@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.desmos.com; style-src 'self' 'unsafe-inline' https://www.desmos.com; img-src 'self' data: blob: https://*.desmos.com; font-src 'self' data: https://*.desmos.com; connect-src https://*.supabase.co wss://*.supabase.co http: https: ws: wss:; frame-src 'none'">
+<title>DesmosLock</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div id="drag-strip"></div>
+
+<!-- ─────────────────────────────────────────── landing ── -->
+<section class="view center" id="view-landing">
+  <div class="stack">
+    <div class="mark">∫</div>
+    <h1>DesmosLock</h1>
+    <p class="sub">The Desmos graphing calculator, locked to the screen during a test.</p>
+    <div class="choice-grid">
+      <button class="choice" data-goto="teacher-auth">
+        <span class="choice-icon">◧</span>
+        <span class="choice-title">I'm the teacher</span>
+        <span class="choice-sub">Sign in, start a test, lock every device</span>
+      </button>
+      <button class="choice" data-goto="student-join">
+        <span class="choice-icon">◉</span>
+        <span class="choice-title">I'm a student</span>
+        <span class="choice-sub">Enter the class code and your name</span>
+      </button>
+    </div>
+    <p class="foot"><span id="landing-server">—</span> <button class="link" id="landing-change-server">change</button></p>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────── teacher sign-in ── -->
+<section class="view center" id="view-teacher-auth">
+  <div class="stack narrow">
+    <button class="link back" data-goto="landing">← Back</button>
+    <h2 id="auth-title">Sign in</h2>
+    <p class="sub" id="auth-sub">Teachers only. Students never make an account.</p>
+
+    <form id="auth-form" class="form" autocomplete="off">
+      <label class="field hidden" id="field-name">
+        <span>Name</span>
+        <input type="text" id="auth-name" placeholder="Ms. Rivera">
+      </label>
+      <label class="field">
+        <span>Email</span>
+        <input type="email" id="auth-email" placeholder="you@school.edu" required>
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input type="password" id="auth-password" placeholder="At least 8 characters" required>
+      </label>
+      <label class="field">
+        <span>Backend</span>
+        <input type="text" id="auth-server" readonly>
+      </label>
+      <p class="error hidden" id="auth-error"></p>
+      <button class="btn primary" type="submit" id="auth-submit">Sign in</button>
+    </form>
+    <p class="foot">
+      <span id="auth-swap-label">No account yet?</span>
+      <button class="link" id="auth-swap">Create one</button>
+    </p>
+  </div>
+</section>
+
+<!-- ────────────────────────────────── teacher console ── -->
+<section class="view" id="view-console">
+  <aside class="sidebar">
+    <div class="side-head">
+      <div class="avatar" id="t-avatar">T</div>
+      <div class="side-id">
+        <div class="side-name" id="t-name">Teacher</div>
+        <div class="side-mail" id="t-email"></div>
+      </div>
+    </div>
+
+    <button class="side-new" id="new-session">＋ New test</button>
+
+    <div class="side-label">Tests</div>
+    <div class="side-list" id="session-list"></div>
+
+    <div class="side-foot">
+      <button class="link" id="sign-out">Sign out</button>
+    </div>
+  </aside>
+
+  <main class="console" id="console-main">
+    <div class="empty" id="console-empty">
+      <div class="empty-mark">◧</div>
+      <p>Create a test to get a class code.</p>
+    </div>
+
+    <div class="console-body hidden" id="console-body">
+      <header class="page-head">
+        <input class="page-title" id="s-title" readonly>
+        <div class="page-meta">
+          <span class="pill" id="s-state">Unlocked</span>
+          <span class="dim" id="s-created"></span>
+        </div>
+      </header>
+
+      <div class="cards">
+        <div class="card code-card">
+          <div class="card-label">Class code</div>
+          <div class="code" id="s-code">——————</div>
+          <div class="card-hint">Students type this to join</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Joined</div>
+          <div class="stat" id="s-count">0</div>
+          <div class="card-hint"><span id="s-online">0</span> online now</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Flags</div>
+          <div class="stat warn" id="s-flags">0</div>
+          <div class="card-hint">Integrity events</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Override code</div>
+          <div class="code small" id="s-unlock">——————</div>
+          <div class="card-hint">Frees one stuck device</div>
+        </div>
+      </div>
+
+      <div class="lockbar">
+        <button class="btn lock" id="btn-lock">🔒 Lock all devices</button>
+        <button class="btn ghost hidden" id="btn-unlock">Unlock all</button>
+        <button class="btn ghost danger" id="btn-end">End test</button>
+        <span class="lockbar-note" id="lock-note">Locking freezes every joined device onto the calculator.</span>
+      </div>
+
+      <div class="split">
+        <div class="panel">
+          <div class="panel-head">Students <span class="count" id="roster-count">0</span></div>
+          <div class="roster" id="roster"><div class="none">Nobody has joined yet.</div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">Activity</div>
+          <div class="feed" id="feed"><div class="none">No activity yet.</div></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</section>
+
+<!-- ─────────────────────────────────────── student join ── -->
+<section class="view center" id="view-student-join">
+  <div class="stack narrow">
+    <button class="link back" data-goto="landing">← Back</button>
+    <h2>Join your test</h2>
+    <p class="sub">Your teacher will read out the class code.</p>
+
+    <form id="join-form" class="form" autocomplete="off">
+      <label class="field">
+        <span>Class code</span>
+        <input type="text" id="join-code" class="code-input" maxlength="6" placeholder="XKD4TQ" required>
+      </label>
+      <label class="field">
+        <span>Your full name</span>
+        <input type="text" id="join-name" placeholder="Jordan Kim" required>
+      </label>
+      <label class="field">
+        <span>Backend</span>
+        <input type="text" id="join-server" readonly>
+      </label>
+      <p class="error hidden" id="join-error"></p>
+      <button class="btn primary" type="submit">Join</button>
+    </form>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────── calculator ── -->
+<section class="view" id="view-calc">
+  <div class="calc-bar" id="calc-bar">
+    <div class="calc-left">
+      <span class="calc-mark">∫</span>
+      <span class="calc-name" id="calc-student">—</span>
+      <span class="calc-test" id="calc-test"></span>
+    </div>
+    <div class="calc-right">
+      <span class="conn" id="conn"><i></i>connecting</span>
+      <span class="lock-chip hidden" id="lock-chip">🔒 Locked by teacher</span>
+      <button class="btn tiny ghost" id="leave-btn">Leave</button>
+      <button class="btn tiny ghost danger hidden" id="exit-btn" title="Exit and forfeit">✕ Exit test</button>
+    </div>
+  </div>
+  <div id="calculator"></div>
+</section>
+
+<!-- ─────────────────────────────────────── overlays ── -->
+<div class="overlay hidden" id="lock-splash">
+  <div class="overlay-card">
+    <div class="overlay-icon">🔒</div>
+    <h3>Your screen is locked</h3>
+    <p>Only the graphing calculator is available until your teacher unlocks it.</p>
+  </div>
+</div>
+
+<div class="overlay hidden" id="override">
+  <div class="overlay-card">
+    <div class="overlay-icon">🔑</div>
+    <h3>Override</h3>
+    <p>Ask your teacher for the 6-character override code. They'll be notified.</p>
+    <input type="text" id="override-code" class="code-input" maxlength="6" placeholder="——————">
+    <p class="error hidden" id="override-error"></p>
+    <div class="overlay-actions">
+      <button class="btn ghost" id="override-cancel">Cancel</button>
+      <button class="btn primary" id="override-submit">Unlock</button>
+    </div>
+    <div class="overlay-escape hidden" id="override-escape">
+      <p class="dim">The server has been unreachable for a while. You can force-exit — your teacher gets a flagged report as soon as the connection is back.</p>
+      <button class="btn ghost danger" id="override-force">Force exit</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay hidden" id="ask">
+  <div class="overlay-card">
+    <h3 id="ask-title">Name this test</h3>
+    <p id="ask-body" class="hidden"></p>
+    <input type="text" id="ask-input" class="ask-input">
+    <div class="overlay-actions">
+      <button class="btn ghost" id="ask-cancel">Cancel</button>
+      <button class="btn primary" id="ask-ok">OK</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast hidden" id="toast"></div>
+
+<script src="vendor/supabase.js"></script>
+<script src="config.js"></script>
+<script src="backend.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

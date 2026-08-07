@@ -1,0 +1,48 @@
+{
+  "name": "desmoslock",
+  "productName": "DesmosLock",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Locked-down Desmos graphing calculator for exams",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "build:vendor": "esbuild build/vendor-entry.js --bundle --format=iife --global-name=SupabaseSDK --minify --target=chrome110 --outfile=renderer/vendor/supabase.js"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.28.1"
+  },
+  "build": {
+    "appId": "app.desmoslock.client",
+    "productName": "DesmosLock",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.education",
+      "target": [
+        "dmg"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ]
+    }
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.112.2"
+  }
+}

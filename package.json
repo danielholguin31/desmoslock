@@ -1,0 +1,14 @@
+{
+  "name": "desmoslock",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Locked-down Desmos graphing calculator for exams. Teacher-controlled kiosk lock, Electron client, desmoslock.com landing page.",
+  "scripts": {
+    "install:all": "npm --prefix server install && npm --prefix desktop install",
+    "server": "npm --prefix server start",
+    "app": "npm --prefix desktop start",
+    "dev": "npm --prefix server run dev",
+    "dist": "npm --prefix desktop run dist",
+    "publish:installers": "mkdir -p web/downloads && cp desktop/dist/*.dmg desktop/dist/*.exe desktop/dist/*.AppImage web/downloads/ 2>/dev/null || true"
+  }
+}

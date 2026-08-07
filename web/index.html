@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DesmosLock — the Desmos calculator, locked for tests</title>
+<meta name="description" content="The real Desmos graphing calculator, locked to your students' screens during a test. One click locks every device in the room.">
+<meta property="og:title" content="DesmosLock">
+<meta property="og:description" content="The real Desmos graphing calculator, locked to your students' screens during a test.">
+<meta property="og:url" content="https://desmoslock.com">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔒</text></svg>">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+
+<header class="nav">
+  <a class="brand" href="/"><span class="brand-mark">∫</span> DesmosLock</a>
+  <nav>
+    <a href="#how">How it works</a>
+    <a href="#lock">The lock</a>
+    <a href="#faq">FAQ</a>
+    <a class="nav-cta" href="#download">Download</a>
+  </nav>
+</header>
+
+<main>
+
+<section class="hero">
+  <p class="eyebrow">For math teachers</p>
+  <h1>The Desmos calculator.<br>Locked to their screens.</h1>
+  <p class="lede">
+    Students get the real graphing calculator — nothing removed, nothing rebuilt.
+    You get one button that freezes every device in the room onto it, and a live
+    feed the moment anyone tries to leave.
+  </p>
+  <div class="cta-row">
+    <a class="btn primary" href="#download">Download for free</a>
+    <a class="btn ghost" href="#how">See how it works</a>
+  </div>
+  <p class="micro">Free · No student accounts · Works on your classroom network</p>
+
+  <div class="shot" role="img" aria-label="The DesmosLock teacher console next to a locked student screen">
+    <div class="shot-win">
+      <div class="shot-bar"><i></i><i></i><i></i><span>Teacher console</span></div>
+      <div class="shot-body console-mock">
+        <div class="mock-side">
+          <div class="mock-row head"><span class="mock-avatar">R</span> Ms. Rivera</div>
+          <div class="mock-row muted">＋ New test</div>
+          <div class="mock-label">Tests</div>
+          <div class="mock-row on"><span class="dot red"></span> Unit 4 Test</div>
+          <div class="mock-row"><span class="dot green"></span> Warm-up</div>
+        </div>
+        <div class="mock-main">
+          <div class="mock-title">Unit 4 Test <span class="pill red">Locked</span></div>
+          <div class="mock-cards">
+            <div class="mock-card blue"><small>Class code</small><b>XKD4TQ</b></div>
+            <div class="mock-card"><small>Joined</small><b>27</b></div>
+            <div class="mock-card"><small>Flags</small><b class="amber">3</b></div>
+          </div>
+          <div class="mock-feed">
+            <div class="feed-row bad"><b>Jordan K.</b> switched away from the calculator <em>10:42</em></div>
+            <div class="feed-row"><b>Alex C.</b> joined the session <em>10:31</em></div>
+            <div class="feed-row bad"><b>Sam P.</b> tried to quit the app <em>10:29</em></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="shot-win locked">
+      <div class="shot-bar red"><span>🔒 Locked by teacher — Jordan Kim</span></div>
+      <div class="shot-body calc-mock">
+        <div class="calc-exprs">
+          <div class="expr"><span class="n">1</span> y = 3x + 1</div>
+          <div class="expr"><span class="n">2</span> y = x²  −  4</div>
+          <div class="expr"><span class="n">3</span> </div>
+        </div>
+        <div class="calc-grid">
+          <svg viewBox="0 0 240 180" preserveAspectRatio="none" aria-hidden="true">
+            <defs><pattern id="g" width="20" height="20" patternUnits="userSpaceOnUse">
+              <path d="M20 0H0v20" fill="none" stroke="rgba(55,53,47,.10)" stroke-width="1"/>
+            </pattern></defs>
+            <rect width="240" height="180" fill="url(#g)"/>
+            <line x1="0" y1="90" x2="240" y2="90" stroke="rgba(55,53,47,.35)" stroke-width="1.2"/>
+            <line x1="120" y1="0" x2="120" y2="180" stroke="rgba(55,53,47,.35)" stroke-width="1.2"/>
+            <path d="M0 174 L240 6" fill="none" stroke="#2383e2" stroke-width="2.4"/>
+            <path d="M20 4 Q120 210 220 4" fill="none" stroke="#0f7b6c" stroke-width="2.4"/>
+          </svg>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="how" class="band">
+  <h2>Three steps, no setup</h2>
+  <ol class="steps">
+    <li>
+      <span class="step-n">1</span>
+      <h3>Start a test</h3>
+      <p>Sign in and name it. You get a six-character class code — the only thing your students need.</p>
+    </li>
+    <li>
+      <span class="step-n">2</span>
+      <h3>Students join</h3>
+      <p>They open the app, type the code and their name. No accounts, no passwords, no email addresses to collect.</p>
+    </li>
+    <li>
+      <span class="step-n">3</span>
+      <h3>Lock the room</h3>
+      <p>One button. Every joined device goes full-screen on the calculator and stays there until you say otherwise.</p>
+    </li>
+  </ol>
+</section>
+
+<section id="lock" class="band alt">
+  <h2>What “locked” actually means</h2>
+  <p class="band-lede">
+    Not a full-screen web page you can tab out of. The lock lives in the app's
+    system layer, so the page can't talk itself out of it.
+  </p>
+  <div class="grid">
+    <div class="cell">
+      <h3>Covers every display</h3>
+      <p>The calculator fills the main screen over the menu bar and dock. Every other monitor gets its own opaque cover.</p>
+    </div>
+    <div class="cell">
+      <h3>Follows across desktops</h3>
+      <p>Swipe to another Space or virtual desktop and the lock is already there. There is no clean screen to swipe to.</p>
+    </div>
+    <div class="cell">
+      <h3>Holds the front</h3>
+      <p>A watchdog checks three times a second. Anything that steals focus loses it again — and you get an alert.</p>
+    </div>
+    <div class="cell">
+      <h3>Swallows shortcuts</h3>
+      <p>Quit, close, hide, Spotlight, Mission Control, screenshots, dev tools. Every attempt is logged with the key that was pressed.</p>
+    </div>
+    <div class="cell">
+      <h3>Won't quit or close</h3>
+      <p>The close button and the quit command are both refused while a test is live, and both attempts reach your console.</p>
+    </div>
+    <div class="cell">
+      <h3>Survives a force-quit</h3>
+      <p>Kill the app or reboot the laptop and it reopens straight back into the locked test — with their graph exactly where they left it.</p>
+    </div>
+    <div class="cell">
+      <h3>Blocks screen capture</h3>
+      <p>Screenshots and screen-sharing of the test window come out blank.</p>
+    </div>
+    <div class="cell">
+      <h3>Nothing else loads</h3>
+      <p>All network traffic is dropped except Desmos and your own server. No links, no new windows, no browsing.</p>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <h2>Leaving early costs them the test</h2>
+  <div class="two">
+    <div>
+      <p>
+        There is exactly one student-facing way out of a live lock: the <b>✕ Exit test</b>
+        button. It doesn't just close — it warns them, in plain words, that their test
+        ends there and that you will be told.
+      </p>
+      <p>
+        If they go through with it, their name is struck through on your roster, marked
+        <b>forfeited</b>, with the time they left. Everything short of that — switching
+        away, a blocked shortcut, a dropped connection, the screen going to sleep —
+        lands in your activity feed as it happens.
+      </p>
+    </div>
+    <div class="quote-card">
+      <div class="quote-icon">⚠</div>
+      <p class="quote-title">Exit and forfeit the test?</p>
+      <p class="quote-body">
+        Your test ends here. The calculator closes, your teacher is told immediately
+        that you left early, and you cannot rejoin this test without them letting
+        you back in.
+      </p>
+      <div class="quote-actions"><span class="qbtn">Cancel</span><span class="qbtn danger">Forfeit and exit</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="download" class="band alt">
+  <h2>Download DesmosLock</h2>
+  <p class="band-lede">The same app for teachers and students. Install it once on every machine that sits a test.</p>
+  <div class="downloads">
+    <a class="dl" href="/download/mac">
+      <span class="dl-os"></span>
+      <span class="dl-text"><b>Download for macOS</b><small>Apple silicon &amp; Intel · .dmg</small></span>
+    </a>
+    <a class="dl" href="/download/windows">
+      <span class="dl-os">⊞</span>
+      <span class="dl-text"><b>Download for Windows</b><small>Windows 10 &amp; 11 · .exe</small></span>
+    </a>
+    <a class="dl" href="/download/linux">
+      <span class="dl-os">🐧</span>
+      <span class="dl-text"><b>Download for Linux</b><small>AppImage</small></span>
+    </a>
+  </div>
+  <p class="micro">Teachers also run the DesmosLock server once per classroom — it prints the address students type in.</p>
+</section>
+
+<section id="faq" class="band">
+  <h2>Questions teachers actually ask</h2>
+  <div class="faq">
+    <details open>
+      <summary>Is this the real Desmos calculator?</summary>
+      <p>Yes — the official Desmos graphing calculator, embedded through their API with no options changed. Same keypad, same sliders, same tables, same everything your students already know.</p>
+    </details>
+    <details>
+      <summary>Do my students need accounts?</summary>
+      <p>No. You're the only person who signs in. Students type a six-character code and their name, which is all that shows up on your roster.</p>
+    </details>
+    <details>
+      <summary>What if the Wi-Fi drops mid-test?</summary>
+      <p>The lock holds — losing the network does not unlock anyone. Their work keeps autosaving locally. If the server stays unreachable for 90 seconds, the app offers a force-exit so nobody is trapped on a frozen screen; it's recorded and delivered to you the moment you're back online.</p>
+    </details>
+    <details>
+      <summary>What if a student gets stuck?</summary>
+      <p>Every test has an override code that only you can see. Read it out and that one device unlocks — and you're told which student used it. You can also release or remove anyone from the roster with one click.</p>
+    </details>
+    <details>
+      <summary>Can it stop absolutely everything?</summary>
+      <p>No software lock can, and we'd rather say so. A student can still force-quit the app from the operating system, or pick up a phone. What DesmosLock does is make every one of those moves loud: the app reopens back into the lock, and the attempt is already sitting in your feed with a timestamp.</p>
+    </details>
+    <details>
+      <summary>Does it work without internet?</summary>
+      <p>The calculator itself loads from Desmos, so each machine needs to reach desmos.com once at the start. Locking, joining and alerts run entirely on your classroom network.</p>
+    </details>
+  </div>
+</section>
+
+<section class="closer">
+  <h2>Your next test, without the tab-switching</h2>
+  <a class="btn primary big" href="#download">Download DesmosLock</a>
+</section>
+
+</main>
+
+<footer>
+  <span>DesmosLock</span>
+  <span class="dim">Not affiliated with Desmos Studio PBC. Built on the public Desmos API.</span>
+</footer>
+
+</body>
+</html>
