@@ -74,6 +74,9 @@ in the page, so the renderer can't talk itself out of it.
 - **Survives a force-quit.** The locked session is written to disk, so killing the
   app or rebooting reopens straight back into the locked calculator — with the
   student's graph restored, since work autosaves every few seconds.
+- **Refuses to start on a busy machine.** Before a student can join, the app
+  enumerates every open application and will not continue until all of them are
+  quit. Anything launched mid-test is reported to the teacher by name.
 
 Anything the OS lets through is *reported* rather than silently ignored, so the
 teacher's feed shows: switched away, tried to quit, pressed a blocked shortcut,
@@ -121,20 +124,39 @@ If the server has been unreachable for 90 seconds, the override dialog also offe
 as the connection is back. This exists so a dead server or a Wi-Fi outage can't leave
 a student stuck on a frozen screen with no way out.
 
-## desmoslock.com
+### Closing everything else
 
-[web/](web/) is the landing page — hero, how-it-works, what the lock does, FAQ, and
-download buttons. The server serves it at `/`, so `npm run server` gives you the real
-site locally. Deploy it anywhere static; only the download routes need the server.
+The gate uses `ps` on macOS/Linux and PowerShell on Windows rather than scripting the
+window server, because the AppleScript route needs an Automation permission that a
+student can simply decline — and a check you can decline is not a check. On a typical
+machine it filters ~134 running `.app` processes down to the ~10 the student actually
+has to quit, dropping system apps and per-app helpers.
+
+It never kills anything. Terminating another app risks destroying unsaved work that
+isn't ours to lose, so it refuses to start and names what's in the way.
+
+## desmoslock.vercel.app
+
+[web/](web/) is the landing page, deployed on Vercel from `vercel.json`
+(`outputDirectory: web`, no build step). `/download/mac`, `/download/mac-intel`,
+`/download/windows` and `/download/linux` redirect to the newest GitHub Release asset,
+so the links keep working for every future version with no redeploy.
+
+Cutting a release builds and publishes all three platforms:
 
 ```bash
-npm run dist                 # build installers with electron-builder
-npm run publish:installers   # copy them into web/downloads/
+git tag v1.0.1 && git push --tags
 ```
 
-`/download/mac`, `/download/windows` and `/download/linux` serve the newest matching
-installer from `web/downloads/`, and show a friendly "not built yet" page until one
-exists. `GET /api/downloads` reports what's published.
+[.github/workflows/release.yml](.github/workflows/release.yml) builds on macOS, Windows
+and Ubuntu runners, normalises the filenames the site links to, and attaches them to the
+release. `npm run dist` still builds locally if you want a one-off.
+
+**Installers are not code-signed.** macOS refuses a plain double-click — right-click →
+Open → Open, or `xattr -dr com.apple.quarantine /Applications/DesmosLock.app`. Windows
+shows a SmartScreen warning. Fixing this properly needs an Apple Developer account
+($99/yr) and a Windows certificate; the install steps are spelled out on the download
+page rather than left as a surprise.
 
 ## Supabase
 

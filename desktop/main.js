@@ -82,7 +82,7 @@ const APP_IGNORE = new Set([
 ])
 
 const looksLikeHelper = (name) =>
-  /helper|crashpad|renderer|gpu process|\(plugin\)|agent$|daemon$|xpc/i.test(name)
+  /helper|crashpad|renderer|gpu process|\(plugin\)|\(service\)|\(gpu\)|agent$|daemon$|xpc|updater$/i.test(name)
 
 function parseMacApps (stdout) {
   const apps = new Map()
