@@ -144,6 +144,10 @@
       <p>Kill the app or reboot the laptop and it reopens straight back into the locked test — with their graph exactly where they left it.</p>
     </div>
     <div class="cell">
+      <h3>Starts from a clean machine</h3>
+      <p>Students cannot begin with anything else running. The app lists every open program and refuses to start until they are all quit — and tells you if one is opened mid-test.</p>
+    </div>
+    <div class="cell">
       <h3>Blocks screen capture</h3>
       <p>Screenshots and screen-sharing of the test window come out blank.</p>
     </div>
@@ -189,18 +193,42 @@
   <div class="downloads">
     <a class="dl" href="/download/mac">
       <span class="dl-os"></span>
-      <span class="dl-text"><b>Download for macOS</b><small>Apple silicon &amp; Intel · .dmg</small></span>
+      <span class="dl-text"><b>macOS</b><small>Apple silicon · .dmg</small></span>
+    </a>
+    <a class="dl" href="/download/mac-intel">
+      <span class="dl-os"></span>
+      <span class="dl-text"><b>macOS</b><small>Intel · .dmg</small></span>
     </a>
     <a class="dl" href="/download/windows">
       <span class="dl-os">⊞</span>
-      <span class="dl-text"><b>Download for Windows</b><small>Windows 10 &amp; 11 · .exe</small></span>
-    </a>
-    <a class="dl" href="/download/linux">
-      <span class="dl-os">🐧</span>
-      <span class="dl-text"><b>Download for Linux</b><small>AppImage</small></span>
+      <span class="dl-text"><b>Windows</b><small>10 &amp; 11 · .exe</small></span>
     </a>
   </div>
-  <p class="micro">Teachers also run the DesmosLock server once per classroom — it prints the address students type in.</p>
+  <p class="micro"><a href="/download/linux">Linux AppImage</a> · <a href="/releases">all versions and release notes</a></p>
+
+  <div class="install-note">
+    <h3>⚠ First launch: the OS will warn you</h3>
+    <p>
+      These builds are not code-signed yet, so your computer does not recognise the
+      publisher. Nothing is wrong with the app — signing costs $99/yr for Apple plus a
+      Windows certificate, and that is not in place.
+    </p>
+    <div class="install-cols">
+      <div>
+        <b>macOS</b>
+        <p>Drag DesmosLock to Applications, then <b>right-click the app → Open → Open</b>.
+        A normal double-click gets refused. If it says the app is damaged, run this in
+        Terminal once:</p>
+        <code>xattr -dr com.apple.quarantine /Applications/DesmosLock.app</code>
+      </div>
+      <div>
+        <b>Windows</b>
+        <p>SmartScreen shows a blue box. Click <b>More info</b>, then <b>Run anyway</b>.</p>
+        <b>Everyone</b>
+        <p>Install it on every machine sitting the test. Teachers use the same app.</p>
+      </div>
+    </div>
+  </div>
 </section>
 
 <section id="faq" class="band">
@@ -225,6 +253,10 @@
     <details>
       <summary>Can it stop absolutely everything?</summary>
       <p>No software lock can, and we'd rather say so. A student can still force-quit the app from the operating system, or pick up a phone. What DesmosLock does is make every one of those moves loud: the app reopens back into the lock, and the attempt is already sitting in your feed with a timestamp.</p>
+    </details>
+    <details>
+      <summary>Do students have to close their other apps?</summary>
+      <p>Yes, and it is enforced rather than requested. Before a student can join, DesmosLock lists every application they have open and will not continue until every one is quit. If something is launched during the test, it lands in your activity feed with the app's name.</p>
     </details>
     <details>
       <summary>Does it work without internet?</summary>

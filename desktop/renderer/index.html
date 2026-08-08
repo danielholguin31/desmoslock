@@ -172,6 +172,22 @@
   </div>
 </section>
 
+<!-- ───────────────────────────────── close-everything gate ── -->
+<section class="view center" id="view-appcheck">
+  <div class="stack narrow">
+    <div class="gate-icon">⛔</div>
+    <h2>Close everything else first</h2>
+    <p class="sub">Your test will not start while other apps are open. Quit each one, then check again.</p>
+    <div class="applist" id="applist"></div>
+    <p class="error hidden" id="appcheck-error"></p>
+    <div class="gate-actions">
+      <button class="btn ghost" id="appcheck-cancel">Cancel</button>
+      <button class="btn primary" id="appcheck-recheck">Check again</button>
+    </div>
+    <p class="foot">Quit apps properly (⌘Q on Mac, not just the red button). Minimised windows still count.</p>
+  </div>
+</section>
+
 <!-- ─────────────────────────────────────── calculator ── -->
 <section class="view" id="view-calc">
   <div class="calc-bar" id="calc-bar">

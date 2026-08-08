@@ -183,7 +183,7 @@ returns trigger language plpgsql security definer set search_path = public as $$
 begin
   new.severe := new.kind in (
     'left_app', 'quit_attempt', 'screen_locked', 'override_used', 'override_failed',
-    'display_changed', 'forced_exit', 'forfeited'
+    'display_changed', 'forced_exit', 'forfeited', 'other_app_opened'
   );
   if new.severe then
     update students set flags = flags + 1 where id = new.student_id;

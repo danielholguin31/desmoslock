@@ -1,0 +1,105 @@
+name: Build installers
+
+# Tag a version to cut a release:  git tag v1.0.0 && git push --tags
+# Or run it by hand from the Actions tab.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macOS
+          - os: windows-latest
+            name: Windows
+          - os: ubuntu-latest
+            name: Linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install
+        working-directory: desktop
+        run: npm ci
+
+      - name: Bundle supabase-js
+        working-directory: desktop
+        run: npm run build:vendor
+
+      - name: Build ${{ matrix.name }}
+        working-directory: desktop
+        # No signing identity is configured, so tell electron-builder not to look
+        # for one. Installers are unsigned — see README for what that means.
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --publish never
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.name }}
+          path: |
+            desktop/dist/*.dmg
+            desktop/dist/*.exe
+            desktop/dist/*.AppImage
+          if-no-files-found: warn
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # electron-builder names files with versions and arches; the website links
+      # to stable names, so normalise them here.
+      - name: Normalise asset names
+        run: |
+          mkdir -p out
+          find artifacts -type f | while read -r f; do
+            case "$f" in
+              *arm64*.dmg) cp "$f" out/DesmosLock-mac.dmg ;;
+              *.dmg)       cp "$f" out/DesmosLock-mac-intel.dmg ;;
+              *.exe)       cp "$f" out/DesmosLock-setup.exe ;;
+              *.AppImage)  cp "$f" out/DesmosLock.AppImage ;;
+            esac
+          done
+          ls -la out
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          generate_release_notes: true
+          body: |
+            ## Installing
+
+            These builds are **not code-signed**, so the operating system will warn you.
+
+            **macOS** — after opening the `.dmg` and dragging DesmosLock to Applications,
+            right-click the app and choose **Open**, then **Open** again. A normal
+            double-click will be refused. If macOS says the app is damaged, run:
+
+            ```
+            xattr -dr com.apple.quarantine /Applications/DesmosLock.app
+            ```
+
+            **Windows** — SmartScreen will show a blue warning. Click **More info**,
+            then **Run anyway**.
+
+            Signing these properly needs an Apple Developer account ($99/yr) and a
+            Windows code-signing certificate.

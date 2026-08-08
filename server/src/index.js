@@ -124,12 +124,13 @@ const ALERT_LABELS = {
   display_changed: 'changed displays or resolution',
   forced_exit: 'force-exited the lock while offline',
   forfeited: 'exited early and forfeited the test',
-  left_session: 'left the test'
+  left_session: 'left the test',
+  other_app_opened: 'opened another app during the test'
 }
 
 const SEVERE = new Set([
   'left_app', 'quit_attempt', 'screen_locked', 'override_used',
-  'override_failed', 'display_changed', 'forced_exit', 'forfeited'
+  'override_failed', 'display_changed', 'forced_exit', 'forfeited', 'other_app_opened'
 ])
 
 function recordAlert (sessionId, studentId, kind, detail = '') {

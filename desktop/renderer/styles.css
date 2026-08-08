@@ -293,6 +293,27 @@ body.is-locked .calc-bar { -webkit-app-region: no-drag; background: #fff5f5; bor
 .calc-bar { padding-left: 84px; }
 body.is-locked .calc-bar { padding-left: 14px; }
 
+.gate-icon { font-size: 28px; margin-bottom: 12px; }
+.applist {
+  margin-top: 18px; border: 1px solid var(--line); border-radius: var(--radius);
+  overflow: hidden; max-height: 240px; overflow-y: auto;
+}
+.applist .app-row {
+  display: flex; align-items: center; gap: 9px; padding: 9px 13px;
+  border-bottom: 1px solid var(--line); font-size: 14px;
+}
+.applist .app-row:last-child { border-bottom: none; }
+.applist .app-row .badge {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--red); flex: 0 0 7px;
+}
+.applist .app-row .pid { margin-left: auto; color: var(--text-3); font-size: 11.5px; }
+.applist.clear { border-color: rgba(15, 123, 108, .3); }
+.applist .all-clear { padding: 14px; font-size: 14px; color: var(--green); }
+.gate-actions { display: flex; gap: 8px; margin-top: 16px; }
+.gate-actions .btn { flex: 1; }
+@keyframes nudge { 0%,100%{transform:translateX(0)} 25%{transform:translateX(-4px)} 75%{transform:translateX(4px)} }
+.applist.nudge { animation: nudge .22s ease-in-out 2; }
+
 /* ───────────────────────────────────────────── overlays */
 
 .overlay {

@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, globalShortcut, Menu, powerMonitor, screen, shell, session } = require('electron')
 const path = require('path')
 const fs = require('fs')
+const { execFile } = require('child_process')
 
 const IS_MAC = process.platform === 'darwin'
 
@@ -12,6 +13,7 @@ let locked = false
 let watchdog = null
 let lastAwayReport = 0
 let lastFsKick = 0
+let lastAppScan = 0
 let displaySignature = ''
 
 const NORMAL_SIZE = { width: 1280, height: 860 }
@@ -58,6 +60,84 @@ function status () {
     displays: screen.getAllDisplays().length,
     blockers: blockers.length
   }
+}
+
+/* ------------------------------------------------- other running apps
+
+   Before a student starts, everything else has to be shut. We enumerate GUI
+   apps with plain `ps` / `tasklist` rather than scripting the window server,
+   because those need an Automation permission prompt that a student can simply
+   decline — and a check they can decline is not a check.
+
+   We never kill anything. Terminating another app risks destroying unsaved work
+   that is not ours to lose, so we refuse to start and name what is in the way.
+--------------------------------------------------------------------------- */
+
+// Helpers, agents and our own processes: present on every machine, not "apps".
+const APP_IGNORE = new Set([
+  'DesmosLock', 'Electron', 'Finder', 'Dock', 'SystemUIServer', 'ControlCenter',
+  'NotificationCenter', 'Spotlight', 'loginwindow', 'WindowServer', 'Terminal',
+  'iTerm2', 'explorer', 'ApplicationFrameHost', 'TextInputHost', 'ShellExperienceHost',
+  'SearchHost', 'StartMenuExperienceHost', 'SystemSettings', 'universalaccessd'
+])
+
+const looksLikeHelper = (name) =>
+  /helper|crashpad|renderer|gpu process|\(plugin\)|agent$|daemon$|xpc/i.test(name)
+
+function parseMacApps (stdout) {
+  const apps = new Map()
+  for (const line of stdout.split('\n')) {
+    const m = line.trim().match(/^(\d+)\s+(\/.*)$/)
+    if (!m) continue
+    const [, pid, execPath] = m
+    // Only real bundles, and nothing shipped inside the OS.
+    if (!execPath.includes('.app/Contents/MacOS/')) continue
+    if (execPath.startsWith('/System/') || execPath.startsWith('/usr/')) continue
+    if (execPath.startsWith('/Library/') && !execPath.startsWith('/Library/Application Support/')) continue
+    const bundle = execPath.match(/([^/]+)\.app\/Contents\/MacOS\//)
+    if (!bundle) continue
+    const name = bundle[1]
+    if (APP_IGNORE.has(name) || looksLikeHelper(name)) continue
+    if (!apps.has(name)) apps.set(name, Number(pid))
+  }
+  return [...apps].map(([name, pid]) => ({ name, pid }))
+}
+
+function parseWindowsApps (stdout) {
+  const apps = new Map()
+  for (const raw of stdout.split('\n')) {
+    const name = raw.trim()
+    if (!name || APP_IGNORE.has(name) || looksLikeHelper(name)) continue
+    if (/^desmoslock$/i.test(name)) continue
+    if (!apps.has(name)) apps.set(name, 0)
+  }
+  return [...apps].map(([name, pid]) => ({ name, pid }))
+}
+
+function listRunningApps () {
+  return new Promise((resolve) => {
+    const done = (fn) => (err, stdout) => resolve(err ? [] : fn(String(stdout || '')))
+    if (IS_MAC) {
+      execFile('/bin/ps', ['-axo', 'pid=,comm='], { maxBuffer: 8e6 }, done(parseMacApps))
+    } else if (process.platform === 'win32') {
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+        "Get-Process | Where-Object { $_.MainWindowTitle -ne '' } | Select-Object -ExpandProperty ProcessName"],
+      { maxBuffer: 8e6 }, done(parseWindowsApps))
+    } else {
+      execFile('/bin/ps', ['-axo', 'pid=,comm='], { maxBuffer: 8e6 }, done((out) => {
+        const apps = new Map()
+        for (const line of out.split('\n')) {
+          const m = line.trim().match(/^(\d+)\s+(\/\S+)$/)
+          if (!m) continue
+          const name = m[2].split('/').pop()
+          if (!/^\/(usr\/bin|opt|snap|usr\/lib)/.test(m[2])) continue
+          if (APP_IGNORE.has(name) || looksLikeHelper(name)) continue
+          if (!apps.has(name)) apps.set(name, Number(m[1]))
+        }
+        return [...apps].map(([name, pid]) => ({ name, pid }))
+      }))
+    }
+  })
 }
 
 /* ------------------------------------------------- keyboard / shortcut net */
@@ -295,6 +375,14 @@ function startWatchdog () {
     }
     if (blockers.some(w => w.isDestroyed())) spawnBlockers()
 
+    // Something launched during the test: the teacher hears about it.
+    if (Date.now() - lastAppScan > 10000) {
+      lastAppScan = Date.now()
+      listRunningApps().then((apps) => {
+        if (locked && apps.length) report('other_app_opened', apps.map(a => a.name).slice(0, 6).join(', '))
+      })
+    }
+
     if (!win.isFocused()) {
       win.moveTop()
       win.focus()
@@ -510,6 +598,8 @@ function buildMenu () {
 ipcMain.handle('lock:engage', () => engageLock())
 ipcMain.handle('lock:release', () => releaseLock())
 ipcMain.handle('lock:status', () => status())
+
+ipcMain.handle('apps:scan', () => listRunningApps())
 
 ipcMain.handle('net:allow-server', (_e, url) => allowServerOrigin(url))
 

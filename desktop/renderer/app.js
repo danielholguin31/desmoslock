@@ -387,11 +387,14 @@ $('#btn-end').addEventListener('click', async () => {
 $('#join-form').addEventListener('submit', async (e) => {
   e.preventDefault()
   showError($('#join-error'), '')
+
+  // Nothing else may be running before a test starts.
+  const code = $('#join-code').value
+  const name = $('#join-name').value
+  if (!await ensureNothingElseRunning()) return
+
   try {
-    const { student, test, credential } = await state.backend.join({
-      code: $('#join-code').value,
-      name: $('#join-name').value
-    })
+    const { student, test, credential } = await state.backend.join({ code, name })
     state.student = { id: student.id, name: student.name, testId: test.id, title: test.title }
     state.backend.setStudentName && state.backend.setStudentName(student.name)
     await desk.storeSet('student', { ...state.student, ...credential, mode: state.mode, serverUrl: state.serverUrl })
@@ -430,6 +433,58 @@ $('#exit-btn').addEventListener('click', async () => {
   await applyLock(false)
   toast('You exited the test. Your teacher was notified.')
   await leaveSession()
+})
+
+/* ────────────────────────────────── close-everything-else gate */
+
+let gateResolve = null
+
+function renderAppList (apps) {
+  const el = $('#applist')
+  el.classList.toggle('clear', apps.length === 0)
+  if (!apps.length) { el.innerHTML = '<div class="all-clear">✓ Nothing else is running. You are good to go.</div>'; return }
+  el.innerHTML = ''
+  for (const a of apps) {
+    const row = document.createElement('div')
+    row.className = 'app-row'
+    row.innerHTML = '<span class="badge"></span><span class="nm"></span>' + (a.pid ? `<span class="pid">pid ${a.pid}</span>` : '')
+    row.querySelector('.nm').textContent = a.name
+    el.appendChild(row)
+  }
+}
+
+// Resolves true only once nothing else is running. There is no way past this
+// screen with an app open — that is the point of it.
+async function ensureNothingElseRunning () {
+  const apps = await desk.scanApps()
+  if (!apps.length) return true
+  showError($('#appcheck-error'), '')
+  renderAppList(apps)
+  show('appcheck')
+  return new Promise((resolve) => { gateResolve = resolve })
+}
+
+$('#appcheck-recheck').addEventListener('click', async () => {
+  const btn = $('#appcheck-recheck')
+  btn.disabled = true
+  const apps = await desk.scanApps()
+  renderAppList(apps)
+  btn.disabled = false
+  if (!apps.length) {
+    showError($('#appcheck-error'), '')
+    const done = gateResolve; gateResolve = null
+    if (done) done(true)
+    return
+  }
+  showError($('#appcheck-error'), `Still ${apps.length} app${apps.length === 1 ? '' : 's'} open. Quit ${apps.length === 1 ? 'it' : 'them all'} to continue.`)
+  const el = $('#applist')
+  el.classList.remove('nudge'); void el.offsetWidth; el.classList.add('nudge')
+})
+
+$('#appcheck-cancel').addEventListener('click', () => {
+  const done = gateResolve; gateResolve = null
+  if (done) done(false)
+  show('student-join')
 })
 
 /* ──────────────────────────────────────────────── calculator */

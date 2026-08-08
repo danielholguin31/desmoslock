@@ -20,6 +20,9 @@ contextBridge.exposeInMainWorld('desk', {
   storeGet: (key) => ipcRenderer.invoke('store:get', key),
   storeSet: (key, value) => ipcRenderer.invoke('store:set', key, value),
 
+  // Everything else the student has open. They must close it all to start.
+  scanApps: () => ipcRenderer.invoke('apps:scan'),
+
   // Whitelist the DesmosLock server so the network filter lets it through
   allowServer: (url) => ipcRenderer.invoke('net:allow-server', url),
 
