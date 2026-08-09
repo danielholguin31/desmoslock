@@ -18,8 +18,10 @@
   <nav>
     <a href="#how">How it works</a>
     <a href="#lock">The lock</a>
-    <a href="#faq">FAQ</a>
-    <a class="nav-cta" href="#download">Download</a>
+    <a href="#pricing">Pricing</a>
+    <a href="#districts">For districts</a>
+    <a href="/admin">Admin console</a>
+    <a class="nav-cta" href="#quote">Get a quote</a>
   </nav>
 </header>
 
@@ -34,10 +36,10 @@
     feed the moment anyone tries to leave.
   </p>
   <div class="cta-row">
-    <a class="btn primary" href="#download">Download for free</a>
-    <a class="btn ghost" href="#how">See how it works</a>
+    <a class="btn primary" href="#quote">Get a quote</a>
+    <a class="btn ghost" href="#download">Download &amp; try it</a>
   </div>
-  <p class="micro">Free · No student accounts · Works on your classroom network</p>
+  <p class="micro">$8 per student per year · 30-day trial, no card · No student accounts</p>
 
   <div class="shot" role="img" aria-label="The DesmosLock teacher console next to a locked student screen">
     <div class="shot-win">
@@ -187,6 +189,170 @@
   </div>
 </section>
 
+<section id="pricing" class="band">
+  <h2>One price, per student, per year</h2>
+  <p class="band-lede">
+    Schools and districts buy seats; teachers never see a bill and students never
+    make an account. A student who sits nine tests is one seat, not nine.
+  </p>
+
+  <div class="tiers" id="tiers"></div>
+
+  <div class="calc">
+    <div class="calc-in">
+      <h3>Estimate your cost</h3>
+
+      <label class="calc-field">
+        <span>Students who will sit tests</span>
+        <input type="number" id="q-students" min="1" max="200000" step="1" value="600">
+      </label>
+      <input type="range" id="q-slider" min="50" max="20000" step="50" value="600" aria-label="Number of students">
+      <div class="calc-scale"><span>50</span><span>5,000</span><span>10,000</span><span>20,000+</span></div>
+
+      <div class="calc-field">
+        <span>Contract length</span>
+        <div class="term-pills" id="q-terms"></div>
+      </div>
+    </div>
+
+    <div class="calc-out" id="calc-out">
+      <div class="calc-tier" id="o-tier">Single school</div>
+      <div class="calc-big"><span id="o-annual">$4,800</span><small>per year</small></div>
+      <dl class="calc-rows">
+        <div><dt>Price per student</dt><dd id="o-seat">$8.00</dd></div>
+        <div><dt>Students</dt><dd id="o-students">600</dd></div>
+        <div><dt>Contract total</dt><dd id="o-contract">$4,800</dd></div>
+      </dl>
+      <div class="calc-save hidden" id="o-save"></div>
+      <a class="btn primary" href="#quote" id="o-cta">Get this quote in writing</a>
+      <p class="calc-note">Estimate only. Formal quotes include your PO details and are valid for 60 days.</p>
+    </div>
+  </div>
+
+  <div class="incl">
+    <h3>Every plan includes</h3>
+    <ul>
+      <li>Unlimited teachers and unlimited tests</li>
+      <li>The admin console — roles, invites, seat reporting</li>
+      <li>macOS, Windows and Linux apps</li>
+      <li>Cloud or on-premise classroom server</li>
+      <li>Purchase orders, invoicing and W-9</li>
+      <li>Email support, next business day</li>
+    </ul>
+  </div>
+</section>
+
+<section id="districts" class="band alt">
+  <h2>Built for the people who sign it off</h2>
+  <p class="band-lede">
+    Teachers get one button. Whoever owns the contract gets everything else.
+  </p>
+  <div class="grid">
+    <div class="cell">
+      <h3>Admin console</h3>
+      <p>Add teachers, set roles, watch seat usage against what you bought, and see every test run across the school — from the browser, no install.</p>
+    </div>
+    <div class="cell">
+      <h3>Three roles</h3>
+      <p>Owner, admin and teacher. Admins manage people and billing details; teachers only ever see their own classes.</p>
+    </div>
+    <div class="cell">
+      <h3>Domain join</h3>
+      <p>Verify your email domain once and any teacher who signs up with a school address lands in the right place automatically.</p>
+    </div>
+    <div class="cell">
+      <h3>Almost no student data</h3>
+      <p>We store the name a student types to join, and nothing else. No email addresses, no student IDs, no grades, no work product leaves the device.</p>
+    </div>
+    <div class="cell">
+      <h3>Isolation by default</h3>
+      <p>Every query is filtered in the database by row-level security, not in the app. One school cannot read another's roster even with a crafted request.</p>
+    </div>
+    <div class="cell">
+      <h3>Runs without the internet</h3>
+      <p>Prefer to keep it inside the building? Run the classroom server yourself and nothing leaves your network.</p>
+    </div>
+    <div class="cell">
+      <h3>Procurement-friendly</h3>
+      <p>Purchase orders, net-30 invoicing, W-9, multi-year terms and mid-year seat top-ups at the same per-student rate.</p>
+    </div>
+    <div class="cell">
+      <h3>Deploy how you like</h3>
+      <p>Hand teachers the installer or push it with your MDM. Pair it with a managed kiosk profile for the strictest possible lockdown.</p>
+    </div>
+  </div>
+</section>
+
+<section id="quote" class="band">
+  <h2>Request a quote</h2>
+  <p class="band-lede">
+    Tell us the size of the school and we'll send a formal quote, usually the same
+    working day. No call required.
+  </p>
+
+  <form class="quote-form" id="quote-form" novalidate>
+    <fieldset>
+      <legend>Your school</legend>
+      <div class="qf-grid">
+        <label class="qf"><span>School or district name <b>*</b></span>
+          <input type="text" id="f-school" required placeholder="Riverside Unified School District"></label>
+        <label class="qf"><span>Campuses</span>
+          <input type="number" id="f-campuses" min="1" max="500" value="1"></label>
+        <label class="qf"><span>Country</span>
+          <input type="text" id="f-country" placeholder="United States"></label>
+        <label class="qf"><span>State / region</span>
+          <input type="text" id="f-region" placeholder="California"></label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>You</legend>
+      <div class="qf-grid">
+        <label class="qf"><span>Full name <b>*</b></span>
+          <input type="text" id="f-name" required placeholder="Pat Rivera"></label>
+        <label class="qf"><span>Job title</span>
+          <input type="text" id="f-title" placeholder="Director of Technology"></label>
+        <label class="qf"><span>Work email <b>*</b></span>
+          <input type="email" id="f-email" required placeholder="p.rivera@riverside.k12.us"></label>
+        <label class="qf"><span>Phone</span>
+          <input type="tel" id="f-phone" placeholder="(555) 010-4477"></label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>What you need</legend>
+      <div class="qf-grid">
+        <label class="qf"><span>Students who will sit tests <b>*</b></span>
+          <input type="number" id="f-students" min="1" max="200000" required value="600"></label>
+        <label class="qf"><span>Contract length</span>
+          <select id="f-years"><option value="1">1 year</option><option value="2">2 years — save 5%</option><option value="3">3 years — save 10%</option></select></label>
+        <label class="qf"><span>Preferred start</span>
+          <input type="date" id="f-start"></label>
+        <label class="qf"><span>How did you hear about us?</span>
+          <input type="text" id="f-hear" placeholder="A colleague, a conference, a search…"></label>
+      </div>
+      <label class="qf wide"><span>Anything else we should know?</span>
+        <textarea id="f-notes" rows="3" placeholder="Existing lockdown software, rollout timeline, procurement requirements…"></textarea></label>
+    </fieldset>
+
+    <div class="qf-summary" id="qf-summary"></div>
+    <p class="error hidden" id="qf-error"></p>
+
+    <div class="qf-actions">
+      <button class="btn primary big" type="submit" id="qf-submit">Send quote request</button>
+      <p class="micro">We use this to prepare your quote and nothing else. No newsletter, no reselling.</p>
+    </div>
+  </form>
+
+  <div class="qf-done hidden" id="qf-done">
+    <div class="done-tick">✓</div>
+    <h3>Request received</h3>
+    <p id="qf-done-body"></p>
+    <p class="micro">Nothing to install yet — but you can start the 30-day trial right now if you'd like to test it first.</p>
+    <a class="btn ghost" href="#download">Download the app</a>
+  </div>
+</section>
+
 <section id="download" class="band alt">
   <h2>Download DesmosLock</h2>
   <p class="band-lede">The same app for teachers and students. Install it once on every machine that sits a test.</p>
@@ -251,6 +417,22 @@
       <p>Every test has an override code that only you can see. Read it out and that one device unlocks — and you're told which student used it. You can also release or remove anyone from the roster with one click.</p>
     </details>
     <details>
+      <summary>What exactly counts as a "student" for billing?</summary>
+      <p>A distinct student who joins at least one test during your licence year. Not a device, not a login, not a test sitting — one student who sits nine exams is one seat. Your admin console shows the count live against what you bought, so there are no surprises at renewal.</p>
+    </details>
+    <details>
+      <summary>Do you take purchase orders?</summary>
+      <p>Yes. Purchase orders, net-30 invoicing and a W-9 on request. Add your PO number in the admin console and it appears on every invoice. Multi-year terms are discounted 5% for two years and 10% for three.</p>
+    </details>
+    <details>
+      <summary>What if we grow mid-year?</summary>
+      <p>Top up seats at any time at the same per-student rate, pro-rated to the end of your term. Nothing stops working if you go over — you are not locked out mid-exam; we reconcile it at renewal.</p>
+    </details>
+    <details>
+      <summary>What student data do you store?</summary>
+      <p>The name a student types when they join, the times they joined and left, and any integrity events during the test. No email addresses, no student IDs, no grades. Their graph work stays on their own machine.</p>
+    </details>
+    <details>
       <summary>Can it stop absolutely everything?</summary>
       <p>No software lock can, and we'd rather say so. A student can still force-quit the app from the operating system, or pick up a phone. What DesmosLock does is make every one of those moves loud: the app reopens back into the lock, and the attempt is already sitting in your feed with a timestamp.</p>
     </details>
@@ -273,9 +455,12 @@
 </main>
 
 <footer>
-  <span>DesmosLock</span>
+  <span>DesmosLock · <a href="/admin">Admin console</a> · <a href="#pricing">Pricing</a> · <a href="#quote">Get a quote</a></span>
   <span class="dim">Not affiliated with Desmos Studio PBC. Built on the public Desmos API.</span>
 </footer>
 
+<script src="config.js"></script>
+<script src="pricing.js"></script>
+<script src="site.js"></script>
 </body>
 </html>

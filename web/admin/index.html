@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DesmosLock — Admin console</title>
+<meta name="robots" content="noindex">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔒</text></svg>">
+<link rel="stylesheet" href="admin.css">
+</head>
+<body>
+
+<!-- ───────────────────────────────────────────────── auth ── -->
+<div class="auth" id="view-auth">
+  <div class="auth-card">
+    <a class="auth-brand" href="/"><span class="brand-mark">∫</span> DesmosLock</a>
+    <h1 id="auth-h">Admin console</h1>
+    <p class="sub" id="auth-sub">Sign in to manage your school's licence, teachers and tests.</p>
+
+    <form id="auth-form" autocomplete="on">
+      <label class="fld hidden" id="fld-name"><span>Your name</span>
+        <input type="text" id="a-name" placeholder="Pat Rivera" autocomplete="name"></label>
+      <label class="fld"><span>Work email</span>
+        <input type="email" id="a-email" required placeholder="you@school.edu" autocomplete="email"></label>
+      <label class="fld"><span>Password</span>
+        <input type="password" id="a-pass" required placeholder="At least 8 characters" autocomplete="current-password"></label>
+      <p class="msg err hidden" id="auth-err"></p>
+      <p class="msg ok hidden" id="auth-ok"></p>
+      <button class="btn primary wide" type="submit" id="auth-go">Sign in</button>
+    </form>
+
+    <p class="auth-swap"><span id="swap-label">New here?</span>
+      <button class="link" id="auth-swap">Create an account</button></p>
+    <p class="auth-foot">Teachers do not need an account here — they sign in from the desktop app.</p>
+  </div>
+</div>
+
+<!-- ────────────────────────────────────── school onboarding ── -->
+<div class="auth" id="view-onboard">
+  <div class="auth-card">
+    <a class="auth-brand" href="/"><span class="brand-mark">∫</span> DesmosLock</a>
+    <h1>Set up your school</h1>
+    <p class="sub">You are signed in as <b id="ob-email"></b>, but you are not attached to a school yet.</p>
+
+    <form id="ob-form">
+      <label class="fld"><span>School or district name</span>
+        <input type="text" id="ob-name" required placeholder="Riverside High School"></label>
+      <label class="fld"><span>Email domain <em>optional</em></span>
+        <input type="text" id="ob-domain" placeholder="riverside.k12.us"></label>
+      <p class="hint">Any teacher who signs up with an address on this domain joins your school automatically. Leave it blank to add teachers by invitation only.</p>
+      <p class="msg err hidden" id="ob-err"></p>
+      <button class="btn primary wide" type="submit" id="ob-go">Create school</button>
+    </form>
+
+    <p class="auth-foot">Waiting on an invitation instead? <button class="link" id="ob-recheck">Check again</button> · <button class="link" id="ob-out">Sign out</button></p>
+  </div>
+</div>
+
+<!-- ─────────────────────────────────────────────── console ── -->
+<div class="shell" id="view-shell">
+  <aside class="side">
+    <a class="side-brand" href="/"><span class="brand-mark">∫</span> DesmosLock</a>
+    <div class="side-school">
+      <div class="ss-name" id="ss-name">—</div>
+      <div class="ss-plan"><span class="chip" id="ss-status">trial</span><span id="ss-days"></span></div>
+    </div>
+
+    <nav class="side-nav">
+      <button class="nav-item on" data-tab="overview"><span>◧</span> Overview</button>
+      <button class="nav-item" data-tab="people"><span>◉</span> Teachers</button>
+      <button class="nav-item" data-tab="tests"><span>▤</span> Tests</button>
+      <button class="nav-item" data-tab="billing"><span>◈</span> Licence &amp; billing</button>
+      <button class="nav-item" data-tab="settings"><span>⚙</span> Settings</button>
+    </nav>
+
+    <div class="side-foot">
+      <div class="me"><span class="ava" id="me-ava">A</span><span class="me-id"><b id="me-name">—</b><small id="me-role">—</small></span></div>
+      <button class="link" id="sign-out">Sign out</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <!-- overview -->
+    <section class="tab on" id="tab-overview">
+      <header class="head"><h1>Overview</h1><p class="sub" id="ov-sub"></p></header>
+
+      <div class="seat-card">
+        <div class="seat-top">
+          <div><div class="seat-label">Seats used this licence year</div>
+            <div class="seat-num"><b id="sc-used">0</b><span id="sc-of"> of 50</span></div></div>
+          <div class="seat-right"><div class="seat-label">Renews</div><div class="seat-date" id="sc-renew">—</div></div>
+        </div>
+        <div class="bar"><div class="bar-fill" id="sc-bar"></div></div>
+        <p class="seat-note" id="sc-note"></p>
+      </div>
+
+      <div class="stats">
+        <div class="stat"><span class="stat-label">Teachers</span><b id="st-teachers">0</b><small id="st-invites">no pending invites</small></div>
+        <div class="stat"><span class="stat-label">Tests run</span><b id="st-tests">0</b><small>since you started</small></div>
+        <div class="stat"><span class="stat-label">Price per student</span><b id="st-price">$8.00</b><small>per year</small></div>
+        <div class="stat"><span class="stat-label">Annual cost</span><b id="st-annual">—</b><small id="st-annual-sub">at current seat count</small></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">Getting started</div>
+        <ol class="steps-list" id="ov-steps"></ol>
+      </div>
+    </section>
+
+    <!-- people -->
+    <section class="tab" id="tab-people">
+      <header class="head"><h1>Teachers</h1><p class="sub">Anyone here can run locked tests from the desktop app. Admins can also manage this console.</p></header>
+
+      <form class="invite" id="invite-form">
+        <input type="email" id="inv-email" placeholder="teacher@school.edu" required>
+        <select id="inv-role"><option value="teacher">Teacher</option><option value="admin">Admin</option></select>
+        <button class="btn primary" type="submit">Send invite</button>
+      </form>
+      <p class="hint">They join the moment they sign in with that address — in this console or in the desktop app. No email is sent yet, so tell them to sign up.</p>
+      <p class="msg err hidden" id="inv-err"></p>
+      <p class="msg ok hidden" id="inv-ok"></p>
+
+      <div class="panel">
+        <div class="panel-head">Members <span class="count" id="mem-count">0</span></div>
+        <div class="table" id="members"></div>
+      </div>
+
+      <div class="panel" id="invites-panel">
+        <div class="panel-head">Pending invitations <span class="count" id="inv-count">0</span></div>
+        <div class="table" id="invites"></div>
+      </div>
+    </section>
+
+    <!-- tests -->
+    <section class="tab" id="tab-tests">
+      <header class="head"><h1>Tests</h1><p class="sub">Every test run across the school. Read-only — locking and unlocking happens in the desktop app.</p></header>
+      <div class="panel">
+        <div class="panel-head">All tests <span class="count" id="tests-count">0</span></div>
+        <div class="table" id="tests"></div>
+      </div>
+    </section>
+
+    <!-- billing -->
+    <section class="tab" id="tab-billing">
+      <header class="head"><h1>Licence &amp; billing</h1><p class="sub">Seats and term are set by us when a quote is accepted. Everything here is yours to edit.</p></header>
+
+      <div class="panel">
+        <div class="panel-head">Current licence</div>
+        <dl class="deflist" id="lic"></dl>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">Billing details</div>
+        <form class="form-grid" id="bill-form">
+          <label class="fld"><span>Billing contact</span><input type="text" id="b-contact" placeholder="Finance Office"></label>
+          <label class="fld"><span>Billing email</span><input type="email" id="b-email" placeholder="ap@school.edu"></label>
+          <label class="fld"><span>Purchase order number</span><input type="text" id="b-po" placeholder="PO-4471"></label>
+          <div class="fld-actions"><button class="btn primary" type="submit">Save billing details</button>
+            <span class="msg ok hidden" id="bill-ok">Saved</span>
+            <span class="msg err hidden" id="bill-err"></span></div>
+        </form>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">Need more seats?</div>
+        <div class="upsell">
+          <p id="upsell-copy">Top up at any time at your current per-student rate, pro-rated to the end of your term. Nothing stops working if you go over — we reconcile at renewal.</p>
+          <a class="btn primary" href="/#quote" id="upsell-cta">Request a quote</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- settings -->
+    <section class="tab" id="tab-settings">
+      <header class="head"><h1>Settings</h1><p class="sub">Changing the domain affects who joins automatically from now on. Nobody already in the school is removed.</p></header>
+      <div class="panel">
+        <div class="panel-head">School</div>
+        <form class="form-grid" id="school-form">
+          <label class="fld"><span>School or district name</span><input type="text" id="s-name" required></label>
+          <label class="fld"><span>Email domains <em>comma separated</em></span><input type="text" id="s-domains" placeholder="riverside.k12.us, riverside.org"></label>
+          <div class="fld-actions"><button class="btn primary" type="submit">Save</button>
+            <span class="msg ok hidden" id="school-ok">Saved</span>
+            <span class="msg err hidden" id="school-err"></span></div>
+        </form>
+      </div>
+      <div class="panel">
+        <div class="panel-head">Apps</div>
+        <div class="upsell">
+          <p>Teachers and students both install the same app. Push it with your MDM or send them the link.</p>
+          <a class="btn ghost" href="/#download">Download page</a>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="toast hidden" id="toast"></div>
+
+<div class="modal hidden" id="modal">
+  <div class="modal-card">
+    <h3 id="modal-title">Are you sure?</h3>
+    <p id="modal-body"></p>
+    <div class="modal-actions">
+      <button class="btn ghost" id="modal-no">Cancel</button>
+      <button class="btn primary" id="modal-yes">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<script src="vendor/supabase.js"></script>
+<script src="../config.js"></script>
+<script src="../pricing.js"></script>
+<script src="admin.js"></script>
+</body>
+</html>

@@ -269,7 +269,18 @@ function createCloudBackend () {
 
   async function profileFor (user) {
     const { data } = await sb.from('teachers').select('id,email,name').eq('id', user.id).maybeSingle()
-    return data || { id: user.id, email: user.email, name: (user.user_metadata || {}).name || user.email.split('@')[0] }
+    const base = data || { id: user.id, email: user.email, name: (user.user_metadata || {}).name || user.email.split('@')[0] }
+
+    // Pick up an invitation or a matching school email domain, then report the
+    // licence so the teacher can see who they are teaching under.
+    let school = null
+    try {
+      await sb.rpc('claim_membership')
+      const { data: ov } = await sb.rpc('school_overview')
+      const row = Array.isArray(ov) ? ov[0] : ov
+      if (row) school = { name: row.name, status: row.status, role: row.my_role, daysLeft: row.days_left }
+    } catch {}
+    return { ...base, school }
   }
 
   async function fetchStudents (testId) {

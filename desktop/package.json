@@ -10,7 +10,7 @@
     "dist": "electron-builder",
     "dist:mac": "electron-builder --mac",
     "dist:win": "electron-builder --win",
-    "build:vendor": "esbuild build/vendor-entry.js --bundle --format=iife --global-name=SupabaseSDK --minify --target=chrome110 --outfile=renderer/vendor/supabase.js"
+    "build:vendor": "esbuild build/vendor-entry.js --bundle --format=iife --global-name=SupabaseSDK --minify --target=chrome110 --outfile=renderer/vendor/supabase.js && cp renderer/vendor/supabase.js ../web/admin/vendor/supabase.js"
   },
   "devDependencies": {
     "electron": "^33.2.0",

@@ -212,6 +212,19 @@ async function enterConsole () {
   $('#t-name').textContent = p.name || 'Teacher'
   $('#t-email').textContent = p.email
   $('#t-avatar').textContent = (p.name || p.email).trim()[0].toUpperCase()
+
+  // Show which school's licence this teacher is teaching under.
+  const badge = $('#t-school')
+  if (badge) {
+    if (p.school) {
+      badge.textContent = p.school.name +
+        (p.school.status === 'trial' ? ` · trial, ${Math.max(0, p.school.daysLeft)}d left` : '')
+      badge.className = 'side-school' + (p.school.status === 'trial' ? ' trial' : '')
+      badge.classList.remove('hidden')
+    } else {
+      badge.classList.add('hidden')
+    }
+  }
   await desk.setWindowMode('console')
   show('console')
   await loadSessions()
