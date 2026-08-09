@@ -9,11 +9,12 @@ and the teacher gets a live feed of anyone who tries to get out.
 
 ```
 desmoslock/
-├── server/     Node + Express + WebSocket. Accounts, class codes, lock state, alerts.
+├── server/     Node + Express + WebSocket. The offline-capable classroom server.
 ├── desktop/    Electron app. One binary, both roles (teacher console / student calculator).
-├── web/        desmoslock.com — landing page + installer downloads, served by the server.
-├── supabase/   schema.sql — applied and live.
-└── docs/       SUPABASE.md — setup, security model, gotchas.
+├── web/        desmoslock.vercel.app — marketing site, pricing calculator, quote form
+│   └── admin/  the school admin console
+├── supabase/   schema.sql (core) + enterprise.sql (schools, seats, roles, quotes)
+└── docs/       SUPABASE.md · OPERATIONS.md
 ```
 
 The app ships **two backends** and remembers which you picked (landing screen →
@@ -157,6 +158,47 @@ Open → Open, or `xattr -dr com.apple.quarantine /Applications/DesmosLock.app`.
 shows a SmartScreen warning. Fixing this properly needs an Apple Developer account
 ($99/yr) and a Windows certificate; the install steps are spelled out on the download
 page rather than left as a surprise.
+
+## Pricing and licensing
+
+**$8 per student per year**, billed to the school. Teachers never see a bill and
+students never make an account. A student counts once per licence year however
+many tests they sit.
+
+| | Per student / year |
+| --- | --- |
+| Up to 999 students | $8.00 |
+| 1,000 – 4,999 | $7.00 |
+| 5,000+ | $6.00 |
+
+2-year terms take 5% off, 3-year terms 10%. The calculator on the site and the
+admin console both import [`web/pricing.js`](web/pricing.js), so the number a
+district sees on the website is the number their console shows later.
+
+New schools start on a 30-day, 50-seat trial. Quotes land in `quote_requests`,
+which nobody can read through the API — see
+[docs/OPERATIONS.md](docs/OPERATIONS.md) for reading them and activating a paid
+licence.
+
+## Admin console
+
+`/admin` — a browser app for whoever owns the contract.
+
+- **Seats** used against purchased, with the overage called out
+- **Teachers** — invite by email, promote to admin, remove; pending invitations
+- **Tests** — every test run across the school, read-only
+- **Licence & billing** — term, price per student, billing contact, PO number
+- **Settings** — school name and the email domains that auto-join
+
+Three roles. Owners and admins manage people and billing; teachers see the
+roster and nothing else. Teachers join either by invitation or by signing up
+with an address on a verified school domain.
+
+The boundary is the database, not the interface. Hiding the billing tab from a
+teacher is a courtesy; the reason they cannot change billing is that
+`update_school_profile()` refuses them. Two bugs found while testing this are
+worth knowing about if you extend it — both are documented in
+[docs/SUPABASE.md](docs/SUPABASE.md).
 
 ## Supabase
 
