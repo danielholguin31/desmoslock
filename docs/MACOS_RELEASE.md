@@ -110,8 +110,10 @@ The order is mandatory because Vercel automatically deploys merges to `main`, an
 PR #1 contains both the new public-repository redirects and copy describing signed
 macOS installers.
 
-1. Complete Apple enrollment and create the Developer ID Application certificate,
-   password-protected `.p12`, App Store Connect API key, and one-time `.p8`.
+1. Choose Individual versus Organization Apple Developer Program enrollment, then
+   complete the selected enrollment and create the Developer ID Application
+   certificate, password-protected `.p12`, App Store Connect API key, and one-time
+   `.p8`.
 2. Create and protect the public releases repository, mirror v1.0.0, configure the
    source rulesets and the three protected environments, then add the eight
    environment secrets.
@@ -213,7 +215,8 @@ never be given to customers or used for release acceptance.
 
 ## Daniel-owned release checklist
 
-- [ ] Apple enrollment, certificate, `.p12`, API key, and `.p8` completed.
+- [ ] Individual versus Organization Apple Developer enrollment chosen; selected
+  enrollment, certificate, `.p12`, API key, and `.p8` completed.
 - [ ] Public releases repository created, protected, and v1.0.0 mirrored and checked.
 - [ ] Source `main`, `release/1.0`, and `v*` rulesets active with Daniel-only bypass.
 - [ ] Three dedicated environments restricted to the documented branches and tags.
