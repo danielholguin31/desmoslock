@@ -1,27 +1,38 @@
 name: Build installers
 
-# Tag a version to cut a release:  git tag v1.0.0 && git push --tags
-# Or run it by hand from the Actions tab.
 on:
   push:
-    tags: ['v*']
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: installer-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASES_REPOSITORY: danielholguin31/desmoslock-releases
 
 jobs:
-  build:
+  build-desktop:
+    name: Build ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            name: macOS
-          - os: windows-latest
-            name: Windows
-          - os: ubuntu-latest
-            name: Linux
+          - name: Windows
+            os: windows-latest
+            platform: win
+            artifact: windows
+            files: desktop/dist/*.exe
+          - name: Linux
+            os: ubuntu-latest
+            platform: linux
+            artifact: linux
+            files: desktop/dist/*.AppImage
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +42,9 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: desktop/package-lock.json
+
+      - name: Use npm 10
+        run: npm install --global npm@10
 
       - name: Install
         working-directory: desktop
@@ -42,64 +56,321 @@ jobs:
 
       - name: Build ${{ matrix.name }}
         working-directory: desktop
-        # No signing identity is configured, so tell electron-builder not to look
-        # for one. Installers are unsigned — see README for what that means.
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npx electron-builder --publish never
+        run: npx electron-builder --${{ matrix.platform }} --publish never
 
       - uses: actions/upload-artifact@v4
         with:
-          name: installers-${{ matrix.name }}
-          path: |
-            desktop/dist/*.dmg
-            desktop/dist/*.exe
-            desktop/dist/*.AppImage
-          if-no-files-found: warn
+          name: installer-${{ matrix.artifact }}
+          path: ${{ matrix.files }}
+          if-no-files-found: error
 
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+  build-macos:
+    name: Build and verify macOS
+    runs-on: macos-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Use npm 10
+        run: npm install --global npm@10
+
+      - name: Install
+        working-directory: desktop
+        run: npm ci
+
+      - name: Bundle supabase-js
+        working-directory: desktop
+        run: npm run build:vendor
+
+      - name: Configure signing and notarization credentials
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY_B64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          : "${CSC_LINK:?CSC_LINK is required}"
+          : "${CSC_KEY_PASSWORD:?CSC_KEY_PASSWORD is required}"
+          : "${APPLE_API_KEY_B64:?APPLE_API_KEY_B64 is required}"
+          : "${APPLE_API_KEY_ID:?APPLE_API_KEY_ID is required}"
+          : "${APPLE_API_ISSUER:?APPLE_API_ISSUER is required}"
+          : "${APPLE_TEAM_ID:?APPLE_TEAM_ID is required}"
+
+          [[ "$APPLE_API_KEY_ID" =~ ^[A-Z0-9]{10}$ ]] || {
+            echo 'APPLE_API_KEY_ID must be a 10-character key ID.' >&2
+            exit 1
+          }
+          [[ "$APPLE_API_ISSUER" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || {
+            echo 'APPLE_API_ISSUER must be an App Store Connect issuer UUID.' >&2
+            exit 1
+          }
+          [[ "$APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || {
+            echo 'APPLE_TEAM_ID must be a 10-character Apple team ID.' >&2
+            exit 1
+          }
+
+          key_path="$RUNNER_TEMP/AuthKey.p8"
+          umask 077
+          printf '%s' "$APPLE_API_KEY_B64" | base64 -D > "$key_path"
+          chmod 600 "$key_path"
+          grep -q -- 'BEGIN PRIVATE KEY' "$key_path" || {
+            echo 'APPLE_API_KEY_B64 did not decode to a .p8 private key.' >&2
+            exit 1
+          }
+          echo "APPLE_API_KEY=$key_path" >> "$GITHUB_ENV"
+
+      - name: Build signed and notarized macOS DMGs
+        working-directory: desktop
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npx electron-builder --mac --publish never
+
+      - name: Verify signed macOS DMGs
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          arm64_dmgs=(desktop/dist/*arm64*.dmg)
+          x64_dmgs=(desktop/dist/*x64*.dmg)
+          [[ ${#arm64_dmgs[@]} -eq 1 ]] || {
+            echo "Expected one arm64 DMG; found ${#arm64_dmgs[@]}." >&2
+            exit 1
+          }
+          [[ ${#x64_dmgs[@]} -eq 1 ]] || {
+            echo "Expected one x64 DMG; found ${#x64_dmgs[@]}." >&2
+            exit 1
+          }
+          desktop/scripts/verify-macos-dmg.sh "${arm64_dmgs[0]}" arm64
+          desktop/scripts/verify-macos-dmg.sh "${x64_dmgs[0]}" x86_64
+
+      - name: Remove temporary notarization key
+        if: always()
+        shell: bash
+        run: |
+          key_path="${RUNNER_TEMP:?RUNNER_TEMP is required}/AuthKey.p8"
+          case "$key_path" in
+            "$RUNNER_TEMP"/*) rm -f -- "$key_path" ;;
+            *) echo "Refusing unexpected cleanup path: $key_path" >&2; exit 1 ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-macos
+          path: desktop/dist/*.dmg
+          if-no-files-found: error
+
+  draft-release:
+    name: Create public draft release
+    needs:
+      - build-desktop
+      - build-macos
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      # electron-builder names files with versions and arches; the website links
-      # to stable names, so normalise them here.
-      - name: Normalise asset names
+      - name: Stage stable customer filenames and checksums
+        shell: bash
         run: |
-          mkdir -p out
-          find artifacts -type f | while read -r f; do
-            case "$f" in
-              *arm64*.dmg) cp "$f" out/DesmosLock-mac.dmg ;;
-              *.dmg)       cp "$f" out/DesmosLock-mac-intel.dmg ;;
-              *.exe)       cp "$f" out/DesmosLock-setup.exe ;;
-              *.AppImage)  cp "$f" out/DesmosLock.AppImage ;;
-            esac
-          done
-          ls -la out
+          set -euo pipefail
+          desktop_version=$(node -p "require('./desktop/package.json').version")
+          [[ "$GITHUB_REF_NAME" == "v$desktop_version" ]] || {
+            echo "Tag $GITHUB_REF_NAME does not match desktop version $desktop_version." >&2
+            exit 1
+          }
+          mkdir out
 
-      - uses: softprops/action-gh-release@v2
+          copy_one() {
+            local source_dir=$1
+            local pattern=$2
+            local destination=$3
+            local matches=()
+            mapfile -d '' matches < <(find "$source_dir" -type f -name "$pattern" -print0)
+            if [[ ${#matches[@]} -ne 1 ]]; then
+              echo "Expected one $pattern in $source_dir; found ${#matches[@]}." >&2
+              exit 1
+            fi
+            cp -- "${matches[0]}" "out/$destination"
+          }
+
+          copy_one artifacts/installer-macos '*arm64*.dmg' DesmosLock-mac.dmg
+          copy_one artifacts/installer-macos '*x64*.dmg' DesmosLock-mac-intel.dmg
+          copy_one artifacts/installer-windows '*.exe' DesmosLock-setup.exe
+          copy_one artifacts/installer-linux '*.AppImage' DesmosLock.AppImage
+
+          (
+            cd out
+            sha256sum \
+              DesmosLock-mac.dmg \
+              DesmosLock-mac-intel.dmg \
+              DesmosLock-setup.exe \
+              DesmosLock.AppImage > SHA256SUMS.txt
+          )
+
+      - name: Refuse to overwrite a published release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          release_state=$(gh release view "$GITHUB_REF_NAME" \
+            --repo "$RELEASES_REPOSITORY" \
+            --json isDraft \
+            --jq .isDraft 2>&1)
+          view_status=$?
+          set -e
+
+          if [[ $view_status -eq 0 ]]; then
+            [[ "$release_state" == true ]] || {
+              echo "Refusing to replace assets on an already-published release." >&2
+              exit 1
+            }
+            echo "An existing draft will be updated and reverified."
+          elif [[ "$release_state" == "release not found" ]]; then
+            echo "No existing release was found; a new draft will be created."
+          else
+            echo "Could not safely determine the target release state." >&2
+            exit 1
+          fi
+
+      - name: Create or update draft release
+        # v2 pinned because this step receives the public-repository write token.
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
-          files: out/*
-          generate_release_notes: true
+          repository: ${{ env.RELEASES_REPOSITORY }}
+          tag_name: ${{ github.ref_name }}
+          target_commitish: main
+          name: DesmosLock ${{ github.ref_name }}
+          draft: true
+          prerelease: false
+          generate_release_notes: false
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          token: ${{ secrets.RELEASES_REPO_TOKEN }}
           body: |
+            DesmosLock installers for ${{ github.ref_name }}.
+
+            Private source commit: `${{ github.sha }}`
+
             ## Installing
 
-            These builds are **not code-signed**, so the operating system will warn you.
+            **macOS:** Open the DMG, drag DesmosLock to Applications, then launch it
+            normally from Applications.
 
-            **macOS** — after opening the `.dmg` and dragging DesmosLock to Applications,
-            right-click the app and choose **Open**, then **Open** again. A normal
-            double-click will be refused. If macOS says the app is damaged, run:
+            **Windows:** Run `DesmosLock-setup.exe`. Windows SmartScreen may warn until
+            Windows code signing is added.
+          files: |
+            out/DesmosLock-mac.dmg
+            out/DesmosLock-mac-intel.dmg
+            out/DesmosLock-setup.exe
+            out/DesmosLock.AppImage
+            out/SHA256SUMS.txt
 
-            ```
-            xattr -dr com.apple.quarantine /Applications/DesmosLock.app
-            ```
+  verify-draft-macos:
+    name: Verify draft release on fresh macOS
+    needs: draft-release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
 
-            **Windows** — SmartScreen will show a blue warning. Click **More info**,
-            then **Run anyway**.
+      - name: Download draft release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir draft-assets
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$RELEASES_REPOSITORY" \
+            --dir draft-assets
 
-            Signing these properly needs an Apple Developer account ($99/yr) and a
-            Windows code-signing certificate.
+      - name: Check hashes and Gatekeeper acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(
+            DesmosLock-mac.dmg
+            DesmosLock-mac-intel.dmg
+            DesmosLock-setup.exe
+            DesmosLock.AppImage
+            SHA256SUMS.txt
+          )
+          for asset in "${expected[@]}"; do
+            [[ -f "draft-assets/$asset" ]] || {
+              echo "Draft release asset is missing: $asset" >&2
+              exit 1
+            }
+          done
+          asset_count=$(find draft-assets -maxdepth 1 -type f | wc -l | tr -d ' ')
+          [[ "$asset_count" -eq ${#expected[@]} ]] || {
+            echo "Expected exactly ${#expected[@]} draft assets; found $asset_count." >&2
+            exit 1
+          }
+          (cd draft-assets && shasum -a 256 --check SHA256SUMS.txt)
+          desktop/scripts/verify-macos-dmg.sh draft-assets/DesmosLock-mac.dmg arm64
+          desktop/scripts/verify-macos-dmg.sh draft-assets/DesmosLock-mac-intel.dmg x86_64
+
+  publish-release:
+    name: Publish verified release
+    needs: verify-draft-macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish draft
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release edit "$GITHUB_REF_NAME" \
+            --repo "$RELEASES_REPOSITORY" \
+            --draft=false \
+            --latest
+          [[ "$(gh release view "$GITHUB_REF_NAME" \
+            --repo "$RELEASES_REPOSITORY" \
+            --json isDraft \
+            --jq .isDraft)" == false ]]
+
+  verify-public-release:
+    name: Verify unauthenticated public downloads
+    needs: publish-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download every public asset without authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir public-assets
+          base_url="https://github.com/$RELEASES_REPOSITORY/releases/latest/download"
+          assets=(
+            DesmosLock-mac.dmg
+            DesmosLock-mac-intel.dmg
+            DesmosLock-setup.exe
+            DesmosLock.AppImage
+            SHA256SUMS.txt
+          )
+          for asset in "${assets[@]}"; do
+            curl --fail --location --silent --show-error \
+              --retry 12 --retry-delay 5 --retry-all-errors \
+              "$base_url/$asset" \
+              --output "public-assets/$asset"
+          done
+          (cd public-assets && sha256sum --check SHA256SUMS.txt)

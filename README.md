@@ -40,6 +40,17 @@ Everyone must be on the same network.
 > `ELECTRON_RUN_AS_NODE` first (`env -u ELECTRON_RUN_AS_NODE npm start`) — VS Code
 > exports it and it makes Electron boot as plain Node.
 
+## Install a release build
+
+On macOS, download the DMG for Apple silicon or Intel, open it, drag DesmosLock to
+Applications, and launch DesmosLock normally from Applications. Published macOS
+builds must be signed, notarized, stapled, and pass the repository's Gatekeeper
+checks before release.
+
+Release operators should follow [docs/MACOS_RELEASE.md](docs/MACOS_RELEASE.md). The
+quarantine-removal command sometimes used while diagnosing unsigned software is not
+a supported installation step.
+
 ## Using it
 
 **Teacher** — Create an account (email + password), click **New test**, name it. The
@@ -135,6 +146,11 @@ npm run publish:installers   # copy them into web/downloads/
 `/download/mac`, `/download/windows` and `/download/linux` serve the newest matching
 installer from `web/downloads/`, and show a friendly "not built yet" page until one
 exists. `GET /api/downloads` reports what's published.
+
+Customer-facing macOS releases use the stable filenames `DesmosLock-mac.dmg` and
+`DesmosLock-mac-intel.dmg`. Installation is drag-to-Applications followed by a normal
+launch; see [docs/MACOS_RELEASE.md](docs/MACOS_RELEASE.md) for the signed release
+procedure.
 
 ## Supabase
 

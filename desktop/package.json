@@ -1,7 +1,7 @@
 {
   "name": "desmoslock",
   "productName": "DesmosLock",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Locked-down Desmos graphing calculator for exams",
   "main": "main.js",
@@ -27,6 +27,11 @@
     ],
     "mac": {
       "category": "public.app-category.education",
+      "forceCodeSigning": true,
+      "hardenedRuntime": true,
+      "notarize": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist",
       "target": [
         {
           "target": "dmg",
@@ -35,8 +40,7 @@
             "x64"
           ]
         }
-      ],
-      "identity": null
+      ]
     },
     "win": {
       "target": [
