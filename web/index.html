@@ -373,17 +373,19 @@
   <p class="micro"><a href="/download/linux">Linux AppImage</a> · <a href="/releases">all versions and release notes</a></p>
 
   <div class="install-note">
-    <h3>Install DesmosLock</h3>
+    <h3>⚠ First launch: the OS will warn you</h3>
     <p>
-      macOS downloads are Developer ID signed, notarized and checked by Gatekeeper
-      before publication. Windows publisher signing is not yet in place, so Windows
-      may still show a SmartScreen warning.
+      These builds are not code-signed yet, so your computer does not recognise the
+      publisher. Nothing is wrong with the app — signing costs $99/yr for Apple plus a
+      Windows certificate, and that is not in place.
     </p>
     <div class="install-cols">
       <div>
         <b>macOS</b>
-        <p>Open the DMG, drag DesmosLock to Applications, then launch DesmosLock
-        normally from Applications.</p>
+        <p>Drag DesmosLock to Applications, then <b>right-click the app → Open → Open</b>.
+        A normal double-click gets refused. If it says the app is damaged, run this in
+        Terminal once:</p>
+        <code>xattr -dr com.apple.quarantine /Applications/DesmosLock.app</code>
       </div>
       <div>
         <b>Windows</b>
