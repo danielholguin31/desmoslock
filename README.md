@@ -141,23 +141,30 @@ isn't ours to lose, so it refuses to start and names what's in the way.
 [web/](web/) is the landing page, deployed on Vercel from `vercel.json`
 (`outputDirectory: web`, no build step). `/download/mac`, `/download/mac-intel`,
 `/download/windows` and `/download/linux` redirect to the newest GitHub Release asset,
-so the links keep working for every future version with no redeploy.
+hosted in the public
+[`danielholguin31/desmoslock-releases`](https://github.com/danielholguin31/desmoslock-releases)
+repository, so customer downloads stay public if this source repository becomes
+private.
 
-Cutting a release builds and publishes all three platforms:
+The release workflow builds macOS separately from Windows and Linux. A manual run
+builds and verifies without publishing. A `v*` tag stages a draft in the public
+binary repository, redownloads and verifies both macOS builds on a fresh runner,
+then publishes only after every Gatekeeper check passes. Start with the
+[macOS release runbook](docs/MACOS_RELEASE.md); a release tag is the final step,
+not the first one.
 
-```bash
-git tag v1.0.1 && git push --tags
-```
+The macOS job requires Developer ID signing, hardened runtime, notarization, and a
+stapled ticket. It refuses to build an unsigned fallback. Install a published Mac
+release by opening the DMG, dragging DesmosLock to Applications, and launching it
+normally from Applications.
 
-[.github/workflows/release.yml](.github/workflows/release.yml) builds on macOS, Windows
-and Ubuntu runners, normalises the filenames the site links to, and attaches them to the
-release. `npm run dist` still builds locally if you want a one-off.
+Windows publisher signing is outside this macOS repair, so SmartScreen may still
+warn for the Windows installer.
 
-**Installers are not code-signed.** macOS refuses a plain double-click — right-click →
-Open → Open, or `xattr -dr com.apple.quarantine /Applications/DesmosLock.app`. Windows
-shows a SmartScreen warning. Fixing this properly needs an Apple Developer account
-($99/yr) and a Windows certificate; the install steps are spelled out on the download
-page rather than left as a surprise.
+Do not deploy the redirect changes until Daniel has created the public repository,
+mirrored the v1.0.0 assets, and approved a signed v1.0.1 dry run. Do not make this
+source repository private until every website route works without GitHub
+authentication and the downloaded files match the published SHA-256 values.
 
 ## Pricing and licensing
 
