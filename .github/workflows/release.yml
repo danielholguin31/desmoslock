@@ -10,15 +10,141 @@ permissions:
   contents: read
 
 concurrency:
-  group: installer-release-${{ github.ref }}
+  # Keep every public release mutation serialized, even across different tags.
+  group: desmoslock-public-release
   cancel-in-progress: false
 
 env:
   RELEASES_REPOSITORY: danielholguin31/desmoslock-releases
 
 jobs:
+  trusted-source:
+    name: Verify trusted release source
+    runs-on: ubuntu-latest
+    outputs:
+      is_release: ${{ steps.preflight.outputs.is_release }}
+      source_sha: ${{ steps.preflight.outputs.source_sha }}
+      version: ${{ steps.preflight.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require the protected release branch or a contained version tag
+        id: preflight
+        shell: bash
+        env:
+          TRUSTED_BRANCH: release/1.0
+        run: |
+          set -euo pipefail
+
+          fail() {
+            echo "::error::$*" >&2
+            exit 1
+          }
+
+          require_public_releases_repository() {
+            local response_file="$RUNNER_TEMP/releases-repository.json"
+            local status
+            status=$(curl --silent --show-error \
+              --retry 5 --retry-delay 2 --retry-all-errors \
+              --output "$response_file" \
+              --write-out '%{http_code}' \
+              "https://api.github.com/repos/$RELEASES_REPOSITORY")
+            [[ "$status" == 200 ]] || fail \
+              "The public releases repository is unavailable (HTTP $status)."
+            [[ "$(node -e \
+              "const d=require(process.argv[1]); process.stdout.write(String(d.private))" \
+              "$response_file")" == false ]] || fail \
+              "The releases repository must be public before signing credentials are used."
+          }
+
+          assert_newer_than_latest() {
+            local candidate_tag=$1
+            local response_file="$RUNNER_TEMP/latest-release.json"
+            local status latest_tag
+            status=$(curl --silent --show-error \
+              --retry 5 --retry-delay 2 --retry-all-errors \
+              --output "$response_file" \
+              --write-out '%{http_code}' \
+              "https://api.github.com/repos/$RELEASES_REPOSITORY/releases/latest")
+
+            case "$status" in
+              200)
+                latest_tag=$(node -e \
+                  "const d=require(process.argv[1]); process.stdout.write(String(d.tag_name || ''))" \
+                  "$response_file")
+                node - "$candidate_tag" "$latest_tag" <<'NODE'
+          const parse = (tag) => {
+            const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(tag);
+            if (!match) throw new Error(`not a strict stable SemVer tag: ${tag}`);
+            return match.slice(1).map((part) => BigInt(part));
+          };
+          try {
+            const candidate = parse(process.argv[2]);
+            const latest = parse(process.argv[3]);
+            const comparison = candidate.findIndex((part, index) => part !== latest[index]);
+            if (comparison === -1 || candidate[comparison] < latest[comparison]) {
+              throw new Error(`${process.argv[2]} is not newer than latest ${process.argv[3]}`);
+            }
+          } catch (error) {
+            console.error(`::error::${error.message}`);
+            process.exit(1);
+          }
+          NODE
+                ;;
+              404)
+                echo "No current latest release exists; monotonic guard allows the first release."
+                ;;
+              *)
+                fail "Could not determine the current latest release (HTTP $status)."
+                ;;
+            esac
+          }
+
+          package_version=$(node -p "require('./desktop/package.json').version")
+          [[ "$package_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || \
+            fail "Desktop version must be strict stable SemVer; found $package_version."
+
+          source_sha=$(git rev-parse "${GITHUB_SHA}^{commit}")
+          [[ "$source_sha" == "$(git rev-parse 'HEAD^{commit}')" ]] || fail \
+            "Checked-out source does not match GITHUB_SHA."
+          case "$GITHUB_EVENT_NAME" in
+            workflow_dispatch)
+              [[ "$GITHUB_REF" == "refs/heads/$TRUSTED_BRANCH" ]] || fail \
+                "workflow_dispatch must run from refs/heads/$TRUSTED_BRANCH."
+              is_release=false
+              ;;
+            push)
+              [[ "$GITHUB_REF" == refs/tags/v* ]] || fail \
+                "Only v* tag pushes may use the tag release path."
+              [[ "$GITHUB_REF_NAME" == "v$package_version" ]] || fail \
+                "Tag $GITHUB_REF_NAME does not match desktop version $package_version."
+              git show-ref --verify --quiet "refs/remotes/origin/$TRUSTED_BRANCH" || fail \
+                "Fetched protected branch origin/$TRUSTED_BRANCH is missing."
+              git merge-base --is-ancestor \
+                "$source_sha" "refs/remotes/origin/$TRUSTED_BRANCH" || fail \
+                "Tagged commit $source_sha is not contained in protected $TRUSTED_BRANCH."
+              assert_newer_than_latest "$GITHUB_REF_NAME"
+              is_release=true
+              ;;
+            *)
+              fail "Unsupported workflow event: $GITHUB_EVENT_NAME."
+              ;;
+          esac
+
+          require_public_releases_repository
+          {
+            echo "is_release=$is_release"
+            echo "source_sha=$source_sha"
+            echo "version=$package_version"
+          } >> "$GITHUB_OUTPUT"
+
   build-desktop:
     name: Build ${{ matrix.name }}
+    needs: trusted-source
+    if: ${{ needs.trusted-source.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -66,9 +192,14 @@ jobs:
 
   build-macos:
     name: Build and verify macOS
+    needs: trusted-source
+    if: ${{ needs.trusted-source.result == 'success' }}
     runs-on: macos-latest
+    environment: macos-signing
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -175,10 +306,16 @@ jobs:
   draft-release:
     name: Create public draft release
     needs:
+      - trusted-source
       - build-desktop
       - build-macos
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      ${{ needs.trusted-source.result == 'success' &&
+          needs.trusted-source.outputs.is_release == 'true' &&
+          needs.build-desktop.result == 'success' &&
+          needs.build-macos.result == 'success' }}
     runs-on: ubuntu-latest
+    environment: public-releases-write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -232,6 +369,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          : "${GH_TOKEN:?RELEASES_REPO_TOKEN environment secret is required}"
           set +e
           release_state=$(gh release view "$GITHUB_REF_NAME" \
             --repo "$RELEASES_REPOSITORY" \
@@ -262,7 +400,7 @@ jobs:
           target_commitish: main
           name: DesmosLock ${{ github.ref_name }}
           draft: true
-          prerelease: false
+          prerelease: true
           generate_release_notes: false
           fail_on_unmatched_files: true
           overwrite_files: true
@@ -270,7 +408,7 @@ jobs:
           body: |
             DesmosLock installers for ${{ github.ref_name }}.
 
-            Private source commit: `${{ github.sha }}`
+            Private source commit: `${{ needs.trusted-source.outputs.source_sha }}`
 
             ## Installing
 
@@ -288,23 +426,36 @@ jobs:
 
   verify-draft-macos:
     name: Verify draft release on fresh macOS
-    needs: draft-release
+    needs:
+      - trusted-source
+      - draft-release
+    if: >-
+      ${{ needs.trusted-source.result == 'success' &&
+          needs.trusted-source.outputs.is_release == 'true' &&
+          needs.draft-release.result == 'success' }}
     runs-on: macos-latest
+    environment: public-releases-read
+    outputs:
+      manifest_sha256: ${{ steps.verify.outputs.manifest_sha256 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Download draft release assets
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_READ_TOKEN }}
         run: |
           set -euo pipefail
+          : "${GH_TOKEN:?RELEASES_REPO_READ_TOKEN environment secret is required}"
           mkdir draft-assets
           gh release download "$GITHUB_REF_NAME" \
             --repo "$RELEASES_REPOSITORY" \
             --dir draft-assets
 
       - name: Check hashes and Gatekeeper acceptance
+        id: verify
         shell: bash
         run: |
           set -euo pipefail
@@ -329,43 +480,92 @@ jobs:
           (cd draft-assets && shasum -a 256 --check SHA256SUMS.txt)
           desktop/scripts/verify-macos-dmg.sh draft-assets/DesmosLock-mac.dmg arm64
           desktop/scripts/verify-macos-dmg.sh draft-assets/DesmosLock-mac-intel.dmg x86_64
+          manifest_sha256=$(shasum -a 256 draft-assets/SHA256SUMS.txt | awk '{print $1}')
+          [[ "$manifest_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "Invalid SHA256SUMS.txt digest: $manifest_sha256" >&2
+            exit 1
+          }
+          echo "manifest_sha256=$manifest_sha256" >> "$GITHUB_OUTPUT"
 
-  publish-release:
-    name: Publish verified release
-    needs: verify-draft-macos
+  publish-prerelease:
+    name: Publish verified non-latest prerelease
+    needs:
+      - trusted-source
+      - verify-draft-macos
+    if: >-
+      ${{ needs.trusted-source.result == 'success' &&
+          needs.trusted-source.outputs.is_release == 'true' &&
+          needs.verify-draft-macos.result == 'success' }}
     runs-on: ubuntu-latest
+    environment: public-releases-write
     steps:
-      - name: Publish draft
+      - name: Publish draft as a public prerelease without changing latest
         env:
           GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        shell: bash
         run: |
           set -euo pipefail
-          gh release edit "$GITHUB_REF_NAME" \
-            --repo "$RELEASES_REPOSITORY" \
-            --draft=false \
-            --latest
-          [[ "$(gh release view "$GITHUB_REF_NAME" \
-            --repo "$RELEASES_REPOSITORY" \
-            --json isDraft \
-            --jq .isDraft)" == false ]]
+          : "${GH_TOKEN:?RELEASES_REPO_TOKEN environment secret is required}"
+          release_id=$(gh api \
+            "repos/$RELEASES_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
+            --jq .id)
+          [[ "$(gh api "repos/$RELEASES_REPOSITORY/releases/$release_id" --jq .draft)" == true ]] || {
+            echo "Expected $GITHUB_REF_NAME to still be a draft." >&2
+            exit 1
+          }
+          gh api --method PATCH \
+            "repos/$RELEASES_REPOSITORY/releases/$release_id" \
+            -F draft=false \
+            -F prerelease=true \
+            -f make_latest=false \
+            --silent
+          state=$(gh api \
+            "repos/$RELEASES_REPOSITORY/releases/$release_id" \
+            --jq '[.draft, .prerelease] | @tsv')
+          [[ "$state" == $'false\ttrue' ]] || {
+            echo "Release did not become a public prerelease: $state" >&2
+            exit 1
+          }
 
   verify-public-release:
-    name: Verify unauthenticated public downloads
-    needs: publish-release
+    name: Verify unauthenticated tag-specific downloads
+    needs:
+      - trusted-source
+      - verify-draft-macos
+      - publish-prerelease
+    if: >-
+      ${{ needs.trusted-source.result == 'success' &&
+          needs.trusted-source.outputs.is_release == 'true' &&
+          needs.verify-draft-macos.result == 'success' &&
+          needs.publish-prerelease.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download every public asset without authentication
         shell: bash
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.verify-draft-macos.outputs.manifest_sha256 }}
         run: |
           set -euo pipefail
+          [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "Missing verified draft manifest digest." >&2
+            exit 1
+          }
           mkdir public-assets
-          base_url="https://github.com/$RELEASES_REPOSITORY/releases/latest/download"
+          base_url="https://github.com/$RELEASES_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+          curl --fail --location --silent --show-error \
+            --retry 12 --retry-delay 5 --retry-all-errors \
+            "$base_url/SHA256SUMS.txt" \
+            --output public-assets/SHA256SUMS.txt
+          public_manifest_sha256=$(sha256sum public-assets/SHA256SUMS.txt | awk '{print $1}')
+          [[ "$public_manifest_sha256" == "$EXPECTED_MANIFEST_SHA256" ]] || {
+            echo "Public SHA256SUMS.txt does not match the verified draft manifest." >&2
+            exit 1
+          }
           assets=(
             DesmosLock-mac.dmg
             DesmosLock-mac-intel.dmg
             DesmosLock-setup.exe
             DesmosLock.AppImage
-            SHA256SUMS.txt
           )
           for asset in "${assets[@]}"; do
             curl --fail --location --silent --show-error \
@@ -374,3 +574,166 @@ jobs:
               --output "public-assets/$asset"
           done
           (cd public-assets && sha256sum --check SHA256SUMS.txt)
+
+  promote-release:
+    name: Promote verified prerelease to stable latest
+    needs:
+      - trusted-source
+      - verify-public-release
+    if: >-
+      ${{ needs.trusted-source.result == 'success' &&
+          needs.trusted-source.outputs.is_release == 'true' &&
+          needs.verify-public-release.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: public-releases-write
+    steps:
+      - name: Recheck monotonic version and promote
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          : "${GH_TOKEN:?RELEASES_REPO_TOKEN environment secret is required}"
+
+          fail() {
+            echo "::error::$*" >&2
+            exit 1
+          }
+
+          repository_file="$RUNNER_TEMP/releases-repository.json"
+          repository_status=$(curl --silent --show-error \
+            --retry 5 --retry-delay 2 --retry-all-errors \
+            --output "$repository_file" \
+            --write-out '%{http_code}' \
+            "https://api.github.com/repos/$RELEASES_REPOSITORY")
+          [[ "$repository_status" == 200 ]] || fail \
+            "The public releases repository is unavailable (HTTP $repository_status)."
+          [[ "$(node -e \
+            "const d=require(process.argv[1]); process.stdout.write(String(d.private))" \
+            "$repository_file")" == false ]] || fail \
+            "The releases repository became private before promotion."
+
+          response_file="$RUNNER_TEMP/latest-release.json"
+          status=$(curl --silent --show-error \
+            --retry 5 --retry-delay 2 --retry-all-errors \
+            --output "$response_file" \
+            --write-out '%{http_code}' \
+            "https://api.github.com/repos/$RELEASES_REPOSITORY/releases/latest")
+          case "$status" in
+            200)
+              latest_tag=$(node -e \
+                "const d=require(process.argv[1]); process.stdout.write(String(d.tag_name || ''))" \
+                "$response_file")
+              node - "$GITHUB_REF_NAME" "$latest_tag" <<'NODE'
+          const parse = (tag) => {
+            const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(tag);
+            if (!match) throw new Error(`not a strict stable SemVer tag: ${tag}`);
+            return match.slice(1).map((part) => BigInt(part));
+          };
+          try {
+            const candidate = parse(process.argv[2]);
+            const latest = parse(process.argv[3]);
+            const comparison = candidate.findIndex((part, index) => part !== latest[index]);
+            if (comparison === -1 || candidate[comparison] < latest[comparison]) {
+              throw new Error(`${process.argv[2]} is not newer than latest ${process.argv[3]}`);
+            }
+          } catch (error) {
+            console.error(`::error::${error.message}`);
+            process.exit(1);
+          }
+          NODE
+              ;;
+            404)
+              echo "No current latest release exists; monotonic guard allows the first release."
+              ;;
+            *)
+              fail "Could not safely recheck the current latest release (HTTP $status)."
+              ;;
+          esac
+
+          release_id=$(gh api \
+            "repos/$RELEASES_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
+            --jq .id)
+          state=$(gh api \
+            "repos/$RELEASES_REPOSITORY/releases/$release_id" \
+            --jq '[.draft, .prerelease] | @tsv')
+          [[ "$state" == $'false\ttrue' ]] || fail \
+            "Expected a public prerelease before promotion; found $state."
+          gh api --method PATCH \
+            "repos/$RELEASES_REPOSITORY/releases/$release_id" \
+            -F prerelease=false \
+            -f make_latest=true \
+            --silent
+
+  verify-latest-release:
+    name: Verify latest tag and customer download routes
+    needs:
+      - trusted-source
+      - verify-draft-macos
+      - promote-release
+    if: >-
+      ${{ needs.trusted-source.result == 'success' &&
+          needs.trusted-source.outputs.is_release == 'true' &&
+          needs.verify-draft-macos.result == 'success' &&
+          needs.promote-release.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert latest and verify its public assets without authentication
+        shell: bash
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.verify-draft-macos.outputs.manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "Missing verified draft manifest digest." >&2
+            exit 1
+          }
+          response_file="$RUNNER_TEMP/latest-release.json"
+          latest_verified=false
+          for attempt in {1..12}; do
+            status=$(curl --silent --show-error \
+              --retry 3 --retry-delay 2 --retry-all-errors \
+              --output "$response_file" \
+              --write-out '%{http_code}' \
+              "https://api.github.com/repos/$RELEASES_REPOSITORY/releases/latest")
+            if [[ "$status" == 200 ]]; then
+              latest_tag=$(node -e \
+                "const d=require(process.argv[1]); process.stdout.write(String(d.tag_name || ''))" \
+                "$response_file")
+              if [[ "$latest_tag" == "$GITHUB_REF_NAME" ]]; then
+                echo "Latest release is $latest_tag."
+                latest_verified=true
+                break
+              fi
+            fi
+            sleep 5
+          done
+          [[ "$latest_verified" == true ]] || {
+            echo "Unauthenticated releases/latest did not resolve to $GITHUB_REF_NAME." >&2
+            exit 1
+          }
+
+          mkdir latest-assets
+          base_url="https://github.com/$RELEASES_REPOSITORY/releases/latest/download"
+          curl --fail --location --silent --show-error \
+            --retry 12 --retry-delay 5 --retry-all-errors \
+            "$base_url/SHA256SUMS.txt" \
+            --output latest-assets/SHA256SUMS.txt
+          latest_manifest_sha256=$(sha256sum latest-assets/SHA256SUMS.txt | awk '{print $1}')
+          [[ "$latest_manifest_sha256" == "$EXPECTED_MANIFEST_SHA256" ]] || {
+            echo "Latest SHA256SUMS.txt does not match the verified draft manifest." >&2
+            exit 1
+          }
+          assets=(
+            DesmosLock-mac.dmg
+            DesmosLock-mac-intel.dmg
+            DesmosLock-setup.exe
+            DesmosLock.AppImage
+          )
+          for asset in "${assets[@]}"; do
+            curl --fail --location --silent --show-error \
+              --retry 12 --retry-delay 5 --retry-all-errors \
+              "$base_url/$asset" \
+              --output "latest-assets/$asset"
+          done
+          (cd latest-assets && sha256sum --check SHA256SUMS.txt)
