@@ -161,10 +161,12 @@ normally from Applications.
 Windows publisher signing is outside this macOS repair, so SmartScreen may still
 warn for the Windows installer.
 
-Do not deploy the redirect changes until Daniel has created the public repository,
-mirrored the v1.0.0 assets, and approved a signed v1.0.1 dry run. Do not make this
-source repository private until every website route works without GitHub
-authentication and the downloaded files match the published SHA-256 values.
+Do not merge PR #1 or deploy its redirect changes until Daniel has created the public
+repository, mirrored the v1.0.0 assets, and published v1.0.1 as stable/latest. Both
+tag-specific and latest anonymous asset/checksum checks and the required macOS human
+smoke tests must pass first. Do not make this source repository private until every
+website route works without GitHub authentication and the downloaded files match the
+published SHA-256 values.
 
 ## Pricing and licensing
 
