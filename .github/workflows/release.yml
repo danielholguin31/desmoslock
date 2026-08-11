@@ -31,10 +31,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Require protected main or a contained version tag
+      - name: Require a protected, non-deleted release ref
         id: preflight
         shell: bash
         env:
+          EVENT_DELETED: ${{ github.event.deleted == true }}
           TRUSTED_BRANCH: main
         run: |
           set -euo pipefail
@@ -43,6 +44,15 @@ jobs:
             echo "::error::$*" >&2
             exit 1
           }
+
+          case "$EVENT_DELETED" in
+            false) ;;
+            true) fail "Ref-deletion push events must never build or publish installers." ;;
+            *) fail "Could not safely determine whether the triggering ref was deleted." ;;
+          esac
+
+          [[ "${GITHUB_REF_PROTECTED:-}" == true ]] || fail \
+            "Triggering ref $GITHUB_REF is not protected by branch protection or a ruleset."
 
           require_public_releases_repository() {
             local response_file="$RUNNER_TEMP/releases-repository.json"
