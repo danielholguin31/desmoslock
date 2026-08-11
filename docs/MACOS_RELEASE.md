@@ -57,8 +57,10 @@ The workflow also fails closed before any environment-secret job starts. A manua
 hotfix run must come from `refs/heads/release/1.0`; the forward-port accepts manual
 runs only from `refs/heads/main`. A tag must match `desktop/package.json`, use strict
 stable SemVer, and point to a commit contained in the workflow's fetched protected
-branch. The external rulesets remain essential because a write collaborator could
-otherwise change or remove an in-workflow check.
+branch. The preflight rejects ref-deletion push payloads before a fallback SHA can
+reach a build and requires `GITHUB_REF_PROTECTED == true` for both permitted manual
+branches and tag refs. The external rulesets remain essential because a write
+collaborator could otherwise change or remove an in-workflow check.
 
 ## Public releases repository
 
@@ -144,7 +146,8 @@ and copy that does not describe the still-latest unsigned v1.0.0 macOS release.
 ## Exact workflow sequencing
 
 For either a manual run or tag push, `trusted-source` runs first without custom
-secrets. It validates the exact ref, package version, protected-branch ancestry, public
+secrets. It rejects deleted refs, requires the triggering ref to report protected,
+and validates the exact ref, package version, protected-branch ancestry, public
 releases repository, and—for tags—the monotonic version against the unauthenticated
 `releases/latest` API. A static repository-wide concurrency group serializes all
 versions and reruns.
@@ -219,6 +222,8 @@ never be given to customers or used for release acceptance.
   enrollment, certificate, `.p12`, API key, and `.p8` completed.
 - [ ] Public releases repository created, protected, and v1.0.0 mirrored and checked.
 - [ ] Source `main`, `release/1.0`, and `v*` rulesets active with Daniel-only bypass.
+- [ ] Trusted-source preflight reports protected refs for the permitted branch and
+  `v*` tag paths; controlled deleted-tag and unprotected-ref cases fail before secrets.
 - [ ] Three dedicated environments restricted to the documented branches and tags.
 - [ ] Private plan supports environment secrets/ref policies and rulesets (Pro+); if
   private reviewer approval is required, use Enterprise. Otherwise remove every
