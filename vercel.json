@@ -8,28 +8,8 @@
   "trailingSlash": false,
   "redirects": [
     {
-      "source": "/download/mac",
-      "destination": "https://github.com/danielholguin31/desmoslock-releases/releases/latest/download/DesmosLock-mac.dmg",
-      "permanent": false
-    },
-    {
-      "source": "/download/mac-intel",
-      "destination": "https://github.com/danielholguin31/desmoslock-releases/releases/latest/download/DesmosLock-mac-intel.dmg",
-      "permanent": false
-    },
-    {
-      "source": "/download/windows",
-      "destination": "https://github.com/danielholguin31/desmoslock-releases/releases/latest/download/DesmosLock-setup.exe",
-      "permanent": false
-    },
-    {
-      "source": "/download/linux",
-      "destination": "https://github.com/danielholguin31/desmoslock-releases/releases/latest/download/DesmosLock.AppImage",
-      "permanent": false
-    },
-    {
-      "source": "/releases",
-      "destination": "https://github.com/danielholguin31/desmoslock-releases/releases/latest",
+      "source": "/:path*",
+      "destination": "https://desmoslock.pages.dev/:path*",
       "permanent": false
     }
   ],

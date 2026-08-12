@@ -1,8 +1,9 @@
 /* Public config for the website and admin console.
 
-   The publishable key is designed to ship in browsers. It can do nothing on its
-   own: quote requests are insert-only, and every other table is behind
-   row-level security that checks auth.uid() in the database. */
+   The publishable key is designed to ship in browsers. It authorizes only the
+   anonymous or signed-in operations permitted by database grants and row-level
+   security: quote requests are insert-only, and every other table checks
+   auth.uid() in the database. */
 
 const CONFIG = {
   supabaseUrl: 'https://xoholqrbhgffivvklpvd.supabase.co',

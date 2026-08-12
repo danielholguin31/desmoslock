@@ -419,14 +419,17 @@ function createCloudBackend () {
     },
 
     async restoreStudent () {
-      const { data } = await sb.auth.getSession()
+      const { data, error: sessionError } = await sb.auth.getSession()
+      if (sessionError) throw friendly(sessionError)
       const user = data?.session?.user
       if (!user || !user.is_anonymous) return null
       await syncRealtimeAuth()
-      const { data: rows } = await sb.from('students').select('*').eq('user_id', user.id).eq('removed', false).order('joined_at', { ascending: false }).limit(1)
+      const { data: rows, error: studentError } = await sb.from('students').select('*').eq('user_id', user.id).eq('removed', false).order('joined_at', { ascending: false }).limit(1)
+      if (studentError) throw friendly(studentError)
       const row = rows && rows[0]
       if (!row) return null
-      const { data: test } = await sb.from('tests').select('*').eq('id', row.test_id).single()
+      const { data: test, error: testError } = await sb.from('tests').select('*').eq('id', row.test_id).maybeSingle()
+      if (testError) throw friendly(testError)
       if (!test || !test.active) return null
       ctx.testId = row.test_id
       ctx.studentId = row.id

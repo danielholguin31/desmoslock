@@ -11,7 +11,7 @@ and the teacher gets a live feed of anyone who tries to get out.
 desmoslock/
 ├── server/     Node + Express + WebSocket. The offline-capable classroom server.
 ├── desktop/    Electron app. One binary, both roles (teacher console / student calculator).
-├── web/        desmoslock.vercel.app — marketing site, pricing calculator, quote form
+├── web/        Cloudflare Pages site — marketing, pricing, quote form, redirects
 │   └── admin/  the school admin console
 ├── supabase/   schema.sql (core) + enterprise.sql (schools, seats, roles, quotes)
 └── docs/       SUPABASE.md · OPERATIONS.md
@@ -53,8 +53,10 @@ teacher locks, the window takes over every screen and stays there.
 
 ## What "locked" actually does
 
-The lock lives in the Electron main process ([desktop/main.js](desktop/main.js)), not
-in the page, so the renderer can't talk itself out of it.
+The native screen cover lives in the Electron main process
+([desktop/main.js](desktop/main.js)). The renderer requests lock transitions through
+the preload bridge; the separate renderer trust caveat is recorded in
+[docs/MACOS_RELEASE.md](docs/MACOS_RELEASE.md#separate-renderer-security-follow-up).
 
 - **Covers every display.** The calculator fills its display's full frame — menu bar
   and dock included. Every *other* monitor gets its own opaque blocker window at the
@@ -72,9 +74,10 @@ in the page, so the renderer can't talk itself out of it.
   cancelled, and each attempt is reported.
 - **Blocks screen capture** via `setContentProtection(true)`.
 - **Blocks all network** except `desmos.com` and the DesmosLock server.
-- **Survives a force-quit.** The locked session is written to disk, so killing the
-  app or rebooting reopens straight back into the locked calculator — with the
-  student's graph restored, since work autosaves every few seconds.
+- **Restores on a later manual launch.** The locked session is written to disk, so a
+  manual relaunch after a force-quit or reboot re-engages the saved lock before
+  network or calculator loading and restores the autosaved graph. DesmosLock does
+  not install a login item or automatically relaunch itself.
 - **Refuses to start on a busy machine.** Before a student can join, the app
   enumerates every open application and will not continue until all of them are
   quit. Anything launched mid-test is reported to the teacher by name.
@@ -99,14 +102,16 @@ options are released on the way out of fullscreen (the display's `workArea` stay
 What that leaves genuinely open:
 
 - **Force Quit** and killing the app from the Dock or Activity Monitor. The hotkey
-  is blocked and the app reboots back into the lock, but the process can be killed.
+  is blocked, but the process can be killed; the lock returns when DesmosLock is
+  manually launched again.
 - **Cmd+Tab** can still move key focus. The other app is *not visible* — our windows
   cover every display in every Space — and focus is taken back within ~300ms with an
   alert to the teacher.
 - **A phone or a second computer** is outside what any software lock can see.
 
-Same envelope commercial lockdown browsers work in without a kernel extension. For
-airtight, pair it with an MDM-managed kiosk profile.
+Same envelope commercial lockdown browsers work in without a kernel extension.
+Managed-device deployment is a separate, unverified workstream and is not part of
+the public release claim.
 
 ### Getting out
 
@@ -136,37 +141,41 @@ has to quit, dropping system apps and per-app helpers.
 It never kills anything. Terminating another app risks destroying unsaved work that
 isn't ours to lose, so it refuses to start and names what's in the way.
 
-## desmoslock.vercel.app
+## Website and downloads
 
-[web/](web/) is the landing page, deployed on Vercel from `vercel.json`
-(`outputDirectory: web`, no build step). `/download/mac`, `/download/mac-intel`,
-`/download/windows` and `/download/linux` redirect to the newest GitHub Release asset,
-hosted in the public
-[`danielholguin31/desmoslock-releases`](https://github.com/danielholguin31/desmoslock-releases)
-repository, so customer downloads stay public if this source repository becomes
-private.
+[web/](web/) is a static Cloudflare Pages site with no Functions, bindings, or
+server-side secrets. [`web/_redirects`](web/_redirects) sends the four download routes
+and `/releases` to the public
+[`desmoslock/desmoslock-releases`](https://github.com/desmoslock/desmoslock-releases)
+repository. [`web/_headers`](web/_headers) preserves the site's security headers.
+The 13-file deploy tree also includes a static 404 page and an advisory `robots.txt`;
+the latter is not an authorization boundary for the public admin console.
+The old Vercel project becomes a temporary path-preserving redirect to Pages only
+after the Pages production deployment has passed its release checks; it is removed
+after a seven-day transition. The exact order is in the
+[Cloudflare cutover runbook](docs/CLOUDFLARE_PAGES.md).
 
-The release workflow builds macOS separately from Windows and Linux. A manual run
-builds and verifies without publishing. A `v*` tag stages a draft in the public
-binary repository, redownloads and verifies both macOS builds on a fresh runner,
-then publishes only after every Gatekeeper check passes. Start with the
-[macOS release runbook](docs/MACOS_RELEASE.md); a release tag is the final step,
-not the first one.
+The release workflow is a secret-free Windows/Linux builder, not a publisher. It
+checks out one explicit 40-character source commit and produces source-bound hosted
+artifacts without Apple or GitHub release credentials. The Mac Mini builds and
+strictly verifies the arm64 and x64 ad-hoc DMGs from that same clean commit. An
+offline local assembler then validates the exact Actions run/artifact evidence,
+normalizes the four installers, writes `SHA256SUMS.txt` and
+`RELEASE-PROVENANCE.json`, and only then may a separate local publishing step receive
+GitHub authority. Start with the
+[macOS release runbook](docs/MACOS_RELEASE.md) and the
+[provenance contract](docs/RELEASE_PROVENANCE.md).
 
-The macOS job requires Developer ID signing, hardened runtime, notarization, and a
-stapled ticket. It refuses to build an unsigned fallback. Install a published Mac
-release by opening the DMG, dragging DesmosLock to Applications, and launching it
-normally from Applications.
+The v1.0.1 Mac builds use an explicit ad-hoc signing identity, retain the hardened
+runtime and current entitlements, and are **not notarized**. On first launch, macOS
+will block the unidentified developer. Open **System Settings → Privacy & Security**,
+click **Open Anyway**, and confirm; later launches work normally. Do not disable
+Gatekeeper or remove quarantine metadata. Windows publisher signing is also not yet
+in place, so SmartScreen may warn.
 
-Windows publisher signing is outside this macOS repair, so SmartScreen may still
-warn for the Windows installer.
-
-Do not merge PR #1 or deploy its redirect changes until Daniel has created the public
-repository, mirrored the v1.0.0 assets, and published v1.0.1 as stable/latest. Both
-tag-specific and latest anonymous asset/checksum checks and the required macOS human
-smoke tests must pass first. Do not make this source repository private until every
-website route works without GitHub authentication and the downloaded files match the
-published SHA-256 values.
+The defective v1.0.0 Mac DMGs must not be republished. Do not merge or deploy the
+website cutover until immutable public v1.0.1 assets have passed anonymous checksum,
+tag/latest, and fresh quarantined-download acceptance checks.
 
 ## Pricing and licensing
 
@@ -231,9 +240,9 @@ Details, the security model, and the two gotchas that cost real time are in
   `server/data/db.json` — delete that file to reset. In cloud mode, Supabase Auth
   handles it.
 - The publishable key in [desktop/renderer/config.js](desktop/renderer/config.js) is
-  meant to ship in clients and grants nothing on its own. There is no secret key in
-  this app and there must never be one — anything holding a service-role key bypasses
-  every row-level security policy.
+  meant to ship in clients and authorizes only operations allowed by database grants
+  and row-level security. There is no secret key in this app and there must never be
+  one — anything holding a service-role key bypasses every row-level security policy.
 - `npm --prefix desktop run build:vendor` rebuilds the bundled supabase-js after a
   dependency bump.
 - The server speaks plain HTTP, which is fine on a classroom LAN. Put it behind TLS

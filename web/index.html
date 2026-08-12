@@ -117,8 +117,8 @@
 <section id="lock" class="band alt">
   <h2>What “locked” actually means</h2>
   <p class="band-lede">
-    Not a full-screen web page you can tab out of. The lock lives in the app's
-    system layer, so the page can't talk itself out of it.
+    Not just a full-screen web page. Native screen coverage is driven by the app's
+    system layer and follows the student across displays and desktops.
   </p>
   <div class="grid">
     <div class="cell">
@@ -142,8 +142,8 @@
       <p>The close button and the quit command are both refused while a test is live, and both attempts reach your console.</p>
     </div>
     <div class="cell">
-      <h3>Survives a force-quit</h3>
-      <p>Kill the app or reboot the laptop and it reopens straight back into the locked test — with their graph exactly where they left it.</p>
+      <h3>Restores after a force-quit</h3>
+      <p>On the next manual launch after a force-quit or reboot, a saved active lock re-engages before network or calculator loading and restores the autosaved graph. The app does not automatically relaunch.</p>
     </div>
     <div class="cell">
       <h3>Starts from a clean machine</h3>
@@ -278,7 +278,7 @@
     </div>
     <div class="cell">
       <h3>Deploy how you like</h3>
-      <p>Hand teachers the installer or push it with your MDM. Pair it with a managed kiosk profile for the strictest possible lockdown.</p>
+      <p>Send teachers the download page or distribute the installer with your existing software-deployment tools.</p>
     </div>
   </div>
 </section>
@@ -375,15 +375,18 @@
   <div class="install-note">
     <h3>Install DesmosLock</h3>
     <p>
-      macOS downloads are Developer ID signed, notarized and checked by Gatekeeper
-      before publication. Windows publisher signing is not yet in place, so Windows
-      may still show a SmartScreen warning.
+      macOS downloads are ad-hoc signed and are not notarized. macOS therefore
+      requires one explicit approval the first time you open the app. Windows
+      publisher signing is also not yet in place, so Windows may show a SmartScreen
+      warning.
     </p>
     <div class="install-cols">
       <div>
         <b>macOS</b>
-        <p>Open the DMG, drag DesmosLock to Applications, then launch DesmosLock
-        normally from Applications.</p>
+        <p>Open the DMG, drag DesmosLock to Applications, then try to open it. When
+        macOS blocks the unidentified developer, open <b>System Settings → Privacy
+        &amp; Security</b>, click <b>Open Anyway</b>, and confirm. Later launches open
+        normally.</p>
       </div>
       <div>
         <b>Windows</b>
@@ -432,7 +435,7 @@
     </details>
     <details>
       <summary>Can it stop absolutely everything?</summary>
-      <p>No software lock can, and we'd rather say so. A student can still force-quit the app from the operating system, or pick up a phone. What DesmosLock does is make every one of those moves loud: the app reopens back into the lock, and the attempt is already sitting in your feed with a timestamp.</p>
+      <p>No software lock can, and we'd rather say so. A student can still force-quit the app from the operating system, or pick up a phone. On the next manual launch, DesmosLock restores a saved active lock before network or calculator loading; it does not automatically relaunch.</p>
     </details>
     <details>
       <summary>Do students have to close their other apps?</summary>

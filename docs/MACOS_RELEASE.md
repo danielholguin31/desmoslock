@@ -1,243 +1,352 @@
-# macOS signing and release runbook
+# Zero-cost v1.0.1 recovery release
 
-This runbook is for Daniel, the product and repository owner. The proposed v1.0.1
-pipeline is prepared but not released: no signed and notarized v1.0.1 has been
-published or accepted on customer machines. Keep the customer Gatekeeper issue open
-until every automated and human gate below passes.
+This runbook replaces the paid Developer ID, notarization, protected-environment,
+and cross-repository-token design. The v1.0.1 macOS builds use an explicit ad-hoc
+identity. They retain hardened runtime and the existing Electron entitlements, but
+they are **not Developer ID signed and are not notarized**.
 
-## Confirmed v1.0.0 root cause
+The expected first-launch path is a macOS unidentified-developer block followed by
+the one-time **System Settings > Privacy & Security > Open Anyway** action. A build
+that says it is damaged, fails strict signature verification, or cannot launch after
+Open Anyway is defective. Do not weaken Gatekeeper or give customers a quarantine
+removal command.
 
-The v1.0.0 DMG downloads and filesystems are intact. The Apple-silicon app has only
-an invalid ad-hoc linker signature, the Intel app is unsigned, neither has a stapled
-notarization ticket, and both fail `syspolicy_check distribution` with exit 70. The
-v1.0.0 workflow caused this by setting `mac.identity` to `null` and exporting
-`CSC_IDENTITY_AUTO_DISCOVERY=false`.
+The public release target is `desmoslock/desmoslock-releases`. Never republish the
+defective v1.0.0 Mac DMGs and never merge the obsolete PR #3.
 
-This draft configures v1.0.1 to require Developer ID signing, hardened runtime,
-notarization, stapling, and Gatekeeper verification. Windows remains unsigned and is
-outside this repair. Do not replace v1.0.0; ship the repair as v1.0.1 only after the
-gates below pass.
+The v1.0.1 recovery build itself comes from the reviewed `release/1.0` replacement.
+Afterward, `main` carries the same validated builder and offline assembly code, with
+its manual workflow bound to the exact `main` head instead. The forward-port must
+not be used to bypass or replace the recorded `release/1.0` build used for v1.0.1.
 
-## Authority boundary before credentials
+## Trust and cost boundary
 
-GitHub warns that a collaborator with write access can use repository-level Actions
-secrets by changing a workflow. Nicky currently has write access, so do **not** store
-Apple credentials or release tokens as unrestricted repository secrets.
+- The private source workflow has `contents: read` permission and no custom secrets,
+  environments, release token, tag trigger, or publishing job.
+- The private source repository may not have paid branch/ruleset controls. Use
+  reviewed pull requests only, record full commit SHAs, keep an independent backup,
+  and make every build prove its exact `release/1.0` source.
+- The v1.0.1 recovery run on `release/1.0` is accepted only from
+  `refs/heads/release/1.0`, only when the required 40-character `source_sha` equals
+  both the dispatch commit and fetched branch HEAD, and only when
+  `desktop/package.json` is exactly version 1.0.1. The forward-ported workflow on
+  `main` applies the same contract to `refs/heads/main` and fetched `main`; it is not
+  a substitute source for the v1.0.1 release.
+- Every build job checks out that output SHA rather than an ambient branch or tag.
+  Tag pushes—including tag deletions and their fallback SHAs—are not workflow
+  triggers. The preflight also rejects an event explicitly marked deleted if the
+  trigger configuration ever regresses.
+- Windows and Linux artifacts embed the canonical source repository, actual Actions
+  workflow repository, source SHA, run attempt, installer hash and size, platform,
+  target architecture, and version metadata. The Windows build
+  also uploads and hashes its unpacked application payload so offline assembly can
+  independently prove AMD64 (`0x8664`) while recording the expected 32-bit NSIS
+  wrapper machine (`0x014c`).
+- Fetch GitHub run JSON, artifact JSON, and artifact ZIPs in a separate read step.
+  The assembler consumes those explicit files offline, invokes no network client,
+  and rejects GitHub or release-token environment variables.
+- Spend $0: do not purchase Apple membership, certificates, hosted runners, GitHub
+  plan upgrades, or other release services.
+- The workflow uses only the included GitHub Free Actions allowance for short
+  Windows and Linux jobs, with one-day artifact retention. If included capacity is
+  unavailable, stop and wait; never buy minutes or increase a plan. macOS builds run
+  only on the Mac Mini, not on a hosted macOS runner.
+- Official checkout, Node setup, and artifact-upload actions are pinned to reviewed
+  full v4 commit SHAs, and hosted builds install the explicit npm 10.9.9 release.
 
-Before adding any credential, Daniel must configure these controls himself:
+## macOS build contract
 
-1. Create active source-repository rulesets for `main` and `release/1.0`. Require
-   pull requests and Daniel's approval; block direct updates, force-pushes, and
-   deletion. Configure Daniel as the only bypass actor.
-2. Create an active tag ruleset targeting `v*`. Restrict tag creation, update, and
-   deletion to Daniel through a Daniel-only bypass.
-3. Create three dedicated GitHub Actions environments. Do not reuse Vercel's
-   `Preview` or `Production` environments:
-   - `macos-signing`: allow only branches `release/1.0` and `main`, plus tags `v*`;
-   - `public-releases-read`: allow only tags `v*`;
-   - `public-releases-write`: allow only tags `v*`.
-4. Confirm the GitHub plan before adding credentials. Private environment secrets,
-   deployment branch/tag policies, and private branch/tag rulesets require GitHub
-   Pro, Team, or Enterprise. GitHub Free is not an adequate private-source boundary.
-5. Required environment reviewers for private repositories are unavailable on Free,
-   Pro, and Team. If private reviewer approval must persist, use an appropriate
-   Enterprise organization/plan. Where reviewers are supported, make Daniel the only
-   required reviewer and the only administrator allowed to bypass; do not prohibit
-   self-review if Daniel will dispatch and approve the same run.
-6. Confirm every selected protection remains effective after the source repository
-   becomes private.
+`desktop/package.json` explicitly sets:
 
-If the private plan has Pro-or-better environment ref policies and rulesets but lacks
-private required reviewers, remove **all** non-Daniel write access and rely on the
-Daniel-only ref/ruleset boundary. Otherwise move signing to a Daniel-only repository
-or signing service. Upgrading to a plan with the required protections is also valid.
-Do not add credentials to a private workflow boundary that the active plan ignores.
-
-The workflow also fails closed before any environment-secret job starts. A manual
-hotfix run must come from `refs/heads/release/1.0`; the forward-port accepts manual
-runs only from `refs/heads/main`. A tag must match `desktop/package.json`, use strict
-stable SemVer, and point to a commit contained in the workflow's fetched protected
-branch. The external rulesets remain essential because a write collaborator could
-otherwise change or remove an in-workflow check.
-
-## Public releases repository
-
-Before merging either PR:
-
-1. Create public repository `danielholguin31/desmoslock-releases` with a minimal
-   README and `main` default branch. Keep proprietary source and workflow files out.
-2. Limit write/admin access to Daniel and protect its `main` branch and release tags.
-3. Create a v1.0.0 release with these exact stable assets:
-   - `DesmosLock-mac.dmg`
-   - `DesmosLock-mac-intel.dmg`
-   - `DesmosLock-setup.exe`
-   - `DesmosLock.AppImage`
-   - `SHA256SUMS.txt`
-4. Record SHA-256 values before and after the mirror. Verify every tag-specific URL
-   while logged out of GitHub.
-5. Leave the current website and Vercel production deployment unchanged. The v1.0.0
-   macOS artifacts remain unsigned; mirroring them does not repair them.
-
-## Protected environment secrets
-
-Add all eight values as **environment secrets**, never repository secrets. Environment
-names and contents must match the job bindings in the workflow.
-
-| Environment | Secret | Required format |
-| --- | --- | --- |
-| `macos-signing` | `CSC_LINK` | One-line base64 of the password-protected Developer ID Application `.p12`. |
-| `macos-signing` | `CSC_KEY_PASSWORD` | Raw password used to export the `.p12`. |
-| `macos-signing` | `APPLE_API_KEY_B64` | One-line base64 of the App Store Connect `.p8`. |
-| `macos-signing` | `APPLE_API_KEY_ID` | 10-character uppercase-alphanumeric App Store Connect key ID. |
-| `macos-signing` | `APPLE_API_ISSUER` | App Store Connect issuer UUID. |
-| `macos-signing` | `APPLE_TEAM_ID` | 10-character uppercase-alphanumeric Apple team ID. |
-| `public-releases-read` | `RELEASES_REPO_READ_TOKEN` | Raw fine-grained PAT, limited to `desmoslock-releases`, with Contents read only. Do not base64, quote, or add a newline. |
-| `public-releases-write` | `RELEASES_REPO_TOKEN` | Separate raw fine-grained PAT, limited to `desmoslock-releases`, with Contents read/write. Do not base64, quote, or add a newline. |
-
-Daniel should own both PATs. The identity behind `RELEASES_REPO_READ_TOKEN` must have
-enough repository standing to view draft releases even though the token itself has
-only Contents read permission. The read token is used only by fresh-runner draft
-verification. `RELEASES_REPO_TOKEN` is reserved for draft staging, prerelease
-publication, and stable/latest promotion; it never reaches a Gatekeeper runner.
-
-The workflow decodes `APPLE_API_KEY_B64` to a mode-600 file under `$RUNNER_TEMP`,
-exports its path as `APPLE_API_KEY`, and deletes it after the macOS job. Never put a
-credential value in Git, an issue, a pull request, a log, or chat.
-
-## Required rollout order
-
-The order is mandatory because Vercel automatically deploys merges to `main`, and
-PR #1 contains both the new public-repository redirects and copy describing signed
-macOS installers.
-
-1. Choose Individual versus Organization Apple Developer Program enrollment, then
-   complete the selected enrollment and create the Developer ID Application
-   certificate, password-protected `.p12`, App Store Connect API key, and one-time
-   `.p8`.
-2. Create and protect the public releases repository, mirror v1.0.0, configure the
-   source rulesets and the three protected environments, then add the eight
-   environment secrets.
-3. Review and merge **hotfix PR #2 only** into protected `release/1.0`. Record its
-   exact merge SHA. Keep **PR #1 draft and unmerged**.
-4. Run `Build installers` with `workflow_dispatch` from the exact trusted
-   `release/1.0` state. Approve only the `macos-signing` environment. Both macOS
-   verifier invocations must pass.
-5. Independently verify the dry-run artifacts on another supported Mac. If anything
-   fails, stop and correct the cause through reviewed code; never weaken
-   `forceCodeSigning` or the verifier.
-6. Create `v1.0.1` at that exact tested `release/1.0` commit and push the new tag.
-7. Let the tag workflow publish and verify v1.0.1 directly in the public releases
-   repository. Complete fresh Chrome/Safari and Apple-silicon/Intel human tests.
-8. Only after signed v1.0.1 is public, stable/latest, and verified may Daniel mark
-   **PR #1** ready and merge it. That merge triggers Vercel's production deployment.
-9. Wait for Vercel production to report PR #1's exact merge SHA. While logged out,
-   test `/download/mac`, `/download/mac-intel`, `/download/windows`,
-   `/download/linux`, and `/releases`, and compare downloads with the published
-   checksum manifest.
-10. Only then make the proprietary source repository private. Repeat the logged-out
-    download tests and confirm all source rulesets and environments remain effective.
-
-PR #1 must remain unmerged until signed v1.0.1 is publicly available and verified.
-Merging both PRs before the dry run would deploy redirects to an unavailable target
-and copy that does not describe the still-latest unsigned v1.0.0 macOS release.
-
-## Exact workflow sequencing
-
-For either a manual run or tag push, `trusted-source` runs first without custom
-secrets. It validates the exact ref, package version, protected-branch ancestry, public
-releases repository, and—for tags—the monotonic version against the unauthenticated
-`releases/latest` API. A static repository-wide concurrency group serializes all
-versions and reruns.
-
-A manual dispatch builds and locally verifies artifacts only. It never creates or
-changes a public release.
-
-Tag runs pause at the `macos-signing`, `public-releases-read`, and
-`public-releases-write` gates. Daniel must approve each expected job as it appears and
-reject any unexpected ref or job. The write environment is used at multiple distinct
-staging and promotion steps, so it may require more than one approval in a run.
-
-After a trusted `v*` tag, the jobs run in this order:
-
-1. Build unsigned Windows/Linux installers and separately build, sign, notarize,
-   staple, and locally verify both macOS DMGs.
-2. With `RELEASES_REPO_TOKEN`, stage the four stable filenames and
-   `SHA256SUMS.txt` in a **draft prerelease**.
-3. On fresh macOS, use only `RELEASES_REPO_READ_TOKEN` to download the draft, verify
-   all checksums, rerun both Gatekeeper verifiers, and output the verified manifest's
-   SHA-256 digest.
-4. With the write token, publish the verified draft as a **public prerelease** with
-   `make_latest=false`.
-5. Without authentication, download `SHA256SUMS.txt` from
-   `/releases/download/${GITHUB_REF_NAME}/`, require its digest to equal the verified
-   draft digest, then download and verify every tag-specific asset.
-6. Recheck that the version is newer than the current stable latest. Only then use
-   the write token to set `prerelease=false` and `make_latest=true`.
-7. Without authentication, require the GitHub `releases/latest` API to report
-   `tag_name == GITHUB_REF_NAME`. Then download the manifest and all four assets from
-   `/releases/latest/download/`, require the manifest digest to equal the verified
-   draft digest, and verify every customer-facing download.
-
-An older queued tag fails the monotonic guard and cannot replace a newer latest
-release. If anonymous verification fails, the candidate remains a visible non-latest
-prerelease; do not delete or overwrite it automatically. Resume only through a
-reviewed, auditable recovery.
-
-## Human acceptance
-
-Before calling the customer issue fixed, preserve browser quarantine and test fresh
-Chrome and Safari downloads. Test Apple silicon and Intel (real Intel hardware or
-Rosetta where appropriate), normal drag-to-Applications and double-click launch,
-Desmos loading, teacher login, student join, other-app scanning, lock/unlock, restart
-recovery, and multiple-display coverage.
-
-For an additional local verifier run:
-
-```bash
-desktop/scripts/verify-macos-dmg.sh DesmosLock-mac.dmg arm64
-desktop/scripts/verify-macos-dmg.sh DesmosLock-mac-intel.dmg x86_64
+```json
+{
+  "forceCodeSigning": true,
+  "hardenedRuntime": true,
+  "notarize": false,
+  "identity": "-",
+  "sign": "./scripts/sign-macos-adhoc.js",
+  "entitlements": "build/entitlements.mac.plist",
+  "entitlementsInherit": "build/entitlements.mac.inherit.plist"
+}
 ```
 
-`xattr -dr com.apple.quarantine /Applications/DesmosLock.app` is a diagnostic bypass
-only. It removes a security control, does not repair signing or notarization, and must
-never be given to customers or used for release acceptance.
+The `-` identity is the explicit ad-hoc signing identity. The locked electron-builder
+25 release does not resolve that sentinel through its certificate lookup, so the
+small configured hook passes it directly to the locked `@electron/osx-sign` API and
+refuses profiles or non-macOS bundles. Both entitlement files retain `allow-jit`,
+`allow-unsigned-executable-memory`, and
+`disable-library-validation`; the last entitlement is required for Electron's
+pre-signed frameworks to launch under hardened runtime with an ad-hoc identity.
 
-## Rotation and revocation
+For each thin arm64 and x86_64 DMG,
+`desktop/scripts/verify-macos-dmg.sh` must:
 
-- Revoke and replace a compromised Developer ID certificate, then update `CSC_LINK`
-  and `CSC_KEY_PASSWORD` together.
-- Revoke and replace a compromised App Store Connect key, then update
-  `APPLE_API_KEY_B64`, `APPLE_API_KEY_ID`, and `APPLE_API_ISSUER` together.
-- Revoke and replace either PAT independently with the same single-repository,
-  least-privilege scope. Never substitute the write PAT into the read environment.
-- Remove obsolete secrets after rotation and audit workflow runs and repository
-  access. Never retain decoded keys longer than needed.
+1. pass `hdiutil verify`;
+2. mount read-only at a private temporary path and find exactly one app;
+3. find exactly the requested executable architecture;
+4. pass `codesign --verify --deep --strict`;
+5. report `Signature=adhoc`, no certificate authority, and the runtime flag; and
+6. extract and confirm all three required entitlements.
 
-## Daniel-owned release checklist
+These checks prove structural integrity and the intended ad-hoc signature. They do
+not claim notarization or ordinary Gatekeeper acceptance.
 
-- [ ] Individual versus Organization Apple Developer enrollment chosen; selected
-  enrollment, certificate, `.p12`, API key, and `.p8` completed.
-- [ ] Public releases repository created, protected, and v1.0.0 mirrored and checked.
-- [ ] Source `main`, `release/1.0`, and `v*` rulesets active with Daniel-only bypass.
-- [ ] Three dedicated environments restricted to the documented branches and tags.
-- [ ] Private plan supports environment secrets/ref policies and rulesets (Pro+); if
-  private reviewer approval is required, use Enterprise. Otherwise remove every
-  non-Daniel writer and rely on the supported ref/ruleset boundary, or move signing.
-- [ ] Eight environment secrets added in the documented least-privilege split.
-- [ ] PR #2 reviewed and merged alone; PR #1 still draft and unmerged.
-- [ ] Signed `workflow_dispatch` from exact protected `release/1.0` passes both DMGs.
-- [ ] v1.0.1 tagged at that tested commit only after the dry run.
-- [ ] Draft, fresh-macOS, public-prerelease, tag-specific anonymous, promotion,
-  unauthenticated latest-API, and latest customer-download gates all pass.
-- [ ] Chrome/Safari and Apple-silicon/Intel human acceptance passes.
-- [ ] PR #1 merged only now; exact Vercel production deployment verified logged out.
-- [ ] Source made private only after every redirect and checksum passes; protections
-  rechecked afterward.
+## Build one exact source commit
 
-References: [GitHub secure use](https://docs.github.com/en/actions/reference/security/secure-use),
-[GitHub environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments),
-[GitHub rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets),
-[Apple notarization](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution),
-[Developer ID certificates](https://developer.apple.com/help/account/certificates/create-developer-id-certificates),
-[Electron code signing](https://www.electronjs.org/docs/latest/tutorial/code-signing), and
-[electron-builder notarization](https://www.electron.build/docs/features/code-signing/notarization/).
+Merge the reviewed replacement PR into `release/1.0` and record the resulting full
+commit SHA:
+
+```bash
+CANONICAL_SOURCE_REPOSITORY=desmoslock/desmoslock
+WORKFLOW_REPOSITORY=<owner-that-hosts-this-actions-run>/desmoslock
+TRUSTED_BRANCH=release/1.0
+SOURCE_SHA=$(git rev-parse HEAD)
+test "${#SOURCE_SHA}" -eq 40
+test "$(git status --short)" = ""
+```
+
+Choose one existing, operator-controlled work root outside the source checkout. All
+generated Mac output, downloaded evidence, and final assembly paths must be outside
+the checkout or the exact-source clean gate will reject them:
+
+```bash
+SOURCE_ROOT=$(git rev-parse --show-toplevel)
+RELEASE_WORK_ROOT=<absolute-existing-directory-outside-source-checkout>
+case "$RELEASE_WORK_ROOT/" in "$SOURCE_ROOT/"*) exit 1 ;; esac
+MAC_BUILD_DIR="$RELEASE_WORK_ROOT/macos-$SOURCE_SHA"
+EVIDENCE_DIR="$RELEASE_WORK_ROOT/evidence-$SOURCE_SHA"
+OUTPUT_DIR="$RELEASE_WORK_ROOT/release-$SOURCE_SHA"
+test ! -e "$MAC_BUILD_DIR"
+test ! -e "$EVIDENCE_DIR"
+test ! -e "$OUTPUT_DIR"
+```
+
+From the Actions page, select **Build v1.0.1 recovery installers**, choose the exact
+`release/1.0` branch, and paste that same full SHA into `source_sha`. The run must
+finish with all three jobs successful:
+
+1. `Bind the run to exact release/1.0 source`
+2. `Build Windows installer`
+3. `Build Linux AppImage`
+
+Build the final Mac inputs on the Mac Mini from the same clean SHA, with no release
+credential present:
+
+```bash
+desktop/scripts/build-macos-adhoc.sh \
+  --source-sha "$SOURCE_SHA" \
+  --canonical-source-repository "$CANONICAL_SOURCE_REPOSITORY" \
+  --output-dir "$MAC_BUILD_DIR"
+```
+
+This creates two versioned DMGs plus `MACOS-BUILD-METADATA.json`; it does not publish.
+
+Record the Actions run ID and the numeric Windows/Linux artifact IDs. They can be
+listed without downloading the assets:
+
+```bash
+RUN_ID=<successful-workflow-run-id>
+WINDOWS_RUN_ID=$RUN_ID
+LINUX_RUN_ID=$RUN_ID
+gh api "repos/$WORKFLOW_REPOSITORY/actions/runs/$RUN_ID/artifacts" \
+  --jq '.artifacts[] | [.name, .id, .expired] | @tsv'
+```
+
+The expected names are `installer-windows-$SOURCE_SHA` and
+`installer-linux-$SOURCE_SHA`. Never select artifacts by a friendly name alone;
+record their immutable numeric IDs. In a separate authenticated read step, save the
+exact API responses and ZIP bytes used for assembly:
+
+```bash
+mkdir "$EVIDENCE_DIR"
+gh api "repos/$WORKFLOW_REPOSITORY/actions/runs/$WINDOWS_RUN_ID" \
+  > "$EVIDENCE_DIR/windows-run.json"
+gh api "repos/$WORKFLOW_REPOSITORY/actions/artifacts/$WINDOWS_ARTIFACT_ID" \
+  > "$EVIDENCE_DIR/windows-artifact.json"
+gh api "repos/$WORKFLOW_REPOSITORY/actions/artifacts/$WINDOWS_ARTIFACT_ID/zip" \
+  > "$EVIDENCE_DIR/windows-artifact.zip"
+gh api "repos/$WORKFLOW_REPOSITORY/actions/runs/$LINUX_RUN_ID" \
+  > "$EVIDENCE_DIR/linux-run.json"
+gh api "repos/$WORKFLOW_REPOSITORY/actions/artifacts/$LINUX_ARTIFACT_ID" \
+  > "$EVIDENCE_DIR/linux-artifact.json"
+gh api "repos/$WORKFLOW_REPOSITORY/actions/artifacts/$LINUX_ARTIFACT_ID/zip" \
+  > "$EVIDENCE_DIR/linux-artifact.zip"
+```
+
+Leave that authenticated shell before assembly. The evidence files are not release
+assets; retain their SHA-256 values in provenance for the audit trail.
+
+## Assemble exactly six stable files
+
+Use a clean checkout whose `HEAD` is the recorded source SHA and an output directory
+that does not yet exist. Run with an empty environment except for the executable and
+temporary-directory paths; do not pass GitHub or publisher credentials.
+
+```bash
+env -i PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
+desktop/scripts/assemble-release.sh \
+  --source-sha "$SOURCE_SHA" \
+  --canonical-source-repository "$CANONICAL_SOURCE_REPOSITORY" \
+  --workflow-repository "$WORKFLOW_REPOSITORY" \
+  --trusted-branch "$TRUSTED_BRANCH" \
+  --mac-arm64-dmg "$MAC_BUILD_DIR/DesmosLock-1.0.1-arm64.dmg" \
+  --mac-x64-dmg "$MAC_BUILD_DIR/DesmosLock-1.0.1-x64.dmg" \
+  --mac-build-metadata "$MAC_BUILD_DIR/MACOS-BUILD-METADATA.json" \
+  --windows-run-id "$WINDOWS_RUN_ID" \
+  --windows-artifact-id "$WINDOWS_ARTIFACT_ID" \
+  --windows-run-json "$EVIDENCE_DIR/windows-run.json" \
+  --windows-artifact-json "$EVIDENCE_DIR/windows-artifact.json" \
+  --windows-artifact-zip "$EVIDENCE_DIR/windows-artifact.zip" \
+  --linux-run-id "$LINUX_RUN_ID" \
+  --linux-artifact-id "$LINUX_ARTIFACT_ID" \
+  --linux-run-json "$EVIDENCE_DIR/linux-run.json" \
+  --linux-artifact-json "$EVIDENCE_DIR/linux-artifact.json" \
+  --linux-artifact-zip "$EVIDENCE_DIR/linux-artifact.zip" \
+  --output-dir "$OUTPUT_DIR"
+```
+
+The local builder installs the locked dependencies, including the platform-resolved
+`7zip-bin` executable used later for offline NSIS inspection. Because a fresh npm
+archive can lose its executable bit on macOS, the assembler first requires that the
+resolved binary is a regular, non-symlink file inside that exact locked package and
+then applies mode 0755 to that one file. The assembler makes no network request. It
+validates both successful workflow runs,
+their actual repository and trusted branch, run attempts, artifact repository IDs,
+artifact IDs, GitHub API artifact digests and byte counts, embedded
+canonical/workflow repository metadata, actual installer hashes and sizes, the
+uploaded Windows payload hash and machine, Windows wrapper machine, Linux
+architecture, and also extracts the installer's own `DesmosLock.exe` and
+`resources/app.asar`. The embedded executable must be AMD64, and the embedded
+`app.asar` must byte-match the separately uploaded unpacked copy. It also validates
+local Mac metadata, strict Mac signatures, DMG containers, and source SHAs. It then
+creates exactly:
+
+```text
+DesmosLock-mac.dmg
+DesmosLock-mac-intel.dmg
+DesmosLock-setup.exe
+DesmosLock.AppImage
+SHA256SUMS.txt
+RELEASE-PROVENANCE.json
+```
+
+`SHA256SUMS.txt` covers the four installers and `RELEASE-PROVENANCE.json`. Check it
+again from outside the script:
+
+```bash
+(cd "$OUTPUT_DIR" && shasum -a 256 --check SHA256SUMS.txt)
+```
+
+The provenance schema and validation rules are defined in
+[RELEASE_PROVENANCE.md](RELEASE_PROVENANCE.md).
+
+## Separate renderer security follow-up
+
+The remotely loaded Desmos calculator script currently runs in the same renderer
+main world as the preload bridge, which includes privileged lock-control methods.
+The focused force-quit recovery fix does not isolate that remote script or narrow
+the bridge. Treat this as a separate material security follow-up outside the focused
+v1.0.1 packaging and restore correction: recovery tests prove startup ordering and
+error handling, not that remote calculator code is unable to request a lock release.
+Do not claim that the renderer is isolated or that this follow-up is fixed.
+
+## Pre-publication acceptance
+
+Do not expose a public-release write credential until assembly and independent file
+inspection pass. Require exactly six regular files and no symlinks, re-run the strict
+DMG verifier, verify `SHA256SUMS.txt`, and compare every provenance field with the
+recorded source, Actions run, artifact IDs, evidence files, and installer bytes.
+
+Open one separate publishing session and perform only one public release operation at
+a time. In that session:
+
+1. Reconfirm that `desmoslock/desmoslock-releases` is public, its `main` and `v*`
+   rulesets still block force-push/deletion to the extent supported by GitHub Free,
+   immutable releases are enabled, and no `v1.0.1` tag or release already exists.
+2. Create an annotated `v1.0.1` tag at the exact `SOURCE_SHA` in the private source
+   repository. Read the remote tag back, dereference it, and require the same full SHA.
+   Never move or reuse that tag.
+3. Create a **draft** `v1.0.1` release in the public releases repository, targeted at
+   its reviewed `main`, and upload only the six assembled files.
+4. Authenticated-redownload that draft into a new empty directory. Require exactly the
+   six stable filenames, compare every byte with the accepted local candidate, and
+   verify the redownloaded checksum manifest before any human test.
+5. From fresh Safari and Chrome downloads of those exact draft DMGs, preserve browser
+   quarantine and test Apple silicon plus x64 under Rosetta. A real Intel Mac is
+   preferable; record physical Intel as unavailable if none exists.
+
+The draft release notes must say:
+
+> macOS builds are ad-hoc signed, not notarized, and require a one-time System
+> Settings > Privacy & Security > Open Anyway action. Windows publisher signing is
+> not yet in place. Build provenance and SHA-256 values are attached.
+
+The first Mac launch must show the unidentified-developer/Open Anyway path, never a
+damaged-app message. Open Anyway must launch the app and subsequent normal launches
+must work.
+
+Complete the product smoke suite on the candidate:
+
+- teacher login and student join;
+- Desmos load and graph interaction;
+- other-app scanning;
+- lock and unlock;
+- after force-quitting or rebooting, manually launch the app and verify restoration
+  of a still-active locked session and the most recently autosaved graph; automatic
+  relaunch is not supported;
+- blocked shortcuts; and
+- multi-display coverage and display changes.
+
+Stop on any failure. Replace source through a reviewed PR and generate a new candidate;
+never weaken the verifier or Gatekeeper.
+
+## Publish and verify the immutable release
+
+Only after automated and human acceptance passes, recheck the unauthenticated latest
+release immediately before promotion. Stop if any stable release is already
+`v1.0.1` or newer; an older queued release must never replace a newer latest release.
+Then publish the existing draft as the stable/latest immutable v1.0.1 release. Do not
+replace or delete an asset after publication. Use a logged-out browser and an
+unauthenticated shell to redownload all six tag-specific assets and all six latest
+assets. Verify:
+
+1. the release API reports `v1.0.1` as both the requested tag and latest;
+2. the asset set is exactly the six documented filenames;
+3. both downloaded manifests match the accepted `SHA256SUMS.txt` byte-for-byte;
+4. both asset sets pass `shasum -a 256 --check SHA256SUMS.txt`; and
+5. the release reports immutable in GitHub.
+
+Publication, Cloudflare production, and Vercel changes are intentionally outside
+this source workflow.
+
+## Website, Vercel, and ownership order
+
+The exact deployment commands and checks are in
+[CLOUDFLARE_PAGES.md](CLOUDFLARE_PAGES.md). In order:
+
+1. Use this main replacement PR's exact committed Pages bundle for preview and pass
+   the desktop/mobile, public-config, header, asset, and five-route checks.
+2. Only after v1.0.1 is stable/latest, immutable, and anonymously verified may that
+   same accepted bundle deploy to Pages production.
+3. Verify Pages production, then merge the main replacement PR so the existing Vercel
+   project deploys its path-preserving temporary redirect to Pages.
+4. Keep the source under Daniel's personal account until that Vercel deployment is
+   verified. Only then send the gated ownership-transfer email with the actual issued
+   organization-invitation URL.
+5. Leave the Vercel redirect in place for seven full days; Daniel deletes the old
+   Vercel project only after the healthy transition window.
+
+A delayed source transfer does not block an already verified customer repair; it
+leaves only source co-ownership pending. Close obsolete PR #3 only after the
+superseding release and site have shipped, and never merge it.
+
+## Optional managed-Mac identity
+
+A stable self-signed identity and `SystemPolicyRule` are a separate, Mini-local MDM
+experiment documented in [MACOS_MDM.md](MACOS_MDM.md). Do not store that identity in
+GitHub, substitute it into this public release, or advertise MDM support until an
+enrolled managed Mac passes acceptance.
+
+References: [electron-builder macOS configuration](https://www.electron.build/mac/),
+[Apple Open Anyway guidance](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unidentified-developer-mh40616/mac), and
+[GitHub Actions artifact API](https://docs.github.com/en/rest/actions/artifacts).
