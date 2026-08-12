@@ -10,9 +10,12 @@
     "dist": "electron-builder",
     "dist:mac": "electron-builder --mac",
     "dist:win": "electron-builder --win",
-    "build:vendor": "esbuild build/vendor-entry.js --bundle --format=iife --global-name=SupabaseSDK --minify --target=chrome110 --outfile=renderer/vendor/supabase.js"
+    "build:vendor": "esbuild build/vendor-entry.js --bundle --format=iife --global-name=SupabaseSDK --minify --target=chrome110 --outfile=renderer/vendor/supabase.js",
+    "test:recovery": "node --test test/force-quit-recovery.test.js"
   },
   "devDependencies": {
+    "@electron/osx-sign": "1.3.1",
+    "7zip-bin": "5.2.0",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",
     "esbuild": "^0.28.1"
@@ -29,7 +32,9 @@
       "category": "public.app-category.education",
       "forceCodeSigning": true,
       "hardenedRuntime": true,
-      "notarize": true,
+      "notarize": false,
+      "identity": "-",
+      "sign": "./scripts/sign-macos-adhoc.js",
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.inherit.plist",
       "target": [

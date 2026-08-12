@@ -43,9 +43,11 @@ Everyone must be on the same network.
 ## Install a release build
 
 On macOS, download the DMG for Apple silicon or Intel, open it, drag DesmosLock to
-Applications, and launch DesmosLock normally from Applications. Published macOS
-builds must be signed, notarized, stapled, and pass the repository's Gatekeeper
-checks before release.
+Applications, and launch DesmosLock from Applications. The v1.0.1 recovery builds
+are ad-hoc signed with hardened runtime, not Developer ID signed or notarized. On
+first launch, macOS requires the one-time **System Settings > Privacy & Security >
+Open Anyway** action. The release must pass the repository's strict signature, DMG,
+and quarantined customer-path checks before publication.
 
 Release operators should follow [docs/MACOS_RELEASE.md](docs/MACOS_RELEASE.md). The
 quarantine-removal command sometimes used while diagnosing unsigned software is not
@@ -63,8 +65,10 @@ teacher locks, the window takes over every screen and stays there.
 
 ## What "locked" actually does
 
-The lock lives in the Electron main process ([desktop/main.js](desktop/main.js)), not
-in the page, so the renderer can't talk itself out of it.
+The native screen cover lives in the Electron main process
+([desktop/main.js](desktop/main.js)). The renderer requests lock transitions through
+the preload bridge; the separate renderer trust caveat is recorded in
+[docs/MACOS_RELEASE.md](docs/MACOS_RELEASE.md#separate-renderer-security-follow-up).
 
 - **Covers every display.** The calculator fills its display's full frame — menu bar
   and dock included. Every *other* monitor gets its own opaque blocker window at the
@@ -82,9 +86,10 @@ in the page, so the renderer can't talk itself out of it.
   cancelled, and each attempt is reported.
 - **Blocks screen capture** via `setContentProtection(true)`.
 - **Blocks all network** except `desmos.com` and the DesmosLock server.
-- **Survives a force-quit.** The locked session is written to disk, so killing the
-  app or rebooting reopens straight back into the locked calculator — with the
-  student's graph restored, since work autosaves every few seconds.
+- **Restores on a later manual launch.** The locked session is written to disk, so a
+  manual relaunch after a force-quit or reboot re-engages the saved lock before
+  network or calculator loading and restores the autosaved graph. DesmosLock does
+  not install a login item or automatically relaunch itself.
 
 Anything the OS lets through is *reported* rather than silently ignored, so the
 teacher's feed shows: switched away, tried to quit, pressed a blocked shortcut,
@@ -106,7 +111,8 @@ options are released on the way out of fullscreen (the display's `workArea` stay
 What that leaves genuinely open:
 
 - **Force Quit** and killing the app from the Dock or Activity Monitor. The hotkey
-  is blocked and the app reboots back into the lock, but the process can be killed.
+  is blocked, but the process can be killed; the lock returns when DesmosLock is
+  manually launched again.
 - **Cmd+Tab** can still move key focus. The other app is *not visible* — our windows
   cover every display in every Space — and focus is taken back within ~300ms with an
   alert to the teacher.
@@ -148,9 +154,10 @@ installer from `web/downloads/`, and show a friendly "not built yet" page until 
 exists. `GET /api/downloads` reports what's published.
 
 Customer-facing macOS releases use the stable filenames `DesmosLock-mac.dmg` and
-`DesmosLock-mac-intel.dmg`. Installation is drag-to-Applications followed by a normal
-launch; see [docs/MACOS_RELEASE.md](docs/MACOS_RELEASE.md) for the signed release
-procedure.
+`DesmosLock-mac-intel.dmg`. For v1.0.1, installation is drag-to-Applications followed
+by the one-time **Open Anyway** approval described above; subsequent launches are
+normal. See [docs/MACOS_RELEASE.md](docs/MACOS_RELEASE.md) for the zero-cost ad-hoc
+release procedure.
 
 ## Supabase
 

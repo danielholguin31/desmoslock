@@ -1,40 +1,43 @@
-name: Build installers
+name: Build v1.0.1 recovery installers
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-character release/1.0 HEAD commit to build
+        required: true
+        type: string
 
 permissions:
   contents: read
 
-concurrency:
-  # Keep every public release mutation serialized, even across different tags.
-  group: desmoslock-public-release
-  cancel-in-progress: false
-
 env:
-  RELEASES_REPOSITORY: danielholguin31/desmoslock-releases
+  CANONICAL_SOURCE_REPOSITORY: desmoslock/desmoslock
+
+concurrency:
+  group: desmoslock-v1.0.1-recovery-build
+  cancel-in-progress: false
 
 jobs:
   trusted-source:
-    name: Verify trusted release source
+    name: Bind the run to exact release/1.0 source
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
-      is_release: ${{ steps.preflight.outputs.is_release }}
       source_sha: ${{ steps.preflight.outputs.source_sha }}
       version: ${{ steps.preflight.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Require the protected release branch or a contained version tag
+      - name: Require an exact non-deleted release branch HEAD
         id: preflight
         shell: bash
         env:
+          EVENT_DELETED: ${{ github.event.deleted == true }}
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
           TRUSTED_BRANCH: release/1.0
         run: |
           set -euo pipefail
@@ -44,696 +47,238 @@ jobs:
             exit 1
           }
 
-          require_public_releases_repository() {
-            local response_file="$RUNNER_TEMP/releases-repository.json"
-            local status
-            status=$(curl --silent --show-error \
-              --retry 5 --retry-delay 2 --retry-all-errors \
-              --output "$response_file" \
-              --write-out '%{http_code}' \
-              "https://api.github.com/repos/$RELEASES_REPOSITORY")
-            [[ "$status" == 200 ]] || fail \
-              "The public releases repository is unavailable (HTTP $status)."
-            [[ "$(node -e \
-              "const d=require(process.argv[1]); process.stdout.write(String(d.private))" \
-              "$response_file")" == false ]] || fail \
-              "The releases repository must be public before signing credentials are used."
-          }
-
-          assert_newer_than_latest() {
-            local candidate_tag=$1
-            local response_file="$RUNNER_TEMP/latest-release.json"
-            local status latest_tag
-            status=$(curl --silent --show-error \
-              --retry 5 --retry-delay 2 --retry-all-errors \
-              --output "$response_file" \
-              --write-out '%{http_code}' \
-              "https://api.github.com/repos/$RELEASES_REPOSITORY/releases/latest")
-
-            case "$status" in
-              200)
-                latest_tag=$(node -e \
-                  "const d=require(process.argv[1]); process.stdout.write(String(d.tag_name || ''))" \
-                  "$response_file")
-                node - "$candidate_tag" "$latest_tag" <<'NODE'
-          const parse = (tag) => {
-            const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(tag);
-            if (!match) throw new Error(`not a strict stable SemVer tag: ${tag}`);
-            return match.slice(1).map((part) => BigInt(part));
-          };
-          try {
-            const candidate = parse(process.argv[2]);
-            const latest = parse(process.argv[3]);
-            const comparison = candidate.findIndex((part, index) => part !== latest[index]);
-            if (comparison === -1 || candidate[comparison] < latest[comparison]) {
-              throw new Error(`${process.argv[2]} is not newer than latest ${process.argv[3]}`);
-            }
-          } catch (error) {
-            console.error(`::error::${error.message}`);
-            process.exit(1);
-          }
-          NODE
-                ;;
-              404)
-                echo "No current latest release exists; monotonic guard allows the first release."
-                ;;
-              *)
-                fail "Could not determine the current latest release (HTTP $status)."
-                ;;
-            esac
-          }
-
-          package_version=$(node -p "require('./desktop/package.json').version")
-          [[ "$package_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || \
-            fail "Desktop version must be strict stable SemVer; found $package_version."
-
-          source_sha=$(git rev-parse "${GITHUB_SHA}^{commit}")
-          [[ "$source_sha" == "$(git rev-parse 'HEAD^{commit}')" ]] || fail \
-            "Checked-out source does not match GITHUB_SHA."
-          case "$GITHUB_EVENT_NAME" in
-            workflow_dispatch)
-              [[ "$GITHUB_REF" == "refs/heads/$TRUSTED_BRANCH" ]] || fail \
-                "workflow_dispatch must run from refs/heads/$TRUSTED_BRANCH."
-              is_release=false
-              ;;
-            push)
-              [[ "$GITHUB_REF" == refs/tags/v* ]] || fail \
-                "Only v* tag pushes may use the tag release path."
-              [[ "$GITHUB_REF_NAME" == "v$package_version" ]] || fail \
-                "Tag $GITHUB_REF_NAME does not match desktop version $package_version."
-              git show-ref --verify --quiet "refs/remotes/origin/$TRUSTED_BRANCH" || fail \
-                "Fetched protected branch origin/$TRUSTED_BRANCH is missing."
-              git merge-base --is-ancestor \
-                "$source_sha" "refs/remotes/origin/$TRUSTED_BRANCH" || fail \
-                "Tagged commit $source_sha is not contained in protected $TRUSTED_BRANCH."
-              assert_newer_than_latest "$GITHUB_REF_NAME"
-              is_release=true
-              ;;
-            *)
-              fail "Unsupported workflow event: $GITHUB_EVENT_NAME."
-              ;;
+          case "$EVENT_DELETED" in
+            false) ;;
+            true) fail "Ref-deletion events must never build release installers." ;;
+            *) fail "Could not safely determine whether the triggering ref was deleted." ;;
           esac
 
-          require_public_releases_repository
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || fail \
+            "Only a manual workflow_dispatch may build recovery installers."
+          [[ "$GITHUB_REF" == "refs/heads/$TRUSTED_BRANCH" ]] || fail \
+            "workflow_dispatch must run from refs/heads/$TRUSTED_BRANCH."
+          [[ "$REQUESTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail \
+            "source_sha must be an explicit 40-character lowercase commit SHA."
+
+          source_sha=$(git rev-parse "${REQUESTED_SOURCE_SHA}^{commit}" 2>/dev/null) || fail \
+            "source_sha does not identify a fetched commit."
+          [[ "$source_sha" == "$REQUESTED_SOURCE_SHA" ]] || fail \
+            "source_sha must be the commit's canonical full SHA."
+          trigger_sha=$(git rev-parse "${GITHUB_SHA}^{commit}")
+          [[ "$trigger_sha" == "$source_sha" ]] || fail \
+            "Requested source $source_sha is not the workflow_dispatch HEAD $trigger_sha."
+          [[ "$source_sha" == "$(git rev-parse 'HEAD^{commit}')" ]] || fail \
+            "Checked-out source does not match the requested commit."
+
+          git show-ref --verify --quiet "refs/remotes/origin/$TRUSTED_BRANCH" || fail \
+            "Fetched origin/$TRUSTED_BRANCH is missing."
+          branch_sha=$(git rev-parse "refs/remotes/origin/$TRUSTED_BRANCH^{commit}")
+          [[ "$branch_sha" == "$source_sha" ]] || fail \
+            "Requested source is not the fetched origin/$TRUSTED_BRANCH HEAD."
+          git merge-base --is-ancestor \
+            "$source_sha" "refs/remotes/origin/$TRUSTED_BRANCH" || fail \
+            "Requested source is not contained in origin/$TRUSTED_BRANCH."
+
+          package_version=$(node -p "require('./desktop/package.json').version")
+          [[ "$package_version" == 1.0.1 ]] || fail \
+            "The recovery workflow requires desktop version 1.0.1; found $package_version."
+
           {
-            echo "is_release=$is_release"
             echo "source_sha=$source_sha"
             echo "version=$package_version"
           } >> "$GITHUB_OUTPUT"
 
-  build-desktop:
-    name: Build ${{ matrix.name }}
-    needs: trusted-source
-    if: ${{ needs.trusted-source.result == 'success' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Windows
-            os: windows-latest
-            platform: win
-            artifact: windows
-            files: desktop/dist/*.exe
-          - name: Linux
-            os: ubuntu-latest
-            platform: linux
-            artifact: linux
-            files: desktop/dist/*.AppImage
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: desktop/package-lock.json
 
-      - name: Use npm 10
-        run: npm install --global npm@10
+      - name: Test fail-closed force-quit recovery
+        run: npm --prefix desktop run test:recovery
 
-      - name: Install
-        working-directory: desktop
-        run: npm ci
-
-      - name: Bundle supabase-js
-        working-directory: desktop
-        run: npm run build:vendor
-
-      - name: Build ${{ matrix.name }}
-        working-directory: desktop
-        run: npx electron-builder --${{ matrix.platform }} --publish never
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: installer-${{ matrix.artifact }}
-          path: ${{ matrix.files }}
-          if-no-files-found: error
-
-  build-macos:
-    name: Build and verify macOS
+  build-windows:
+    name: Build Windows installer
     needs: trusted-source
     if: ${{ needs.trusted-source.result == 'success' }}
-    runs-on: macos-latest
-    environment: macos-signing
+    runs-on: windows-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ needs.trusted-source.outputs.source_sha }}
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - name: Verify exact checkout
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.trusted-source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse 'HEAD^{commit}')" == "$SOURCE_SHA" ]]
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || {
+            echo "Checkout has tracked, staged, or untracked source changes." >&2
+            exit 1
+          }
+          [[ -z "$(git ls-files --others --ignored --exclude-standard -- \
+            desktop/main.js desktop/preload.js desktop/renderer)" ]] || {
+            echo "Ignored files are present inside Electron's explicit source inputs." >&2
+            exit 1
+          }
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
       - name: Use npm 10
-        run: npm install --global npm@10
+        run: npm install --global npm@10.9.9
 
-      - name: Install
+      - name: Install locked dependencies
         working-directory: desktop
         run: npm ci
 
-      - name: Bundle supabase-js
+      - name: Rebuild committed browser dependencies
         working-directory: desktop
         run: npm run build:vendor
 
-      - name: Configure signing and notarization credentials
+      - name: Require all packaged source to match the exact commit
         shell: bash
-        env:
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY_B64 }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          : "${CSC_LINK:?CSC_LINK is required}"
-          : "${CSC_KEY_PASSWORD:?CSC_KEY_PASSWORD is required}"
-          : "${APPLE_API_KEY_B64:?APPLE_API_KEY_B64 is required}"
-          : "${APPLE_API_KEY_ID:?APPLE_API_KEY_ID is required}"
-          : "${APPLE_API_ISSUER:?APPLE_API_ISSUER is required}"
-          : "${APPLE_TEAM_ID:?APPLE_TEAM_ID is required}"
-
-          [[ "$APPLE_API_KEY_ID" =~ ^[A-Z0-9]{10}$ ]] || {
-            echo 'APPLE_API_KEY_ID must be a 10-character key ID.' >&2
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || {
+            echo "Dependency installation or vendor rebuild changed tracked, staged, or untracked source." >&2
             exit 1
           }
-          [[ "$APPLE_API_ISSUER" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || {
-            echo 'APPLE_API_ISSUER must be an App Store Connect issuer UUID.' >&2
-            exit 1
-          }
-          [[ "$APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || {
-            echo 'APPLE_TEAM_ID must be a 10-character Apple team ID.' >&2
+          [[ -z "$(git ls-files --others --ignored --exclude-standard -- \
+            desktop/main.js desktop/preload.js desktop/renderer)" ]] || {
+            echo "Ignored files are present inside Electron's explicit source inputs." >&2
             exit 1
           }
 
-          key_path="$RUNNER_TEMP/AuthKey.p8"
-          umask 077
-          printf '%s' "$APPLE_API_KEY_B64" | base64 -D > "$key_path"
-          chmod 600 "$key_path"
-          grep -q -- 'BEGIN PRIVATE KEY' "$key_path" || {
-            echo 'APPLE_API_KEY_B64 did not decode to a .p8 private key.' >&2
-            exit 1
-          }
-          echo "APPLE_API_KEY=$key_path" >> "$GITHUB_ENV"
-
-      - name: Build signed and notarized macOS DMGs
+      - name: Build x64 Windows installer
         working-directory: desktop
-        env:
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npx electron-builder --mac --publish never
+        run: npx electron-builder --win --x64 --publish never
 
-      - name: Verify signed macOS DMGs
+      - name: Require exactly one Windows installer
         shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
-          arm64_dmgs=(desktop/dist/*arm64*.dmg)
-          x64_dmgs=(desktop/dist/*x64*.dmg)
-          [[ ${#arm64_dmgs[@]} -eq 1 ]] || {
-            echo "Expected one arm64 DMG; found ${#arm64_dmgs[@]}." >&2
+          installers=(desktop/dist/*.exe)
+          [[ ${#installers[@]} -eq 1 ]] || {
+            echo "Expected one Windows installer; found ${#installers[@]}." >&2
             exit 1
           }
-          [[ ${#x64_dmgs[@]} -eq 1 ]] || {
-            echo "Expected one x64 DMG; found ${#x64_dmgs[@]}." >&2
-            exit 1
-          }
-          desktop/scripts/verify-macos-dmg.sh "${arm64_dmgs[0]}" arm64
-          desktop/scripts/verify-macos-dmg.sh "${x64_dmgs[0]}" x86_64
 
-      - name: Remove temporary notarization key
-        if: always()
+      - name: Verify AMD64 payload and record source-bound metadata
         shell: bash
-        run: |
-          key_path="${RUNNER_TEMP:?RUNNER_TEMP is required}/AuthKey.p8"
-          case "$key_path" in
-            "$RUNNER_TEMP"/*) rm -f -- "$key_path" ;;
-            *) echo "Refusing unexpected cleanup path: $key_path" >&2; exit 1 ;;
-          esac
+        env:
+          BUILD_PLATFORM: windows
+          SOURCE_SHA: ${{ needs.trusted-source.outputs.source_sha }}
+        run: node desktop/scripts/write-build-metadata.js
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: installer-macos
-          path: desktop/dist/*.dmg
+          name: installer-windows-${{ needs.trusted-source.outputs.source_sha }}
+          path: |
+            desktop/dist/*.exe
+            desktop/dist/win-unpacked/DesmosLock.exe
+            desktop/dist/win-unpacked/resources/app.asar
+            desktop/dist/BUILD-METADATA.json
           if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
 
-  draft-release:
-    name: Create public draft release
-    needs:
-      - trusted-source
-      - build-desktop
-      - build-macos
-    if: >-
-      ${{ needs.trusted-source.result == 'success' &&
-          needs.trusted-source.outputs.is_release == 'true' &&
-          needs.build-desktop.result == 'success' &&
-          needs.build-macos.result == 'success' }}
+  build-linux:
+    name: Build Linux AppImage
+    needs: trusted-source
+    if: ${{ needs.trusted-source.result == 'success' }}
     runs-on: ubuntu-latest
-    environment: public-releases-write
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ needs.trusted-source.outputs.source_sha }}
           persist-credentials: false
 
-      - uses: actions/download-artifact@v4
+      - name: Verify exact checkout
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.trusted-source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse 'HEAD^{commit}')" == "$SOURCE_SHA" ]]
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || {
+            echo "Checkout has tracked, staged, or untracked source changes." >&2
+            exit 1
+          }
+          [[ -z "$(git ls-files --others --ignored --exclude-standard -- \
+            desktop/main.js desktop/preload.js desktop/renderer)" ]] || {
+            echo "Ignored files are present inside Electron's explicit source inputs." >&2
+            exit 1
+          }
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          path: artifacts
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
 
-      - name: Stage stable customer filenames and checksums
+      - name: Use npm 10
+        run: npm install --global npm@10.9.9
+
+      - name: Install locked dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Rebuild committed browser dependencies
+        working-directory: desktop
+        run: npm run build:vendor
+
+      - name: Require all packaged source to match the exact commit
         shell: bash
         run: |
           set -euo pipefail
-          desktop_version=$(node -p "require('./desktop/package.json').version")
-          [[ "$GITHUB_REF_NAME" == "v$desktop_version" ]] || {
-            echo "Tag $GITHUB_REF_NAME does not match desktop version $desktop_version." >&2
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || {
+            echo "Dependency installation or vendor rebuild changed tracked, staged, or untracked source." >&2
             exit 1
           }
-          mkdir out
-
-          copy_one() {
-            local source_dir=$1
-            local pattern=$2
-            local destination=$3
-            local matches=()
-            mapfile -d '' matches < <(find "$source_dir" -type f -name "$pattern" -print0)
-            if [[ ${#matches[@]} -ne 1 ]]; then
-              echo "Expected one $pattern in $source_dir; found ${#matches[@]}." >&2
-              exit 1
-            fi
-            cp -- "${matches[0]}" "out/$destination"
+          [[ -z "$(git ls-files --others --ignored --exclude-standard -- \
+            desktop/main.js desktop/preload.js desktop/renderer)" ]] || {
+            echo "Ignored files are present inside Electron's explicit source inputs." >&2
+            exit 1
           }
 
-          copy_one artifacts/installer-macos '*arm64*.dmg' DesmosLock-mac.dmg
-          copy_one artifacts/installer-macos '*x64*.dmg' DesmosLock-mac-intel.dmg
-          copy_one artifacts/installer-windows '*.exe' DesmosLock-setup.exe
-          copy_one artifacts/installer-linux '*.AppImage' DesmosLock.AppImage
+      - name: Build x64 Linux AppImage
+        working-directory: desktop
+        run: npx electron-builder --linux --x64 --publish never
 
-          (
-            cd out
-            sha256sum \
-              DesmosLock-mac.dmg \
-              DesmosLock-mac-intel.dmg \
-              DesmosLock-setup.exe \
-              DesmosLock.AppImage > SHA256SUMS.txt
-          )
+      - name: Require exactly one Linux AppImage
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          installers=(desktop/dist/*.AppImage)
+          [[ ${#installers[@]} -eq 1 ]] || {
+            echo "Expected one Linux AppImage; found ${#installers[@]}." >&2
+            exit 1
+          }
 
-      - name: Refuse to overwrite a published release
+      - name: Record source-bound build metadata
+        shell: bash
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${GH_TOKEN:?RELEASES_REPO_TOKEN environment secret is required}"
-          set +e
-          release_state=$(gh release view "$GITHUB_REF_NAME" \
-            --repo "$RELEASES_REPOSITORY" \
-            --json isDraft \
-            --jq .isDraft 2>&1)
-          view_status=$?
-          set -e
+          BUILD_PLATFORM: linux
+          SOURCE_SHA: ${{ needs.trusted-source.outputs.source_sha }}
+        run: node desktop/scripts/write-build-metadata.js
 
-          if [[ $view_status -eq 0 ]]; then
-            [[ "$release_state" == true ]] || {
-              echo "Refusing to replace assets on an already-published release." >&2
-              exit 1
-            }
-            echo "An existing draft will be updated and reverified."
-          elif [[ "$release_state" == "release not found" ]]; then
-            echo "No existing release was found; a new draft will be created."
-          else
-            echo "Could not safely determine the target release state." >&2
-            exit 1
-          fi
-
-      - name: Create or update draft release
-        # v2 pinned because this step receives the public-repository write token.
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          repository: ${{ env.RELEASES_REPOSITORY }}
-          tag_name: ${{ github.ref_name }}
-          target_commitish: main
-          name: DesmosLock ${{ github.ref_name }}
-          draft: true
-          prerelease: true
-          generate_release_notes: false
-          fail_on_unmatched_files: true
-          overwrite_files: true
-          token: ${{ secrets.RELEASES_REPO_TOKEN }}
-          body: |
-            DesmosLock installers for ${{ github.ref_name }}.
-
-            Private source commit: `${{ needs.trusted-source.outputs.source_sha }}`
-
-            ## Installing
-
-            **macOS:** Open the DMG, drag DesmosLock to Applications, then launch it
-            normally from Applications.
-
-            **Windows:** Run `DesmosLock-setup.exe`. Windows SmartScreen may warn until
-            Windows code signing is added.
-          files: |
-            out/DesmosLock-mac.dmg
-            out/DesmosLock-mac-intel.dmg
-            out/DesmosLock-setup.exe
-            out/DesmosLock.AppImage
-            out/SHA256SUMS.txt
-
-  verify-draft-macos:
-    name: Verify draft release on fresh macOS
-    needs:
-      - trusted-source
-      - draft-release
-    if: >-
-      ${{ needs.trusted-source.result == 'success' &&
-          needs.trusted-source.outputs.is_release == 'true' &&
-          needs.draft-release.result == 'success' }}
-    runs-on: macos-latest
-    environment: public-releases-read
-    outputs:
-      manifest_sha256: ${{ steps.verify.outputs.manifest_sha256 }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Download draft release assets
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.RELEASES_REPO_READ_TOKEN }}
-        run: |
-          set -euo pipefail
-          : "${GH_TOKEN:?RELEASES_REPO_READ_TOKEN environment secret is required}"
-          mkdir draft-assets
-          gh release download "$GITHUB_REF_NAME" \
-            --repo "$RELEASES_REPOSITORY" \
-            --dir draft-assets
-
-      - name: Check hashes and Gatekeeper acceptance
-        id: verify
-        shell: bash
-        run: |
-          set -euo pipefail
-          expected=(
-            DesmosLock-mac.dmg
-            DesmosLock-mac-intel.dmg
-            DesmosLock-setup.exe
-            DesmosLock.AppImage
-            SHA256SUMS.txt
-          )
-          for asset in "${expected[@]}"; do
-            [[ -f "draft-assets/$asset" ]] || {
-              echo "Draft release asset is missing: $asset" >&2
-              exit 1
-            }
-          done
-          asset_count=$(find draft-assets -maxdepth 1 -type f | wc -l | tr -d ' ')
-          [[ "$asset_count" -eq ${#expected[@]} ]] || {
-            echo "Expected exactly ${#expected[@]} draft assets; found $asset_count." >&2
-            exit 1
-          }
-          (cd draft-assets && shasum -a 256 --check SHA256SUMS.txt)
-          desktop/scripts/verify-macos-dmg.sh draft-assets/DesmosLock-mac.dmg arm64
-          desktop/scripts/verify-macos-dmg.sh draft-assets/DesmosLock-mac-intel.dmg x86_64
-          manifest_sha256=$(shasum -a 256 draft-assets/SHA256SUMS.txt | awk '{print $1}')
-          [[ "$manifest_sha256" =~ ^[0-9a-f]{64}$ ]] || {
-            echo "Invalid SHA256SUMS.txt digest: $manifest_sha256" >&2
-            exit 1
-          }
-          echo "manifest_sha256=$manifest_sha256" >> "$GITHUB_OUTPUT"
-
-  publish-prerelease:
-    name: Publish verified non-latest prerelease
-    needs:
-      - trusted-source
-      - verify-draft-macos
-    if: >-
-      ${{ needs.trusted-source.result == 'success' &&
-          needs.trusted-source.outputs.is_release == 'true' &&
-          needs.verify-draft-macos.result == 'success' }}
-    runs-on: ubuntu-latest
-    environment: public-releases-write
-    steps:
-      - name: Publish draft as a public prerelease without changing latest
-        env:
-          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${GH_TOKEN:?RELEASES_REPO_TOKEN environment secret is required}"
-          release_id=$(gh api \
-            "repos/$RELEASES_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
-            --jq .id)
-          [[ "$(gh api "repos/$RELEASES_REPOSITORY/releases/$release_id" --jq .draft)" == true ]] || {
-            echo "Expected $GITHUB_REF_NAME to still be a draft." >&2
-            exit 1
-          }
-          gh api --method PATCH \
-            "repos/$RELEASES_REPOSITORY/releases/$release_id" \
-            -F draft=false \
-            -F prerelease=true \
-            -f make_latest=false \
-            --silent
-          state=$(gh api \
-            "repos/$RELEASES_REPOSITORY/releases/$release_id" \
-            --jq '[.draft, .prerelease] | @tsv')
-          [[ "$state" == $'false\ttrue' ]] || {
-            echo "Release did not become a public prerelease: $state" >&2
-            exit 1
-          }
-
-  verify-public-release:
-    name: Verify unauthenticated tag-specific downloads
-    needs:
-      - trusted-source
-      - verify-draft-macos
-      - publish-prerelease
-    if: >-
-      ${{ needs.trusted-source.result == 'success' &&
-          needs.trusted-source.outputs.is_release == 'true' &&
-          needs.verify-draft-macos.result == 'success' &&
-          needs.publish-prerelease.result == 'success' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download every public asset without authentication
-        shell: bash
-        env:
-          EXPECTED_MANIFEST_SHA256: ${{ needs.verify-draft-macos.outputs.manifest_sha256 }}
-        run: |
-          set -euo pipefail
-          [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
-            echo "Missing verified draft manifest digest." >&2
-            exit 1
-          }
-          mkdir public-assets
-          base_url="https://github.com/$RELEASES_REPOSITORY/releases/download/$GITHUB_REF_NAME"
-          curl --fail --location --silent --show-error \
-            --retry 12 --retry-delay 5 --retry-all-errors \
-            "$base_url/SHA256SUMS.txt" \
-            --output public-assets/SHA256SUMS.txt
-          public_manifest_sha256=$(sha256sum public-assets/SHA256SUMS.txt | awk '{print $1}')
-          [[ "$public_manifest_sha256" == "$EXPECTED_MANIFEST_SHA256" ]] || {
-            echo "Public SHA256SUMS.txt does not match the verified draft manifest." >&2
-            exit 1
-          }
-          assets=(
-            DesmosLock-mac.dmg
-            DesmosLock-mac-intel.dmg
-            DesmosLock-setup.exe
-            DesmosLock.AppImage
-          )
-          for asset in "${assets[@]}"; do
-            curl --fail --location --silent --show-error \
-              --retry 12 --retry-delay 5 --retry-all-errors \
-              "$base_url/$asset" \
-              --output "public-assets/$asset"
-          done
-          (cd public-assets && sha256sum --check SHA256SUMS.txt)
-
-  promote-release:
-    name: Promote verified prerelease to stable latest
-    needs:
-      - trusted-source
-      - verify-public-release
-    if: >-
-      ${{ needs.trusted-source.result == 'success' &&
-          needs.trusted-source.outputs.is_release == 'true' &&
-          needs.verify-public-release.result == 'success' }}
-    runs-on: ubuntu-latest
-    environment: public-releases-write
-    steps:
-      - name: Recheck monotonic version and promote
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
-        run: |
-          set -euo pipefail
-          : "${GH_TOKEN:?RELEASES_REPO_TOKEN environment secret is required}"
-
-          fail() {
-            echo "::error::$*" >&2
-            exit 1
-          }
-
-          repository_file="$RUNNER_TEMP/releases-repository.json"
-          repository_status=$(curl --silent --show-error \
-            --retry 5 --retry-delay 2 --retry-all-errors \
-            --output "$repository_file" \
-            --write-out '%{http_code}' \
-            "https://api.github.com/repos/$RELEASES_REPOSITORY")
-          [[ "$repository_status" == 200 ]] || fail \
-            "The public releases repository is unavailable (HTTP $repository_status)."
-          [[ "$(node -e \
-            "const d=require(process.argv[1]); process.stdout.write(String(d.private))" \
-            "$repository_file")" == false ]] || fail \
-            "The releases repository became private before promotion."
-
-          response_file="$RUNNER_TEMP/latest-release.json"
-          status=$(curl --silent --show-error \
-            --retry 5 --retry-delay 2 --retry-all-errors \
-            --output "$response_file" \
-            --write-out '%{http_code}' \
-            "https://api.github.com/repos/$RELEASES_REPOSITORY/releases/latest")
-          case "$status" in
-            200)
-              latest_tag=$(node -e \
-                "const d=require(process.argv[1]); process.stdout.write(String(d.tag_name || ''))" \
-                "$response_file")
-              node - "$GITHUB_REF_NAME" "$latest_tag" <<'NODE'
-          const parse = (tag) => {
-            const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(tag);
-            if (!match) throw new Error(`not a strict stable SemVer tag: ${tag}`);
-            return match.slice(1).map((part) => BigInt(part));
-          };
-          try {
-            const candidate = parse(process.argv[2]);
-            const latest = parse(process.argv[3]);
-            const comparison = candidate.findIndex((part, index) => part !== latest[index]);
-            if (comparison === -1 || candidate[comparison] < latest[comparison]) {
-              throw new Error(`${process.argv[2]} is not newer than latest ${process.argv[3]}`);
-            }
-          } catch (error) {
-            console.error(`::error::${error.message}`);
-            process.exit(1);
-          }
-          NODE
-              ;;
-            404)
-              echo "No current latest release exists; monotonic guard allows the first release."
-              ;;
-            *)
-              fail "Could not safely recheck the current latest release (HTTP $status)."
-              ;;
-          esac
-
-          release_id=$(gh api \
-            "repos/$RELEASES_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
-            --jq .id)
-          state=$(gh api \
-            "repos/$RELEASES_REPOSITORY/releases/$release_id" \
-            --jq '[.draft, .prerelease] | @tsv')
-          [[ "$state" == $'false\ttrue' ]] || fail \
-            "Expected a public prerelease before promotion; found $state."
-          gh api --method PATCH \
-            "repos/$RELEASES_REPOSITORY/releases/$release_id" \
-            -F prerelease=false \
-            -f make_latest=true \
-            --silent
-
-  verify-latest-release:
-    name: Verify latest tag and customer download routes
-    needs:
-      - trusted-source
-      - verify-draft-macos
-      - promote-release
-    if: >-
-      ${{ needs.trusted-source.result == 'success' &&
-          needs.trusted-source.outputs.is_release == 'true' &&
-          needs.verify-draft-macos.result == 'success' &&
-          needs.promote-release.result == 'success' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Assert latest and verify its public assets without authentication
-        shell: bash
-        env:
-          EXPECTED_MANIFEST_SHA256: ${{ needs.verify-draft-macos.outputs.manifest_sha256 }}
-        run: |
-          set -euo pipefail
-          [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
-            echo "Missing verified draft manifest digest." >&2
-            exit 1
-          }
-          response_file="$RUNNER_TEMP/latest-release.json"
-          latest_verified=false
-          for attempt in {1..12}; do
-            status=$(curl --silent --show-error \
-              --retry 3 --retry-delay 2 --retry-all-errors \
-              --output "$response_file" \
-              --write-out '%{http_code}' \
-              "https://api.github.com/repos/$RELEASES_REPOSITORY/releases/latest")
-            if [[ "$status" == 200 ]]; then
-              latest_tag=$(node -e \
-                "const d=require(process.argv[1]); process.stdout.write(String(d.tag_name || ''))" \
-                "$response_file")
-              if [[ "$latest_tag" == "$GITHUB_REF_NAME" ]]; then
-                echo "Latest release is $latest_tag."
-                latest_verified=true
-                break
-              fi
-            fi
-            sleep 5
-          done
-          [[ "$latest_verified" == true ]] || {
-            echo "Unauthenticated releases/latest did not resolve to $GITHUB_REF_NAME." >&2
-            exit 1
-          }
-
-          mkdir latest-assets
-          base_url="https://github.com/$RELEASES_REPOSITORY/releases/latest/download"
-          curl --fail --location --silent --show-error \
-            --retry 12 --retry-delay 5 --retry-all-errors \
-            "$base_url/SHA256SUMS.txt" \
-            --output latest-assets/SHA256SUMS.txt
-          latest_manifest_sha256=$(sha256sum latest-assets/SHA256SUMS.txt | awk '{print $1}')
-          [[ "$latest_manifest_sha256" == "$EXPECTED_MANIFEST_SHA256" ]] || {
-            echo "Latest SHA256SUMS.txt does not match the verified draft manifest." >&2
-            exit 1
-          }
-          assets=(
-            DesmosLock-mac.dmg
-            DesmosLock-mac-intel.dmg
-            DesmosLock-setup.exe
-            DesmosLock.AppImage
-          )
-          for asset in "${assets[@]}"; do
-            curl --fail --location --silent --show-error \
-              --retry 12 --retry-delay 5 --retry-all-errors \
-              "$base_url/$asset" \
-              --output "latest-assets/$asset"
-          done
-          (cd latest-assets && sha256sum --check SHA256SUMS.txt)
+          name: installer-linux-${{ needs.trusted-source.outputs.source_sha }}
+          path: |
+            desktop/dist/*.AppImage
+            desktop/dist/BUILD-METADATA.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0

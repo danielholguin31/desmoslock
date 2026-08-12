@@ -1,0 +1,165 @@
+'use strict';
+
+const crypto = require('crypto');
+const childProcess = require('child_process');
+const fs = require('fs');
+const path = require('path');
+
+function requiredEnvironment(name, pattern) {
+  const value = process.env[name] || '';
+  if (!pattern.test(value)) {
+    throw new Error(`${name} is missing or invalid`);
+  }
+  return value;
+}
+
+function oneFile(directory, predicate, description) {
+  const matches = fs.readdirSync(directory)
+    .filter(predicate)
+    .map((name) => path.join(directory, name));
+  if (matches.length !== 1) {
+    throw new Error(`expected exactly one ${description}; found ${matches.length}`);
+  }
+  return matches[0];
+}
+
+function sha256(file) {
+  const hash = crypto.createHash('sha256');
+  const descriptor = fs.openSync(file, 'r');
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    let bytesRead;
+    do {
+      bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+      if (bytesRead > 0) hash.update(buffer.subarray(0, bytesRead));
+    } while (bytesRead > 0);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  return hash.digest('hex');
+}
+
+function asset(file, targetArchitecture) {
+  return {
+    fileName: path.basename(file),
+    targetArchitecture,
+    bytes: fs.statSync(file).size,
+    sha256: sha256(file),
+  };
+}
+
+function peMachine(file) {
+  const descriptor = fs.openSync(file, 'r');
+  try {
+    const dosHeader = Buffer.alloc(64);
+    if (fs.readSync(descriptor, dosHeader, 0, dosHeader.length, 0) !== dosHeader.length) {
+      throw new Error(`truncated DOS header: ${file}`);
+    }
+    if (dosHeader.toString('ascii', 0, 2) !== 'MZ') {
+      throw new Error(`missing MZ header: ${file}`);
+    }
+    const peOffset = dosHeader.readUInt32LE(0x3c);
+    const peHeader = Buffer.alloc(6);
+    if (fs.readSync(descriptor, peHeader, 0, peHeader.length, peOffset) !== peHeader.length) {
+      throw new Error(`truncated PE header: ${file}`);
+    }
+    if (!peHeader.subarray(0, 4).equals(Buffer.from([0x50, 0x45, 0x00, 0x00]))) {
+      throw new Error(`missing PE signature: ${file}`);
+    }
+    return `0x${peHeader.readUInt16LE(4).toString(16).padStart(4, '0')}`;
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function extractFromInstaller(installer, archivePath) {
+  const sevenZip = require('7zip-bin').path7za;
+  const test = childProcess.spawnSync(sevenZip, ['t', installer], {
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  if (test.status !== 0) {
+    throw new Error(`NSIS archive test failed with status ${test.status}`);
+  }
+  const extraction = childProcess.spawnSync(sevenZip, ['x', '-so', installer, archivePath], {
+    encoding: null,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (extraction.status !== 0 || !Buffer.isBuffer(extraction.stdout) || extraction.stdout.length === 0) {
+    throw new Error(`could not extract ${archivePath} from the NSIS installer`);
+  }
+  return extraction.stdout;
+}
+
+const sourceSha = requiredEnvironment('SOURCE_SHA', /^[0-9a-f]{40}$/);
+const canonicalSourceRepository = requiredEnvironment(
+  'CANONICAL_SOURCE_REPOSITORY',
+  /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/,
+);
+const workflowRepository = requiredEnvironment(
+  'GITHUB_REPOSITORY',
+  /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/,
+);
+const platform = requiredEnvironment('BUILD_PLATFORM', /^(macos|windows|linux)$/);
+const workflowRunId = requiredEnvironment('GITHUB_RUN_ID', /^[1-9][0-9]*$/);
+const workflowRunAttempt = requiredEnvironment('GITHUB_RUN_ATTEMPT', /^[1-9][0-9]*$/);
+const packagePath = path.join(__dirname, '..', 'package.json');
+const version = JSON.parse(fs.readFileSync(packagePath, 'utf8')).version;
+const outputDirectory = path.join(__dirname, '..', 'dist');
+
+if (version !== '1.0.1') {
+  throw new Error(`recovery metadata requires version 1.0.1; found ${version}`);
+}
+
+const metadata = {
+  schemaVersion: 1,
+  sourceSha,
+  canonicalSourceRepository,
+  workflowRepository,
+  version,
+  platform,
+  workflowRunId: Number(workflowRunId),
+  workflowRunAttempt: Number(workflowRunAttempt),
+};
+
+if (platform === 'windows') {
+  const installer = oneFile(outputDirectory, (name) => name.endsWith('.exe'), 'Windows installer');
+  const payload = path.join(outputDirectory, 'win-unpacked', 'DesmosLock.exe');
+  const applicationArchive = path.join(outputDirectory, 'win-unpacked', 'resources', 'app.asar');
+  if (!fs.statSync(payload).isFile()) throw new Error(`Windows payload is missing: ${payload}`);
+  if (!fs.statSync(applicationArchive).isFile()) {
+    throw new Error(`Windows application archive is missing: ${applicationArchive}`);
+  }
+  metadata.targetArchitecture = 'x64';
+  metadata.payloadMachine = peMachine(payload);
+  metadata.wrapperMachine = peMachine(installer);
+  if (metadata.payloadMachine !== '0x8664') {
+    throw new Error(`Windows payload machine must be AMD64 0x8664; found ${metadata.payloadMachine}`);
+  }
+  if (metadata.wrapperMachine !== '0x014c') {
+    throw new Error(`NSIS wrapper machine must be i386 0x014c; found ${metadata.wrapperMachine}`);
+  }
+  const embeddedApplicationArchive = extractFromInstaller(installer, 'resources/app.asar');
+  const unpackedApplicationArchive = fs.readFileSync(applicationArchive);
+  if (!embeddedApplicationArchive.equals(unpackedApplicationArchive)) {
+    throw new Error('NSIS resources/app.asar differs from win-unpacked/resources/app.asar');
+  }
+  metadata.payload = asset(payload, 'x64');
+  metadata.applicationArchive = asset(applicationArchive, 'platform-neutral');
+  metadata.artifact = asset(installer, 'x64');
+} else if (platform === 'linux') {
+  const installer = oneFile(outputDirectory, (name) => name.endsWith('.AppImage'), 'Linux AppImage');
+  metadata.targetArchitecture = 'x64';
+  metadata.artifact = asset(installer, 'x64');
+} else {
+  const arm64 = oneFile(outputDirectory, (name) => name.endsWith('.dmg') && name.includes('arm64'), 'arm64 DMG');
+  const x64 = oneFile(outputDirectory, (name) => name.endsWith('.dmg') && name.includes('x64'), 'x64 DMG');
+  metadata.targetArchitecture = 'arm64+x64';
+  metadata.artifacts = [asset(arm64, 'arm64'), asset(x64, 'x86_64')];
+}
+
+fs.writeFileSync(
+  path.join(outputDirectory, 'BUILD-METADATA.json'),
+  `${JSON.stringify(metadata, null, 2)}\n`,
+  { flag: 'wx', mode: 0o644 },
+);
