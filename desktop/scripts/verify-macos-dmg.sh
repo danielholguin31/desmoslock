@@ -178,6 +178,6 @@ rmdir "$mount_point"
 rmdir "$temp_root"
 trap - EXIT INT TERM
 
-printf 'PASS: %s has a strict ad-hoc signature, hardened runtime, required entitlements, and %s architecture.\n' \
+printf 'STRUCTURAL PASS ONLY: %s has a strict ad-hoc signature, hardened runtime, required entitlements, and %s architecture.\n' \
   "$dmg" "$expected_arch"
-printf 'NOTICE: this build is not Developer ID signed or notarized and must require the documented Open Anyway flow.\n'
+printf 'NOTICE: publication remains blocked until both documented quarantined Open Anyway receipts pass.\n'

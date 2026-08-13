@@ -3,6 +3,7 @@
   "productName": "DesmosLock",
   "version": "1.0.1",
   "private": true,
+  "packageManager": "npm@10.9.9+sha512.d60fba8cb42f688b81e33c2f1cbef2ad7b977166700ec0ad057f1b6d60ea6ef2524abf673e20c35931cd8305d1dbb8887134d6eefdc0e7b8435bd458bf65b862",
   "description": "Locked-down Desmos graphing calculator for exams",
   "main": "main.js",
   "scripts": {
@@ -12,6 +13,7 @@
     "dist:win": "electron-builder --win",
     "build:vendor": "esbuild build/vendor-entry.js --bundle --format=iife --global-name=SupabaseSDK --minify --target=chrome110 --outfile=renderer/vendor/supabase.js && node -e \"require('node:fs').copyFileSync('renderer/vendor/supabase.js', '../web/admin/vendor/supabase.js')\"",
     "test:recovery": "node --test test/force-quit-recovery.test.js",
+    "test:gatekeeper": "node --test test/gatekeeper-acceptance.test.js",
     "test:provenance": "node --test test/release-provenance.test.js"
   },
   "devDependencies": {

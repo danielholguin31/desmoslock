@@ -131,6 +131,9 @@ jobs:
       - name: Test fail-closed release provenance
         run: npm --prefix desktop run test:provenance
 
+      - name: Test fail-closed Gatekeeper acceptance contract
+        run: npm --prefix desktop run test:gatekeeper
+
   build-windows:
     name: Build Windows installer
     needs: trusted-source

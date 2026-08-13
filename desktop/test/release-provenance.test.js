@@ -15,6 +15,11 @@ const sourceSha = '0123456789abcdef0123456789abcdef01234567';
 const sourceRepository = 'danielholguin31/desmoslock';
 const sourceRepositoryId = 1326190305;
 const electronBuilderVersion = '25.1.8';
+const pinnedPackageManager = 'npm@10.9.9+sha512.d60fba8cb42f688b81e33c2f1cbef2ad7b977166700ec0ad057f1b6d60ea6ef2524abf673e20c35931cd8305d1dbb8887134d6eefdc0e7b8435bd458bf65b862';
+
+test('pins the local npm runtime by version and tarball hash', () => {
+  assert.equal(require('../package.json').packageManager, pinnedPackageManager);
+});
 
 function hostedMetadata(platform = 'windows') {
   const windows = platform === 'windows';
@@ -218,6 +223,8 @@ test('rejects false macOS source identity and malformed builder/tool provenance'
     (metadata) => { metadata.sourceRepository = 'desmoslock/desmoslock'; },
     (metadata) => { metadata.trustedBranch = 'main'; },
     (metadata) => { metadata.nodeVersion = 'v20.20.0'; },
+    (metadata) => { metadata.npmVersion = '10.9.8'; },
+    (metadata) => { metadata.npmVersion = '11.6.2'; },
     (metadata) => { metadata.builder.os.buildVersion = ''; },
     (metadata) => { metadata.builder.architecture = 'X64'; },
     (metadata) => { metadata.builder.developerTools.version = ''; },
