@@ -166,6 +166,11 @@ GitHub authority. Start with the
 [macOS release runbook](docs/MACOS_RELEASE.md) and the
 [provenance contract](docs/RELEASE_PROVENANCE.md).
 
+Promotion also requires the private two-host Gatekeeper aggregate: Safari ARM64 on
+the Mac Mini, plus Safari ARM64 and Chrome x64/Rosetta on the distinct MacBook. The
+dialog and launch results are witnessed operator attestations; receipts are not
+public release assets.
+
 The v1.0.1 Mac builds use an explicit ad-hoc signing identity, retain the hardened
 runtime and current entitlements, and are **not notarized**. On first launch, macOS
 will block the unidentified developer. Open **System Settings → Privacy & Security**,
@@ -175,7 +180,7 @@ in place, so SmartScreen may warn.
 
 The defective v1.0.0 Mac DMGs must not be republished. Do not merge or deploy the
 website cutover until immutable public v1.0.1 assets have passed anonymous checksum,
-tag/latest, and fresh quarantined-download acceptance checks.
+tag/latest, and the fresh quarantined two-host acceptance checks.
 
 ## Pricing and licensing
 

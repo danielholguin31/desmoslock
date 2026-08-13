@@ -142,7 +142,7 @@ Do not deploy production while any route points to a missing repository or asset
 ## Production cutover
 
 Production is allowed only after the immutable v1.0.1 release and its tag-specific,
-latest, checksum, provenance, and quarantined macOS tests pass.
+latest, checksum, provenance, and private two-host Gatekeeper aggregate receipt pass.
 
 1. Deploy the identical verified upload directory to the production branch of the
    same Pages project; do not regenerate it after preview acceptance:

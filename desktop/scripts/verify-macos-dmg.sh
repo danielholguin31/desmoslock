@@ -180,4 +180,4 @@ trap - EXIT INT TERM
 
 printf 'STRUCTURAL PASS ONLY: %s has a strict ad-hoc signature, hardened runtime, required entitlements, and %s architecture.\n' \
   "$dmg" "$expected_arch"
-printf 'NOTICE: publication remains blocked until both documented quarantined Open Anyway receipts pass.\n'
+printf 'NOTICE: publication remains blocked until the documented two-host Gatekeeper aggregate receipt passes.\n'

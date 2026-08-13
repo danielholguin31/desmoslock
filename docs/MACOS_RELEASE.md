@@ -300,9 +300,8 @@ a time. In that session:
 4. Authenticated-redownload that draft into a new empty directory. Require exactly the
    six stable filenames, compare every byte with the accepted local candidate, and
    verify the redownloaded checksum manifest before any human test.
-5. From fresh Safari and Chrome downloads of those exact draft DMGs, preserve browser
-   quarantine and test Apple silicon plus x64 under Rosetta. A real Intel Mac is
-   preferable; record physical Intel as unavailable if none exists.
+5. Complete the exact two-host private receipt gate below against fresh quarantined
+   browser downloads of those exact draft DMGs.
 
 The draft release notes must say:
 
@@ -314,50 +313,103 @@ The first Mac launch must show the unidentified-developer/Open Anyway path, neve
 damaged-app message. Open Anyway must launch the app and subsequent normal launches
 must work.
 
-Record this customer-boundary result outside the six-asset directory. Use Safari for
-the ARM64 DMG and Chrome for the x64 DMG, enter the exact one-line messages observed,
-and run the recorder only after both Open Anyway launches and subsequent launches
-succeed:
+Acceptance requires two distinct Apple-silicon hosts and three fresh browser
+downloads of the exact draft assets:
+
+- **Mac Mini:** Safari ARM64/native only. This role does not require or probe Rosetta.
+- **MacBook:** Safari ARM64/native plus Chrome x64/Rosetta.
+
+Open each canonical tag-specific URL in a logged-in collaborator browser. The URL
+itself must remain credential-free—authentication comes only from the browser
+session—and each downloaded DMG must retain browser quarantine. Anonymous downloads
+are impossible while the release is a draft; the logged-out anonymous redownload is
+a separate post-publication check below.
+
+On every required path, witness the first-launch unidentified-developer block, use
+**System Settings > Privacy & Security > Open Anyway**, confirm launch, quit normally,
+and confirm a subsequent launch. Any damaged/will-damage/move-to-trash class fails;
+Apple's normal warning that it cannot verify the app is free of malware is compatible
+with the required unidentified-developer/Open Anyway class.
+The dialog text and launch results passed to the recorder are explicitly **witnessed
+operator attestations**, not automated capture. The recorder independently verifies
+the quarantine attribute, exact asset hash, DMG structure, and strict signature.
+
+Run this on the Mac Mini after its Safari ARM64 test:
 
 ```bash
-GATEKEEPER_RECEIPT="$RELEASE_WORK_ROOT/GATEKEEPER-ACCEPTANCE-$SOURCE_SHA.json"
-SAFARI_DMG=/absolute/path/to/fresh-Safari-download/DesmosLock-mac.dmg
-CHROME_DMG=/absolute/path/to/fresh-Chrome-download/DesmosLock-mac-intel.dmg
+MINI_RECEIPT="$RELEASE_WORK_ROOT/GATEKEEPER-HOST-mac-mini-$SOURCE_SHA.json"
+MINI_SAFARI_DMG=/absolute/path/to/fresh-Safari-download/DesmosLock-mac.dmg
 node desktop/scripts/record-gatekeeper-acceptance.js \
+  --host-role mac-mini \
   --candidate-dir "$OUTPUT_DIR" \
-  --arm64-dmg "$SAFARI_DMG" \
+  --arm64-dmg "$MINI_SAFARI_DMG" \
   --arm64-browser Safari \
   --arm64-url https://github.com/desmoslock/desmoslock-releases/releases/download/v1.0.1/DesmosLock-mac.dmg \
   --arm64-fresh-download yes \
   --arm64-denial-class unidentified-developer-open-anyway \
-  --arm64-observed-message '<exact observed macOS message>' \
+  --arm64-observed-message '<exact witnessed macOS message>' \
   --arm64-damaged-observed no \
   --arm64-open-anyway-launched yes \
   --arm64-subsequent-launch yes \
-  --x64-dmg "$CHROME_DMG" \
+  --output "$MINI_RECEIPT"
+```
+
+Place a byte-identical exact-six candidate directory on the MacBook, set that host's
+`OUTPUT_DIR` and `RELEASE_WORK_ROOT` to its local candidate/private-work paths, then
+run this after its fresh Safari ARM64 and Chrome x64/Rosetta tests:
+
+```bash
+MACBOOK_RECEIPT="$RELEASE_WORK_ROOT/GATEKEEPER-HOST-macbook-$SOURCE_SHA.json"
+MACBOOK_SAFARI_DMG=/absolute/path/to/fresh-Safari-download/DesmosLock-mac.dmg
+MACBOOK_CHROME_DMG=/absolute/path/to/fresh-Chrome-download/DesmosLock-mac-intel.dmg
+node desktop/scripts/record-gatekeeper-acceptance.js \
+  --host-role macbook \
+  --candidate-dir "$OUTPUT_DIR" \
+  --arm64-dmg "$MACBOOK_SAFARI_DMG" \
+  --arm64-browser Safari \
+  --arm64-url https://github.com/desmoslock/desmoslock-releases/releases/download/v1.0.1/DesmosLock-mac.dmg \
+  --arm64-fresh-download yes \
+  --arm64-denial-class unidentified-developer-open-anyway \
+  --arm64-observed-message '<exact witnessed macOS message>' \
+  --arm64-damaged-observed no \
+  --arm64-open-anyway-launched yes \
+  --arm64-subsequent-launch yes \
+  --x64-dmg "$MACBOOK_CHROME_DMG" \
   --x64-browser Chrome \
   --x64-url https://github.com/desmoslock/desmoslock-releases/releases/download/v1.0.1/DesmosLock-mac-intel.dmg \
   --x64-fresh-download yes \
   --x64-denial-class unidentified-developer-open-anyway \
-  --x64-observed-message '<exact observed macOS message>' \
+  --x64-observed-message '<exact witnessed macOS message>' \
   --x64-damaged-observed no \
   --x64-open-anyway-launched yes \
   --x64-subsequent-launch yes \
   --x64-rosetta-launched yes \
-  --physical-intel-status unavailable \
-  --output "$GATEKEEPER_RECEIPT"
-shasum -a 256 "$GATEKEEPER_RECEIPT"
+  --output "$MACBOOK_RECEIPT"
 ```
 
-The recorder fails unless the candidate still has exactly six files, both separate
-browser downloads match the accepted manifest and provenance, both retain the
-read-only quarantine attribute, both pass structural DMG verification, the host is
-Apple silicon with working Rosetta, and every controlled observation is the expected
-class. It records macOS/build/architecture, source SHA, manifest digest, URLs, hashes, messages, and
-launch results without recording quarantine contents. It never removes quarantine.
-Do not use `spctl --assess` as the UI classifier or expect an ad-hoc build to pass it.
-No receipt means no promotion; retain the receipt and its SHA-256 privately, never as
-a seventh public release asset.
+Bring both private mode-0600 receipts together outside the exact-six directory and
+run the offline aggregate gate immediately before promotion:
+
+```bash
+TWO_HOST_RECEIPT="$RELEASE_WORK_ROOT/GATEKEEPER-TWO-HOST-$SOURCE_SHA.json"
+node desktop/scripts/verify-gatekeeper-acceptance.js \
+  --candidate-dir "$OUTPUT_DIR" \
+  --mac-mini-receipt "$MINI_RECEIPT" \
+  --macbook-receipt "$MACBOOK_RECEIPT" \
+  --output "$TWO_HOST_RECEIPT"
+shasum -a 256 "$MINI_RECEIPT" "$MACBOOK_RECEIPT" "$TWO_HOST_RECEIPT"
+```
+
+Each recorder validates that its selected role matches the local Mac mini or MacBook
+hardware family. Each host receipt stores only that non-sensitive family and a
+domain-separated SHA-256 hardware fingerprint, never the raw stable hardware
+identifier. The aggregate fails unless the fingerprints are
+distinct; roles/scopes, source repository/SHA, tag, manifest digest, and all six
+asset hashes match the live candidate exactly. It also requires Mini ARM evidence
+and MacBook ARM plus x64/Rosetta evidence. The recorder only reads quarantine and
+never removes it. Do not use `spctl --assess` as the UI classifier or expect an
+ad-hoc build to pass it. Missing either host receipt or the aggregate receipt blocks
+promotion. Retain all three privately; none is a seventh public release asset.
 
 Complete the product smoke suite on the candidate:
 
