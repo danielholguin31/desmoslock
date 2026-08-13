@@ -1,6 +1,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 
 const {
@@ -19,6 +21,27 @@ const pinnedPackageManager = 'npm@10.9.9+sha512.d60fba8cb42f688b81e33c2f1cbef2ad
 
 test('pins the local npm runtime by version and tarball hash', () => {
   assert.equal(require('../package.json').packageManager, pinnedPackageManager);
+});
+
+test('regenerates the committed vendor bundle only on the canonical Linux builder', () => {
+  const workflow = fs.readFileSync(
+    path.resolve(__dirname, '../../.github/workflows/release.yml'),
+    'utf8',
+  );
+  const windowsStart = workflow.indexOf('\n  build-windows:');
+  const linuxStart = workflow.indexOf('\n  build-linux:');
+  assert.ok(windowsStart > 0 && linuxStart > windowsStart, 'hosted build jobs are missing');
+  const windowsJob = workflow.slice(windowsStart, linuxStart);
+  const linuxJob = workflow.slice(linuxStart);
+
+  assert.match(windowsJob, /needs: \[trusted-source, build-linux\]/);
+  assert.match(windowsJob,
+    /needs\.trusted-source\.result == 'success' && needs\.build-linux\.result == 'success'/);
+  assert.doesNotMatch(windowsJob, /npm run build:vendor/);
+  assert.match(windowsJob, /Use the exact committed browser dependency bundle/);
+  assert.match(windowsJob, /git diff --quiet --exit-code -- desktop\/renderer\/vendor\/supabase\.js/);
+  assert.equal((linuxJob.match(/npm run build:vendor/g) || []).length, 1);
+  assert.match(linuxJob, /canonical vendor rebuild changed tracked, staged, or untracked source/);
 });
 
 function hostedMetadata(platform = 'windows') {
