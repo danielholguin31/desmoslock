@@ -354,6 +354,24 @@ The exact deployment commands and checks are in
 5. Leave the Vercel redirect in place for seven full days; Daniel deletes the old
    Vercel project only after the healthy transition window.
 
+No invitation or checkpoint email has been sent at this draft-review checkpoint.
+At step 2, send this exact message and substitute only the verified live invitation
+URL:
+
+```text
+Subject: DesmosLock: one GitHub transfer step
+
+Hey Daniel — the no-cost DesmosLock release setup is ready. Please:
+
+1. Accept this GitHub organization invitation: [actual invitation URL].
+2. Open the DesmosLock repository’s Settings → General.
+3. Scroll to Danger Zone → Transfer ownership.
+4. Enter desmoslock as the new owner and desmoslock as the repository name, then confirm.
+5. Reply “done.”
+
+Please don’t merge PR #3, change the releases, buy Apple membership, or alter Vercel yet—I’ll handle the remaining release work.
+```
+
 A delayed source transfer does not block an already verified customer repair; it
 leaves only source co-ownership pending. Close obsolete PR #3 only after the
 superseding release and site have shipped, and never merge it.
