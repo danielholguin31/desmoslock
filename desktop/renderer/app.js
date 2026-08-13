@@ -507,6 +507,11 @@ async function enterCalculator (lockedNow) {
   $('#calc-test').textContent = state.student.title || ''
   show('calc')
 
+  // Re-engage a persisted lock before loading any remote calculator code. A
+  // slow/offline Desmos request must never leave a recovered student able to
+  // quit or switch away.
+  await applyLock(!!lockedNow)
+
   try {
     await loadDesmos()
   } catch (err) {
@@ -555,8 +560,6 @@ async function enterCalculator (lockedNow) {
       else setConn('off', 'reconnecting')
     }
   })
-  if (lockedNow) applyLock(true)
-
   clearInterval(enterCalculator._hb)
   enterCalculator._hb = setInterval(() => {
     Promise.resolve(state.backend.heartbeat()).then(() => { state.lastContact = Date.now() }).catch(() => {})
@@ -584,14 +587,16 @@ function setConn (cls, label) {
   el.innerHTML = '<i></i>' + label
 }
 
-async function applyLock (on) {
+async function applyLock (on, { persist = true } = {}) {
   if (state.locked === on) return
   state.locked = on
   document.body.classList.toggle('is-locked', on)
 
   // Remembered so a force-quit during a locked test comes back locked.
-  const saved = await desk.storeGet('student')
-  if (saved) await desk.storeSet('student', { ...saved, wasLocked: on })
+  if (persist) {
+    const saved = await desk.storeGet('student')
+    if (saved) await desk.storeSet('student', { ...saved, wasLocked: on })
+  }
 
   $('#lock-chip').classList.toggle('hidden', !on)
   $('#leave-btn').classList.toggle('hidden', on)
@@ -690,13 +695,17 @@ window.addEventListener('blur', () => {
 /* ──────────────────────────────────────────────────── boot */
 
 ;(async function boot () {
+  const saved = await desk.storeGet('student')
+  // This flag was persisted before the earlier lock engaged. Re-engage from it
+  // before creating a backend or awaiting any network-dependent work.
+  if (saved?.wasLocked) await applyLock(true, { persist: false })
+
   const savedBackend = (await desk.storeGet('backend')) || {}
   await useBackend(savedBackend.mode || CONFIG.defaultMode, savedBackend.serverUrl || DEFAULT_SERVER)
   setAuthMode('login')
   show('landing')
 
   // A locked student who force-quit lands straight back in the locked test.
-  const saved = await desk.storeGet('student')
   if (saved && (saved.token || saved.mode === 'cloud')) {
     if (saved.mode && saved.mode !== state.mode) await useBackend(saved.mode, saved.serverUrl)
 
@@ -711,7 +720,10 @@ window.addEventListener('blur', () => {
     if (restored) {
       state.student = { id: restored.student.id, name: restored.student.name, testId: restored.test.id, title: restored.test.title }
       state.backend.setStudentName && state.backend.setStudentName(restored.student.name)
-      await desk.storeSet('student', { ...saved, ...state.student })
+      // The backend response is authoritative. In particular, clear a stale
+      // persisted lock when the teacher unlocked or released this student while
+      // the app was not running.
+      await desk.storeSet('student', { ...saved, ...state.student, wasLocked: !!restored.test.locked })
       // Outside the try: a rendering fault here must not be mistaken for the
       // backend being unreachable.
       await enterCalculator(restored.test.locked)
@@ -730,6 +742,9 @@ window.addEventListener('blur', () => {
       return
     }
 
+    // A successful no-student/inactive response is authoritative and may
+    // release the provisional startup lock before removing stale credentials.
+    if (saved.wasLocked) await applyLock(false)
     await desk.storeSet('student', null)
     state.student = null
   }
