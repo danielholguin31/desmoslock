@@ -44,6 +44,11 @@ not be used to bypass or replace the recorded `release/1.0` build used for v1.0.
   also uploads and hashes its unpacked application payload so offline assembly can
   independently prove AMD64 (`0x8664`) while recording the expected 32-bit NSIS
   wrapper machine (`0x014c`).
+- The committed browser dependency bundle is regenerated and byte-checked on the
+  canonical Linux builder. Windows packages that exact reviewed file instead of
+  rewriting it with a platform-specific esbuild binary, and the Windows job cannot
+  start unless that Linux reproducibility gate succeeds. Both jobs still fail on any
+  tracked, staged, untracked, or ignored packaged-source drift.
 - Fetch GitHub run JSON, artifact JSON, and artifact ZIPs in a separate read step.
   The assembler consumes those explicit files offline, invokes no network client,
   and rejects GitHub or release-token environment variables.
