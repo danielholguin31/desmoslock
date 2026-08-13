@@ -67,11 +67,15 @@ verifier.
 The npm runtime is not ambient: `desktop/package.json` pins npm 10.9.9 and its
 SHA-512 package hash, and the Mac builder resolves it through Corepack in an
 ephemeral cache without enabling shims or making a global installation. Structural
-DMG verification is not Gatekeeper acceptance. The separate private
-`GATEKEEPER-ACCEPTANCE-<source-sha>.json` receipt binds both quarantined browser
-downloads to this manifest and source, records the unidentified-developer/Open
-Anyway classification and successful subsequent launches for ARM64 and x64/Rosetta,
-and must pass before promotion. It is deliberately not one of the six public assets.
+DMG verification is not Gatekeeper acceptance. Private per-host receipts bind a
+Mac Mini Safari ARM64/native test and separate MacBook Safari ARM64/native plus
+Chrome x64/Rosetta tests to this source and all six asset hashes. Dialog and launch
+fields are witnessed operator attestations. The recorder validates its selected role
+against the local Mac mini or MacBook hardware family; each receipt stores only that
+generic family plus a hashed stable hardware fingerprint. The private aggregate
+receipt requires distinct fingerprints, exact roles/scopes, and identical source,
+tag, manifest, and asset hashes before promotion. None of these receipts is one of
+the six public assets.
 
 GitHub does not expose the resolved `*-latest` runner image version as a stable
 workflow context; it appears only in setup logs. Provenance therefore records the
