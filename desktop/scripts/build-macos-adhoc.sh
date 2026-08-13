@@ -13,7 +13,8 @@ usage() {
 Usage:
   desktop/scripts/build-macos-adhoc.sh \
     --source-sha <40-lowercase-hex-commit> \
-    --canonical-source-repository <owner/repository> \
+    --source-repository <actual-owner/repository> \
+    --trusted-branch <release/1.0-or-main> \
     --output-dir <new-directory>
 
 Builds and verifies thin arm64 and x64 ad-hoc-signed DMGs from an exact clean
@@ -22,18 +23,20 @@ USAGE
 }
 
 source_sha=
-canonical_source_repository=
+source_repository=
+trusted_branch=
 output_dir=
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --source-sha|--canonical-source-repository|--output-dir)
+    --source-sha|--source-repository|--trusted-branch|--output-dir)
       [[ $# -ge 2 ]] || fail "missing value for $1"
       option=$1
       value=$2
       case "$option" in
         --source-sha) source_sha=$value ;;
-        --canonical-source-repository) canonical_source_repository=$value ;;
+        --source-repository) source_repository=$value ;;
+        --trusted-branch) trusted_branch=$value ;;
         --output-dir) output_dir=$value ;;
       esac
       shift 2
@@ -51,8 +54,10 @@ done
 
 [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || fail \
   "--source-sha must be an explicit 40-character lowercase commit SHA"
-[[ "$canonical_source_repository" == desmoslock/desmoslock ]] || fail \
-  "--canonical-source-repository must be desmoslock/desmoslock"
+[[ "$source_repository" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$ ]] || fail \
+  "--source-repository must use actual owner/repository syntax"
+[[ "$trusted_branch" == release/1.0 || "$trusted_branch" == main ]] || fail \
+  "--trusted-branch must be release/1.0 or main"
 [[ -n "$output_dir" ]] || fail "--output-dir is required"
 
 for credential_name in \
@@ -71,7 +76,8 @@ for credential_name in \
   fi
 done
 
-for command_name in git node npm shasum mktemp; do
+for command_name in \
+  git node npm shasum mktemp sw_vers uname xcode-select xcrun clang codesign pkgutil; do
   command -v "$command_name" >/dev/null 2>&1 || fail "required command is unavailable: $command_name"
 done
 
@@ -81,6 +87,22 @@ repo_root=$(git -C "$script_dir/../.." rev-parse --show-toplevel 2>/dev/null) ||
 current_head=$(git -C "$repo_root" rev-parse HEAD)
 [[ "$current_head" == "$source_sha" ]] || fail \
   "current checkout is $current_head, not requested source $source_sha"
+origin_url=$(git -C "$repo_root" remote get-url origin) || fail "origin remote is missing"
+origin_repository=$(node - "$script_dir/provenance-contract.js" "$origin_url" <<'NODE'
+const contract = require(process.argv[2]);
+process.stdout.write(contract.parseGitHubRepositoryRemote(process.argv[3]));
+NODE
+) || fail "origin is not an uncredentialed GitHub repository URL"
+[[ "$origin_repository" == "$source_repository" ]] || fail \
+  "origin repository is $origin_repository, not requested source $source_repository"
+git -C "$repo_root" show-ref --verify --quiet "refs/remotes/origin/$trusted_branch" || fail \
+  "fetched origin/$trusted_branch is missing"
+branch_sha=$(git -C "$repo_root" rev-parse "refs/remotes/origin/$trusted_branch^{commit}")
+[[ "$branch_sha" == "$source_sha" ]] || fail \
+  "requested source is not the fetched origin/$trusted_branch HEAD"
+git -C "$repo_root" merge-base --is-ancestor \
+  "$source_sha" "refs/remotes/origin/$trusted_branch" || fail \
+  "requested source is not contained in origin/$trusted_branch"
 
 require_exact_source_state() {
   source_changes=$(git -C "$repo_root" status --porcelain=v1 --untracked-files=all)
@@ -110,6 +132,8 @@ NODE
 desktop_version=$(node -p "require('$repo_root/desktop/package.json').version")
 [[ "$desktop_version" == 1.0.1 ]] || fail \
   "this recovery builder requires desktop version 1.0.1; found $desktop_version"
+node_major=$(node --version | sed -E 's/^v([0-9]+).*/\1/')
+[[ "$node_major" == 22 ]] || fail "Node 22 is required; found $(node --version)"
 npm_major=$(npm --version | awk -F. '{print $1}')
 [[ "$npm_major" == 10 ]] || fail "npm 10 is required; found npm $(npm --version)"
 
@@ -188,23 +212,60 @@ built_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 node_version=$(node --version)
 npm_version=$(npm --version)
 builder_version=$("$repo_root/desktop/node_modules/.bin/electron-builder" --version)
+locked_builder_version=$(node -p \
+  "require('$repo_root/desktop/package-lock.json').packages['node_modules/electron-builder'].version")
+[[ "$builder_version" == "$locked_builder_version" ]] || fail \
+  "electron-builder $builder_version does not match locked $locked_builder_version"
+macos_product_version=$(sw_vers -productVersion)
+macos_build_version=$(sw_vers -buildVersion)
+builder_architecture=$(uname -m)
+selected_developer_dir=$(xcode-select -p)
+macos_sdk_version=$(xcrun --sdk macosx --show-sdk-version)
+apple_clang_version=$(xcrun clang --version | sed -n '1p')
+codesign_path=$(xcrun --find codesign)
+
+case "$selected_developer_dir" in
+  /Library/Developer/CommandLineTools)
+    developer_tools_kind=command-line-tools
+    developer_tools_version=$(pkgutil --pkg-info com.apple.pkg.CLTools_Executables |
+      awk '$1 == "version:" { print $2 }')
+    ;;
+  /*.app/Contents/Developer)
+    developer_tools_kind=xcode
+    developer_tools_version=$(DEVELOPER_DIR="$selected_developer_dir" xcodebuild -version |
+      awk 'NR == 1 && $1 == "Xcode" { print $2 }')
+    ;;
+  *)
+    fail "unsupported selected developer directory: $selected_developer_dir"
+    ;;
+esac
+[[ -n "$developer_tools_version" ]] || fail "could not determine Xcode/CLT version"
 
 node - "$staging_dir/MACOS-BUILD-METADATA.json" \
-  "$canonical_source_repository" "$source_sha" "$built_at" \
+  "$script_dir/provenance-contract.js" \
+  "$source_repository" "$source_sha" "$trusted_branch" "$built_at" \
   "$arm64_name" "$arm64_sha" "$arm64_bytes" \
   "$x64_name" "$x64_sha" "$x64_bytes" \
-  "$node_version" "$npm_version" "$builder_version" <<'NODE'
+  "$node_version" "$npm_version" "$builder_version" \
+  "$macos_product_version" "$macos_build_version" "$builder_architecture" \
+  "$developer_tools_kind" "$developer_tools_version" "$selected_developer_dir" \
+  "$macos_sdk_version" "$apple_clang_version" "$codesign_path" <<'NODE'
 const fs = require('fs');
 const [
-  output, canonicalSourceRepository, sourceSha, builtAtUtc,
+  output, contractPath, sourceRepository, sourceSha, trustedBranch, builtAtUtc,
   arm64FileName, arm64Sha256, arm64Bytes,
   x64FileName, x64Sha256, x64Bytes,
   nodeVersion, npmVersion, electronBuilderVersion,
+  macosProductVersion, macosBuildVersion, builderArchitecture,
+  developerToolsKind, developerToolsVersion, selectedDeveloperDirectory,
+  macosSdkVersion, appleClangVersion, codesignPath,
 ] = process.argv.slice(2);
+const { validateMacBuildMetadataCore } = require(contractPath);
 const metadata = {
   schemaVersion: 1,
-  canonicalSourceRepository,
+  sourceRepository,
   sourceSha,
+  trustedBranch,
   version: '1.0.1',
   platform: 'macos',
   targetArchitecture: 'arm64+x64',
@@ -215,11 +276,33 @@ const metadata = {
   nodeVersion,
   npmVersion,
   electronBuilderVersion,
+  builder: {
+    os: {
+      name: 'macOS',
+      productVersion: macosProductVersion,
+      buildVersion: macosBuildVersion,
+    },
+    architecture: builderArchitecture,
+    developerTools: {
+      kind: developerToolsKind,
+      version: developerToolsVersion,
+      selectedDirectory: selectedDeveloperDirectory,
+      macosSdkVersion,
+      appleClangVersion,
+      codesignPath,
+    },
+  },
   assets: {
     arm64: { fileName: arm64FileName, bytes: Number(arm64Bytes), sha256: arm64Sha256 },
     x86_64: { fileName: x64FileName, bytes: Number(x64Bytes), sha256: x64Sha256 },
   },
 };
+validateMacBuildMetadataCore(metadata, {
+  sourceRepository,
+  sourceSha,
+  trustedBranch,
+  electronBuilderVersion,
+});
 fs.writeFileSync(output, `${JSON.stringify(metadata, null, 2)}\n`, { flag: 'wx', mode: 0o644 });
 NODE
 

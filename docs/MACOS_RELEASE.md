@@ -22,14 +22,16 @@ defective v1.0.0 Mac DMGs and never merge the obsolete PR #3.
   reviewed pull requests only, record full commit SHAs, keep an independent backup,
   and make every build prove its exact `release/1.0` source.
 - A manual run is accepted only from `refs/heads/release/1.0`, only when the required
-  40-character `source_sha` equals both the dispatch commit and fetched branch HEAD,
-  and only when `desktop/package.json` is exactly version 1.0.1.
+  `source_repository` equals the actual workflow/event/runner repository identity,
+  only when the 40-character `source_sha` equals both the dispatch commit and fetched
+  branch HEAD, and only when `desktop/package.json` is exactly version 1.0.1.
 - Every build job checks out that output SHA rather than an ambient branch or tag.
   Tag pushes—including tag deletions and their fallback SHAs—are not workflow
   triggers. The preflight also rejects an event explicitly marked deleted if the
   trigger configuration ever regresses.
-- Windows and Linux artifacts embed the canonical source repository, actual Actions
-  workflow repository, source SHA, run attempt, installer hash and size, platform,
+- Windows and Linux artifacts embed the actual source/workflow repository name and
+  numeric ID, source SHA, run attempt, UTC build time, exact Node/npm/electron-builder
+  versions, stable hosted-runner attributes, installer hash and size, platform,
   target architecture, and version metadata. The Windows build
   also uploads and hashes its unpacked application payload so offline assembly can
   independently prove AMD64 (`0x8664`) while recording the expected 32-bit NSIS
@@ -44,7 +46,8 @@ defective v1.0.0 Mac DMGs and never merge the obsolete PR #3.
   unavailable, stop and wait; never buy minutes or increase a plan. macOS builds run
   only on the Mac Mini, not on a hosted macOS runner.
 - Official checkout, Node setup, and artifact-upload actions are pinned to reviewed
-  full v4 commit SHAs, and hosted builds install the explicit npm 10.9.9 release.
+  full v4 commit SHAs. Project scripts run on Node 22, matching the locked Supabase
+  package engines, and hosted builds install the explicit npm 10.9.9 release.
 
 ## macOS build contract
 
@@ -89,13 +92,21 @@ Merge the reviewed replacement PR into `release/1.0` and record the resulting fu
 commit SHA:
 
 ```bash
-CANONICAL_SOURCE_REPOSITORY=desmoslock/desmoslock
-WORKFLOW_REPOSITORY=<owner-that-hosts-this-actions-run>/desmoslock
+SOURCE_REPOSITORY=danielholguin31/desmoslock
 TRUSTED_BRANCH=release/1.0
 SOURCE_SHA=$(git rev-parse HEAD)
 test "${#SOURCE_SHA}" -eq 40
 test "$(git status --short)" = ""
+test "$(git remote get-url origin)" = \
+  "https://github.com/$SOURCE_REPOSITORY.git"
 ```
+
+`SOURCE_REPOSITORY` is the repository that actually hosts this source and workflow
+run, not the intended future owner. Before Daniel transfers, it is
+`danielholguin31/desmoslock`. After a completed transfer, first update `origin` to
+the organization URL and only then use `desmoslock/desmoslock`. If a transfer happens
+mid-cycle, discard the candidate and rebuild; GitHub's redirect from the old remote
+URL is not source-identity evidence.
 
 Choose one existing, operator-controlled work root outside the source checkout. All
 generated Mac output, downloaded evidence, and final assembly paths must be outside
@@ -114,8 +125,10 @@ test ! -e "$OUTPUT_DIR"
 ```
 
 From the Actions page, select **Build v1.0.1 recovery installers**, choose the exact
-`release/1.0` branch, and paste that same full SHA into `source_sha`. The run must
-finish with all three jobs successful:
+`release/1.0` branch, paste that same full SHA into `source_sha`, and paste the same
+actual `SOURCE_REPOSITORY` into `source_repository`. The preflight compares it with
+the workflow, event, runner, checkout-origin, and numeric repository identities. The
+run must finish with all three jobs successful:
 
 1. `Bind the run to exact release/1.0 source`
 2. `Build Windows installer`
@@ -127,7 +140,8 @@ credential present:
 ```bash
 desktop/scripts/build-macos-adhoc.sh \
   --source-sha "$SOURCE_SHA" \
-  --canonical-source-repository "$CANONICAL_SOURCE_REPOSITORY" \
+  --source-repository "$SOURCE_REPOSITORY" \
+  --trusted-branch "$TRUSTED_BRANCH" \
   --output-dir "$MAC_BUILD_DIR"
 ```
 
@@ -140,7 +154,7 @@ listed without downloading the assets:
 RUN_ID=<successful-workflow-run-id>
 WINDOWS_RUN_ID=$RUN_ID
 LINUX_RUN_ID=$RUN_ID
-gh api "repos/$WORKFLOW_REPOSITORY/actions/runs/$RUN_ID/artifacts" \
+gh api "repos/$SOURCE_REPOSITORY/actions/runs/$RUN_ID/artifacts" \
   --jq '.artifacts[] | [.name, .id, .expired] | @tsv'
 ```
 
@@ -151,17 +165,17 @@ exact API responses and ZIP bytes used for assembly:
 
 ```bash
 mkdir "$EVIDENCE_DIR"
-gh api "repos/$WORKFLOW_REPOSITORY/actions/runs/$WINDOWS_RUN_ID" \
+gh api "repos/$SOURCE_REPOSITORY/actions/runs/$WINDOWS_RUN_ID" \
   > "$EVIDENCE_DIR/windows-run.json"
-gh api "repos/$WORKFLOW_REPOSITORY/actions/artifacts/$WINDOWS_ARTIFACT_ID" \
+gh api "repos/$SOURCE_REPOSITORY/actions/artifacts/$WINDOWS_ARTIFACT_ID" \
   > "$EVIDENCE_DIR/windows-artifact.json"
-gh api "repos/$WORKFLOW_REPOSITORY/actions/artifacts/$WINDOWS_ARTIFACT_ID/zip" \
+gh api "repos/$SOURCE_REPOSITORY/actions/artifacts/$WINDOWS_ARTIFACT_ID/zip" \
   > "$EVIDENCE_DIR/windows-artifact.zip"
-gh api "repos/$WORKFLOW_REPOSITORY/actions/runs/$LINUX_RUN_ID" \
+gh api "repos/$SOURCE_REPOSITORY/actions/runs/$LINUX_RUN_ID" \
   > "$EVIDENCE_DIR/linux-run.json"
-gh api "repos/$WORKFLOW_REPOSITORY/actions/artifacts/$LINUX_ARTIFACT_ID" \
+gh api "repos/$SOURCE_REPOSITORY/actions/artifacts/$LINUX_ARTIFACT_ID" \
   > "$EVIDENCE_DIR/linux-artifact.json"
-gh api "repos/$WORKFLOW_REPOSITORY/actions/artifacts/$LINUX_ARTIFACT_ID/zip" \
+gh api "repos/$SOURCE_REPOSITORY/actions/artifacts/$LINUX_ARTIFACT_ID/zip" \
   > "$EVIDENCE_DIR/linux-artifact.zip"
 ```
 
@@ -178,8 +192,7 @@ temporary-directory paths; do not pass GitHub or publisher credentials.
 env -i PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
 desktop/scripts/assemble-release.sh \
   --source-sha "$SOURCE_SHA" \
-  --canonical-source-repository "$CANONICAL_SOURCE_REPOSITORY" \
-  --workflow-repository "$WORKFLOW_REPOSITORY" \
+  --source-repository "$SOURCE_REPOSITORY" \
   --trusted-branch "$TRUSTED_BRANCH" \
   --mac-arm64-dmg "$MAC_BUILD_DIR/DesmosLock-1.0.1-arm64.dmg" \
   --mac-x64-dmg "$MAC_BUILD_DIR/DesmosLock-1.0.1-x64.dmg" \
@@ -202,15 +215,17 @@ The local builder installs the locked dependencies, including the platform-resol
 archive can lose its executable bit on macOS, the assembler first requires that the
 resolved binary is a regular, non-symlink file inside that exact locked package and
 then applies mode 0755 to that one file. The assembler makes no network request. It
-validates both successful workflow runs,
-their actual repository and trusted branch, run attempts, artifact repository IDs,
-artifact IDs, GitHub API artifact digests and byte counts, embedded
-canonical/workflow repository metadata, actual installer hashes and sizes, the
+validates both successful workflow runs, their actual source/workflow repository
+name and ID and trusted branch, run attempts, artifact repository IDs, artifact IDs,
+GitHub API artifact digests and byte counts, embedded source/workflow repository,
+UTC build-time, exact tool-version, and stable runner metadata, actual installer
+hashes and sizes, the
 uploaded Windows payload hash and machine, Windows wrapper machine, Linux
 architecture, and also extracts the installer's own `DesmosLock.exe` and
 `resources/app.asar`. The embedded executable must be AMD64, and the embedded
 `app.asar` must byte-match the separately uploaded unpacked copy. It also validates
-local Mac metadata, strict Mac signatures, DMG containers, and source SHAs. It then
+local Mac source/OS/Xcode-or-CLT/tool metadata, strict Mac signatures, DMG containers,
+and source SHAs. It then
 creates exactly:
 
 ```text

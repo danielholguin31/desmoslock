@@ -7,12 +7,13 @@ on:
         description: Exact 40-character release/1.0 HEAD commit to build
         required: true
         type: string
+      source_repository:
+        description: Actual owner/repository hosting this workflow run
+        required: true
+        type: string
 
 permissions:
   contents: read
-
-env:
-  CANONICAL_SOURCE_REPOSITORY: desmoslock/desmoslock
 
 concurrency:
   group: desmoslock-v1.0.1-recovery-build
@@ -25,8 +26,14 @@ jobs:
     timeout-minutes: 5
     outputs:
       source_sha: ${{ steps.preflight.outputs.source_sha }}
+      source_repository: ${{ steps.preflight.outputs.source_repository }}
+      source_repository_id: ${{ steps.preflight.outputs.source_repository_id }}
       version: ${{ steps.preflight.outputs.version }}
     steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
@@ -38,6 +45,11 @@ jobs:
         env:
           EVENT_DELETED: ${{ github.event.deleted == true }}
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          REQUESTED_SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          CONTEXT_SOURCE_REPOSITORY: ${{ github.repository }}
+          CONTEXT_SOURCE_REPOSITORY_ID: ${{ github.repository_id }}
+          EVENT_SOURCE_REPOSITORY: ${{ github.event.repository.full_name }}
+          EVENT_SOURCE_REPOSITORY_ID: ${{ github.event.repository.id }}
           TRUSTED_BRANCH: release/1.0
         run: |
           set -euo pipefail
@@ -57,8 +69,31 @@ jobs:
             "Only a manual workflow_dispatch may build recovery installers."
           [[ "$GITHUB_REF" == "refs/heads/$TRUSTED_BRANCH" ]] || fail \
             "workflow_dispatch must run from refs/heads/$TRUSTED_BRANCH."
+          [[ "$REQUESTED_SOURCE_REPOSITORY" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$ ]] || fail \
+            "source_repository must be the actual owner/repository hosting this run."
+          [[ "$REQUESTED_SOURCE_REPOSITORY" == "$CONTEXT_SOURCE_REPOSITORY" ]] || fail \
+            "source_repository does not match github.repository."
+          [[ "$REQUESTED_SOURCE_REPOSITORY" == "$EVENT_SOURCE_REPOSITORY" ]] || fail \
+            "source_repository does not match github.event.repository.full_name."
+          [[ "$REQUESTED_SOURCE_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || fail \
+            "source_repository does not match the runner repository identity."
+          [[ "$CONTEXT_SOURCE_REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]] || fail \
+            "github.repository_id is missing or invalid."
+          [[ "$CONTEXT_SOURCE_REPOSITORY_ID" == "$EVENT_SOURCE_REPOSITORY_ID" ]] || fail \
+            "github.event.repository.id does not match github.repository_id."
+          [[ "$CONTEXT_SOURCE_REPOSITORY_ID" == "$GITHUB_REPOSITORY_ID" ]] || fail \
+            "runner repository ID does not match github.repository_id."
           [[ "$REQUESTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail \
             "source_sha must be an explicit 40-character lowercase commit SHA."
+
+          origin_url=$(git remote get-url origin) || fail "origin remote is missing."
+          origin_repository=$(node - "$origin_url" <<'NODE'
+          const { parseGitHubRepositoryRemote } = require('./desktop/scripts/provenance-contract');
+          process.stdout.write(parseGitHubRepositoryRemote(process.argv[2]));
+          NODE
+          ) || fail "origin is not an uncredentialed GitHub repository URL."
+          [[ "$origin_repository" == "$REQUESTED_SOURCE_REPOSITORY" ]] || fail \
+            "origin repository $origin_repository does not match $REQUESTED_SOURCE_REPOSITORY."
 
           source_sha=$(git rev-parse "${REQUESTED_SOURCE_SHA}^{commit}" 2>/dev/null) || fail \
             "source_sha does not identify a fetched commit."
@@ -85,15 +120,16 @@ jobs:
 
           {
             echo "source_sha=$source_sha"
+            echo "source_repository=$REQUESTED_SOURCE_REPOSITORY"
+            echo "source_repository_id=$CONTEXT_SOURCE_REPOSITORY_ID"
             echo "version=$package_version"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 20
-
       - name: Test fail-closed force-quit recovery
         run: npm --prefix desktop run test:recovery
+
+      - name: Test fail-closed release provenance
+        run: npm --prefix desktop run test:provenance
 
   build-windows:
     name: Build Windows installer
@@ -127,7 +163,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
@@ -176,6 +212,9 @@ jobs:
         env:
           BUILD_PLATFORM: windows
           SOURCE_SHA: ${{ needs.trusted-source.outputs.source_sha }}
+          SOURCE_REPOSITORY: ${{ needs.trusted-source.outputs.source_repository }}
+          SOURCE_REPOSITORY_ID: ${{ needs.trusted-source.outputs.source_repository_id }}
+          RUNNER_REQUESTED_LABEL: windows-latest
         run: node desktop/scripts/write-build-metadata.js
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -222,7 +261,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
@@ -271,6 +310,9 @@ jobs:
         env:
           BUILD_PLATFORM: linux
           SOURCE_SHA: ${{ needs.trusted-source.outputs.source_sha }}
+          SOURCE_REPOSITORY: ${{ needs.trusted-source.outputs.source_repository }}
+          SOURCE_REPOSITORY_ID: ${{ needs.trusted-source.outputs.source_repository_id }}
+          RUNNER_REQUESTED_LABEL: ubuntu-latest
         run: node desktop/scripts/write-build-metadata.js
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

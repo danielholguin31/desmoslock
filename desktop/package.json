@@ -11,7 +11,8 @@
     "dist:mac": "electron-builder --mac",
     "dist:win": "electron-builder --win",
     "build:vendor": "esbuild build/vendor-entry.js --bundle --format=iife --global-name=SupabaseSDK --minify --target=chrome110 --outfile=renderer/vendor/supabase.js",
-    "test:recovery": "node --test test/force-quit-recovery.test.js"
+    "test:recovery": "node --test test/force-quit-recovery.test.js",
+    "test:provenance": "node --test test/release-provenance.test.js"
   },
   "devDependencies": {
     "@electron/osx-sign": "1.3.1",

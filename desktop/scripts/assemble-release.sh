@@ -13,8 +13,7 @@ usage() {
 Usage:
   desktop/scripts/assemble-release.sh \
     --source-sha <40-lowercase-hex-commit> \
-    --canonical-source-repository <owner/repository> \
-    --workflow-repository <actual-actions-owner/repository> \
+    --source-repository <actual-actions-owner/repository> \
     --trusted-branch <release/1.0-or-main> \
     --mac-arm64-dmg <path> \
     --mac-x64-dmg <path> \
@@ -38,8 +37,7 @@ USAGE
 }
 
 source_sha=
-canonical_source_repository=
-workflow_repository=
+source_repository=
 trusted_branch=
 mac_arm64_dmg=
 mac_x64_dmg=
@@ -58,14 +56,13 @@ output_dir=
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --source-sha|--canonical-source-repository|--workflow-repository|--trusted-branch|--mac-arm64-dmg|--mac-x64-dmg|--mac-build-metadata|--windows-run-id|--windows-artifact-id|--windows-run-json|--windows-artifact-json|--windows-artifact-zip|--linux-run-id|--linux-artifact-id|--linux-run-json|--linux-artifact-json|--linux-artifact-zip|--output-dir)
+    --source-sha|--source-repository|--trusted-branch|--mac-arm64-dmg|--mac-x64-dmg|--mac-build-metadata|--windows-run-id|--windows-artifact-id|--windows-run-json|--windows-artifact-json|--windows-artifact-zip|--linux-run-id|--linux-artifact-id|--linux-run-json|--linux-artifact-json|--linux-artifact-zip|--output-dir)
       [[ $# -ge 2 ]] || fail "missing value for $1"
       option=$1
       value=$2
       case "$option" in
         --source-sha) source_sha=$value ;;
-        --canonical-source-repository) canonical_source_repository=$value ;;
-        --workflow-repository) workflow_repository=$value ;;
+        --source-repository) source_repository=$value ;;
         --trusted-branch) trusted_branch=$value ;;
         --mac-arm64-dmg) mac_arm64_dmg=$value ;;
         --mac-x64-dmg) mac_x64_dmg=$value ;;
@@ -97,10 +94,8 @@ done
 
 [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || fail \
   "--source-sha must be an explicit 40-character lowercase commit SHA"
-[[ "$canonical_source_repository" == desmoslock/desmoslock ]] || fail \
-  "--canonical-source-repository must be desmoslock/desmoslock"
-[[ "$workflow_repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail \
-  "--workflow-repository must use owner/repository syntax"
+[[ "$source_repository" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$ ]] || fail \
+  "--source-repository must use actual owner/repository syntax"
 [[ "$trusted_branch" == release/1.0 || "$trusted_branch" == main ]] || fail \
   "--trusted-branch must be release/1.0 or main"
 [[ "$windows_run_id" =~ ^[1-9][0-9]*$ ]] || fail \
@@ -159,6 +154,22 @@ chmod 0755 "$seven_zip" || fail "could not enable the packaged 7zip-bin executab
 current_head=$(git -C "$repo_root" rev-parse HEAD)
 [[ "$current_head" == "$source_sha" ]] || fail \
   "current checkout is $current_head, not requested source $source_sha"
+origin_url=$(git -C "$repo_root" remote get-url origin) || fail "origin remote is missing"
+origin_repository=$(node - "$script_dir/provenance-contract.js" "$origin_url" <<'NODE'
+const contract = require(process.argv[2]);
+process.stdout.write(contract.parseGitHubRepositoryRemote(process.argv[3]));
+NODE
+) || fail "origin is not an uncredentialed GitHub repository URL"
+[[ "$origin_repository" == "$source_repository" ]] || fail \
+  "origin repository is $origin_repository, not requested source $source_repository"
+git -C "$repo_root" show-ref --verify --quiet "refs/remotes/origin/$trusted_branch" || fail \
+  "fetched origin/$trusted_branch is missing"
+branch_sha=$(git -C "$repo_root" rev-parse "refs/remotes/origin/$trusted_branch^{commit}")
+[[ "$branch_sha" == "$source_sha" ]] || fail \
+  "requested source is not the fetched origin/$trusted_branch HEAD"
+git -C "$repo_root" merge-base --is-ancestor \
+  "$source_sha" "refs/remotes/origin/$trusted_branch" || fail \
+  "requested source is not contained in origin/$trusted_branch"
 source_changes=$(git -C "$repo_root" status --porcelain=v1 --untracked-files=all)
 [[ -z "$source_changes" ]] || fail \
   "tracked, staged, or untracked files prevent exact-source assembly"
@@ -171,6 +182,8 @@ ignored_package_inputs=$(git -C "$repo_root" ls-files \
 desktop_version=$(node -p "require('$repo_root/desktop/package.json').version")
 [[ "$desktop_version" == 1.0.1 ]] || fail \
   "this recovery assembler requires desktop version 1.0.1; found $desktop_version"
+locked_builder_version=$(node -p \
+  "require('$repo_root/desktop/package-lock.json').packages['node_modules/electron-builder'].version")
 
 output_parent=$(cd "$(dirname "$output_dir")" && pwd -P) || fail \
   "output parent does not exist: $(dirname "$output_dir")"
@@ -208,7 +221,7 @@ validate_run() {
   platform=$1
   run_id=$2
   run_file=$3
-  node - "$run_file" "$run_id" "$source_sha" "$workflow_repository" "$trusted_branch" <<'NODE'
+  node - "$run_file" "$run_id" "$source_sha" "$source_repository" "$trusted_branch" <<'NODE'
 const fs = require('fs');
 const [file, expectedRunId, expectedSha, expectedRepository, expectedBranch] = process.argv.slice(2);
 const run = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -217,6 +230,16 @@ if (String(run.id) !== expectedRunId) failures.push(`run id is ${run.id}`);
 if (run.head_sha !== expectedSha) failures.push(`run head is ${run.head_sha}`);
 if (!run.repository || run.repository.full_name !== expectedRepository) {
   failures.push(`repository is ${run.repository && run.repository.full_name}`);
+}
+if (!run.repository || !Number.isSafeInteger(run.repository.id) || run.repository.id < 1) {
+  failures.push(`repository id is ${run.repository && run.repository.id}`);
+}
+if (!run.head_repository || run.head_repository.full_name !== expectedRepository) {
+  failures.push(`head repository is ${run.head_repository && run.head_repository.full_name}`);
+}
+if (!run.head_repository || !Number.isSafeInteger(run.head_repository.id) ||
+    run.head_repository.id !== (run.repository && run.repository.id)) {
+  failures.push(`head repository id is ${run.head_repository && run.head_repository.id}`);
 }
 if (run.head_branch !== expectedBranch) failures.push(`head branch is ${run.head_branch}`);
 if (run.event !== 'workflow_dispatch') failures.push(`event is ${run.event}`);
@@ -230,7 +253,7 @@ if (failures.length) {
   console.error(`ERROR: ${expectedRunId} did not satisfy run provenance checks: ${failures.join('; ')}`);
   process.exit(1);
 }
-process.stdout.write(String(run.run_attempt));
+process.stdout.write(`${run.run_attempt}\t${run.repository.id}`);
 NODE
 }
 
@@ -239,16 +262,20 @@ validate_and_extract_artifact() {
   run_id=$2
   artifact_id=$3
   run_attempt=$4
-  artifact_file=$5
-  archive_file=$6
-  run_file=$7
+  repository_id=$5
+  artifact_file=$6
+  archive_file=$7
+  run_file=$8
   expected_name="installer-$platform-$source_sha"
   extraction_dir="$downloads_dir/$platform"
 
-  node - "$artifact_file" "$archive_file" "$run_file" "$artifact_id" "$run_id" "$source_sha" "$expected_name" "$trusted_branch" <<'NODE'
+  node - "$artifact_file" "$archive_file" "$run_file" "$artifact_id" "$run_id" "$source_sha" "$expected_name" "$trusted_branch" "$repository_id" <<'NODE'
 const fs = require('fs');
 const crypto = require('crypto');
-const [file, archiveFile, runFile, expectedArtifactId, expectedRunId, expectedSha, expectedName, expectedBranch] = process.argv.slice(2);
+const [
+  file, archiveFile, runFile, expectedArtifactId, expectedRunId, expectedSha,
+  expectedName, expectedBranch, expectedRepositoryId,
+] = process.argv.slice(2);
 const artifact = JSON.parse(fs.readFileSync(file, 'utf8'));
 const run = JSON.parse(fs.readFileSync(runFile, 'utf8'));
 const failures = [];
@@ -269,17 +296,18 @@ if (!artifact.workflow_run || String(artifact.workflow_run.id) !== expectedRunId
 if (!artifact.workflow_run || artifact.workflow_run.head_sha !== expectedSha) {
   failures.push(`artifact head is ${artifact.workflow_run && artifact.workflow_run.head_sha}`);
 }
-if (artifact.workflow_run && artifact.workflow_run.head_branch != null &&
-    artifact.workflow_run.head_branch !== expectedBranch) {
-  failures.push(`artifact head branch is ${artifact.workflow_run.head_branch}`);
+if (!artifact.workflow_run || artifact.workflow_run.head_branch !== expectedBranch) {
+  failures.push(`artifact head branch is ${artifact.workflow_run && artifact.workflow_run.head_branch}`);
 }
-if (artifact.workflow_run && artifact.workflow_run.repository_id != null &&
-    String(artifact.workflow_run.repository_id) !== String(run.repository && run.repository.id)) {
-  failures.push(`artifact repository id is ${artifact.workflow_run.repository_id}`);
+if (!artifact.workflow_run || artifact.workflow_run.repository_id == null ||
+    String(artifact.workflow_run.repository_id) !== expectedRepositoryId ||
+    String(run.repository && run.repository.id) !== expectedRepositoryId) {
+  failures.push(`artifact repository id is ${artifact.workflow_run && artifact.workflow_run.repository_id}`);
 }
-if (artifact.workflow_run && artifact.workflow_run.head_repository_id != null &&
-    String(artifact.workflow_run.head_repository_id) !== String(run.head_repository && run.head_repository.id)) {
-  failures.push(`artifact head repository id is ${artifact.workflow_run.head_repository_id}`);
+if (!artifact.workflow_run || artifact.workflow_run.head_repository_id == null ||
+    String(artifact.workflow_run.head_repository_id) !== expectedRepositoryId ||
+    String(run.head_repository && run.head_repository.id) !== expectedRepositoryId) {
+  failures.push(`artifact head repository id is ${artifact.workflow_run && artifact.workflow_run.head_repository_id}`);
 }
 if (failures.length) {
   console.error(`ERROR: ${expectedArtifactId} did not satisfy artifact provenance checks: ${failures.join('; ')}`);
@@ -299,37 +327,30 @@ NODE
   [[ -z "$(find "$extraction_dir" -type l -print -quit)" ]] || fail \
     "$platform artifact must not contain symbolic links"
 
-  node - "$extraction_dir/BUILD-METADATA.json" "$source_sha" \
-    "$canonical_source_repository" "$workflow_repository" \
-    "$platform" "$run_id" "$run_attempt" <<'NODE'
+  node - "$extraction_dir/BUILD-METADATA.json" \
+    "$script_dir/provenance-contract.js" "$source_sha" \
+    "$source_repository" "$repository_id" "$platform" \
+    "$run_id" "$run_attempt" "$locked_builder_version" <<'NODE'
 const fs = require('fs');
 const [
-  file, expectedSha, expectedCanonicalRepository, expectedWorkflowRepository,
-  expectedPlatform, expectedRunId, expectedRunAttempt,
+  file, contractPath, expectedSha, expectedRepository, expectedRepositoryId,
+  expectedPlatform, expectedRunId, expectedRunAttempt, expectedBuilderVersion,
 ] = process.argv.slice(2);
 if (!fs.existsSync(file)) {
   console.error(`ERROR: build metadata is missing: ${file}`);
   process.exit(1);
 }
 const metadata = JSON.parse(fs.readFileSync(file, 'utf8'));
-const failures = [];
-if (metadata.schemaVersion !== 1) failures.push(`schema is ${metadata.schemaVersion}`);
-if (metadata.sourceSha !== expectedSha) failures.push(`source is ${metadata.sourceSha}`);
-if (metadata.canonicalSourceRepository !== expectedCanonicalRepository) {
-  failures.push(`canonical repository is ${metadata.canonicalSourceRepository}`);
-}
-if (metadata.workflowRepository !== expectedWorkflowRepository) {
-  failures.push(`workflow repository is ${metadata.workflowRepository}`);
-}
-if (metadata.platform !== expectedPlatform) failures.push(`platform is ${metadata.platform}`);
-if (metadata.targetArchitecture !== 'x64') failures.push(`target architecture is ${metadata.targetArchitecture}`);
-if (String(metadata.workflowRunId) !== expectedRunId) failures.push(`run id is ${metadata.workflowRunId}`);
-if (String(metadata.workflowRunAttempt) !== expectedRunAttempt) failures.push(`run attempt is ${metadata.workflowRunAttempt}`);
-if (metadata.version !== '1.0.1') failures.push(`version is ${metadata.version}`);
-if (failures.length) {
-  console.error(`ERROR: embedded build metadata did not satisfy provenance checks: ${failures.join('; ')}`);
-  process.exit(1);
-}
+const { validateHostedBuildMetadata } = require(contractPath);
+validateHostedBuildMetadata(metadata, {
+  sourceSha: expectedSha,
+  sourceRepository: expectedRepository,
+  sourceRepositoryId: Number(expectedRepositoryId),
+  platform: expectedPlatform,
+  runId: expectedRunId,
+  runAttempt: expectedRunAttempt,
+  electronBuilderVersion: expectedBuilderVersion,
+});
 NODE
 
   extracted_count=$(find "$extraction_dir" -type f | wc -l | tr -d ' ')
@@ -347,12 +368,18 @@ NODE
   fi
 }
 
-windows_run_attempt=$(validate_run windows "$windows_run_id" "$windows_run_json")
-linux_run_attempt=$(validate_run linux "$linux_run_id" "$linux_run_json")
+windows_run_binding=$(validate_run windows "$windows_run_id" "$windows_run_json")
+linux_run_binding=$(validate_run linux "$linux_run_id" "$linux_run_json")
+IFS=$'\t' read -r windows_run_attempt windows_repository_id <<< "$windows_run_binding"
+IFS=$'\t' read -r linux_run_attempt linux_repository_id <<< "$linux_run_binding"
+[[ "$windows_repository_id" == "$linux_repository_id" ]] || fail \
+  "Windows and Linux runs came from different source repository IDs"
 validate_and_extract_artifact windows "$windows_run_id" "$windows_artifact_id" \
-  "$windows_run_attempt" "$windows_artifact_json" "$windows_artifact_zip" "$windows_run_json"
+  "$windows_run_attempt" "$windows_repository_id" \
+  "$windows_artifact_json" "$windows_artifact_zip" "$windows_run_json"
 validate_and_extract_artifact linux "$linux_run_id" "$linux_artifact_id" \
-  "$linux_run_attempt" "$linux_artifact_json" "$linux_artifact_zip" "$linux_run_json"
+  "$linux_run_attempt" "$linux_repository_id" \
+  "$linux_artifact_json" "$linux_artifact_zip" "$linux_run_json"
 
 find_one() {
   search_root=$1
@@ -481,15 +508,18 @@ NODE
 "$script_dir/verify-macos-dmg.sh" "$mac_arm64_dmg" arm64
 "$script_dir/verify-macos-dmg.sh" "$mac_x64_dmg" x86_64
 node - "$mac_build_metadata" "$mac_arm64_dmg" "$mac_x64_dmg" \
-  "$source_sha" "$canonical_source_repository" <<'NODE'
+  "$script_dir/provenance-contract.js" "$source_sha" "$source_repository" \
+  "$trusted_branch" "$locked_builder_version" <<'NODE'
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const [metadataFile, arm64Dmg, x64Dmg, expectedSha, expectedRepository] = process.argv.slice(2);
+const [
+  metadataFile, arm64Dmg, x64Dmg, contractPath, expectedSha,
+  expectedRepository, expectedBranch, expectedBuilderVersion,
+] = process.argv.slice(2);
+const { validateMacBuildMetadataCore } = require(contractPath);
 const metadata = JSON.parse(fs.readFileSync(metadataFile, 'utf8'));
 const failures = [];
-const releaseVersion = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
-const nodeVersion = /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 function validateAsset(key, file) {
   const expected = metadata.assets && metadata.assets[key];
   const actualSha = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -499,32 +529,12 @@ function validateAsset(key, file) {
   if (expected && expected.bytes !== actualBytes) failures.push(`${key} byte length is ${expected.bytes}, actual ${actualBytes}`);
   if (expected && expected.sha256 !== actualSha) failures.push(`${key} SHA-256 does not match metadata`);
 }
-if (metadata.schemaVersion !== 1) failures.push(`schema is ${metadata.schemaVersion}`);
-if (metadata.sourceSha !== expectedSha) failures.push(`source is ${metadata.sourceSha}`);
-if (metadata.canonicalSourceRepository !== expectedRepository) {
-  failures.push(`canonical repository is ${metadata.canonicalSourceRepository}`);
-}
-if (metadata.version !== '1.0.1') failures.push(`version is ${metadata.version}`);
-if (metadata.platform !== 'macos') failures.push(`platform is ${metadata.platform}`);
-if (metadata.targetArchitecture !== 'arm64+x64') failures.push(`target architecture is ${metadata.targetArchitecture}`);
-if (metadata.signing !== 'ad-hoc') failures.push(`signing is ${metadata.signing}`);
-if (metadata.notarized !== false) failures.push(`notarized is ${metadata.notarized}`);
-if (metadata.hardenedRuntime !== true) failures.push(`hardenedRuntime is ${metadata.hardenedRuntime}`);
-if (typeof metadata.builtAtUtc !== 'string' ||
-    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(metadata.builtAtUtc) ||
-    !Number.isFinite(Date.parse(metadata.builtAtUtc))) {
-  failures.push(`builtAtUtc is ${metadata.builtAtUtc}`);
-}
-if (typeof metadata.nodeVersion !== 'string' || !nodeVersion.test(metadata.nodeVersion)) {
-  failures.push(`nodeVersion is ${metadata.nodeVersion}`);
-}
-if (typeof metadata.npmVersion !== 'string' || !releaseVersion.test(metadata.npmVersion)) {
-  failures.push(`npmVersion is ${metadata.npmVersion}`);
-}
-if (typeof metadata.electronBuilderVersion !== 'string' ||
-    !releaseVersion.test(metadata.electronBuilderVersion)) {
-  failures.push(`electronBuilderVersion is ${metadata.electronBuilderVersion}`);
-}
+validateMacBuildMetadataCore(metadata, {
+  sourceSha: expectedSha,
+  sourceRepository: expectedRepository,
+  trustedBranch: expectedBranch,
+  electronBuilderVersion: expectedBuilderVersion,
+});
 validateAsset('arm64', arm64Dmg);
 validateAsset('x86_64', x64Dmg);
 if (failures.length) throw new Error(`macOS build metadata failed: ${failures.join('; ')}`);
@@ -562,8 +572,10 @@ linux_artifact_api_digest=$(node -p \
   "$linux_artifact_json")
 assembled_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
-node - "$staging_dir/RELEASE-PROVENANCE.json" "$mac_build_metadata" \
-  "$canonical_source_repository" "$workflow_repository" \
+node - "$staging_dir/RELEASE-PROVENANCE.json" \
+  "$mac_build_metadata" "$downloads_dir/windows/BUILD-METADATA.json" \
+  "$downloads_dir/linux/BUILD-METADATA.json" "$script_dir/provenance-contract.js" \
+  "$source_repository" "$windows_repository_id" "$locked_builder_version" \
   "$source_sha" "$trusted_branch" "$assembled_at" \
   "$windows_run_id" "$windows_artifact_id" "$windows_run_attempt" \
   "$linux_run_id" "$linux_artifact_id" "$linux_run_attempt" \
@@ -576,7 +588,8 @@ node - "$staging_dir/RELEASE-PROVENANCE.json" "$mac_build_metadata" \
   "$windows_artifact_api_digest" "$linux_artifact_api_digest" <<'NODE'
 const fs = require('fs');
 const [
-  output, macMetadataFile, repository, workflowRepository,
+  output, macMetadataFile, windowsMetadataFile, linuxMetadataFile, contractPath,
+  repository, repositoryId, expectedBuilderVersion,
   sourceSha, trustedBranch, assembledAt,
   windowsRunId, windowsArtifactId, windowsRunAttempt,
   linuxRunId, linuxArtifactId, linuxRunAttempt,
@@ -588,7 +601,40 @@ const [
   linuxRunJsonSha, linuxArtifactJsonSha, linuxArtifactZipSha,
   windowsArtifactApiDigest, linuxArtifactApiDigest,
 ] = process.argv.slice(2);
+const {
+  hostedProvenanceFields,
+  validateHostedBuildMetadata,
+  validateMacBuildMetadataCore,
+  validateUtcSeconds,
+} = require(contractPath);
 const macMetadata = JSON.parse(fs.readFileSync(macMetadataFile, 'utf8'));
+const windowsMetadata = JSON.parse(fs.readFileSync(windowsMetadataFile, 'utf8'));
+const linuxMetadata = JSON.parse(fs.readFileSync(linuxMetadataFile, 'utf8'));
+validateUtcSeconds(assembledAt, 'assembledAtUtc');
+validateMacBuildMetadataCore(macMetadata, {
+  sourceSha,
+  sourceRepository: repository,
+  trustedBranch,
+  electronBuilderVersion: expectedBuilderVersion,
+});
+validateHostedBuildMetadata(windowsMetadata, {
+  sourceSha,
+  sourceRepository: repository,
+  sourceRepositoryId: Number(repositoryId),
+  platform: 'windows',
+  runId: windowsRunId,
+  runAttempt: windowsRunAttempt,
+  electronBuilderVersion: expectedBuilderVersion,
+});
+validateHostedBuildMetadata(linuxMetadata, {
+  sourceSha,
+  sourceRepository: repository,
+  sourceRepositoryId: Number(repositoryId),
+  platform: 'linux',
+  runId: linuxRunId,
+  runAttempt: linuxRunAttempt,
+  electronBuilderVersion: expectedBuilderVersion,
+});
 const provenance = {
   schemaVersion: 1,
   release: {
@@ -597,7 +643,7 @@ const provenance = {
     assembledAtUtc: assembledAt,
     assembler: 'desktop/scripts/assemble-release.sh',
   },
-  source: { repository, commit: sourceSha, trustedBranch },
+  source: { repository, repositoryId: Number(repositoryId), commit: sourceSha, trustedBranch },
   builds: {
     macos: {
       method: 'local-macos',
@@ -608,10 +654,12 @@ const provenance = {
       nodeVersion: macMetadata.nodeVersion,
       npmVersion: macMetadata.npmVersion,
       electronBuilderVersion: macMetadata.electronBuilderVersion,
+      builder: macMetadata.builder,
     },
     windows: {
       method: 'github-actions',
-      workflowRepository,
+      workflowRepository: repository,
+      workflowRepositoryId: Number(repositoryId),
       runId: Number(windowsRunId),
       runAttempt: Number(windowsRunAttempt),
       artifactId: Number(windowsArtifactId),
@@ -622,14 +670,17 @@ const provenance = {
       applicationArchiveBytes: Number(windowsApplicationArchiveBytes),
       applicationArchiveSha256: windowsApplicationArchiveSha,
       wrapperMachine: '0x014c',
+      ...hostedProvenanceFields(windowsMetadata),
     },
     linux: {
       method: 'github-actions',
-      workflowRepository,
+      workflowRepository: repository,
+      workflowRepositoryId: Number(repositoryId),
       runId: Number(linuxRunId),
       runAttempt: Number(linuxRunAttempt),
       artifactId: Number(linuxArtifactId),
       artifactName: `installer-linux-${sourceSha}`,
+      ...hostedProvenanceFields(linuxMetadata),
     },
   },
   evidence: {
