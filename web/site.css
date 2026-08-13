@@ -86,7 +86,7 @@ h1 {
 .btn:hover { background: var(--hover); }
 .btn:active { transform: translateY(1px); }
 .btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
-.btn.primary:hover { filter: brightness(1.07); background: var(--blue); }
+.btn.primary:hover { filter: brightness(.94); background: var(--blue); }
 .btn.big { padding: 14px 30px; font-size: 16.5px; }
 
 .micro { font-size: 13.5px; color: var(--text-2); margin-top: 16px; }
