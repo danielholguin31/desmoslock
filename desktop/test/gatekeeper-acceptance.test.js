@@ -277,6 +277,8 @@ test('requires truthful macOS draft release disclosures and rejects bypass advic
     releaseNotes.replace('not notarized', 'notarized'),
     releaseNotes.replace('Open Anyway once', 'Continue once'),
     releaseNotes.replace('Do not remove quarantine or disable Gatekeeper.', 'Run xattr -dr com.apple.quarantine.'),
+    `${releaseNotes} Use \`xattr -dr com.apple.quarantine\`.`,
+    `${releaseNotes} Run /usr/bin/xattr -dr com.apple.quarantine.`,
     `${releaseNotes} Run spctl --master-disable.`,
   ]) assert.throws(() => validateReleaseNotes(invalid));
 });

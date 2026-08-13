@@ -167,7 +167,7 @@ function validateReleaseNotes(body) {
       !body.includes('They are not Developer ID signed and are not notarized.') ||
       !body.includes('System Settings > Privacy & Security and choose Open Anyway once.') ||
       !body.includes('Do not remove quarantine or disable Gatekeeper.') ||
-      /(?:^|\s)xattr(?:\s|$)|spctl\s+--master-disable/i.test(body)) {
+      /\bxattr\b|spctl\s+--master-disable/i.test(body)) {
     fail('draft release notes must disclose ad-hoc signing, no notarization, Open Anyway, and no bypass advice');
   }
   return hashBytes(body);
