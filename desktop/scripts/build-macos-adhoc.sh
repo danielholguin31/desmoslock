@@ -77,7 +77,7 @@ for credential_name in \
 done
 
 for command_name in \
-  git node npm shasum mktemp sw_vers uname xcode-select xcrun clang codesign pkgutil; do
+  git node corepack shasum mktemp sw_vers uname xcode-select xcrun clang codesign pkgutil; do
   command -v "$command_name" >/dev/null 2>&1 || fail "required command is unavailable: $command_name"
 done
 
@@ -134,8 +134,6 @@ desktop_version=$(node -p "require('$repo_root/desktop/package.json').version")
   "this recovery builder requires desktop version 1.0.1; found $desktop_version"
 node_major=$(node --version | sed -E 's/^v([0-9]+).*/\1/')
 [[ "$node_major" == 22 ]] || fail "Node 22 is required; found $(node --version)"
-npm_major=$(npm --version | awk -F. '{print $1}')
-[[ "$npm_major" == 10 ]] || fail "npm 10 is required; found npm $(npm --version)"
 
 output_parent=$(cd "$(dirname "$output_dir")" && pwd -P) || fail \
   "output parent does not exist: $(dirname "$output_dir")"
@@ -165,13 +163,28 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+pinned_npm() {
+  (
+    cd "$repo_root/desktop"
+    COREPACK_HOME="$temp_root/corepack" \
+      COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+      COREPACK_DEFAULT_TO_LATEST=0 \
+      corepack npm "$@"
+  )
+}
+
+npm_version=$(pinned_npm --version) || fail \
+  "Corepack could not resolve the hash-pinned npm declared by desktop/package.json"
+[[ "$npm_version" == 10.9.9 ]] || fail \
+  "hash-pinned npm 10.9.9 is required; Corepack resolved npm $npm_version"
+
 build_dir="$temp_root/build"
 staging_dir="$temp_root/output"
 mkdir "$build_dir" "$staging_dir"
 
 printf 'Installing locked dependencies and rebuilding the committed vendor bundle...\n'
-npm --prefix "$repo_root/desktop" ci
-npm --prefix "$repo_root/desktop" run build:vendor
+pinned_npm ci
+pinned_npm run build:vendor
 require_exact_source_state
 
 printf 'Building ad-hoc-signed arm64 and x64 DMGs from %s...\n' "$source_sha"
@@ -210,7 +223,6 @@ arm64_bytes=$(wc -c < "$staging_dir/$arm64_name" | tr -d ' ')
 x64_bytes=$(wc -c < "$staging_dir/$x64_name" | tr -d ' ')
 built_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 node_version=$(node --version)
-npm_version=$(npm --version)
 builder_version=$("$repo_root/desktop/node_modules/.bin/electron-builder" --version)
 locked_builder_version=$(node -p \
   "require('$repo_root/desktop/package-lock.json').packages['node_modules/electron-builder'].version")

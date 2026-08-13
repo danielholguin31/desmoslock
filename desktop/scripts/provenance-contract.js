@@ -184,7 +184,7 @@ function validateMacBuildMetadataCore(metadata, expected) {
   requireEqual(metadata.hardenedRuntime, true, 'hardenedRuntime');
   validateUtcSeconds(metadata.builtAtUtc, 'builtAtUtc');
   validateNodeVersion(metadata.nodeVersion, 'nodeVersion', { major: 22 });
-  validateReleaseVersion(metadata.npmVersion, 'npmVersion', { major: 10 });
+  validateReleaseVersion(metadata.npmVersion, 'npmVersion', { exact: '10.9.9' });
   validateReleaseVersion(metadata.electronBuilderVersion, 'electronBuilderVersion', {
     exact: expected.electronBuilderVersion,
   });

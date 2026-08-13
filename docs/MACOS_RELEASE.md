@@ -49,6 +49,15 @@ defective v1.0.0 Mac DMGs and never merge the obsolete PR #3.
   full v4 commit SHAs. Project scripts run on Node 22, matching the locked Supabase
   package engines, and hosted builds install the explicit npm 10.9.9 release.
 
+The local Mac prerequisite is Node 22 with Corepack available. `desktop/package.json`
+pins npm 10.9.9 by both version and SHA-512 package hash. The Mac builder invokes
+that package through Corepack from an ephemeral per-build cache and records the
+resolved exact version; ambient npm 11 is not used. The first run may download the
+hash-pinned package, but the builder never runs `corepack enable`, changes the user's
+default npm, or installs npm globally. Missing Corepack, an unavailable first
+download, a hash mismatch, or any resolved version other than 10.9.9 fails before
+dependency installation.
+
 ## macOS build contract
 
 `desktop/package.json` explicitly sets:
@@ -237,6 +246,11 @@ SHA256SUMS.txt
 RELEASE-PROVENANCE.json
 ```
 
+A locked-7za diagnostic of the actual v1.0.0 NSIS installer confirmed the expected
+top-level `DesmosLock.exe` and `resources/app.asar` paths. That disproves the generic
+extraction-layout concern, but the newly hosted v1.0.1 installer must still pass the
+same fail-closed archive, path, machine, hash, and `app.asar` equality checks above.
+
 `SHA256SUMS.txt` covers the four installers and `RELEASE-PROVENANCE.json`. Check it
 again from outside the script:
 
@@ -274,6 +288,51 @@ test Apple silicon and x64 under Rosetta. A real Intel Mac is preferable; record
 physical Intel as unavailable if none exists. The first launch must show the
 unidentified-developer/Open Anyway path, never a damaged-app message. Open Anyway
 must launch the app and subsequent normal launches must work.
+
+Record this customer-boundary result outside the six-asset directory. Use Safari for
+the ARM64 DMG and Chrome for the x64 DMG, enter the exact one-line messages observed,
+and run the recorder only after both Open Anyway launches and subsequent launches
+succeed:
+
+```bash
+GATEKEEPER_RECEIPT="$RELEASE_WORK_ROOT/GATEKEEPER-ACCEPTANCE-$SOURCE_SHA.json"
+SAFARI_DMG=/absolute/path/to/fresh-Safari-download/DesmosLock-mac.dmg
+CHROME_DMG=/absolute/path/to/fresh-Chrome-download/DesmosLock-mac-intel.dmg
+node desktop/scripts/record-gatekeeper-acceptance.js \
+  --candidate-dir "$OUTPUT_DIR" \
+  --arm64-dmg "$SAFARI_DMG" \
+  --arm64-browser Safari \
+  --arm64-url https://github.com/desmoslock/desmoslock-releases/releases/download/v1.0.1/DesmosLock-mac.dmg \
+  --arm64-fresh-download yes \
+  --arm64-denial-class unidentified-developer-open-anyway \
+  --arm64-observed-message '<exact observed macOS message>' \
+  --arm64-damaged-observed no \
+  --arm64-open-anyway-launched yes \
+  --arm64-subsequent-launch yes \
+  --x64-dmg "$CHROME_DMG" \
+  --x64-browser Chrome \
+  --x64-url https://github.com/desmoslock/desmoslock-releases/releases/download/v1.0.1/DesmosLock-mac-intel.dmg \
+  --x64-fresh-download yes \
+  --x64-denial-class unidentified-developer-open-anyway \
+  --x64-observed-message '<exact observed macOS message>' \
+  --x64-damaged-observed no \
+  --x64-open-anyway-launched yes \
+  --x64-subsequent-launch yes \
+  --x64-rosetta-launched yes \
+  --physical-intel-status unavailable \
+  --output "$GATEKEEPER_RECEIPT"
+shasum -a 256 "$GATEKEEPER_RECEIPT"
+```
+
+The recorder fails unless the candidate still has exactly six files, both separate
+browser downloads match the accepted manifest and provenance, both retain the
+read-only quarantine attribute, both pass structural DMG verification, the host is
+Apple silicon with working Rosetta, and every controlled observation is the expected
+class. It records macOS/build/architecture, source SHA, manifest digest, URLs, hashes, messages, and
+launch results without recording quarantine contents. It never removes quarantine.
+Do not use `spctl --assess` as the UI classifier or expect an ad-hoc build to pass it.
+No receipt means no promotion; retain the receipt and its SHA-256 privately, never as
+a seventh public release asset.
 
 Complete the product smoke suite on the candidate:
 

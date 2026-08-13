@@ -55,13 +55,23 @@ The local Mac builder parses the checkout's uncredentialed GitHub `origin`, requ
 it to equal the explicit actual source repository, and requires the fetched trusted
 branch head to equal the source SHA. It emits `MACOS-BUILD-METADATA.json` with that
 source identity, validated UTC timestamp, exact locked electron-builder version,
-Node/npm versions, macOS product/build and architecture evidence, and selected
-Xcode/Command Line Tools, SDK, Apple clang, and `/usr/bin/codesign` paths. Apple's
+Node 22 and exact npm 10.9.9 versions, macOS product/build and architecture evidence,
+and selected Xcode/Command Line Tools, SDK, Apple clang, and `/usr/bin/codesign`
+paths. Apple's
 OS-supplied `codesign` has no supported version flag, so the OS build and exact path
 bind that tool without inventing a version. The metadata also records the
 `arm64+x64` target, signing/notarization flags, and both DMG hashes and sizes. Offline
 assembly validates and carries these exact fields forward and reruns the strict DMG
 verifier.
+
+The npm runtime is not ambient: `desktop/package.json` pins npm 10.9.9 and its
+SHA-512 package hash, and the Mac builder resolves it through Corepack in an
+ephemeral cache without enabling shims or making a global installation. Structural
+DMG verification is not Gatekeeper acceptance. The separate private
+`GATEKEEPER-ACCEPTANCE-<source-sha>.json` receipt binds both quarantined browser
+downloads to this manifest and source, records the unidentified-developer/Open
+Anyway classification and successful subsequent launches for ARM64 and x64/Rosetta,
+and must pass before promotion. It is deliberately not one of the six public assets.
 
 GitHub does not expose the resolved `*-latest` runner image version as a stable
 workflow context; it appears only in setup logs. Provenance therefore records the
