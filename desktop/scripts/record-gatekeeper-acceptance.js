@@ -11,6 +11,8 @@ const {
 } = require('./provenance-contract');
 
 const RELEASE_REPOSITORY = 'desmoslock/desmoslock-releases';
+const RELEASE_ORIGIN = 'https://github.com';
+const RELEASE_TARGET_COMMIT = '5b110b5de3262b7bf8ca1c540a94da930ace8017';
 const TAG = 'v1.0.1';
 const RECEIPT_TYPE = 'gatekeeper-host-acceptance';
 const EXPECTED_FILES = [
@@ -146,16 +148,29 @@ function validateDraftDownloadUrl(value, filename, expectedToken) {
   } catch {
     fail(`${filename} download URL is invalid`);
   }
-  const prefix = `/${RELEASE_REPOSITORY}/releases/download/`;
-  const pathMatch = /^\/([^/]+)\/([^/]+)\/releases\/download\/(untagged-[0-9a-f]{20})\/([^/]+)$/.exec(url.pathname);
-  if (url.protocol !== 'https:' || url.hostname !== 'github.com' ||
-      !url.pathname.startsWith(prefix) || !pathMatch || pathMatch[1] !== 'desmoslock' ||
-      pathMatch[2] !== 'desmoslock-releases' || pathMatch[4] !== filename ||
+  const expectedPrefix = `/${RELEASE_REPOSITORY}/releases/download/`;
+  const escapedRepository = RELEASE_REPOSITORY.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pathMatch = new RegExp(`^/${escapedRepository}/releases/download/(untagged-[0-9a-f]{20})/([^/]+)$`)
+    .exec(url.pathname);
+  if (url.origin !== RELEASE_ORIGIN || !url.pathname.startsWith(expectedPrefix) ||
+      !pathMatch || pathMatch[2] !== filename ||
       url.pathname.includes('%') || url.username || url.password || url.search || url.hash ||
-      url.toString() !== value || (expectedToken !== undefined && pathMatch[3] !== expectedToken)) {
+      url.toString() !== value || (expectedToken !== undefined && pathMatch[1] !== expectedToken)) {
     fail(`${filename} must use its exact credential-free GitHub draft asset URL`);
   }
-  return { url: url.toString(), untaggedToken: pathMatch[3] };
+  return { url: url.toString(), untaggedToken: pathMatch[1] };
+}
+
+function validateReleaseNotes(body) {
+  if (typeof body !== 'string' ||
+      !body.includes('The macOS builds are ad-hoc signed.') ||
+      !body.includes('They are not Developer ID signed and are not notarized.') ||
+      !body.includes('System Settings > Privacy & Security and choose Open Anyway once.') ||
+      !body.includes('Do not remove quarantine or disable Gatekeeper.') ||
+      /(?:^|\s)xattr(?:\s|$)|spctl\s+--master-disable/i.test(body)) {
+    fail('draft release notes must disclose ad-hoc signing, no notarization, Open Anyway, and no bypass advice');
+  }
+  return hashBytes(body);
 }
 
 function validateObservation(label, observation, { expectedBrowser, requireRosetta = false } = {}) {
@@ -286,12 +301,13 @@ function loadCandidate(candidateArgument) {
 function validateDraftReleaseSnapshot(snapshot, candidate) {
   requireExactObjectKeys(snapshot, [
     'releaseId', 'repository', 'tag', 'targetCommitish', 'draft', 'prerelease',
-    'immutable', 'untaggedToken', 'assets',
+    'immutable', 'releaseNotesSha256', 'untaggedToken', 'assets',
   ], 'draft release snapshot');
   requirePositiveSafeInteger(snapshot.releaseId, 'draft release ID');
   if (snapshot.repository !== RELEASE_REPOSITORY || snapshot.tag !== TAG ||
-      !/^[0-9a-f]{40}$/.test(snapshot.targetCommitish) || snapshot.draft !== true ||
+      snapshot.targetCommitish !== RELEASE_TARGET_COMMIT || snapshot.draft !== true ||
       snapshot.prerelease !== false || snapshot.immutable !== false ||
+      !/^[0-9a-f]{64}$/.test(snapshot.releaseNotesSha256) ||
       !/^untagged-[0-9a-f]{20}$/.test(snapshot.untaggedToken)) {
     fail('draft release identity is invalid');
   }
@@ -333,12 +349,13 @@ function loadDraftReleaseSnapshot(snapshotArgument, candidate) {
   const releaseId = requirePositiveSafeInteger(raw.id, 'draft release ID');
   if (raw.url !== `https://api.github.com/repos/${RELEASE_REPOSITORY}/releases/${releaseId}` ||
       raw.assets_url !== `https://api.github.com/repos/${RELEASE_REPOSITORY}/releases/${releaseId}/assets` ||
-      raw.tag_name !== TAG || !/^[0-9a-f]{40}$/.test(raw.target_commitish) ||
+      raw.tag_name !== TAG || raw.target_commitish !== RELEASE_TARGET_COMMIT ||
       raw.draft !== true || raw.prerelease !== false || raw.published_at !== null ||
       raw.immutable !== false ||
       !Array.isArray(raw.assets) || raw.assets.length !== EXPECTED_FILES.length) {
     fail('draft release API snapshot identity is invalid');
   }
+  const releaseNotesSha256 = validateReleaseNotes(raw.body);
 
   const rawAssets = new Map();
   const rawAssetIds = new Set();
@@ -379,6 +396,7 @@ function loadDraftReleaseSnapshot(snapshotArgument, candidate) {
     draft: true,
     prerelease: false,
     immutable: false,
+    releaseNotesSha256,
     untaggedToken,
     assets: Object.fromEntries(EXPECTED_FILES.map((filename) => [filename, rawAssets.get(filename)])),
   };
@@ -682,6 +700,7 @@ module.exports = {
   EXPECTED_FILES,
   RECEIPT_TYPE,
   RELEASE_REPOSITORY,
+  RELEASE_TARGET_COMMIT,
   ROLE_SCOPES,
   TAG,
   classifyHardwareFamily,
@@ -699,6 +718,7 @@ module.exports = {
   sameFile,
   validateDraftDownloadUrl,
   validateDraftReleaseSnapshot,
+  validateReleaseNotes,
   validateHostReceipt,
   validateObservation,
   validateReceiptPair,

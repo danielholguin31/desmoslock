@@ -345,6 +345,7 @@ run this after its fresh Safari ARM64 and Chrome x64/Rosetta tests:
 MACBOOK_RECEIPT="$RELEASE_WORK_ROOT/GATEKEEPER-HOST-macbook-$SOURCE_SHA.json"
 MACBOOK_SAFARI_DMG=/absolute/path/to/fresh-Safari-download/DesmosLock-mac.dmg
 MACBOOK_CHROME_DMG=/absolute/path/to/fresh-Chrome-download/DesmosLock-mac-intel.dmg
+DRAFT_RELEASE_JSON=/absolute/private/path/on/macbook/to/draft-release-v1.0.1.json
 node desktop/scripts/record-gatekeeper-acceptance.js \
   --host-role macbook \
   --candidate-dir "$OUTPUT_DIR" \

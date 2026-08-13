@@ -10,6 +10,7 @@ const {
   CHECKSUM_FILES,
   EXPECTED_FILES,
   RELEASE_REPOSITORY,
+  RELEASE_TARGET_COMMIT,
   ROLE_SCOPES,
   TAG,
   classifyHardwareFamily,
@@ -19,6 +20,7 @@ const {
   parseChecksumManifest,
   validateDraftDownloadUrl,
   validateDraftReleaseSnapshot,
+  validateReleaseNotes,
   validateHostReceipt,
   validateObservation,
   validateReceiptPair,
@@ -26,9 +28,10 @@ const {
 
 const sourceSha = '0123456789abcdef0123456789abcdef01234567';
 const sourceRepository = 'danielholguin31/desmoslock';
-const releaseTarget = '89abcdef0123456789abcdef0123456789abcdef';
+const releaseTarget = RELEASE_TARGET_COMMIT;
 const draftReleaseId = 370225506;
 const untaggedToken = 'untagged-e0bdd4e2f98d728bbb84';
+const releaseNotes = 'The macOS builds are ad-hoc signed. They are not Developer ID signed and are not notarized. On first launch, open System Settings > Privacy & Security and choose Open Anyway once. Do not remove quarantine or disable Gatekeeper.';
 const hashes = Object.fromEntries(EXPECTED_FILES.map((filename, index) => [
   filename,
   (index + 1).toString(16).repeat(64),
@@ -54,6 +57,7 @@ const draftRelease = {
   draft: true,
   prerelease: false,
   immutable: false,
+  releaseNotesSha256: require('node:crypto').createHash('sha256').update(releaseNotes).digest('hex'),
   untaggedToken,
   assets: draftAssets,
 };
@@ -76,6 +80,7 @@ function rawDraftRelease(overrides = {}) {
     draft: true,
     prerelease: false,
     immutable: false,
+    body: releaseNotes,
     published_at: null,
     assets: EXPECTED_FILES.map((filename) => ({
       url: `https://api.github.com/repos/${RELEASE_REPOSITORY}/releases/assets/${draftAssets[filename].assetId}`,
@@ -233,6 +238,7 @@ test('accepts only the exact credential-free GitHub draft asset URL', () => {
     url.replace(`/${untaggedToken}/`, '/latest/'),
     `${url}?token=secret`,
     url.replace('https://github.com', 'https://user:secret@github.com'),
+    url.replace('github.com/', 'github.com:444/'),
     url.replace('github.com', 'example.com'),
     url.replace('DesmosLock-mac.dmg', 'DesmosLock-mac%2Edmg'),
   ]) assert.throws(() => validateDraftDownloadUrl(invalid, 'DesmosLock-mac.dmg'));
@@ -245,6 +251,7 @@ test('draft snapshot binds release and asset IDs, sizes, hashes, and one untagge
     (snapshot) => { snapshot.releaseId = 0; },
     (snapshot) => { snapshot.repository = 'other/repository'; },
     (snapshot) => { snapshot.tag = 'v1.0.2'; },
+    (snapshot) => { snapshot.targetCommitish = 'f'.repeat(40); },
     (snapshot) => { snapshot.draft = false; },
     (snapshot) => { delete snapshot.assets['SHA256SUMS.txt']; },
     (snapshot) => { snapshot.assets['DesmosLock-mac.dmg'].assetId = -1; },
@@ -260,6 +267,18 @@ test('draft snapshot binds release and asset IDs, sizes, hashes, and one untagge
     mutate(changed);
     assert.throws(() => validateDraftReleaseSnapshot(changed, candidate));
   }
+});
+
+test('requires truthful macOS draft release disclosures and rejects bypass advice', () => {
+  assert.match(validateReleaseNotes(releaseNotes), /^[0-9a-f]{64}$/);
+  for (const invalid of [
+    '',
+    releaseNotes.replace('ad-hoc signed', 'signed'),
+    releaseNotes.replace('not notarized', 'notarized'),
+    releaseNotes.replace('Open Anyway once', 'Continue once'),
+    releaseNotes.replace('Do not remove quarantine or disable Gatekeeper.', 'Run xattr -dr com.apple.quarantine.'),
+    `${releaseNotes} Run spctl --master-disable.`,
+  ]) assert.throws(() => validateReleaseNotes(invalid));
 });
 
 test('loads a private saved GitHub draft API response into the normalized snapshot', (t) => {
@@ -293,10 +312,12 @@ test('rejects malformed GitHub draft API identity and asset evidence', (t) => {
     (raw) => { raw.id = -1; },
     (raw) => { raw.url = raw.url.replace(RELEASE_REPOSITORY, 'other/repository'); },
     (raw) => { raw.tag_name = 'v1.0.2'; },
+    (raw) => { raw.target_commitish = 'f'.repeat(40); },
     (raw) => { raw.draft = false; },
     (raw) => { raw.prerelease = true; },
     (raw) => { raw.immutable = true; },
     (raw) => { raw.published_at = '2026-08-13T20:00:00Z'; },
+    (raw) => { raw.body = ''; },
     (raw) => { raw.assets.pop(); },
     (raw) => { raw.assets[1].name = raw.assets[0].name; },
     (raw) => { raw.assets[1].id = raw.assets[0].id; },
