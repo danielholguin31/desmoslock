@@ -2,15 +2,15 @@
 
 :root {
   --text: #37352f;
-  --text-2: rgba(55, 53, 47, 0.68);
+  --text-2: rgba(55, 53, 47, 0.70);
   --text-3: rgba(55, 53, 47, 0.45);
   --bg: #ffffff;
   --bg-2: #fbfbfa;
   --line: rgba(55, 53, 47, 0.10);
   --line-2: rgba(55, 53, 47, 0.18);
   --hover: rgba(55, 53, 47, 0.055);
-  --blue: #2383e2;
-  --blue-soft: rgba(35, 131, 226, 0.10);
+  --blue: #1f73bd;
+  --blue-soft: rgba(31, 115, 189, 0.10);
   --red: #e03e3e;
   --red-soft: rgba(224, 62, 62, 0.10);
   --amber: #d9730d;
