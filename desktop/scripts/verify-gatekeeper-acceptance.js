@@ -58,11 +58,12 @@ function main(argv) {
       path.basename(output) === path.basename(macbook.receiptPath)) fail('aggregate output collides with MacBook receipt');
 
   const aggregate = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     receiptType: 'gatekeeper-two-host-acceptance',
     verifiedAtUtc: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     source: candidate.source,
     release: candidate.release,
+    draftRelease: mini.receipt.draftRelease,
     candidate: {
       manifestSha256: candidate.manifestSha256,
       assetSha256: candidate.assetSha256,
@@ -87,6 +88,7 @@ function main(argv) {
       liveSixAssetCandidateMatched: true,
       sourceRepositoryAndCommitMatched: true,
       releaseRepositoryAndTagMatched: true,
+      draftReleaseAndEveryAssetBindingMatched: true,
       manifestAndEveryAssetHashMatched: true,
       exactRoleScopesMatched: true,
       distinctHostFingerprintsMatched: true,

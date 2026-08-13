@@ -294,11 +294,17 @@ downloads of the exact draft assets:
 - **Mac Mini:** Safari ARM64/native only. This role does not require or probe Rosetta.
 - **MacBook:** Safari ARM64/native plus Chrome x64/Rosetta.
 
-Open each canonical tag-specific URL in a logged-in collaborator browser. The URL
-itself must remain credential-free—authentication comes only from the browser
-session—and each downloaded DMG must retain browser quarantine. Anonymous downloads
-are impossible while the release is a draft; the logged-out anonymous redownload is
-a separate post-publication check below.
+Save the authenticated GitHub REST response for the draft release as a private
+mode-0600 JSON file outside the six-asset directory. GitHub intentionally gives draft
+assets credential-free `untagged-*` browser URLs; it does not create the final tag
+until publication. Open the exact ARM64 and x64 URLs from that saved response in a
+logged-in collaborator browser. Authentication comes only from the browser session,
+never from URL credentials. The recorder requires the response to describe this
+repository, v1.0.1, a still-unpublished draft, and exactly six uploaded assets, and
+binds every numeric release/asset ID, byte length, GitHub SHA-256 digest, and exact
+`untagged-*` URL to the live candidate. Each downloaded DMG must retain browser
+quarantine. Anonymous downloads are impossible while the release is a draft; the
+logged-out canonical v1.0.1 redownload remains a separate post-publication check.
 
 On every required path, witness the first-launch unidentified-developer block, use
 **System Settings > Privacy & Security > Open Anyway**, confirm launch, quit normally,
@@ -314,12 +320,14 @@ Run this on the Mac Mini after its Safari ARM64 test:
 ```bash
 MINI_RECEIPT="$RELEASE_WORK_ROOT/GATEKEEPER-HOST-mac-mini-$SOURCE_SHA.json"
 MINI_SAFARI_DMG=/absolute/path/to/fresh-Safari-download/DesmosLock-mac.dmg
+DRAFT_RELEASE_JSON=/absolute/private/path/to/draft-release-v1.0.1.json
 node desktop/scripts/record-gatekeeper-acceptance.js \
   --host-role mac-mini \
   --candidate-dir "$OUTPUT_DIR" \
+  --draft-release-json "$DRAFT_RELEASE_JSON" \
   --arm64-dmg "$MINI_SAFARI_DMG" \
   --arm64-browser Safari \
-  --arm64-url https://github.com/desmoslock/desmoslock-releases/releases/download/v1.0.1/DesmosLock-mac.dmg \
+  --arm64-url '<exact browser_download_url for DesmosLock-mac.dmg from the saved response>' \
   --arm64-fresh-download yes \
   --arm64-denial-class unidentified-developer-open-anyway \
   --arm64-observed-message '<exact witnessed macOS message>' \
@@ -340,9 +348,10 @@ MACBOOK_CHROME_DMG=/absolute/path/to/fresh-Chrome-download/DesmosLock-mac-intel.
 node desktop/scripts/record-gatekeeper-acceptance.js \
   --host-role macbook \
   --candidate-dir "$OUTPUT_DIR" \
+  --draft-release-json "$DRAFT_RELEASE_JSON" \
   --arm64-dmg "$MACBOOK_SAFARI_DMG" \
   --arm64-browser Safari \
-  --arm64-url https://github.com/desmoslock/desmoslock-releases/releases/download/v1.0.1/DesmosLock-mac.dmg \
+  --arm64-url '<exact browser_download_url for DesmosLock-mac.dmg from the saved response>' \
   --arm64-fresh-download yes \
   --arm64-denial-class unidentified-developer-open-anyway \
   --arm64-observed-message '<exact witnessed macOS message>' \
@@ -351,7 +360,7 @@ node desktop/scripts/record-gatekeeper-acceptance.js \
   --arm64-subsequent-launch yes \
   --x64-dmg "$MACBOOK_CHROME_DMG" \
   --x64-browser Chrome \
-  --x64-url https://github.com/desmoslock/desmoslock-releases/releases/download/v1.0.1/DesmosLock-mac-intel.dmg \
+  --x64-url '<exact browser_download_url for DesmosLock-mac-intel.dmg from the saved response>' \
   --x64-fresh-download yes \
   --x64-denial-class unidentified-developer-open-anyway \
   --x64-observed-message '<exact witnessed macOS message>' \

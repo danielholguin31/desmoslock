@@ -27,7 +27,7 @@ const ROLE_SCOPES = Object.freeze({
   macbook: Object.freeze(['arm64-native', 'x64-rosetta']),
 });
 const COMMON_OPTION_KEYS = [
-  'host-role', 'candidate-dir', 'arm64-dmg', 'arm64-browser', 'arm64-url',
+  'host-role', 'candidate-dir', 'draft-release-json', 'arm64-dmg', 'arm64-browser', 'arm64-url',
   'arm64-fresh-download', 'arm64-denial-class', 'arm64-observed-message',
   'arm64-damaged-observed', 'arm64-open-anyway-launched', 'arm64-subsequent-launch',
   'output',
@@ -134,19 +134,28 @@ function parseChecksumManifest(text) {
   return entries;
 }
 
-function validateDownloadUrl(value, filename) {
+function requirePositiveSafeInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value <= 0) fail(`${label} must be a positive safe integer`);
+  return value;
+}
+
+function validateDraftDownloadUrl(value, filename, expectedToken) {
   let url;
   try {
     url = new URL(value);
   } catch {
     fail(`${filename} download URL is invalid`);
   }
-  const expectedPath = `/${RELEASE_REPOSITORY}/releases/download/${TAG}/${filename}`;
+  const prefix = `/${RELEASE_REPOSITORY}/releases/download/`;
+  const pathMatch = /^\/([^/]+)\/([^/]+)\/releases\/download\/(untagged-[0-9a-f]{20})\/([^/]+)$/.exec(url.pathname);
   if (url.protocol !== 'https:' || url.hostname !== 'github.com' ||
-      url.pathname !== expectedPath || url.username || url.password || url.search || url.hash) {
-    fail(`${filename} must use its credential-free, tag-specific GitHub release URL`);
+      !url.pathname.startsWith(prefix) || !pathMatch || pathMatch[1] !== 'desmoslock' ||
+      pathMatch[2] !== 'desmoslock-releases' || pathMatch[4] !== filename ||
+      url.pathname.includes('%') || url.username || url.password || url.search || url.hash ||
+      url.toString() !== value || (expectedToken !== undefined && pathMatch[3] !== expectedToken)) {
+    fail(`${filename} must use its exact credential-free GitHub draft asset URL`);
   }
-  return url.toString();
+  return { url: url.toString(), untaggedToken: pathMatch[3] };
 }
 
 function validateObservation(label, observation, { expectedBrowser, requireRosetta = false } = {}) {
@@ -259,17 +268,125 @@ function loadCandidate(candidateArgument) {
     filename,
     filename === 'SHA256SUMS.txt' ? hashFile(manifestPath) : checksums[filename],
   ]));
+  const assetSize = Object.fromEntries(EXPECTED_FILES.map((filename) => [
+    filename,
+    fs.statSync(path.join(candidateDir, filename)).size,
+  ]));
   return {
     candidateDir,
     manifestSha256: assetSha256['SHA256SUMS.txt'],
     assetSha256,
+    assetSize,
     source: { repository: sourceRepository, commit: sourceSha },
     release: { repository: RELEASE_REPOSITORY, tag: TAG },
     provenance,
   };
 }
 
-function receiptTest(asset, candidate) {
+function validateDraftReleaseSnapshot(snapshot, candidate) {
+  requireExactObjectKeys(snapshot, [
+    'releaseId', 'repository', 'tag', 'targetCommitish', 'draft', 'prerelease',
+    'immutable', 'untaggedToken', 'assets',
+  ], 'draft release snapshot');
+  requirePositiveSafeInteger(snapshot.releaseId, 'draft release ID');
+  if (snapshot.repository !== RELEASE_REPOSITORY || snapshot.tag !== TAG ||
+      !/^[0-9a-f]{40}$/.test(snapshot.targetCommitish) || snapshot.draft !== true ||
+      snapshot.prerelease !== false || snapshot.immutable !== false ||
+      !/^untagged-[0-9a-f]{20}$/.test(snapshot.untaggedToken)) {
+    fail('draft release identity is invalid');
+  }
+  const seenAssetIds = new Set();
+  requireExactObjectKeys(snapshot.assets, EXPECTED_FILES, 'draft release assets');
+  for (const filename of EXPECTED_FILES) {
+    const asset = requireExactObjectKeys(snapshot.assets[filename], [
+      'assetId', 'size', 'sha256', 'browserDownloadUrl',
+    ], `draft release asset ${filename}`);
+    requirePositiveSafeInteger(asset.assetId, `${filename} draft asset ID`);
+    if (seenAssetIds.has(asset.assetId)) fail('draft release asset IDs must be unique');
+    seenAssetIds.add(asset.assetId);
+    requirePositiveSafeInteger(asset.size, `${filename} draft asset size`);
+    if (!/^[0-9a-f]{64}$/.test(asset.sha256)) fail(`${filename} draft asset digest is invalid`);
+    validateDraftDownloadUrl(asset.browserDownloadUrl, filename, snapshot.untaggedToken);
+    if (candidate && (asset.sha256 !== candidate.assetSha256[filename] ||
+        asset.size !== candidate.assetSize[filename])) {
+      fail(`${filename} draft asset does not match the live candidate`);
+    }
+  }
+  return snapshot;
+}
+
+function loadDraftReleaseSnapshot(snapshotArgument, candidate) {
+  const snapshotPath = resolveRegularFile(snapshotArgument, 'draft release API snapshot');
+  if (pathIsInside(candidate.candidateDir, snapshotPath)) {
+    fail('draft release API snapshot must remain outside the six-asset directory');
+  }
+  if ((fs.lstatSync(snapshotPath).mode & 0o077) !== 0) {
+    fail('draft release API snapshot must not be readable or writable by group/others');
+  }
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(snapshotPath, 'utf8'));
+  } catch {
+    fail('draft release API snapshot is not valid JSON');
+  }
+  requireObject(raw, 'draft release API snapshot');
+  const releaseId = requirePositiveSafeInteger(raw.id, 'draft release ID');
+  if (raw.url !== `https://api.github.com/repos/${RELEASE_REPOSITORY}/releases/${releaseId}` ||
+      raw.assets_url !== `https://api.github.com/repos/${RELEASE_REPOSITORY}/releases/${releaseId}/assets` ||
+      raw.tag_name !== TAG || !/^[0-9a-f]{40}$/.test(raw.target_commitish) ||
+      raw.draft !== true || raw.prerelease !== false || raw.published_at !== null ||
+      raw.immutable !== false ||
+      !Array.isArray(raw.assets) || raw.assets.length !== EXPECTED_FILES.length) {
+    fail('draft release API snapshot identity is invalid');
+  }
+
+  const rawAssets = new Map();
+  const rawAssetIds = new Set();
+  let untaggedToken;
+  for (const rawAsset of raw.assets) {
+    if (!rawAsset || typeof rawAsset !== 'object' || typeof rawAsset.name !== 'string' ||
+        rawAssets.has(rawAsset.name) || !EXPECTED_FILES.includes(rawAsset.name)) {
+      fail('draft release API snapshot assets are missing, duplicated, or unexpected');
+    }
+    const assetId = requirePositiveSafeInteger(rawAsset.id, `${rawAsset.name} draft asset ID`);
+    if (rawAssetIds.has(assetId)) fail('draft release asset IDs must be unique');
+    rawAssetIds.add(assetId);
+    const size = requirePositiveSafeInteger(rawAsset.size, `${rawAsset.name} draft asset size`);
+    if (rawAsset.state !== 'uploaded' ||
+        rawAsset.url !== `https://api.github.com/repos/${RELEASE_REPOSITORY}/releases/assets/${assetId}` ||
+        rawAsset.digest !== `sha256:${candidate.assetSha256[rawAsset.name]}` ||
+        size !== candidate.assetSize[rawAsset.name]) {
+      fail(`${rawAsset.name} draft asset API evidence does not match the live candidate`);
+    }
+    const validatedUrl = validateDraftDownloadUrl(rawAsset.browser_download_url, rawAsset.name, untaggedToken);
+    untaggedToken ??= validatedUrl.untaggedToken;
+    rawAssets.set(rawAsset.name, {
+      assetId,
+      size,
+      sha256: rawAsset.digest.slice('sha256:'.length),
+      browserDownloadUrl: validatedUrl.url,
+    });
+  }
+  if (rawAssets.size !== EXPECTED_FILES.length ||
+      raw.html_url !== `https://github.com/${RELEASE_REPOSITORY}/releases/tag/${untaggedToken}`) {
+    fail('draft release API snapshot URLs are inconsistent');
+  }
+  const snapshot = {
+    releaseId,
+    repository: RELEASE_REPOSITORY,
+    tag: TAG,
+    targetCommitish: raw.target_commitish,
+    draft: true,
+    prerelease: false,
+    immutable: false,
+    untaggedToken,
+    assets: Object.fromEntries(EXPECTED_FILES.map((filename) => [filename, rawAssets.get(filename)])),
+  };
+  return validateDraftReleaseSnapshot(snapshot, candidate);
+}
+
+function receiptTest(asset, candidate, draftRelease) {
+  const draftAsset = draftRelease.assets[asset.filename];
   return {
     id: asset.id,
     filename: asset.filename,
@@ -284,7 +401,10 @@ function receiptTest(asset, candidate) {
       kind: 'witnessed-operator-attestation',
       draftDownloadContext: 'logged-in-collaborator-browser',
       browser: asset.observation.browser,
-      canonicalDownloadUrl: asset.url,
+      draftReleaseId: draftRelease.releaseId,
+      draftAssetId: draftAsset.assetId,
+      githubSha256: draftAsset.sha256,
+      draftBrowserDownloadUrl: asset.url,
       freshBrowserDownload: true,
       executionMode: asset.id === 'x64-rosetta' ? 'rosetta' : 'native',
       denialClass: asset.observation.denialClass,
@@ -300,9 +420,9 @@ function receiptTest(asset, candidate) {
 function validateHostReceipt(receipt, expectedRole, candidate) {
   requireExactObjectKeys(receipt, [
     'schemaVersion', 'receiptType', 'recordedAtUtc', 'source', 'release', 'candidate',
-    'host', 'policy', 'tests', 'verification',
+    'draftRelease', 'host', 'policy', 'tests', 'verification',
   ], 'host receipt');
-  if (receipt.schemaVersion !== 2 || receipt.receiptType !== RECEIPT_TYPE) fail('host receipt schema/type is invalid');
+  if (receipt.schemaVersion !== 3 || receipt.receiptType !== RECEIPT_TYPE) fail('host receipt schema/type is invalid');
   validateUtcSeconds(receipt.recordedAtUtc, 'recordedAtUtc');
   requireExactObjectKeys(receipt.source, ['repository', 'commit'], 'source');
   validateRepository(receipt.source.repository, 'source.repository');
@@ -319,6 +439,7 @@ function validateHostReceipt(receipt, expectedRole, candidate) {
   if (receipt.candidate.assetSha256['SHA256SUMS.txt'] !== receipt.candidate.manifestSha256) {
     fail('receipt manifest digest is inconsistent');
   }
+  validateDraftReleaseSnapshot(receipt.draftRelease, candidate);
 
   requireExactObjectKeys(receipt.host, [
     'role', 'scope', 'hardwareFamily', 'fingerprintSha256', 'macosProductVersion', 'macosBuildVersion',
@@ -367,14 +488,20 @@ function validateHostReceipt(receipt, expectedRole, candidate) {
         test.automatedEvidence.quarantinePresent !== true || test.automatedEvidence.hdiutilVerify !== true ||
         test.automatedEvidence.codesignDeepStrict !== true) fail(`${id} automated evidence is invalid`);
     const attestation = requireExactObjectKeys(test.witnessedOperatorAttestation, [
-      'kind', 'draftDownloadContext', 'browser', 'canonicalDownloadUrl', 'freshBrowserDownload',
+      'kind', 'draftDownloadContext', 'browser', 'draftReleaseId', 'draftAssetId',
+      'githubSha256', 'draftBrowserDownloadUrl', 'freshBrowserDownload',
       'executionMode', 'denialClass', 'observedMessage', 'damagedMessageObserved',
       'openAnywayLaunched', 'subsequentLaunchWorked', 'rosettaLaunched',
     ], `${id}.witnessedOperatorAttestation`);
     if (attestation.kind !== 'witnessed-operator-attestation' ||
         attestation.draftDownloadContext !== 'logged-in-collaborator-browser' ||
         attestation.browser !== (x64 ? 'Chrome' : 'Safari') ||
-        validateDownloadUrl(attestation.canonicalDownloadUrl, filename) !== attestation.canonicalDownloadUrl ||
+        attestation.draftReleaseId !== receipt.draftRelease.releaseId ||
+        attestation.draftAssetId !== receipt.draftRelease.assets[filename].assetId ||
+        attestation.githubSha256 !== receipt.draftRelease.assets[filename].sha256 ||
+        validateDraftDownloadUrl(attestation.draftBrowserDownloadUrl, filename,
+          receipt.draftRelease.untaggedToken).url !== attestation.draftBrowserDownloadUrl ||
+        attestation.draftBrowserDownloadUrl !== receipt.draftRelease.assets[filename].browserDownloadUrl ||
         attestation.freshBrowserDownload !== true || attestation.executionMode !== (x64 ? 'rosetta' : 'native') ||
         attestation.denialClass !== 'unidentified-developer-open-anyway' ||
         typeof attestation.observedMessage !== 'string' || attestation.observedMessage.length < 5 ||
@@ -411,6 +538,7 @@ function validateReceiptPair(macMiniReceipt, macBookReceipt, candidate) {
   }
   if (JSON.stringify(macMiniReceipt.source) !== JSON.stringify(macBookReceipt.source) ||
       JSON.stringify(macMiniReceipt.release) !== JSON.stringify(macBookReceipt.release) ||
+      JSON.stringify(macMiniReceipt.draftRelease) !== JSON.stringify(macBookReceipt.draftRelease) ||
       macMiniReceipt.candidate.manifestSha256 !== macBookReceipt.candidate.manifestSha256 ||
       JSON.stringify(macMiniReceipt.candidate.assetSha256) !== JSON.stringify(macBookReceipt.candidate.assetSha256)) {
     fail('host receipts do not bind the same source, release, and six assets');
@@ -432,6 +560,7 @@ function main(argv) {
   }
 
   const candidate = loadCandidate(options['candidate-dir']);
+  const draftRelease = loadDraftReleaseSnapshot(options['draft-release-json'], candidate);
   const hostArchitecture = commandOutput('/usr/bin/uname', ['-m']);
   if (hostArchitecture !== 'arm64') fail('both required host roles must run on Apple silicon');
   const hardwareFamily = readHardwareFamily();
@@ -475,7 +604,12 @@ function main(argv) {
     if (sameFile(asset.path, path.join(candidate.candidateDir, asset.filename))) {
       fail(`${asset.id} test input is the assembled file, not a separate browser download`);
     }
-    asset.url = validateDownloadUrl(asset.url, asset.filename);
+    const draftAsset = draftRelease.assets[asset.filename];
+    const validatedUrl = validateDraftDownloadUrl(asset.url, asset.filename, draftRelease.untaggedToken);
+    if (validatedUrl.url !== draftAsset.browserDownloadUrl) {
+      fail(`${asset.id} download URL does not match the saved draft asset API evidence`);
+    }
+    asset.url = validatedUrl.url;
     validateObservation(asset.id, asset.observation, {
       expectedBrowser: asset.id === 'x64-rosetta' ? 'Chrome' : 'Safari',
       requireRosetta: asset.id === 'x64-rosetta',
@@ -492,7 +626,7 @@ function main(argv) {
 
   const output = resolveNewPrivateOutput(options.output, candidate.candidateDir);
   const receipt = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     receiptType: RECEIPT_TYPE,
     recordedAtUtc: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     source: candidate.source,
@@ -501,6 +635,7 @@ function main(argv) {
       manifestSha256: candidate.manifestSha256,
       assetSha256: candidate.assetSha256,
     },
+    draftRelease,
     host: {
       role,
       scope: [...ROLE_SCOPES[role]],
@@ -519,7 +654,7 @@ function main(argv) {
       receiptIsPublicReleaseAsset: false,
       dialogAndLaunchEvidenceSource: 'witnessed-operator-attestation',
     },
-    tests: assets.map((asset) => receiptTest(asset, candidate)),
+    tests: assets.map((asset) => receiptTest(asset, candidate, draftRelease)),
     verification: {
       checksumManifestMatched: true,
       candidateAssetHashesMatched: true,
@@ -554,6 +689,7 @@ module.exports = {
   fingerprintHardwareIdentifier,
   hashFile,
   loadCandidate,
+  loadDraftReleaseSnapshot,
   parseArgs,
   parseChecksumManifest,
   pathIsInside,
@@ -561,7 +697,8 @@ module.exports = {
   resolveRegularFile,
   resolveNewPrivateOutput,
   sameFile,
-  validateDownloadUrl,
+  validateDraftDownloadUrl,
+  validateDraftReleaseSnapshot,
   validateHostReceipt,
   validateObservation,
   validateReceiptPair,

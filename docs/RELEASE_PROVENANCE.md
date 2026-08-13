@@ -74,8 +74,11 @@ fields are witnessed operator attestations. The recorder validates its selected 
 against the local Mac mini or MacBook hardware family; each receipt stores only that
 generic family plus a hashed stable hardware fingerprint. The private aggregate
 receipt requires distinct fingerprints, exact roles/scopes, and identical source,
-tag, manifest, and asset hashes before promotion. None of these receipts is one of
-the six public assets.
+tag, manifest, asset hashes, and normalized saved GitHub draft evidence. That evidence
+binds the numeric draft release and all six asset IDs, sizes, GitHub SHA-256 digests,
+and credential-free `untagged-*` browser URLs before publication. Canonical v1.0.1
+URLs are verified anonymously after publication. None of these private receipts or
+the saved draft response is one of the six public assets.
 
 GitHub does not expose the resolved `*-latest` runner image version as a stable
 workflow context; it appears only in setup logs. Provenance therefore records the
