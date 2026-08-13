@@ -123,8 +123,19 @@ it is not a secret and it is not unlimited authority.
 5. Verify that the preview contains no `_worker.js` or `functions/` tree and has no
    configured bindings.
 6. Verify the two security headers on `/`, `/admin`, CSS, and JavaScript responses.
-7. Once public v1.0.1 exists, follow all five preview routes while logged out and
+7. Confirm `desmoslock/desmoslock-releases` is prepared. Issue Daniel's
+   `desmoslock` organization-owner invitation and verify both the requested owner
+   role and its live invitation URL. Because the Cloudflare preview now works, send
+   the exact checkpoint email below from Nicky's connected Gmail account to
+   `dholguines@gmail.com`, substituting only the actual invitation URL. Continue the
+   release and site work if Daniel is delayed; do not wait for the source transfer.
+8. Once public v1.0.1 exists, follow all five preview routes while logged out and
    verify the downloaded assets against the published checksum manifest.
+
+If Daniel replies `done` at any point, verify that both partners are `desmoslock`
+organization owners, the source is still private at `desmoslock/desmoslock`, the
+remotes are correct, and all recorded full SHAs still match. A delayed reply leaves
+only source co-ownership pending and does not block the repaired release or site.
 
 Do not deploy production while any route points to a missing repository or asset.
 
@@ -162,26 +173,15 @@ latest, checksum, provenance, and quarantined macOS tests pass.
    `/admin`, all five release routes, query strings, and at least one nested static
    asset through `https://desmoslock.vercel.app`; each must arrive at the equivalent
    Pages path without a loop.
-6. Keep the private source repository under Daniel's personal account through this
-   verified Vercel deployment. Only now send the transfer checkpoint email below from
-   Nicky's connected Gmail account to `dholguines@gmail.com`. The organization owner
-   invitation may be prepared earlier, but this email and repository transfer are
-   intentionally deferred so the final Vercel deployment occurs while its existing
-   source connection is unchanged.
-7. After Daniel replies `done`, verify that both partners are `desmoslock`
-   organization owners, the source is still private at `desmoslock/desmoslock`, the
-   remotes are correct, and all recorded full SHAs still match. If Daniel is delayed,
-   the repaired public release and site remain live; only source co-ownership is
-   pending.
-8. Leave the Vercel redirect active for seven full days from its production
+6. Leave the Vercel redirect active for seven full days from its production
    deployment. During that window, Pages is authoritative and Vercel is
    rollback-friendly forwarding only.
-9. After seven days of healthy checks, Daniel deletes the old Vercel project. Record
+7. After seven days of healthy checks, Daniel deletes the old Vercel project. Record
    the deletion time in the release receipt.
 
-Send this exact checkpoint message at step 6 only after an owner invitation has been
-issued and its live URL has been verified. Replace the bracketed gate with that exact
-URL before sending; the current zero-invitation state is not sufficient:
+Send this exact checkpoint message at preview step 7 only after an owner invitation
+has been issued and its live URL has been verified. Replace the bracketed gate with
+that exact URL before sending; the current zero-invitation state is not sufficient:
 
 ```text
 Subject: DesmosLock: one GitHub transfer step

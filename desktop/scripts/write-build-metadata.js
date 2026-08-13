@@ -5,6 +5,11 @@ const childProcess = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
+const {
+  parseGitHubRepositoryRemote,
+  validateHostedBuildMetadata,
+} = require('./provenance-contract');
+
 function requiredEnvironment(name, pattern) {
   const value = process.env[name] || '';
   if (!pattern.test(value)) {
@@ -46,6 +51,13 @@ function asset(file, targetArchitecture) {
     bytes: fs.statSync(file).size,
     sha256: sha256(file),
   };
+}
+
+function commandOutput(command, args, options = {}) {
+  return childProcess.execFileSync(command, args, {
+    encoding: 'utf8',
+    ...options,
+  }).trim();
 }
 
 function peMachine(file) {
@@ -92,34 +104,92 @@ function extractFromInstaller(installer, archivePath) {
 }
 
 const sourceSha = requiredEnvironment('SOURCE_SHA', /^[0-9a-f]{40}$/);
-const canonicalSourceRepository = requiredEnvironment(
-  'CANONICAL_SOURCE_REPOSITORY',
+const sourceRepository = requiredEnvironment(
+  'SOURCE_REPOSITORY',
   /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/,
 );
+const sourceRepositoryId = requiredEnvironment('SOURCE_REPOSITORY_ID', /^[1-9][0-9]*$/);
 const workflowRepository = requiredEnvironment(
   'GITHUB_REPOSITORY',
   /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/,
 );
-const platform = requiredEnvironment('BUILD_PLATFORM', /^(macos|windows|linux)$/);
+const workflowRepositoryId = requiredEnvironment('GITHUB_REPOSITORY_ID', /^[1-9][0-9]*$/);
+const platform = requiredEnvironment('BUILD_PLATFORM', /^(windows|linux)$/);
 const workflowRunId = requiredEnvironment('GITHUB_RUN_ID', /^[1-9][0-9]*$/);
 const workflowRunAttempt = requiredEnvironment('GITHUB_RUN_ATTEMPT', /^[1-9][0-9]*$/);
+const runnerEnvironment = requiredEnvironment('RUNNER_ENVIRONMENT', /^github-hosted$/);
+const runnerOs = requiredEnvironment('RUNNER_OS', /^(Windows|Linux)$/);
+const runnerArch = requiredEnvironment('RUNNER_ARCH', /^X64$/);
+const runnerRequestedLabel = requiredEnvironment(
+  'RUNNER_REQUESTED_LABEL',
+  /^(windows-latest|ubuntu-latest)$/,
+);
 const packagePath = path.join(__dirname, '..', 'package.json');
 const version = JSON.parse(fs.readFileSync(packagePath, 'utf8')).version;
 const outputDirectory = path.join(__dirname, '..', 'dist');
+const repositoryRoot = path.join(__dirname, '..', '..');
+const electronBuilderPackage = path.join(
+  __dirname,
+  '..',
+  'node_modules',
+  'electron-builder',
+  'package.json',
+);
+const packageLockPath = path.join(__dirname, '..', 'package-lock.json');
 
 if (version !== '1.0.1') {
   throw new Error(`recovery metadata requires version 1.0.1; found ${version}`);
+}
+if (sourceRepository !== workflowRepository || sourceRepositoryId !== workflowRepositoryId) {
+  throw new Error('supplied source repository identity does not match the workflow repository');
+}
+if (commandOutput('git', ['-C', repositoryRoot, 'rev-parse', 'HEAD']) !== sourceSha) {
+  throw new Error('checked-out HEAD does not match SOURCE_SHA');
+}
+const originRepository = parseGitHubRepositoryRemote(
+  commandOutput('git', ['-C', repositoryRoot, 'remote', 'get-url', 'origin']),
+);
+if (originRepository !== sourceRepository) {
+  throw new Error(`origin repository is ${originRepository}, expected ${sourceRepository}`);
+}
+
+const npmExecutable = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+const npmVersion = commandOutput(npmExecutable, ['--version'], {
+  shell: process.platform === 'win32',
+});
+const electronBuilderVersion = JSON.parse(
+  fs.readFileSync(electronBuilderPackage, 'utf8'),
+).version;
+const lockedElectronBuilderVersion = JSON.parse(
+  fs.readFileSync(packageLockPath, 'utf8'),
+).packages['node_modules/electron-builder'].version;
+if (electronBuilderVersion !== lockedElectronBuilderVersion) {
+  throw new Error(
+    `installed electron-builder ${electronBuilderVersion} does not match locked ${lockedElectronBuilderVersion}`,
+  );
 }
 
 const metadata = {
   schemaVersion: 1,
   sourceSha,
-  canonicalSourceRepository,
+  sourceRepository,
+  sourceRepositoryId: Number(sourceRepositoryId),
   workflowRepository,
+  workflowRepositoryId: Number(workflowRepositoryId),
   version,
   platform,
   workflowRunId: Number(workflowRunId),
   workflowRunAttempt: Number(workflowRunAttempt),
+  builtAtUtc: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+  nodeVersion: process.version,
+  npmVersion,
+  electronBuilderVersion,
+  runner: {
+    environment: runnerEnvironment,
+    os: runnerOs,
+    arch: runnerArch,
+    requestedLabel: runnerRequestedLabel,
+  },
 };
 
 if (platform === 'windows') {
@@ -147,16 +217,21 @@ if (platform === 'windows') {
   metadata.payload = asset(payload, 'x64');
   metadata.applicationArchive = asset(applicationArchive, 'platform-neutral');
   metadata.artifact = asset(installer, 'x64');
-} else if (platform === 'linux') {
+} else {
   const installer = oneFile(outputDirectory, (name) => name.endsWith('.AppImage'), 'Linux AppImage');
   metadata.targetArchitecture = 'x64';
   metadata.artifact = asset(installer, 'x64');
-} else {
-  const arm64 = oneFile(outputDirectory, (name) => name.endsWith('.dmg') && name.includes('arm64'), 'arm64 DMG');
-  const x64 = oneFile(outputDirectory, (name) => name.endsWith('.dmg') && name.includes('x64'), 'x64 DMG');
-  metadata.targetArchitecture = 'arm64+x64';
-  metadata.artifacts = [asset(arm64, 'arm64'), asset(x64, 'x86_64')];
 }
+
+validateHostedBuildMetadata(metadata, {
+  sourceSha,
+  sourceRepository,
+  sourceRepositoryId: Number(sourceRepositoryId),
+  platform,
+  runId: workflowRunId,
+  runAttempt: workflowRunAttempt,
+  electronBuilderVersion,
+});
 
 fs.writeFileSync(
   path.join(outputDirectory, 'BUILD-METADATA.json'),
