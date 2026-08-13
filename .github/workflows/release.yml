@@ -136,8 +136,8 @@ jobs:
 
   build-windows:
     name: Build Windows installer
-    needs: trusted-source
-    if: ${{ needs.trusted-source.result == 'success' }}
+    needs: [trusted-source, build-linux]
+    if: ${{ needs.trusted-source.result == 'success' && needs.build-linux.result == 'success' }}
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -177,16 +177,22 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      - name: Rebuild committed browser dependencies
-        working-directory: desktop
-        run: npm run build:vendor
+      - name: Use the exact committed browser dependency bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s desktop/renderer/vendor/supabase.js
+          git ls-files --error-unmatch desktop/renderer/vendor/supabase.js >/dev/null
+          git diff --quiet --exit-code -- desktop/renderer/vendor/supabase.js
 
       - name: Require all packaged source to match the exact commit
         shell: bash
         run: |
           set -euo pipefail
-          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || {
-            echo "Dependency installation or vendor rebuild changed tracked, staged, or untracked source." >&2
+          source_changes=$(git status --porcelain=v1 --untracked-files=all)
+          [[ -z "$source_changes" ]] || {
+            echo "Dependency installation changed tracked, staged, or untracked source:" >&2
+            printf '%s\n' "$source_changes" >&2
             exit 1
           }
           [[ -z "$(git ls-files --others --ignored --exclude-standard -- \
@@ -283,8 +289,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || {
-            echo "Dependency installation or vendor rebuild changed tracked, staged, or untracked source." >&2
+          source_changes=$(git status --porcelain=v1 --untracked-files=all)
+          [[ -z "$source_changes" ]] || {
+            echo "Dependency installation or canonical vendor rebuild changed tracked, staged, or untracked source:" >&2
+            printf '%s\n' "$source_changes" >&2
             exit 1
           }
           [[ -z "$(git ls-files --others --ignored --exclude-standard -- \
