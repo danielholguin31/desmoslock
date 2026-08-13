@@ -307,6 +307,40 @@ Finally verify the five Cloudflare customer routes, homepage and install copy, a
 the temporary Vercel-to-Cloudflare transition. Publication, Cloudflare production,
 and Vercel changes are intentionally outside this source workflow.
 
+## Website and ownership checkpoint order
+
+The public releases repository must be prepared and the exact Cloudflare Pages
+bundle must pass preview acceptance before this checkpoint:
+
+1. Issue Daniel's `desmoslock` organization-owner invitation and verify both the
+   requested owner role and its live invitation URL.
+2. Once the Cloudflare preview works, send the exact checkpoint email below from
+   Nicky's connected Gmail account to `dholguines@gmail.com`, substituting only the
+   actual invitation URL. Continue release and site work if Daniel is delayed; do
+   not wait for the source transfer.
+3. Pages production and the Vercel redirect remain blocked until v1.0.1 is
+   stable/latest, immutable, anonymously verified, and the accepted preview's five
+   release routes pass.
+
+No invitation or checkpoint email has been sent at this draft-review checkpoint.
+
+```text
+Subject: DesmosLock: one GitHub transfer step
+
+Hey Daniel — the no-cost DesmosLock release setup is ready. Please:
+
+1. Accept this GitHub organization invitation: [actual invitation URL].
+2. Open the DesmosLock repository’s Settings → General.
+3. Scroll to Danger Zone → Transfer ownership.
+4. Enter desmoslock as the new owner and desmoslock as the repository name, then confirm.
+5. Reply “done.”
+
+Please don’t merge PR #3, change the releases, buy Apple membership, or alter Vercel yet—I’ll handle the remaining release work.
+```
+
+A delayed source transfer leaves only source co-ownership pending; it does not block
+an otherwise verified release or site repair.
+
 ## Optional managed-Mac identity
 
 A stable self-signed identity and `SystemPolicyRule` are a separate, Mini-local MDM
