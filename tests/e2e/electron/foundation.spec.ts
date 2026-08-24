@@ -2,7 +2,7 @@ import path from "node:path";
 
 import { _electron as electron, expect, test } from "@playwright/test";
 
-test("v2 Electron shell launches with a sandboxed renderer", async () => {
+test("v2 Electron shell requests isolated renderer preferences with Node access disabled", async () => {
   const environment: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value !== undefined && key !== "ELECTRON_RUN_AS_NODE") {
