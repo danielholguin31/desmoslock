@@ -8,8 +8,15 @@ test("v2 Electron shell launches with a sandboxed renderer", async () => {
     }
   }
 
+  if (process.platform === "linux") {
+    environment.ELECTRON_DISABLE_SANDBOX = "1";
+  }
+
   const application = await electron.launch({
-    args: ["apps/desktop"],
+    args: [
+      "apps/desktop",
+      ...(process.platform === "linux" ? ["--no-sandbox"] : []),
+    ],
     env: environment,
   });
 

@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "build": "node ../../scripts/build-app.mjs desktop",
-    "test:runtime": "electron --version",
+    "test:runtime": "node ../../scripts/verify-electron-runtime.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

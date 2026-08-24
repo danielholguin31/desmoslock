@@ -107,6 +107,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: xvfb-run -a npm run test:electron
+        env:
+          ELECTRON_DISABLE_SANDBOX: "1"
 
   supply-chain:
     name: Dependency, secret, SBOM, and package checks
