@@ -1,6 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": null,
+  "buildCommand": "node scripts/refuse-legacy-vercel-build.mjs",
+  "ignoreCommand": "node scripts/ignore-legacy-vercel-build.mjs",
   "installCommand": null,
   "outputDirectory": "web",
   "framework": null,

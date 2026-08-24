@@ -1,0 +1,17 @@
+{
+  "name": "@desmoslock/web",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node ../../scripts/build-app.mjs web",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@desmoslock/contracts": "2.0.0",
+    "@desmoslock/domain": "2.0.0"
+  }
+}

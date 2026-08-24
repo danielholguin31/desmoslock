@@ -1,9 +1,6 @@
-name: Build and verify installers
+name: Legacy v1 release (disabled)
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -18,7 +15,17 @@ env:
   RELEASES_REPOSITORY: danielholguin31/desmoslock-releases
 
 jobs:
+  legacy-v1-release-disabled:
+    name: Legacy v1 release is disabled during v2 expansion
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject legacy packaging and publication
+        run: |
+          echo "::error::Legacy v1 cannot produce a GA artifact during the v2 expand phase."
+          exit 1
+
   trusted-source:
+    if: ${{ false }}
     name: Verify trusted release source
     runs-on: ubuntu-latest
     outputs:
