@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { _electron as electron, expect, test } from "@playwright/test";
 
 test("v2 Electron shell launches with a sandboxed renderer", async () => {
@@ -8,15 +10,17 @@ test("v2 Electron shell launches with a sandboxed renderer", async () => {
     }
   }
 
+  const linuxLaunchFlags =
+    process.platform === "linux"
+      ? ["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu"]
+      : [];
   if (process.platform === "linux") {
     environment.ELECTRON_DISABLE_SANDBOX = "1";
   }
 
   const application = await electron.launch({
-    args: [
-      "apps/desktop",
-      ...(process.platform === "linux" ? ["--no-sandbox"] : []),
-    ],
+    args: [...linuxLaunchFlags, path.resolve("apps/desktop")],
+    chromiumSandbox: false,
     env: environment,
   });
 

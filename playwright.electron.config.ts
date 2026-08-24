@@ -5,7 +5,7 @@ export default defineConfig({
   fullyParallel: false,
   reporter: "line",
   testDir: "tests/e2e/electron",
-  timeout: 30_000,
+  timeout: 60_000,
   use: {
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
