@@ -233,9 +233,17 @@ const redContracts: readonly RedContract[] = [
   {
     id: "GK-02",
     assert: () => {
-      const fingerprint = fingerprintHardwareIdentifier("serial-ABC-123");
-      expect(fingerprint).not.toMatch(/serial-ABC-123/);
-      expect(fingerprint).toMatch(/^[0-9a-f]{64}$/i);
+      const firstId = "11111111-2222-3333-4444-555555555555";
+      const secondId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+      const first = fingerprintHardwareIdentifier(firstId);
+
+      expect(first).toMatch(/^[0-9a-f]{64}$/i);
+      expect(fingerprintHardwareIdentifier(firstId.toUpperCase())).toBe(first);
+      expect(fingerprintHardwareIdentifier(secondId)).not.toBe(first);
+      expect(first).not.toContain(firstId);
+      expect(() =>
+        fingerprintHardwareIdentifier("raw-serial-number"),
+      ).toThrow();
     },
   },
   {
