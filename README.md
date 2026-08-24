@@ -1,5 +1,41 @@
 # DesmosLock
 
+> **v2 expand phase:** The root npm workspace is the only development and
+> verification path. The legacy `desktop/`, `server/`, `web/`, standalone SQL,
+> Vercel deployment, and v1 release workflow remain audit evidence and cannot
+> produce a GA artifact.
+
+## v2 workspace
+
+The typed v2 foundation lives in `apps/` and `packages/` and uses the root
+`package-lock.json`.
+
+```bash
+npm ci
+npm run format:check
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
+
+The disposable database starts from `supabase/migrations/` and
+`supabase/seed.sql`; it does not import legacy users or product rows.
+
+```bash
+npm run db:start
+npm run db:reset
+npm run test:db
+npm run db:stop
+```
+
+See
+[`docs/product-completion/source-reconciliation.md`](docs/product-completion/source-reconciliation.md)
+for the audited recovery, provenance, and Gatekeeper evidence retained from
+`release/1.0`.
+
+## Legacy v1 evidence
+
 The real Desmos graphing calculator, locked to the screen during a test.
 
 The teacher signs in, starts a test, and reads out a 6-character class code. Students

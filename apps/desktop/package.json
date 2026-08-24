@@ -1,0 +1,22 @@
+{
+  "name": "@desmoslock/desktop",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node ../../scripts/build-app.mjs desktop",
+    "test:runtime": "node ../../scripts/verify-electron-runtime.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@desmoslock/contracts": "2.0.0",
+    "@desmoslock/domain": "2.0.0"
+  },
+  "devDependencies": {
+    "electron": "^43.4.1"
+  }
+}

@@ -1,0 +1,7 @@
+# Changes that can weaken mandatory verification or restore legacy publication
+# require review from a trusted friend-project maintainer.
+/.github/workflows/ @danielholguin31 @nicolasdmolina
+/package.json @danielholguin31 @nicolasdmolina
+/package-lock.json @danielholguin31 @nicolasdmolina
+/scripts/verify-*.mjs @danielholguin31 @nicolasdmolina
+/vercel.json @danielholguin31 @nicolasdmolina

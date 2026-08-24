@@ -1,0 +1,13 @@
+/desktop/
+/server/
+/web/
+desmos-lock-release-test/
+supabase/schema.sql
+supabase/enterprise.sql
+node_modules/
+**/dist/
+package-lock.json
+README.md
+docs/MACOS_RELEASE.md
+docs/OPERATIONS.md
+docs/SUPABASE.md

@@ -1,5 +1,13 @@
 node_modules/
 server/data/
 dist/
+artifacts/
+supabase/.branches/
+supabase/.temp/
+test-results/
+playwright-report/
+blob-report/
 .DS_Store
 .env
+.env.*
+!.env.example
