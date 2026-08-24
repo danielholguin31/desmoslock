@@ -273,7 +273,7 @@ jobs:
           esac
 
       - name: Upload macOS installers
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: installers-macOS
           path: desktop/dist/*.dmg
@@ -321,7 +321,7 @@ jobs:
         run: npx electron-builder ${{ matrix.builder_args }} --publish never
 
       - name: Upload ${{ matrix.name }} installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: installers-${{ matrix.name }}
           path: desktop/dist/*.${{ matrix.extension }}
