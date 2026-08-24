@@ -83,6 +83,6 @@ must pass.
 `npm run test:evidence` verifies the exact
 `release/1.0@ddcfce456f3cf015ab77d207310140a311c945ab` tree and runs its 9 recovery,
 13 provenance, and 15 Gatekeeper tests in a temporary directory. The matching v2
-contracts are registered as todos in
-`tests/evidence/audited-release.contract.test.ts`; they may become passing v2 tests
-only when their v2 public seams are implemented.
+contracts live in `tests/evidence/audited-release.contract.test.ts` as an executable
+expected-failure harness bound to v2 public seams. They may become passing v2 tests
+only when those seams implement the retained behavior.

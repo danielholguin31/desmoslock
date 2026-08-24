@@ -1,67 +1,402 @@
-import { describe, it } from "vitest";
+import { describe, expect, it } from "vitest";
+
+import {
+  fingerprintHardwareIdentifier,
+  parseTrustedGitHubOrigin,
+  verifyGatekeeperAcceptance,
+  verifyReleaseProvenance,
+} from "@desmoslock/contracts";
+import {
+  clearStaleLockedState,
+  engagePersistedLock,
+  releaseRecoveryLock,
+  restoreStudentSession,
+} from "@desmoslock/domain";
 
 const sourceCommit = "ddcfce456f3cf015ab77d207310140a311c945ab";
 
-describe(`v2 recovery contracts preserved from ${sourceCommit}`, () => {
-  it.todo("REC-01 rejects every Supabase lookup error");
-  it.todo("REC-02 rejects a Supabase authentication lookup error");
-  it.todo("REC-03 rejects a Supabase Student row lookup error");
-  it.todo("REC-04 rejects a Supabase Test row lookup error");
-  it.todo("REC-05 reserves null for authoritative absent or inactive state");
-  it.todo("REC-06 engages a persisted lock before a stalled calculator load");
-  it.todo("REC-07 engages a persisted lock before a never-resolving restore");
-  it.todo("REC-08 clears stale locked state before loading the calculator");
-  it.todo(
-    "REC-09 releases recovery lock and clears an authoritative missing session",
-  );
-});
+interface RedContract {
+  readonly id: string;
+  readonly assert: () => void | Promise<void>;
+}
 
-describe(`v2 release-provenance contracts preserved from ${sourceCommit}`, () => {
-  it.todo("PROV-01 pins npm by version and tarball hash");
-  it.todo("PROV-02 regenerates vendor code only on the canonical builder");
-  it.todo("PROV-03 normalizes supported GitHub origin URL formats");
-  it.todo(
-    "PROV-04 rejects redirects credentials alternate hosts and ambiguous origins",
-  );
-  it.todo(
-    "PROV-05 accepts an explicitly updated repository identity after transfer",
-  );
-  it.todo("PROV-06 accepts exact all-platform hosted provenance");
-  it.todo("PROV-07 rejects malformed build time and tool versions");
-  it.todo("PROV-08 rejects mismatched source and workflow identity");
-  it.todo("PROV-09 rejects untrusted hosted runner attributes");
-  it.todo("PROV-10 accepts exact macOS source builder and tool provenance");
-  it.todo("PROV-11 accepts two-component full-Xcode SDK versions");
-  it.todo(
-    "PROV-12 rejects false macOS source and malformed builder provenance",
-  );
-  it.todo("PROV-13 requires a real second-precision UTC instant");
-});
+const lookupError = new Error("controlled unavailable");
 
-describe(`v2 Gatekeeper contracts preserved from ${sourceCommit}`, () => {
-  it.todo("GK-01 binds each host role to its exact scope and options");
-  it.todo(
-    "GK-02 fingerprints hardware deterministically without exposing identifiers",
-  );
-  it.todo("GK-03 binds host roles to the physical Mac hardware family");
-  it.todo("GK-04 accepts only the exact credential-free draft asset URL");
-  it.todo("GK-05 binds draft snapshots to release asset IDs sizes and hashes");
-  it.todo(
-    "GK-06 requires truthful draft disclosures and rejects bypass advice",
-  );
-  it.todo("GK-07 normalizes a private saved GitHub draft response");
-  it.todo("GK-08 rejects malformed GitHub draft identity and asset evidence");
-  it.todo("GK-09 requires witnessed dialog Open Anyway and relaunch evidence");
-  it.todo("GK-10 requires the exact ordered checksum contract");
-  it.todo("GK-11 accepts exact Mini ARM and MacBook ARM plus Rosetta receipts");
-  it.todo(
-    "GK-12 rejects wrong scope missing Rosetta and unwitnessed launch claims",
-  );
-  it.todo("GK-13 rejects one physical host reused for both roles");
-  it.todo(
-    "GK-14 rejects cross-receipt source release asset manifest or hash mismatch",
-  );
-  it.todo(
-    "GK-15 reads quarantine without mutation and writes private receipts",
-  );
+const redContracts: readonly RedContract[] = [
+  {
+    id: "REC-01",
+    assert: async () => {
+      await expect(restoreStudentSession({ lookupError })).rejects.toThrow(
+        /controlled unavailable/,
+      );
+    },
+  },
+  {
+    id: "REC-02",
+    assert: async () => {
+      await expect(
+        restoreStudentSession({ authError: lookupError }),
+      ).rejects.toThrow(/controlled unavailable/);
+    },
+  },
+  {
+    id: "REC-03",
+    assert: async () => {
+      await expect(
+        restoreStudentSession({ studentError: lookupError }),
+      ).rejects.toThrow(/controlled unavailable/);
+    },
+  },
+  {
+    id: "REC-04",
+    assert: async () => {
+      await expect(
+        restoreStudentSession({ testError: lookupError }),
+      ).rejects.toThrow(/controlled unavailable/);
+    },
+  },
+  {
+    id: "REC-05",
+    assert: async () => {
+      await expect(
+        restoreStudentSession({ students: [], test: null }),
+      ).resolves.toBeNull();
+    },
+  },
+  {
+    id: "REC-06",
+    assert: async () => {
+      await expect(
+        engagePersistedLock({ before: "stalled-calculator-load" }),
+      ).resolves.toBe("locked");
+    },
+  },
+  {
+    id: "REC-07",
+    assert: async () => {
+      await expect(
+        engagePersistedLock({ before: "never-resolving-restore" }),
+      ).resolves.toBe("locked");
+    },
+  },
+  {
+    id: "REC-08",
+    assert: async () => {
+      await expect(clearStaleLockedState()).resolves.toBe("unlocked");
+    },
+  },
+  {
+    id: "REC-09",
+    assert: async () => {
+      await expect(
+        releaseRecoveryLock({ session: "authoritative-missing" }),
+      ).resolves.toBeNull();
+    },
+  },
+  {
+    id: "PROV-01",
+    assert: () => {
+      expect(() =>
+        verifyReleaseProvenance({
+          packageManager:
+            "npm@11.12.1+sha512.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        }),
+      ).not.toThrow();
+    },
+  },
+  {
+    id: "PROV-02",
+    assert: () => {
+      expect(() =>
+        verifyReleaseProvenance({ vendorRebuildJobs: ["build-windows"] }),
+      ).toThrow(/canonical/);
+    },
+  },
+  {
+    id: "PROV-03",
+    assert: () => {
+      expect(
+        parseTrustedGitHubOrigin(
+          "git@github.com:danielholguin31/desmoslock.git",
+        ),
+      ).toEqual({ owner: "danielholguin31", name: "desmoslock" });
+    },
+  },
+  {
+    id: "PROV-04",
+    assert: () => {
+      expect(() =>
+        parseTrustedGitHubOrigin(
+          "https://evil.example/danielholguin31/desmoslock",
+        ),
+      ).toThrow(/ambiguous|redirect|credential|host/i);
+    },
+  },
+  {
+    id: "PROV-05",
+    assert: () => {
+      expect(() =>
+        verifyReleaseProvenance({
+          sourceRepository: "new-owner/desmoslock",
+        }),
+      ).not.toThrow();
+    },
+  },
+  {
+    id: "PROV-06",
+    assert: () => {
+      expect(() =>
+        verifyReleaseProvenance({
+          platform: "windows",
+          sourceRepository: "danielholguin31/desmoslock",
+          workflowRepository: "danielholguin31/desmoslock",
+        }),
+      ).not.toThrow();
+    },
+  },
+  {
+    id: "PROV-07",
+    assert: () => {
+      expect(() =>
+        verifyReleaseProvenance({
+          builtAtUtc: "not-a-date",
+          nodeVersion: "latest",
+        }),
+      ).toThrow(/malformed|utc|version/i);
+    },
+  },
+  {
+    id: "PROV-08",
+    assert: () => {
+      expect(() =>
+        verifyReleaseProvenance({
+          sourceRepository: "danielholguin31/desmoslock",
+          workflowRepository: "other/repo",
+        }),
+      ).toThrow(/mismatched|identity/i);
+    },
+  },
+  {
+    id: "PROV-09",
+    assert: () => {
+      expect(() =>
+        verifyReleaseProvenance({
+          runner: { environment: "self-hosted", requestedLabel: "untrusted" },
+        }),
+      ).toThrow(/untrusted|runner/i);
+    },
+  },
+  {
+    id: "PROV-10",
+    assert: () => {
+      expect(() =>
+        verifyReleaseProvenance({
+          platform: "macos",
+          sourceRepository: "danielholguin31/desmoslock",
+        }),
+      ).not.toThrow();
+    },
+  },
+  {
+    id: "PROV-11",
+    assert: () => {
+      expect(() => verifyReleaseProvenance({ xcodeSdk: "16.4" })).not.toThrow();
+    },
+  },
+  {
+    id: "PROV-12",
+    assert: () => {
+      expect(() =>
+        verifyReleaseProvenance({
+          platform: "macos",
+          sourceRepository: "unrelated/repo",
+        }),
+      ).toThrow(/macos|malformed|source/i);
+    },
+  },
+  {
+    id: "PROV-13",
+    assert: () => {
+      expect(() =>
+        verifyReleaseProvenance({ builtAtUtc: "2026-08-13T12:34:56.789Z" }),
+      ).toThrow(/second-precision|utc/i);
+    },
+  },
+  {
+    id: "GK-01",
+    assert: () => {
+      expect(() =>
+        verifyGatekeeperAcceptance({ role: "mini", scope: "macbook" }),
+      ).toThrow(/scope|role/i);
+    },
+  },
+  {
+    id: "GK-02",
+    assert: () => {
+      const fingerprint = fingerprintHardwareIdentifier("serial-ABC-123");
+      expect(fingerprint).not.toMatch(/serial-ABC-123/);
+      expect(fingerprint).toMatch(/^[0-9a-f]{64}$/i);
+    },
+  },
+  {
+    id: "GK-03",
+    assert: () => {
+      expect(() =>
+        verifyGatekeeperAcceptance({
+          role: "mini",
+          hardwareFamily: "windows-pc",
+        }),
+      ).toThrow(/hardware|mac/i);
+    },
+  },
+  {
+    id: "GK-04",
+    assert: () => {
+      expect(() =>
+        verifyGatekeeperAcceptance({
+          draftUrl: "https://github.com/example/tokenized",
+        }),
+      ).toThrow(/credential-free|draft|url/i);
+    },
+  },
+  {
+    id: "GK-05",
+    assert: () => {
+      expect(() =>
+        verifyGatekeeperAcceptance({
+          draft: { assets: [], hashes: [] },
+        }),
+      ).toThrow(/asset|hash|size/i);
+    },
+  },
+  {
+    id: "GK-06",
+    assert: () => {
+      expect(() =>
+        verifyGatekeeperAcceptance({
+          releaseNotes: "disable Gatekeeper and skip Open Anyway",
+        }),
+      ).toThrow(/disclosure|bypass/i);
+    },
+  },
+  {
+    id: "GK-07",
+    assert: () => {
+      expect(() =>
+        verifyGatekeeperAcceptance({
+          draft: { draft: true, private: true },
+        }),
+      ).not.toThrow();
+    },
+  },
+  {
+    id: "GK-08",
+    assert: () => {
+      expect(() =>
+        verifyGatekeeperAcceptance({
+          draft: { id: "not-numeric" },
+        }),
+      ).toThrow(/malformed|identity|asset/i);
+    },
+  },
+  {
+    id: "GK-09",
+    assert: () => {
+      expect(() =>
+        verifyGatekeeperAcceptance({
+          receipts: [{ dialog: false, openAnyway: false, relaunch: false }],
+        }),
+      ).toThrow(/witnessed|Open Anyway|relaunch/i);
+    },
+  },
+  {
+    id: "GK-10",
+    assert: () => {
+      expect(() =>
+        verifyGatekeeperAcceptance({
+          checksumText: "out of order",
+        }),
+      ).toThrow(/checksum|order/i);
+    },
+  },
+  {
+    id: "GK-11",
+    assert: () => {
+      expect(() =>
+        verifyGatekeeperAcceptance({
+          receipts: [
+            { role: "mini", arch: "arm64" },
+            { role: "macbook", arch: "arm64", rosetta: true },
+          ],
+        }),
+      ).not.toThrow();
+    },
+  },
+  {
+    id: "GK-12",
+    assert: () => {
+      expect(() =>
+        verifyGatekeeperAcceptance({
+          receipts: [{ role: "macbook", rosetta: false, launched: false }],
+        }),
+      ).toThrow(/scope|Rosetta|unwitnessed/i);
+    },
+  },
+  {
+    id: "GK-13",
+    assert: () => {
+      expect(() =>
+        verifyGatekeeperAcceptance({
+          receipts: [
+            { role: "mini", host: "same-mac" },
+            { role: "macbook", host: "same-mac" },
+          ],
+        }),
+      ).toThrow(/reused|host/i);
+    },
+  },
+  {
+    id: "GK-14",
+    assert: () => {
+      expect(() =>
+        verifyGatekeeperAcceptance({
+          receipts: [
+            { manifestSha256: "aaa", assetSha256: "bbb" },
+            { manifestSha256: "ccc", assetSha256: "ddd" },
+          ],
+        }),
+      ).toThrow(/mismatch|hash|manifest|asset/i);
+    },
+  },
+  {
+    id: "GK-15",
+    assert: () => {
+      expect(() =>
+        verifyGatekeeperAcceptance({ quarantineMutated: true }),
+      ).toThrow(/quarantine|receipt/i);
+    },
+  },
+];
+
+describe(`v2 public-seam red contracts from ${sourceCommit}`, () => {
+  it("fails closed for every retained behavior before it is ported", async () => {
+    const failedIds: string[] = [];
+    const passedIds: string[] = [];
+
+    for (const contract of redContracts) {
+      try {
+        await contract.assert();
+        passedIds.push(contract.id);
+      } catch {
+        failedIds.push(contract.id);
+      }
+    }
+
+    expect(
+      passedIds,
+      "no retained behavior may pass before it is ported",
+    ).toEqual([]);
+    expect(failedIds).toEqual(redContracts.map((contract) => contract.id));
+    expect(failedIds).toHaveLength(37);
+  });
 });

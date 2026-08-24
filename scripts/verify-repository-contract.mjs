@@ -142,6 +142,17 @@ if (vercel.buildCommand !== "node scripts/refuse-legacy-vercel-build.mjs") {
   fail("Direct legacy Vercel builds are not blocked");
 }
 
+const legacyDesktop = readJson("desktop/package.json");
+for (const script of ["dist", "dist:mac", "dist:win", "dist:linux"]) {
+  if (
+    !String(legacyDesktop.scripts?.[script] ?? "").includes(
+      "refuse-legacy-packaging.mjs",
+    )
+  ) {
+    fail(`Legacy ${script} is not fail-closed`);
+  }
+}
+
 const testSupport = readJson("packages/test-support/package.json");
 if (
   testSupport.exports?.["."]?.["desmoslock-test"] !== "./dist/index.js" ||
@@ -166,6 +177,11 @@ for (const workspaceRoot of ["apps", "packages"]) {
 const evidenceContracts = readText(
   "tests/evidence/audited-release.contract.test.ts",
 );
+if (/\bit\.todo\s*\(/.test(evidenceContracts)) {
+  fail(
+    "v2 evidence contracts must be executable expected-failure tests, not todos",
+  );
+}
 if (!evidenceContracts.includes("ddcfce456f3cf015ab77d207310140a311c945ab")) {
   fail("v2 evidence contracts are not bound to the audited release commit");
 }
@@ -176,7 +192,7 @@ for (const [prefix, expectedCount] of [
 ]) {
   const actualCount = countMatches(
     evidenceContracts,
-    new RegExp(`it\\.todo\\(\\s*["']${prefix}-`, "gu"),
+    new RegExp(`id:\\s*["']${prefix}-`, "gu"),
   );
   if (actualCount !== expectedCount) {
     fail(

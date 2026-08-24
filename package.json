@@ -23,7 +23,7 @@
     "typecheck": "npm run build:packages && npm run typecheck --workspaces --if-present && tsc -p tsconfig.tests.json --noEmit",
     "test": "npm run test:repository && npm run test:unit && npm run test:evidence",
     "test:unit": "npm run build:packages && vitest run",
-    "test:repository": "node --test tests/repository-contract.test.mjs tests/acceptance/required-check-probe.test.mjs tests/acceptance/unsupported-surfaces.test.mjs",
+    "test:repository": "node --test tests/repository-contract.test.mjs tests/acceptance/required-check-probe.test.mjs tests/acceptance/unsupported-surfaces.test.mjs tests/acceptance/license-policy.test.mjs tests/acceptance/legacy-packaging.test.mjs",
     "test:evidence": "node scripts/run-release-evidence.mjs",
     "db:start": "supabase start --exclude gotrue,realtime,storage-api,imgproxy,kong,mailpit,postgrest,postgres-meta,studio,edge-runtime,logflare,vector,supavisor",
     "db:start:full": "supabase start",

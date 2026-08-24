@@ -30,3 +30,14 @@ export const retentionMaximumDays = {
 
 export const backupDeletionMaximumAdditionalDays = 35;
 export const calculatorStateMaximumHoursAfterTestEnd = 24;
+
+export {
+  clearStaleLockedState,
+  engagePersistedLock,
+  releaseRecoveryLock,
+  restoreStudentSession,
+} from "./student-session.js";
+export type {
+  RestoredStudentSession,
+  StudentSessionLookup,
+} from "./student-session.js";

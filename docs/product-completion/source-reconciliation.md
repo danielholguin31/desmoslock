@@ -24,9 +24,10 @@ The current friend-project development source remains `danielholguin31/desmosloc
 
 The evidence harness verifies the audited tree before extracting files and fails if any suite count or pass count changes.
 
-The same 37 behaviors are registered, with stable IDs, in
-`tests/evidence/audited-release.contract.test.ts`. They remain explicit todos until
-their v2 public seams exist; a passing legacy evidence run is not reported as a
+The same 37 behaviors are exercised as executable expected-failure contracts in
+`tests/evidence/audited-release.contract.test.ts`. Each contract calls a v2 public
+seam and records a failure until that behavior is ported. The harness asserts the
+exact 37 IDs remain red; a passing legacy evidence run is not reported as a
 passing v2 implementation.
 
 ## Forward-port rule

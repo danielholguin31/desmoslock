@@ -36,3 +36,14 @@ export const trustedIpcChannels = [
 ] as const;
 
 export type TrustedIpcChannel = (typeof trustedIpcChannels)[number];
+
+export {
+  fingerprintHardwareIdentifier,
+  verifyGatekeeperAcceptance,
+} from "./gatekeeper-acceptance.js";
+export type { GatekeeperAcceptanceInput } from "./gatekeeper-acceptance.js";
+export {
+  parseTrustedGitHubOrigin,
+  verifyReleaseProvenance,
+} from "./release-provenance.js";
+export type { ReleaseProvenanceInput } from "./release-provenance.js";
