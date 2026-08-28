@@ -1,0 +1,337 @@
+{
+  "schemaVersion": 1,
+  "issue": 29,
+  "recordedAtUtc": "2026-08-28T00:00:40Z",
+  "canonicalSource": {
+    "repository": "danielholguin31/desmoslock",
+    "branch": "main",
+    "onlyIntegrationAndReleaseSource": true,
+    "integrationBaseline": {
+      "commit": "388170e94418d20ad205812553e1c9fdf5de9139",
+      "tree": "95a00a77f84962248523f38a8c554216270cc23d"
+    },
+    "preservedLegacyEvidence": {
+      "enterpriseAdministration": {
+        "paths": ["web/admin", "supabase/enterprise.sql", "docs/OPERATIONS.md"],
+        "status": "historical-evidence-only",
+        "releaseable": false
+      }
+    },
+    "releasePolicy": {
+      "reviewedCanonicalCommitRequired": true,
+      "versionAuthority": "package.json",
+      "lockfileAuthority": "package-lock.json",
+      "workspaceVersionPolicy": "exact-root",
+      "publicReleaseEnabled": false
+    }
+  },
+  "divergentReleaseLine": {
+    "ref": "refs/heads/release/1.0",
+    "mergeBase": {
+      "commit": "3883f4234923c0bc250dc41649ba3801144c3f58",
+      "tree": "ebb86934567790048bdb3f04ae8e57ac4968a34c"
+    },
+    "head": {
+      "commit": "ddcfce456f3cf015ab77d207310140a311c945ab",
+      "tree": "ab352dea9a5cdde409d2ff93d61dd62283005cbe"
+    },
+    "uniqueCommitCount": 17,
+    "dispositionCounts": {
+      "integrated": 0,
+      "rejected": 17
+    },
+    "commits": [
+      {
+        "commit": "f2cfb93b4f674d1a523cbef9cece2ff1c76f0f27",
+        "parents": ["3883f4234923c0bc250dc41649ba3801144c3f58"],
+        "tree": "d3f5fe233e603aaf0af11fa7419a33d709c67182",
+        "subject": "Fix macOS release signing pipeline",
+        "disposition": "rejected",
+        "reason": "The v1 signing, publication, customer-install, and web-download code change is rejected as obsolete; it does not implement v2, and every legacy packaging and release surface remains fail-closed."
+      },
+      {
+        "commit": "ee2857eab57e0e4d5fe3e466db805fd65f99f534",
+        "parents": ["f2cfb93b4f674d1a523cbef9cece2ff1c76f0f27"],
+        "tree": "6125e6f3e78a9cc3e4a13b025b4e8f65616ef39b",
+        "subject": "Restore complete package lock",
+        "disposition": "rejected",
+        "reason": "This restores the nested legacy desktop lock; canonical v2 accepts only the root package.json and package-lock.json and rejects nested workspace locks."
+      },
+      {
+        "commit": "0c8a65f9ae1e0d769646cb092807eb3c48dfd86f",
+        "parents": ["ee2857eab57e0e4d5fe3e466db805fd65f99f534"],
+        "tree": "9fbfa85e83a944b1ac1c959959a45f975f588d0d",
+        "subject": "Harden release trust and promotion gates",
+        "disposition": "rejected",
+        "reason": "The code change is rejected because it targets the obsolete release/1.0 tag and public-binary promotion path; v2 has no release pipeline yet and requires future artifacts to come from reviewed main commits."
+      },
+      {
+        "commit": "31c4768a7804f5d7f80d32af3d4c921ce0fc9a69",
+        "parents": ["0c8a65f9ae1e0d769646cb092807eb3c48dfd86f"],
+        "tree": "0615bac9c736c35a674afff05cfa77c315fb8673",
+        "subject": "Clarify Apple enrollment decision",
+        "disposition": "rejected",
+        "reason": "This person-specific Apple and v1 custody instruction is rejected because its prerequisites were not completed; it is neither v2 product behavior nor a current operator runbook."
+      },
+      {
+        "commit": "b0910d1a815c56b9036da6f0df4ff1cc648fe1ae",
+        "parents": [
+          "3883f4234923c0bc250dc41649ba3801144c3f58",
+          "31c4768a7804f5d7f80d32af3d4c921ce0fc9a69"
+        ],
+        "tree": "0615bac9c736c35a674afff05cfa77c315fb8673",
+        "subject": "Merge pull request #2 from danielholguin31/hotfix/macos-signing-v1.0.1",
+        "disposition": "rejected",
+        "reason": "The merge tree exactly equals its second parent and has no resolution delta; it inherits the rejection of the obsolete v1 signing and publication path."
+      },
+      {
+        "commit": "64dcbb5cd555c861190ce0159f282f17489344be",
+        "parents": ["b0910d1a815c56b9036da6f0df4ff1cc648fe1ae"],
+        "tree": "5f029533907b4c6559a176281d517ce6b85f1741",
+        "subject": "Prepare zero-cost v1.0.1 recovery release",
+        "disposition": "rejected",
+        "retainedEvidenceContractIds": ["REC-01..REC-09"],
+        "reason": "The ad-hoc v1 packaging, assembly, workflow, and operator code change is rejected. Only its exact fail-closed recovery contract IDs are retained separately through the tracked evidence fixture."
+      },
+      {
+        "commit": "454a3b316d75fd03888b27d52b95676fddd50a0c",
+        "parents": ["64dcbb5cd555c861190ce0159f282f17489344be"],
+        "tree": "6da40413e466c02f8d6da1bc70ce044044d3b780",
+        "subject": "Bind recovery provenance to actual builders",
+        "disposition": "rejected",
+        "retainedEvidenceContractIds": ["PROV-03..PROV-13"],
+        "reason": "The legacy source, workflow, builder, and tool code change is rejected. Its identity contract is retained separately as evidence; no legacy builder or workflow becomes v2 production source."
+      },
+      {
+        "commit": "1e6f156b50002fb6096510db962577a2d793296b",
+        "parents": ["454a3b316d75fd03888b27d52b95676fddd50a0c"],
+        "tree": "baad4b0f4d5553fe3a6fb0790c249a8161ef6c48",
+        "subject": "Document Daniel preview checkpoint",
+        "disposition": "rejected",
+        "reason": "The checkpoint text is rejected because it requests owner outreach and gates Cloudflare and Vercel publication while recording that no outreach occurred; ownership outreach and public deployment are outside the internal baseline."
+      },
+      {
+        "commit": "aee038212b96dacc46abd686f8e260e10f127160",
+        "parents": ["1e6f156b50002fb6096510db962577a2d793296b"],
+        "tree": "58c1afd3b5dadfa4fbd6af8b006446d39a88dd24",
+        "subject": "Harden local release acceptance",
+        "disposition": "rejected",
+        "retainedEvidenceContractIds": [
+          "PROV-01",
+          "GK-04",
+          "GK-09",
+          "GK-10",
+          "GK-12",
+          "GK-15"
+        ],
+        "reason": "The ad-hoc v1 release procedure and code change are rejected. Its npm-integrity and initial Gatekeeper contract IDs are retained separately as evidence."
+      },
+      {
+        "commit": "3ef19f63fe12b07a0f9fc7babd49d5f9fdbb35fe",
+        "parents": ["aee038212b96dacc46abd686f8e260e10f127160"],
+        "tree": "5c90bca66926341a2824c6959dabf8c5ebfb57af",
+        "subject": "Require two-host Gatekeeper acceptance",
+        "disposition": "rejected",
+        "retainedEvidenceContractIds": ["GK-01..GK-04", "GK-09..GK-15"],
+        "reason": "The two-host v1 acceptance implementation is rejected. Its hardware fingerprinting, Rosetta, witnessed launch, host separation, and aggregate receipt contract IDs are retained separately as evidence pending a signed v2 artifact."
+      },
+      {
+        "commit": "096bc9bc68301a4e343b15632d2f8de8d7622692",
+        "parents": [
+          "b0910d1a815c56b9036da6f0df4ff1cc648fe1ae",
+          "3ef19f63fe12b07a0f9fc7babd49d5f9fdbb35fe"
+        ],
+        "tree": "5c90bca66926341a2824c6959dabf8c5ebfb57af",
+        "subject": "Merge PR #4: v1.0.1 zero-cost recovery",
+        "disposition": "rejected",
+        "retainedEvidenceContractIds": [
+          "REC-01..REC-09",
+          "PROV-01",
+          "PROV-03..PROV-13",
+          "GK-01..GK-15"
+        ],
+        "reason": "The merge tree exactly equals its second parent and has no resolution delta, so its code change is rejected. Its recovery, provenance, and then-current Gatekeeper contract IDs are retained separately as evidence."
+      },
+      {
+        "commit": "69441a9b7bffce7b2abb48e14c0f1cf04bc6603d",
+        "parents": ["096bc9bc68301a4e343b15632d2f8de8d7622692"],
+        "tree": "68b1f51a0fda6249677c84e244fd59f1a06e18b3",
+        "subject": "Fix Windows vendor reproducibility gate",
+        "disposition": "rejected",
+        "retainedEvidenceContractIds": ["PROV-02"],
+        "reason": "The legacy Windows vendor workflow change is rejected. The rule that committed vendor regeneration occurs on one canonical builder is retained separately as PROV-02 evidence."
+      },
+      {
+        "commit": "56cd979f2b9fa292ede481099b042f0ef74fbe88",
+        "parents": [
+          "096bc9bc68301a4e343b15632d2f8de8d7622692",
+          "69441a9b7bffce7b2abb48e14c0f1cf04bc6603d"
+        ],
+        "tree": "68b1f51a0fda6249677c84e244fd59f1a06e18b3",
+        "subject": "Merge PR #6: fix Windows vendor reproducibility gate",
+        "disposition": "rejected",
+        "retainedEvidenceContractIds": ["PROV-02"],
+        "reason": "The merge tree exactly equals its second parent and has no resolution delta, so its code change is rejected. It retains only the PROV-02 contract ID as separate evidence."
+      },
+      {
+        "commit": "4ca74ba36e7f9c158b8c55658d151ff735b7245a",
+        "parents": ["56cd979f2b9fa292ede481099b042f0ef74fbe88"],
+        "tree": "2ca48c115f2e80bfad1bd7ad3524b7661a47106b",
+        "subject": "Bind Gatekeeper tests to GitHub draft assets",
+        "disposition": "rejected",
+        "retainedEvidenceContractIds": [
+          "GK-04",
+          "GK-05",
+          "GK-07",
+          "GK-08",
+          "GK-14"
+        ],
+        "reason": "The draft-asset binding implementation is rejected. Its credential-free URL, release and asset identity, size, hash, and aggregate-binding contract IDs are retained separately as evidence; the draft stays unpublished quarantine."
+      },
+      {
+        "commit": "a17f962b41bfd08640ed7b7e858c7594da47dae4",
+        "parents": ["4ca74ba36e7f9c158b8c55658d151ff735b7245a"],
+        "tree": "780423ea42d80a3b1493cb77869215187665ed14",
+        "subject": "Harden draft release identity checks",
+        "disposition": "rejected",
+        "retainedEvidenceContractIds": ["GK-06", "GK-08"],
+        "reason": "The v1 draft identity implementation is rejected. Truthful ad-hoc and not-notarized disclosure, bypass rejection, and strict draft identity contract IDs are retained separately as evidence."
+      },
+      {
+        "commit": "371a4afa540a1f7d5bf88e8b18d4ba420008e74d",
+        "parents": ["a17f962b41bfd08640ed7b7e858c7594da47dae4"],
+        "tree": "ab352dea9a5cdde409d2ff93d61dd62283005cbe",
+        "subject": "Reject quarantine bypass advice",
+        "disposition": "rejected",
+        "retainedEvidenceContractIds": ["GK-06", "GK-15"],
+        "reason": "The quarantine-guidance code change is rejected. Its validation contract IDs are retained separately as evidence that quarantine removal cannot become customer or release-acceptance advice; no v1 artifact is accepted."
+      },
+      {
+        "commit": "ddcfce456f3cf015ab77d207310140a311c945ab",
+        "parents": [
+          "56cd979f2b9fa292ede481099b042f0ef74fbe88",
+          "371a4afa540a1f7d5bf88e8b18d4ba420008e74d"
+        ],
+        "tree": "ab352dea9a5cdde409d2ff93d61dd62283005cbe",
+        "subject": "Merge PR #8: bind acceptance to GitHub draft assets",
+        "disposition": "rejected",
+        "retainedEvidenceContractIds": [
+          "REC-01..REC-09",
+          "PROV-01..PROV-13",
+          "GK-01..GK-15"
+        ],
+        "reason": "The merge tree exactly equals its second parent and has no resolution delta, so its code change is rejected. It remains historical metadata for the separately retained exact 9 recovery, 13 provenance, and 15 Gatekeeper contract IDs."
+      }
+    ]
+  },
+  "retainedEvidence": {
+    "historicalSource": {
+      "commit": "ddcfce456f3cf015ab77d207310140a311c945ab",
+      "tree": "ab352dea9a5cdde409d2ff93d61dd62283005cbe",
+      "executableDependency": false
+    },
+    "trackedFixture": {
+      "path": "tests/evidence/release-1.0-evidence.fixture.json",
+      "sha256": "b9f97ee0e1a844c6d68cbbc2a80e670dd4077ac1c6a1151d35eb87e8be0fd44b",
+      "expectedRedContract": {
+        "path": "tests/evidence/audited-release.contract.test.ts",
+        "sha256": "7b823ab28322f8aeea7e85f654d4ff6615675732fe84d1dd5c99cd894ca93054"
+      },
+      "requiresHistoricalGitObject": false
+    },
+    "suites": [
+      {
+        "prefix": "REC",
+        "count": 9,
+        "source": "desktop/test/force-quit-recovery.test.js"
+      },
+      {
+        "prefix": "PROV",
+        "count": 13,
+        "source": "desktop/test/release-provenance.test.js"
+      },
+      {
+        "prefix": "GK",
+        "count": 15,
+        "source": "desktop/test/gatekeeper-acceptance.test.js"
+      }
+    ]
+  },
+  "draftRelease": {
+    "repository": "desmoslock/desmoslock-releases",
+    "releaseId": 370225506,
+    "version": "v1.0.1",
+    "assetCount": 6,
+    "state": "draft-unpublished",
+    "policy": "never-publish"
+  },
+  "sanitizedRecoveryArchive": {
+    "repository": "nicolasdmolina/desmoslock-recovery-20260827-1835-sanitized",
+    "ref": "recovery/macbook-20260827-1835/sanitized-evidence",
+    "commit": "c523743601ce75cfab4edcc6e4fd040d60730446",
+    "tree": "d2a11a84a54a0185890020fba684dbe2bf1e47c6",
+    "mode": "sanitized-orphan",
+    "evidenceOnly": true,
+    "mergeable": false,
+    "originalCommitObjectsTransferred": false,
+    "ticket04EnvContentPreserved": false,
+    "counts": {
+      "sourceCommitMetadata": 29,
+      "sourceTips": 27,
+      "unpublishedSourceTips": 26,
+      "legacyCommits": 3,
+      "sanitizedPatches": 35,
+      "environmentExclusions": 10,
+      "originalUnpublishedCommitsAbsent": 32,
+      "originalTreeOverlap": 0
+    },
+    "sha256": {
+      "patchInventory": "648a0d3651b313f12b5ef23cc8bb7f55a0dcfaa4255b61eb83e84320c9b6f5c0",
+      "ticket04SnapshotManifest": "bbf24523273883bcdf94d841738d1869cede9ab42ac3d0118ed6d013de47b412",
+      "ticket11aSnapshotManifest": "56acff0310ee2416d27812ca98a3bd73ee57daab359caee2d2cf0f14e47dd678",
+      "legacySnapshotManifest": "51237ab3872f274dda6326188198cc26a86ff96d30d2bd07f39a72ae5fb6da44",
+      "trackerEvidenceManifest": "5c411ab6cddbdf71d89f3956866418af6bac771b4fec8009560b9d0f329bb5c9",
+      "environmentExclusions": "4aa34d5bf0dfbdbff50befaf07dcc0f5be938be082fbee4bc7d90ccad2cc4fd8"
+    },
+    "reconstructionDecisions": {
+      "ticket04": {
+        "base": "5d4c34cdd4958e5f40ac5c367462ad76fd39355a",
+        "verdict": "rejected-incomplete-negative-evidence",
+        "reason": "The capability lifecycle work remained incomplete after repeated rework and has no final accepted lifecycle-v4 receipt; it may inform new tests but is not integration input."
+      },
+      "ticket11a": {
+        "base": "c5fa74231ba5c645c8dcb8d72e77dbee1a19c269",
+        "verdict": "selective-salvage-only",
+        "salvagePatchSha256": "084d6075c04cc0deedce9ff3cc6cd949ed4b4e5b5dc7ba0ba2cafb5ed408a8c9",
+        "reason": "The preflight work is based on the rejected cumulative 1038ca4d5bd963e97f5c0c4de31e9234eb54d661 line; only independently reviewed fragments may be reconstructed after their true dependencies are accepted."
+      },
+      "legacyPlanning": {
+        "verdict": "non-authoritative-evidence-only"
+      },
+      "trackerEvidence": {
+        "verdict": "non-authoritative-evidence-only"
+      },
+      "overlayAllowed": false,
+      "cherryPickAllowed": false
+    },
+    "residualLoss": "All `.env*` bytes, deltas, blob/tree identity, and commit-wide identity depending on them were intentionally excluded. The original MacBook remains the sole copy of that excluded content. The Mini can recover all verified non-env changes but cannot recreate byte-identical original commits or complete trees."
+  },
+  "completion": {
+    "issue29Complete": false,
+    "state": "local-reconciliation-only",
+    "openGates": [
+      "downstream-v2-behavior",
+      "exact-head-ci",
+      "remote-pr-and-branch-cleanup",
+      "branch-protection",
+      "artifact-provenance"
+    ]
+  },
+  "externalGates": {
+    "branchProtection": {
+      "state": "unresolved-owner-admin-gate",
+      "reason": "The private repository's current plan cannot apply the intended ruleset, and the current operator lacks owner/admin authority.",
+      "claimedEnforced": false
+    }
+  }
+}

@@ -1,5 +1,11 @@
 # macOS signing and release runbook
 
+> **Historical v1 evidence only.** This runbook is disabled and must not be
+> executed. It does not authorize credentials, tags, signing, publication,
+> downloads, or customer installation. Future release work must start from the
+> reviewed v2 `main` contract in
+> [`product-completion/source-reconciliation.md`](product-completion/source-reconciliation.md).
+
 This runbook is for Daniel, the product and repository owner. The proposed v1.0.1
 pipeline is prepared but not released: no signed and notarized v1.0.1 has been
 published or accepted on customer machines. Keep the customer Gatekeeper issue open

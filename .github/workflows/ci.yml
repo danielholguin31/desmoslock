@@ -54,6 +54,8 @@ jobs:
       - run: npm ci
       - run: npm run test:unit
       - run: npm run test:evidence
+        env:
+          GIT_DIR: /nonexistent
 
   database-rls:
     name: Disposable database reset and RLS tests

@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+
+import {
+  assertLegacyReleaseTombstone,
+  expectedLegacyReleaseTombstone,
+} from "../scripts/release-tombstone-contract.mjs";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -15,12 +22,66 @@ function readJson(relativePath) {
   );
 }
 
+function readText(relativePath) {
+  return fs.readFileSync(path.join(repositoryRoot, relativePath), "utf8");
+}
+
+function sha256(contents) {
+  return crypto.createHash("sha256").update(contents).digest("hex");
+}
+
+function git(...arguments_) {
+  return execFileSync("git", arguments_, {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+  }).trim();
+}
+
+function gitIsAncestor(ancestor, descendant) {
+  return (
+    spawnSync("git", ["merge-base", "--is-ancestor", ancestor, descendant], {
+      cwd: repositoryRoot,
+    }).status === 0
+  );
+}
+
 test("v2 uses one typed npm workspace beside legacy v1", () => {
   const rootPackage = readJson("package.json");
+  const lockfile = readJson("package-lock.json");
+  const knownInternalPackages = new Set([
+    "@desmoslock/contracts",
+    "@desmoslock/desktop",
+    "@desmoslock/domain",
+    "@desmoslock/test-support",
+    "@desmoslock/web",
+  ]);
 
   assert.deepEqual(rootPackage.workspaces, ["apps/*", "packages/*"]);
   assert.equal(rootPackage.private, true);
+  assert.match(
+    rootPackage.version,
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/,
+  );
   assert.match(rootPackage.packageManager, /^npm@\d+\.\d+\.\d+/);
+  assert.equal(lockfile.packages[""].version, rootPackage.version);
+  for (const dependencySection of [
+    "dependencies",
+    "devDependencies",
+    "optionalDependencies",
+    "peerDependencies",
+  ]) {
+    for (const [dependency, version] of Object.entries(
+      rootPackage[dependencySection] ?? {},
+    )) {
+      if (!dependency.startsWith("@desmoslock/")) continue;
+      assert.equal(knownInternalPackages.has(dependency), true);
+      assert.equal(version, rootPackage.version);
+      assert.equal(
+        lockfile.packages[""][dependencySection]?.[dependency],
+        version,
+      );
+    }
+  }
 
   for (const relativePath of [
     "package-lock.json",
@@ -52,6 +113,48 @@ test("v2 uses one typed npm workspace beside legacy v1", () => {
       true,
       `${workspace} must not be publishable`,
     );
+    assert.equal(
+      workspacePackage.version,
+      rootPackage.version,
+      `${workspace} version must equal the root version`,
+    );
+    assert.equal(
+      lockfile.packages[workspace].version,
+      rootPackage.version,
+      `${workspace} lockfile version must equal the root version`,
+    );
+    assert.equal(
+      lockfile.packages[workspace].name,
+      workspacePackage.name,
+      `${workspace} lockfile name must equal its manifest`,
+    );
+    assert.deepEqual(
+      lockfile.packages[`node_modules/${workspacePackage.name}`],
+      { resolved: workspace, link: true },
+      `${workspacePackage.name} must be a workspace link`,
+    );
+    for (const dependencySection of [
+      "dependencies",
+      "devDependencies",
+      "optionalDependencies",
+      "peerDependencies",
+    ]) {
+      for (const [dependency, version] of Object.entries(
+        workspacePackage[dependencySection] ?? {},
+      )) {
+        if (!dependency.startsWith("@desmoslock/")) continue;
+        assert.equal(
+          knownInternalPackages.has(dependency),
+          true,
+          `${workspace} references unknown internal package ${dependency}`,
+        );
+        assert.equal(
+          version,
+          rootPackage.version,
+          `${workspace} ${dependency} must use the exact root version`,
+        );
+      }
+    }
     assert.equal(
       typeof workspacePackage.scripts?.build,
       "string",
@@ -164,9 +267,521 @@ test("legacy v1 and test-only support cannot enter a v2 release path", () => {
     "./dist/index.js",
   );
   assert.equal(testSupportPackage.exports?.["."]?.default, "./dist/blocked.js");
-  assert.match(
-    releaseWorkflow,
-    /Legacy v1 release is disabled during v2 expansion/,
+  assert.equal(releaseWorkflow, expectedLegacyReleaseTombstone);
+  assert.doesNotThrow(() => assertLegacyReleaseTombstone(releaseWorkflow));
+});
+
+test("legacy release tombstone rejects every alternate execution path", () => {
+  const mutations = [
+    [
+      "tag trigger",
+      expectedLegacyReleaseTombstone.replace(
+        "  workflow_dispatch:",
+        "  push:\n    tags:\n      - v*",
+      ),
+    ],
+    [
+      "write permission",
+      expectedLegacyReleaseTombstone.replace(
+        "permissions: {}",
+        "permissions:\n  contents: write",
+      ),
+    ],
+    [
+      "environment",
+      expectedLegacyReleaseTombstone.replace(
+        "    runs-on: ubuntu-latest",
+        "    runs-on: ubuntu-latest\n    environment: production",
+      ),
+    ],
+    [
+      "third-party action",
+      expectedLegacyReleaseTombstone.replace(
+        "    steps:",
+        "    steps:\n      - uses: actions/checkout@deadbeef",
+      ),
+    ],
+    [
+      "secret expression",
+      expectedLegacyReleaseTombstone.replace(
+        "        shell: bash",
+        "        env:\n          TOKEN: ${{ secrets.TOKEN }}\n        shell: bash",
+      ),
+    ],
+    [
+      "artifact transfer",
+      expectedLegacyReleaseTombstone.replace(
+        "        shell: bash",
+        "        uses: actions/upload-artifact@deadbeef\n        shell: bash",
+      ),
+    ],
+    [
+      "successful exit",
+      expectedLegacyReleaseTombstone.replace(
+        "          exit 1",
+        "          exit 0",
+      ),
+    ],
+    [
+      "second job",
+      `${expectedLegacyReleaseTombstone}  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: exit 1\n`,
+    ],
+  ];
+
+  for (const [label, mutation] of mutations) {
+    assert.notEqual(
+      mutation,
+      expectedLegacyReleaseTombstone,
+      `${label} mutates`,
+    );
+    assert.throws(
+      () => assertLegacyReleaseTombstone(mutation),
+      Error,
+      `${label} must fail closed`,
+    );
+  }
+});
+
+test("source-reconciliation ledger exactly covers both evidence inputs", () => {
+  const ledger = readJson("docs/product-completion/source-reconciliation.json");
+  const baseline = "388170e94418d20ad205812553e1c9fdf5de9139";
+  const baselineTree = "95a00a77f84962248523f38a8c554216270cc23d";
+  const mergeBase = "3883f4234923c0bc250dc41649ba3801144c3f58";
+  const mergeBaseTree = "ebb86934567790048bdb3f04ae8e57ac4968a34c";
+  const releaseHead = "ddcfce456f3cf015ab77d207310140a311c945ab";
+  const releaseTree = "ab352dea9a5cdde409d2ff93d61dd62283005cbe";
+  const expectedReleaseCommits = [
+    {
+      commit: "f2cfb93b4f674d1a523cbef9cece2ff1c76f0f27",
+      parents: [mergeBase],
+      tree: "d3f5fe233e603aaf0af11fa7419a33d709c67182",
+      subject: "Fix macOS release signing pipeline",
+    },
+    {
+      commit: "ee2857eab57e0e4d5fe3e466db805fd65f99f534",
+      parents: ["f2cfb93b4f674d1a523cbef9cece2ff1c76f0f27"],
+      tree: "6125e6f3e78a9cc3e4a13b025b4e8f65616ef39b",
+      subject: "Restore complete package lock",
+    },
+    {
+      commit: "0c8a65f9ae1e0d769646cb092807eb3c48dfd86f",
+      parents: ["ee2857eab57e0e4d5fe3e466db805fd65f99f534"],
+      tree: "9fbfa85e83a944b1ac1c959959a45f975f588d0d",
+      subject: "Harden release trust and promotion gates",
+    },
+    {
+      commit: "31c4768a7804f5d7f80d32af3d4c921ce0fc9a69",
+      parents: ["0c8a65f9ae1e0d769646cb092807eb3c48dfd86f"],
+      tree: "0615bac9c736c35a674afff05cfa77c315fb8673",
+      subject: "Clarify Apple enrollment decision",
+    },
+    {
+      commit: "b0910d1a815c56b9036da6f0df4ff1cc648fe1ae",
+      parents: [mergeBase, "31c4768a7804f5d7f80d32af3d4c921ce0fc9a69"],
+      tree: "0615bac9c736c35a674afff05cfa77c315fb8673",
+      subject:
+        "Merge pull request #2 from danielholguin31/hotfix/macos-signing-v1.0.1",
+    },
+    {
+      commit: "64dcbb5cd555c861190ce0159f282f17489344be",
+      parents: ["b0910d1a815c56b9036da6f0df4ff1cc648fe1ae"],
+      tree: "5f029533907b4c6559a176281d517ce6b85f1741",
+      subject: "Prepare zero-cost v1.0.1 recovery release",
+      retainedEvidenceContractIds: ["REC-01..REC-09"],
+    },
+    {
+      commit: "454a3b316d75fd03888b27d52b95676fddd50a0c",
+      parents: ["64dcbb5cd555c861190ce0159f282f17489344be"],
+      tree: "6da40413e466c02f8d6da1bc70ce044044d3b780",
+      subject: "Bind recovery provenance to actual builders",
+      retainedEvidenceContractIds: ["PROV-03..PROV-13"],
+    },
+    {
+      commit: "1e6f156b50002fb6096510db962577a2d793296b",
+      parents: ["454a3b316d75fd03888b27d52b95676fddd50a0c"],
+      tree: "baad4b0f4d5553fe3a6fb0790c249a8161ef6c48",
+      subject: "Document Daniel preview checkpoint",
+    },
+    {
+      commit: "aee038212b96dacc46abd686f8e260e10f127160",
+      parents: ["1e6f156b50002fb6096510db962577a2d793296b"],
+      tree: "58c1afd3b5dadfa4fbd6af8b006446d39a88dd24",
+      subject: "Harden local release acceptance",
+      retainedEvidenceContractIds: [
+        "PROV-01",
+        "GK-04",
+        "GK-09",
+        "GK-10",
+        "GK-12",
+        "GK-15",
+      ],
+    },
+    {
+      commit: "3ef19f63fe12b07a0f9fc7babd49d5f9fdbb35fe",
+      parents: ["aee038212b96dacc46abd686f8e260e10f127160"],
+      tree: "5c90bca66926341a2824c6959dabf8c5ebfb57af",
+      subject: "Require two-host Gatekeeper acceptance",
+      retainedEvidenceContractIds: ["GK-01..GK-04", "GK-09..GK-15"],
+    },
+    {
+      commit: "096bc9bc68301a4e343b15632d2f8de8d7622692",
+      parents: [
+        "b0910d1a815c56b9036da6f0df4ff1cc648fe1ae",
+        "3ef19f63fe12b07a0f9fc7babd49d5f9fdbb35fe",
+      ],
+      tree: "5c90bca66926341a2824c6959dabf8c5ebfb57af",
+      subject: "Merge PR #4: v1.0.1 zero-cost recovery",
+      retainedEvidenceContractIds: [
+        "REC-01..REC-09",
+        "PROV-01",
+        "PROV-03..PROV-13",
+        "GK-01..GK-15",
+      ],
+    },
+    {
+      commit: "69441a9b7bffce7b2abb48e14c0f1cf04bc6603d",
+      parents: ["096bc9bc68301a4e343b15632d2f8de8d7622692"],
+      tree: "68b1f51a0fda6249677c84e244fd59f1a06e18b3",
+      subject: "Fix Windows vendor reproducibility gate",
+      retainedEvidenceContractIds: ["PROV-02"],
+    },
+    {
+      commit: "56cd979f2b9fa292ede481099b042f0ef74fbe88",
+      parents: [
+        "096bc9bc68301a4e343b15632d2f8de8d7622692",
+        "69441a9b7bffce7b2abb48e14c0f1cf04bc6603d",
+      ],
+      tree: "68b1f51a0fda6249677c84e244fd59f1a06e18b3",
+      subject: "Merge PR #6: fix Windows vendor reproducibility gate",
+      retainedEvidenceContractIds: ["PROV-02"],
+    },
+    {
+      commit: "4ca74ba36e7f9c158b8c55658d151ff735b7245a",
+      parents: ["56cd979f2b9fa292ede481099b042f0ef74fbe88"],
+      tree: "2ca48c115f2e80bfad1bd7ad3524b7661a47106b",
+      subject: "Bind Gatekeeper tests to GitHub draft assets",
+      retainedEvidenceContractIds: [
+        "GK-04",
+        "GK-05",
+        "GK-07",
+        "GK-08",
+        "GK-14",
+      ],
+    },
+    {
+      commit: "a17f962b41bfd08640ed7b7e858c7594da47dae4",
+      parents: ["4ca74ba36e7f9c158b8c55658d151ff735b7245a"],
+      tree: "780423ea42d80a3b1493cb77869215187665ed14",
+      subject: "Harden draft release identity checks",
+      retainedEvidenceContractIds: ["GK-06", "GK-08"],
+    },
+    {
+      commit: "371a4afa540a1f7d5bf88e8b18d4ba420008e74d",
+      parents: ["a17f962b41bfd08640ed7b7e858c7594da47dae4"],
+      tree: releaseTree,
+      subject: "Reject quarantine bypass advice",
+      retainedEvidenceContractIds: ["GK-06", "GK-15"],
+    },
+    {
+      commit: releaseHead,
+      parents: [
+        "56cd979f2b9fa292ede481099b042f0ef74fbe88",
+        "371a4afa540a1f7d5bf88e8b18d4ba420008e74d",
+      ],
+      tree: releaseTree,
+      subject: "Merge PR #8: bind acceptance to GitHub draft assets",
+      retainedEvidenceContractIds: [
+        "REC-01..REC-09",
+        "PROV-01..PROV-13",
+        "GK-01..GK-15",
+      ],
+    },
+  ];
+
+  assert.equal(ledger.schemaVersion, 1);
+  assert.equal(ledger.issue, 29);
+  assert.equal(ledger.canonicalSource.repository, "danielholguin31/desmoslock");
+  assert.equal(ledger.canonicalSource.branch, "main");
+  assert.equal(ledger.canonicalSource.onlyIntegrationAndReleaseSource, true);
+  assert.deepEqual(ledger.canonicalSource.integrationBaseline, {
+    commit: baseline,
+    tree: baselineTree,
+  });
+  assert.equal(
+    ledger.canonicalSource.releasePolicy.publicReleaseEnabled,
+    false,
   );
-  assert.doesNotMatch(releaseWorkflow, /^\s+tags:\s*$/m);
+  assert.equal(git("rev-parse", `${baseline}^{tree}`), baselineTree);
+  assert.equal(gitIsAncestor(baseline, "HEAD"), true);
+  assert.deepEqual(ledger.divergentReleaseLine.mergeBase, {
+    commit: mergeBase,
+    tree: mergeBaseTree,
+  });
+  assert.deepEqual(ledger.divergentReleaseLine.head, {
+    commit: releaseHead,
+    tree: releaseTree,
+  });
+  assert.equal(ledger.divergentReleaseLine.uniqueCommitCount, 17);
+  assert.deepEqual(ledger.divergentReleaseLine.dispositionCounts, {
+    integrated: 0,
+    rejected: 17,
+  });
+  assert.equal(
+    Object.hasOwn(
+      ledger.divergentReleaseLine.dispositionCounts,
+      "evidence-only",
+    ),
+    false,
+  );
+
+  const recordsWithoutReasons = ledger.divergentReleaseLine.commits.map(
+    ({ reason, ...record }) => {
+      assert.match(reason, /reject/i);
+      return record;
+    },
+  );
+  assert.deepEqual(
+    recordsWithoutReasons,
+    expectedReleaseCommits.map((record) => ({
+      ...record,
+      disposition: "rejected",
+    })),
+  );
+  assert.equal(
+    ledger.divergentReleaseLine.commits.filter(
+      ({ retainedEvidenceContractIds }) =>
+        retainedEvidenceContractIds !== undefined,
+    ).length,
+    11,
+  );
+  for (const record of ledger.divergentReleaseLine.commits) {
+    assert.equal(record.disposition, "rejected");
+    assert.equal(record.contracts, undefined);
+  }
+
+  assert.deepEqual(ledger.retainedEvidence, {
+    historicalSource: {
+      commit: releaseHead,
+      tree: releaseTree,
+      executableDependency: false,
+    },
+    trackedFixture: {
+      path: "tests/evidence/release-1.0-evidence.fixture.json",
+      sha256:
+        "b9f97ee0e1a844c6d68cbbc2a80e670dd4077ac1c6a1151d35eb87e8be0fd44b",
+      expectedRedContract: {
+        path: "tests/evidence/audited-release.contract.test.ts",
+        sha256:
+          "7b823ab28322f8aeea7e85f654d4ff6615675732fe84d1dd5c99cd894ca93054",
+      },
+      requiresHistoricalGitObject: false,
+    },
+    suites: [
+      {
+        prefix: "REC",
+        count: 9,
+        source: "desktop/test/force-quit-recovery.test.js",
+      },
+      {
+        prefix: "PROV",
+        count: 13,
+        source: "desktop/test/release-provenance.test.js",
+      },
+      {
+        prefix: "GK",
+        count: 15,
+        source: "desktop/test/gatekeeper-acceptance.test.js",
+      },
+    ],
+  });
+  assert.equal(ledger.draftRelease.releaseId, 370225506);
+  assert.equal(ledger.draftRelease.state, "draft-unpublished");
+  assert.equal(ledger.draftRelease.policy, "never-publish");
+
+  const recovery = ledger.sanitizedRecoveryArchive;
+  assert.equal(
+    recovery.repository,
+    "nicolasdmolina/desmoslock-recovery-20260827-1835-sanitized",
+  );
+  assert.equal(
+    recovery.ref,
+    "recovery/macbook-20260827-1835/sanitized-evidence",
+  );
+  assert.equal(recovery.commit, "c523743601ce75cfab4edcc6e4fd040d60730446");
+  assert.equal(recovery.mode, "sanitized-orphan");
+  assert.equal(recovery.evidenceOnly, true);
+  assert.equal(recovery.mergeable, false);
+  assert.equal(recovery.originalCommitObjectsTransferred, false);
+  assert.equal(
+    recovery.sha256.patchInventory,
+    "648a0d3651b313f12b5ef23cc8bb7f55a0dcfaa4255b61eb83e84320c9b6f5c0",
+  );
+  assert.equal(
+    recovery.sha256.environmentExclusions,
+    "4aa34d5bf0dfbdbff50befaf07dcc0f5be938be082fbee4bc7d90ccad2cc4fd8",
+  );
+  assert.equal(
+    recovery.reconstructionDecisions.ticket04.verdict,
+    "rejected-incomplete-negative-evidence",
+  );
+  assert.equal(
+    recovery.reconstructionDecisions.ticket11a.verdict,
+    "selective-salvage-only",
+  );
+  assert.equal(
+    recovery.reconstructionDecisions.ticket11a.salvagePatchSha256,
+    "084d6075c04cc0deedce9ff3cc6cd949ed4b4e5b5dc7ba0ba2cafb5ed408a8c9",
+  );
+  assert.equal(recovery.reconstructionDecisions.overlayAllowed, false);
+  assert.equal(recovery.reconstructionDecisions.cherryPickAllowed, false);
+  assert.match(recovery.residualLoss, /All `\.env\*` bytes/);
+  assert.deepEqual(ledger.completion, {
+    issue29Complete: false,
+    state: "local-reconciliation-only",
+    openGates: [
+      "downstream-v2-behavior",
+      "exact-head-ci",
+      "remote-pr-and-branch-cleanup",
+      "branch-protection",
+      "artifact-provenance",
+    ],
+  });
+});
+
+test("README presents only the internal v2 source as current truth", () => {
+  const readme = readText("README.md");
+  assert.match(readme, /internal, pre-release/);
+  assert.match(
+    readme,
+    /only development,\s*integration, and future release source/,
+  );
+  assert.match(readme, /no supported public download, deployment, price/);
+  assert.match(readme, /v1\.0\.1 draft release.*must never be\s*published/s);
+  assert.match(
+    readme,
+    /does not require the historical Git\s*object or branch/,
+  );
+  assert.match(readme, /This local reconciliation does not complete issue 29/);
+  assert.doesNotMatch(readme, /suites are run in\s*a temporary directory/);
+  assert.doesNotMatch(readme, /^## Pricing and licensing$/m);
+  assert.doesNotMatch(readme, /^## desmoslock\.vercel\.app$/m);
+  assert.doesNotMatch(readme, /\*\*Status: live\.\*\*/);
+
+  for (const legacyDocument of [
+    "docs/MACOS_RELEASE.md",
+    "docs/OPERATIONS.md",
+    "docs/SUPABASE.md",
+  ]) {
+    assert.match(
+      readText(legacyDocument),
+      /\*\*Historical v1 evidence only\.\*\*/,
+      `${legacyDocument} must not present historical instructions as current`,
+    );
+  }
+});
+
+test("v2 evidence contract IDs remain exact and contiguous", () => {
+  const fixturePath = "tests/evidence/release-1.0-evidence.fixture.json";
+  const fixtureContents = readText(fixturePath);
+  const fixture = JSON.parse(fixtureContents);
+  const evidenceContracts = readText(
+    "tests/evidence/audited-release.contract.test.ts",
+  );
+  const expectedIds = [
+    ...Array.from(
+      { length: 9 },
+      (_, index) => `REC-${String(index + 1).padStart(2, "0")}`,
+    ),
+    ...Array.from(
+      { length: 13 },
+      (_, index) => `PROV-${String(index + 1).padStart(2, "0")}`,
+    ),
+    ...Array.from(
+      { length: 15 },
+      (_, index) => `GK-${String(index + 1).padStart(2, "0")}`,
+    ),
+  ];
+  const actualIds = [
+    ...evidenceContracts.matchAll(/id:\s*["']((?:REC|PROV|GK)-\d{2})["']/gu),
+  ].map((match) => match[1]);
+
+  assert.equal(
+    sha256(fixtureContents),
+    "b9f97ee0e1a844c6d68cbbc2a80e670dd4077ac1c6a1151d35eb87e8be0fd44b",
+  );
+  assert.equal(
+    sha256(evidenceContracts),
+    "7b823ab28322f8aeea7e85f654d4ff6615675732fe84d1dd5c99cd894ca93054",
+  );
+  assert.deepEqual(fixture.historicalSource, {
+    ref: "refs/heads/release/1.0",
+    commit: "ddcfce456f3cf015ab77d207310140a311c945ab",
+    tree: "ab352dea9a5cdde409d2ff93d61dd62283005cbe",
+    executableDependency: false,
+  });
+  assert.deepEqual(
+    fixture.suites.map(
+      ({ name, prefix, expectedCount, historicalTestFile }) => ({
+        name,
+        prefix,
+        expectedCount,
+        historicalTestFile,
+      }),
+    ),
+    [
+      {
+        name: "recovery",
+        prefix: "REC",
+        expectedCount: 9,
+        historicalTestFile: {
+          path: "desktop/test/force-quit-recovery.test.js",
+          blob: "56b68bad0e0de08f4bfa8e6b3bb104feec5f7cac",
+          size: 9059,
+          sha256:
+            "8c8d9d76723a700a09e7722ec873a27b3c9ef01a465fc501fd0c676d08c126e6",
+        },
+      },
+      {
+        name: "provenance",
+        prefix: "PROV",
+        expectedCount: 13,
+        historicalTestFile: {
+          path: "desktop/test/release-provenance.test.js",
+          blob: "79d9ac1df904b8698fb51ece97126071f5c53666",
+          size: 9584,
+          sha256:
+            "4547cd882cc919d7119ca763f18c867c51d72c328972dd07d5a5b56213641db0",
+        },
+      },
+      {
+        name: "gatekeeper",
+        prefix: "GK",
+        expectedCount: 15,
+        historicalTestFile: {
+          path: "desktop/test/gatekeeper-acceptance.test.js",
+          blob: "2ab5863e17a70bb5c07b12b2cb3e704c1c70aafa",
+          size: 17881,
+          sha256:
+            "f4f5c2b351c0c71dcb9068085ceab2b5ef7189b6dc7171c616bc79e3a701eaf8",
+        },
+      },
+    ],
+  );
+  assert.deepEqual(
+    fixture.suites.flatMap(({ contractIds }) => contractIds),
+    expectedIds,
+  );
+  assert.deepEqual(actualIds, expectedIds);
+  assert.equal(new Set(actualIds).size, 37);
+
+  const evidenceRunner = readText("scripts/run-release-evidence.mjs");
+  assert.doesNotMatch(
+    evidenceRunner,
+    /(?:execFileSync|spawnSync)\(\s*["']git["']/,
+  );
+  assert.match(evidenceRunner, new RegExp(fixturePath.replace(".", "\\.")));
+  assert.match(
+    readText(".github/workflows/ci.yml"),
+    /- run: npm run test:evidence\s+env:\s+GIT_DIR: \/nonexistent/,
+  );
 });
