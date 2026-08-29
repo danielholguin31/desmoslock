@@ -32,15 +32,18 @@ enabled = false
 
 [auth]
 enabled = true
-site_url = "http://127.0.0.1:3000"
-additional_redirect_urls = ["http://127.0.0.1:3000"]
-enable_signup = true
-enable_anonymous_sign_ins = true
+site_url = "https://desmoslock.invalid"
+additional_redirect_urls = []
+enable_signup = false
+enable_anonymous_sign_ins = false
 
 [edge_runtime]
 enabled = true
 policy = "per_worker"
 deno_version = 2
+
+[functions.health]
+verify_jwt = false
 
 [analytics]
 enabled = false

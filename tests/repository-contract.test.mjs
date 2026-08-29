@@ -172,7 +172,9 @@ test("v2 data plane is migration-owned and clean-start only", () => {
   for (const relativePath of [
     "supabase/config.toml",
     "supabase/migrations/20260824000100_v2_foundation.sql",
+    "supabase/migrations/20260828000100_internal_release_backend.sql",
     "supabase/seed.sql",
+    "supabase/tests/database/internal_release_backend.test.sql",
     "supabase/tests/database/v2_foundation.test.sql",
   ]) {
     assert.equal(
@@ -181,6 +183,13 @@ test("v2 data plane is migration-owned and clean-start only", () => {
       `${relativePath} is required`,
     );
   }
+
+  const buildScript = readText("scripts/build-app.mjs");
+  assert.doesNotMatch(
+    buildScript,
+    /DESMOSLOCK_PUBLIC_BACKEND_(?:ENVIRONMENT|URL)[\s\S]{0,80}\?\?/u,
+    "public app builds must not default missing backend configuration",
+  );
 
   const migration = fs.readFileSync(
     path.join(
@@ -210,6 +219,48 @@ test("v2 data plane is migration-owned and clean-start only", () => {
   );
   for (const table of legacyProductTables) {
     assert.doesNotMatch(seed, new RegExp(`\\b${table}\\b`, "i"));
+  }
+});
+
+test("generation-3 Supabase configuration is versioned and fails closed", () => {
+  const configuration = readText("supabase/config.toml");
+  const authStart = configuration.indexOf("[auth]\n");
+  const nextSection = configuration.indexOf("\n[", authStart + 1);
+  const authSection = configuration.slice(
+    authStart,
+    nextSection === -1 ? undefined : nextSection,
+  );
+
+  assert.match(
+    configuration,
+    /^schemas = \["public", "graphql_public", "desmoslock_v2"\]$/mu,
+  );
+  assert.match(configuration, /^\[functions\.health\]\nverify_jwt = false$/mu);
+  assert.notEqual(authStart, -1);
+  assert.match(authSection, /^site_url = "https:\/\/desmoslock\.invalid"$/mu);
+  assert.match(authSection, /^additional_redirect_urls = \[\]$/mu);
+  assert.match(authSection, /^enable_signup = false$/mu);
+  assert.match(authSection, /^enable_anonymous_sign_ins = false$/mu);
+
+  for (const [workflowPath, expectedBuilds] of [
+    [".github/workflows/ci.yml", 2],
+    [".github/workflows/security.yml", 1],
+  ]) {
+    const workflow = readText(workflowPath);
+    assert.equal(
+      [...workflow.matchAll(/^\s+- run: npm run build$/gmu)].length,
+      expectedBuilds,
+      `${workflowPath} has the expected app build count`,
+    );
+    assert.equal(
+      [
+        ...workflow.matchAll(
+          /^\s+- run: npm run build\n\s+env:\n\s+DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT: local\n\s+DESMOSLOCK_PUBLIC_BACKEND_URL: http:\/\/127\.0\.0\.1:54321$/gmu,
+        ),
+      ].length,
+      expectedBuilds,
+      `${workflowPath} configures every app build explicitly`,
+    );
   }
 });
 
@@ -503,6 +554,25 @@ test("source-reconciliation ledger exactly covers both evidence inputs", () => {
   assert.equal(ledger.canonicalSource.repository, "danielholguin31/desmoslock");
   assert.equal(ledger.canonicalSource.branch, "main");
   assert.equal(ledger.canonicalSource.onlyIntegrationAndReleaseSource, true);
+  assert.deepEqual(ledger.canonicalSource.canonicalPaths, {
+    product: [
+      "apps",
+      "packages",
+      "supabase/config.toml",
+      "supabase/functions/deno.json",
+      "supabase/functions/health",
+      "supabase/migrations",
+      "supabase/seed.sql",
+      "supabase/tests/database",
+    ],
+    operations: ["scripts/synthetic-backup"],
+  });
+  assert.equal(
+    ledger.canonicalSource.canonicalPaths.product.includes(
+      "supabase/enterprise.sql",
+    ),
+    false,
+  );
   assert.deepEqual(ledger.canonicalSource.integrationBaseline, {
     commit: baseline,
     tree: baselineTree,

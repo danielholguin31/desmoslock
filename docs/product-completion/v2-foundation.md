@@ -33,12 +33,17 @@ npm run test:dependencies
 npm run test:secrets
 npm run test:workflows
 npm run verify:locks
-npm run build
+DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=local \
+DESMOSLOCK_PUBLIC_BACKEND_URL=http://127.0.0.1:54321 \
+  npm run build
 npm run sbom
 npm run verify:licenses
 npm run verify:packages
 npm run verify:repository
 ```
+
+The two public backend build values are mandatory. Missing or partial values
+fail before bundling; the build never invents a loopback or staging target.
 
 With Docker available, reset and test the clean local data plane:
 

@@ -31,7 +31,11 @@ test("v2 Electron shell requests isolated renderer preferences with Node access 
       window.getByRole("heading", { name: "DesmosLock v2" }),
     ).toBeVisible();
     await expect(window.locator("[data-v2-status]")).toHaveText(
-      "DesmosLock v2 internal workspace",
+      "Synthetic backend ready",
+    );
+    await expect(window.locator("[data-v2-status]")).toHaveAttribute(
+      "data-backend-status",
+      "ready",
     );
     await expect(
       window.evaluate(() => ({
