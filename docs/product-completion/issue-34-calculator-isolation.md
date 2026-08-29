@@ -41,12 +41,19 @@ release path. It runs the hostile and relaunch assertions against an unpackaged
 production build, then creates an unsigned package in a temporary directory. The
 package has the `RunAsNode`, `EnableNodeOptionsEnvironmentVariable`, and
 `EnableNodeCliInspectArguments` Electron fuses disabled. An external child-process
-harness launches the exact executable without a diagnostic endpoint, verifies a
-normal bounded launch, and requires `--inspect=0`, `--remote-debugging-port=0`, and
-`--remote-debugging-pipe` to exit nonzero without advertising a debugger listener or
-leaving a process alive. Every Electron launch receives a small explicit platform
-environment rather than ambient parent variables. The seam removes the package and
-performs no signing, notarization, publication, deployment, or legacy-v1 packaging.
+harness launches the exact executable in an isolated process group, verifies a normal
+bounded launch, and requires `--inspect=0`, `--remote-debugging-port=0`, and
+`--remote-debugging-pipe` to exit nonzero. It waits for process close and both output
+pipes to reach EOF before freezing and inspecting output, then terminates the whole
+group and positively verifies that it is empty. No launch may advertise a debugger
+listener or leave a helper alive. Every Electron launch receives a small explicit
+platform environment rather than ambient parent variables. The seam removes the
+package and performs no signing, notarization, publication, deployment, or legacy-v1
+packaging.
+
+This process-group proof covers the POSIX CI and macOS package gate. Windows execution
+fails closed until an atomic Job Object adapter can provide the same containment and
+positive-empty guarantee; it does not fall back to leader-only termination.
 
 This automated evidence does not claim physical black-box calculator interaction in
 the package. That acceptance remains an issue 37 human/physical gate: XCUITest must

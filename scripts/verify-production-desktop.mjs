@@ -16,6 +16,7 @@ import {
   verifyPackagedElectronFuses,
 } from "./electron-fuse-policy.mjs";
 import { createElectronLaunchProfile } from "./electron-launch-profile.mjs";
+import { spawnIsolatedProcessTree } from "./isolated-process-tree.mjs";
 import { runHostileCalculatorProbe } from "../tests/e2e/electron/support/hostile-calculator-probe.mjs";
 
 const repositoryRoot = path.resolve(
@@ -104,80 +105,28 @@ async function packagedExecutable(packageDirectory) {
   return executable;
 }
 
-function createCapturedChild(executablePath, arguments_, environment) {
-  const child = spawn(executablePath, arguments_, {
-    cwd: path.dirname(executablePath),
-    env: environment,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let stderr = "";
-  let stdout = "";
-  child.stderr.setEncoding("utf8");
-  child.stdout.setEncoding("utf8");
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk;
-  });
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk;
-  });
-  return {
-    child,
-    output: () => `${stdout}${stderr}`,
-  };
-}
-
-async function waitForChildExit(child, timeoutMilliseconds) {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return { code: child.exitCode, signal: child.signalCode };
-  }
-
-  return Promise.race([
-    new Promise((resolve, reject) => {
-      child.once("error", reject);
-      child.once("exit", (code, signal) => resolve({ code, signal }));
-    }),
-    new Promise((resolve) =>
-      setTimeout(() => resolve(null), timeoutMilliseconds),
-    ),
-  ]);
-}
-
-async function terminateChild(child) {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  child.kill("SIGTERM");
-  if ((await waitForChildExit(child, 3_000)) !== null) return;
-  child.kill("SIGKILL");
-  await waitForChildExit(child, 3_000);
-}
-
 async function verifyExternalPackagedLaunch(executablePath, userDataDirectory) {
   const launchProfile = createElectronLaunchProfile();
-  const captured = createCapturedChild(
-    executablePath,
-    [...launchProfile.args, `--user-data-dir=${userDataDirectory}`],
-    launchProfile.env,
-  );
+  const tree = spawnIsolatedProcessTree({
+    arguments: [...launchProfile.args, `--user-data-dir=${userDataDirectory}`],
+    command: executablePath,
+    cwd: path.dirname(executablePath),
+    environment: launchProfile.env,
+  });
 
-  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  let termination;
   try {
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
     assert.equal(
-      captured.child.exitCode,
-      null,
-      `Packaged executable did not remain active:\n${captured.output()}`,
+      tree.leaderIsRunning(),
+      true,
+      `Packaged executable did not remain active:\n${tree.output()}`,
     );
-    assert.equal(
-      captured.child.signalCode,
-      null,
-      `Packaged executable terminated early:\n${captured.output()}`,
-    );
-    assert.doesNotMatch(captured.output(), diagnosticEndpointPattern);
   } finally {
-    await terminateChild(captured.child);
+    termination = await tree.terminate();
   }
-  assert.ok(
-    captured.child.exitCode !== null || captured.child.signalCode !== null,
-    "Packaged executable remained active after bounded termination",
-  );
+  assert.equal(termination.treeEmpty, true);
+  assert.doesNotMatch(termination.close.output, diagnosticEndpointPattern);
 }
 
 async function verifyForbiddenPackagedSwitch(
@@ -186,41 +135,48 @@ async function verifyForbiddenPackagedSwitch(
   forbiddenSwitch,
 ) {
   const launchProfile = createElectronLaunchProfile();
-  const captured = createCapturedChild(
-    executablePath,
-    [
+  const tree = spawnIsolatedProcessTree({
+    arguments: [
       ...launchProfile.args,
       forbiddenSwitch,
       `--user-data-dir=${userDataDirectory}`,
     ],
-    launchProfile.env,
-  );
-  const result = await waitForChildExit(captured.child, 5_000);
-  if (result === null) {
-    await terminateChild(captured.child);
-    throw new Error(`Packaged executable accepted ${forbiddenSwitch}`);
+    command: executablePath,
+    cwd: path.dirname(executablePath),
+    environment: launchProfile.env,
+  });
+  let result;
+  let termination;
+  try {
+    result = await tree.waitForClose(5_000);
+    if (result === null) {
+      throw new Error(`Packaged executable accepted ${forbiddenSwitch}`);
+    }
+  } finally {
+    termination = await tree.terminate();
   }
 
   assert.equal(
-    result.code,
+    termination.treeEmpty,
+    true,
+    `Packaged process tree survived rejection of ${forbiddenSwitch}`,
+  );
+  assert.equal(
+    result.exitCode,
     78,
     `Packaged executable did not fail closed for ${forbiddenSwitch}`,
   );
   assert.equal(result.signal, null);
   assert.match(
-    captured.output(),
+    result.output,
     /Packaged runtime rejected a diagnostic switch\./,
   );
-  assert.doesNotMatch(captured.output(), diagnosticEndpointPattern);
-  assert.equal(
-    captured.child.exitCode,
-    result.code,
-    `Packaged executable remained active after rejecting ${forbiddenSwitch}`,
-  );
+  assert.doesNotMatch(result.output, diagnosticEndpointPattern);
   return {
     diagnosticEndpointObserved: false,
-    exitCode: result.code,
+    exitCode: result.exitCode,
     switch: forbiddenSwitch,
+    treeEmpty: termination.treeEmpty,
   };
 }
 
