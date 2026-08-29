@@ -1,5 +1,10 @@
 # DesmosLock on Supabase
 
+> **Historical v1 evidence only.** The project state and dashboard instructions
+> below are a retained snapshot, not current v2 authority. Do not change a
+> hosted project or authentication setting from this document; v2 uses the
+> repository migrations and requires a separately authorized remote gate.
+
 **Status: live.** Project `thebestprojectofall` (`xoholqrbhgffivvklpvd`) has the schema
 applied, and the app defaults to it. Two provider settings still need flipping in the
 dashboard before students can join — see [Finish the setup](#finish-the-setup).

@@ -1,5 +1,10 @@
 # Running the business side
 
+> **Historical v1 evidence only.** The pricing, quote, database, and activation
+> procedures below are not current product or operator guidance. DesmosLock v2
+> is internal and pre-release; do not perform customer, billing, database, or
+> outreach actions from this document.
+
 Everything a school can do to itself is self-service. Everything that costs
 money is deliberately not — seats, term and licence status are set by you, so a
 school cannot licence itself for free by editing a request in dev tools. There
