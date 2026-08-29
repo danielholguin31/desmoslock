@@ -271,6 +271,21 @@ test("legacy v1 and test-only support cannot enter a v2 release path", () => {
   assert.doesNotThrow(() => assertLegacyReleaseTombstone(releaseWorkflow));
 });
 
+test("Electron CI acceptance includes the packaged hostile verifier", () => {
+  const rootPackage = readJson("package.json");
+  const ciWorkflow = readText(".github/workflows/ci.yml");
+
+  assert.equal(
+    rootPackage.scripts?.["test:electron:production"],
+    "node scripts/verify-production-desktop.mjs",
+  );
+  assert.match(
+    rootPackage.scripts?.["test:electron"] ?? "",
+    /(?:^|&& )npm run test:electron:production$/,
+  );
+  assert.match(ciWorkflow, /xvfb-run -a npm run test:electron/);
+});
+
 test("legacy release tombstone rejects every alternate execution path", () => {
   const mutations = [
     [

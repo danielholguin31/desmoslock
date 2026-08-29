@@ -4,12 +4,17 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DesmosLock v2 Internal</title>
+    <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main>
-      <h1>DesmosLock v2</h1>
-      <p data-v2-status>Loading internal workspace…</p>
-    </main>
+    <header class="shell-bar">
+      <div>
+        <p class="eyebrow">Synthetic internal release</p>
+        <h1>DesmosLock v2</h1>
+        <p data-v2-status>Loading trusted shell…</p>
+      </div>
+      <button data-lock-intent type="button" disabled>Send lock intent</button>
+    </header>
     <script type="module" src="./renderer.js"></script>
   </body>
 </html>

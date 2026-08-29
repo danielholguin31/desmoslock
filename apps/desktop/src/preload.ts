@@ -1,14 +1,13 @@
+import { contextBridge, ipcRenderer } from "electron";
+
 import {
-  trustedIpcChannels,
-  type TrustedIpcChannel,
-} from "@desmoslock/contracts";
+  createTrustedDesktopBridge,
+  type TrustedBridgeResult,
+} from "./trusted-bridge.js";
 
-export interface TrustedDesktopBridge {
-  readonly channels: readonly TrustedIpcChannel[];
-  readonly version: "2.0.0";
-}
+const trustedDesktopBridge = createTrustedDesktopBridge(
+  async (channel, request) =>
+    ipcRenderer.invoke(channel, request) as Promise<TrustedBridgeResult>,
+);
 
-export const trustedDesktopBridge: TrustedDesktopBridge = Object.freeze({
-  channels: trustedIpcChannels,
-  version: "2.0.0",
-});
+contextBridge.exposeInMainWorld("desmoslockDesktop", trustedDesktopBridge);

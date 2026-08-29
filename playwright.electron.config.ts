@@ -6,6 +6,7 @@ export default defineConfig({
   reporter: "line",
   testDir: "tests/e2e/electron",
   timeout: 60_000,
+  workers: 1,
   use: {
     screenshot: "only-on-failure",
     trace: "retain-on-failure",

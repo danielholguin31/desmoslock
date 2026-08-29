@@ -33,8 +33,9 @@
     "test:edge": "deno test supabase/functions && deno check supabase/functions/health/index.ts",
     "test:web": "npm run build:packages && npm run build --workspace @desmoslock/web && vitest run apps/web && npm run test:web:e2e",
     "test:web:e2e": "playwright test --config playwright.web.config.ts",
-    "test:electron": "npm run build:packages && npm run build --workspace @desmoslock/desktop && npm run test:runtime --workspace @desmoslock/desktop && vitest run apps/desktop && npm run test:electron:integration",
+    "test:electron": "npm run build:packages && npm run build --workspace @desmoslock/desktop && npm run test:runtime --workspace @desmoslock/desktop && vitest run apps/desktop && npm run test:electron:integration && npm run test:electron:production",
     "test:electron:integration": "playwright test --config playwright.electron.config.ts",
+    "test:electron:production": "node scripts/verify-production-desktop.mjs",
     "test:dependencies": "npm audit --audit-level=high",
     "test:secrets": "secretlint \"**/*\"",
     "test:workflows": "node scripts/actionlint.mjs",
@@ -46,6 +47,7 @@
     "verify:required-check-probe": "node scripts/verify-required-check-probe.mjs"
   },
   "devDependencies": {
+    "@electron/packager": "^20.3.0",
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.62.1",
     "@secretlint/secretlint-rule-preset-recommend": "^13.0.4",

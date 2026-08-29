@@ -1,8 +1,13 @@
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import { _electron as electron, expect, test } from "@playwright/test";
 
-test("v2 Electron shell requests isolated renderer preferences with Node access disabled", async () => {
+test("v2 Electron shell isolates renderers and resets synthetic state for a reopened window", async () => {
+  const userDataDirectory = await fs.mkdtemp(
+    path.join(os.tmpdir(), "desmoslock-foundation-e2e-"),
+  );
   const environment: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value !== undefined && key !== "ELECTRON_RUN_AS_NODE") {
@@ -19,9 +24,13 @@ test("v2 Electron shell requests isolated renderer preferences with Node access 
   }
 
   const application = await electron.launch({
-    args: [...linuxLaunchFlags, path.resolve("apps/desktop")],
-    chromiumSandbox: false,
+    args: [
+      ...linuxLaunchFlags,
+      `--user-data-dir=${userDataDirectory}`,
+      path.resolve("apps/desktop"),
+    ],
     env: environment,
+    ...(process.platform === "linux" ? { chromiumSandbox: false } : {}),
   });
 
   try {
@@ -31,14 +40,22 @@ test("v2 Electron shell requests isolated renderer preferences with Node access 
       window.getByRole("heading", { name: "DesmosLock v2" }),
     ).toBeVisible();
     await expect(window.locator("[data-v2-status]")).toHaveText(
-      "DesmosLock v2 internal workspace",
+      "Trusted shell ready · calculator isolated below",
     );
     await expect(
       window.evaluate(() => ({
+        bridge: Object.keys(
+          (
+            window as typeof window & {
+              desmoslockDesktop?: Record<string, unknown>;
+            }
+          ).desmoslockDesktop ?? {},
+        ).sort(),
         process: typeof globalThis.process,
         require: typeof globalThis.require,
       })),
     ).resolves.toEqual({
+      bridge: ["requestLock", "version"],
       process: "undefined",
       require: "undefined",
     });
@@ -50,8 +67,9 @@ test("v2 Electron shell requests isolated renderer preferences with Node access 
       const webContents = window.webContents as typeof window.webContents & {
         getLastWebPreferences(): {
           contextIsolation?: boolean;
+          devTools?: boolean;
+          disableDialogs?: boolean;
           nodeIntegration?: boolean;
-          preload?: string;
           sandbox?: boolean;
         };
       };
@@ -59,10 +77,66 @@ test("v2 Electron shell requests isolated renderer preferences with Node access 
     });
 
     expect(preferences.contextIsolation).toBe(true);
+    expect(preferences.devTools ?? false).toBe(false);
+    expect(preferences.disableDialogs).toBe(true);
     expect(preferences.nodeIntegration).toBe(false);
     expect(preferences.sandbox).toBe(true);
-    expect(preferences.preload).toBeUndefined();
+
+    await window.getByRole("button", { name: "Send lock intent" }).click();
+    await expect(window.locator("[data-v2-status]")).toHaveText(
+      "Main process accepted the synthetic lock intent",
+    );
+
+    await expect
+      .poll(() =>
+        application.evaluate(({ app }) => app.listenerCount("activate")),
+      )
+      .toBeGreaterThan(0);
+    await application.evaluate(async ({ app, BrowserWindow }) => {
+      app.removeAllListeners("window-all-closed");
+      const [currentWindow] = BrowserWindow.getAllWindows();
+      if (currentWindow === undefined) {
+        throw new Error("Electron created no BrowserWindow");
+      }
+      await new Promise<void>((resolveClosed) => {
+        currentWindow.once("closed", resolveClosed);
+        currentWindow.close();
+      });
+      app.emit("activate");
+    });
+    await expect
+      .poll(
+        () =>
+          application
+            .windows()
+            .filter(
+              (candidate) =>
+                !candidate.isClosed() &&
+                candidate.url() === "desmoslock-app://shell/index.html",
+            ).length,
+      )
+      .toBe(1);
+    const reopenedWindow = application
+      .windows()
+      .find(
+        (candidate) =>
+          !candidate.isClosed() &&
+          candidate.url() === "desmoslock-app://shell/index.html",
+      );
+    if (reopenedWindow === undefined) {
+      throw new Error("Electron did not reopen the trusted shell window");
+    }
+    await expect(
+      reopenedWindow.getByRole("heading", { name: "DesmosLock v2" }),
+    ).toBeVisible();
+    await reopenedWindow
+      .getByRole("button", { name: "Send lock intent" })
+      .click();
+    await expect(reopenedWindow.locator("[data-v2-status]")).toHaveText(
+      "Main process accepted the synthetic lock intent",
+    );
   } finally {
     await application.close();
+    await fs.rm(userDataDirectory, { force: true, recursive: true });
   }
 });
