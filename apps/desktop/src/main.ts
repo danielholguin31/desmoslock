@@ -16,9 +16,15 @@ import type { RepositoryBuildIdentity } from "@desmoslock/contracts";
 import type { CalculatorSurface } from "./main/calculator-surface.js";
 import { createElectronCalculatorSurface } from "./main/electron-calculator-surface.js";
 import { createPrivilegedRequestRouter } from "./main/privileged-request-router.js";
+import {
+  decideWindowOpen,
+  denyByDefaultCapabilityPolicy,
+  denyDisallowedNavigation,
+  installSessionDenialPolicy,
+} from "./main/session-denial-policy.js";
 import { createStaticProtocolHandler } from "./main/static-protocol.js";
 import { createTrustedRequestHandler } from "./main/trusted-request-handler.js";
-import { trustedRequestLockChannel } from "./trusted-bridge.js";
+import { trustedAssessmentLockChannel } from "./trusted-bridge.js";
 
 export const desktopBuild: RepositoryBuildIdentity = {
   sourceCommit: "development",
@@ -81,8 +87,9 @@ protocol.registerSchemesAsPrivileged(
 let mainWindow: BrowserWindow | null = null;
 let calculatorSurface: CalculatorSurface | null = null;
 let shellProtocolRegistered = false;
-let nextSyntheticAssessmentGeneration = 1;
-const syntheticAssessmentStates = new Map<
+let shellSessionPolicyInstalled = false;
+let nextAssessmentGeneration = 1;
+const assessmentStates = new Map<
   number,
   {
     readonly generation: string;
@@ -95,14 +102,14 @@ const privilegedRouter = createPrivilegedRequestRouter({
   engageLock: async (webContentsId) => {
     // This is intentionally an intent receipt only. Native lock and recovery
     // authority belong to issue #35.
-    const state = syntheticAssessmentStates.get(webContentsId);
+    const state = assessmentStates.get(webContentsId);
     if (state === undefined) {
-      throw new Error("Synthetic assessment state is unavailable");
+      throw new Error("Assessment state is unavailable");
     }
     state.lockIntentAccepted = true;
   },
   readState: (webContentsId) => {
-    const state = syntheticAssessmentStates.get(webContentsId);
+    const state = assessmentStates.get(webContentsId);
     return state === undefined
       ? undefined
       : {
@@ -114,11 +121,18 @@ const privilegedRouter = createPrivilegedRequestRouter({
 });
 
 ipcMain.handle(
-  trustedRequestLockChannel,
+  trustedAssessmentLockChannel,
   createTrustedRequestHandler(privilegedRouter),
 );
 
 async function ensureShellProtocol(outputDirectory: string): Promise<void> {
+  if (!shellSessionPolicyInstalled) {
+    installSessionDenialPolicy(
+      session.defaultSession,
+      denyByDefaultCapabilityPolicy,
+    );
+    shellSessionPolicyInstalled = true;
+  }
   if (shellProtocolRegistered) return;
 
   const [document, script, stylesheet] = await Promise.all([
@@ -150,10 +164,22 @@ async function ensureShellProtocol(outputDirectory: string): Promise<void> {
 }
 
 function denyShellEscape(webContents: WebContents): void {
-  webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  webContents.on("will-navigate", (event) => event.preventDefault());
-  webContents.on("will-frame-navigate", (event) => event.preventDefault());
-  webContents.on("will-redirect", (event) => event.preventDefault());
+  webContents.setWindowOpenHandler(({ url }) =>
+    decideWindowOpen(url, `${shellScheme}:`, denyByDefaultCapabilityPolicy),
+  );
+  const denyNavigation = (event: Electron.Event, url: string): void => {
+    denyDisallowedNavigation(
+      event,
+      url,
+      `${shellScheme}:`,
+      denyByDefaultCapabilityPolicy,
+    );
+  };
+  webContents.on("will-navigate", (event, url) => denyNavigation(event, url));
+  webContents.on("will-frame-navigate", (event) =>
+    denyNavigation(event, event.url),
+  );
+  webContents.on("will-redirect", (event, url) => denyNavigation(event, url));
   webContents.on("will-attach-webview", (event) => event.preventDefault());
 }
 
@@ -225,20 +251,20 @@ async function createWindow(): Promise<BrowserWindow> {
   });
   denyShellEscape(window.webContents);
   const trustedWebContentsId = window.webContents.id;
-  const syntheticAssessmentState = {
-    generation: `synthetic-internal-assessment-${nextSyntheticAssessmentGeneration}`,
+  const assessmentState = {
+    generation: `internal-assessment-${nextAssessmentGeneration}`,
     lockIntentAccepted: false,
     testLifecycle: "open" as const,
   };
-  nextSyntheticAssessmentGeneration += 1;
-  syntheticAssessmentStates.set(trustedWebContentsId, syntheticAssessmentState);
-  registerTrustedShell(window.webContents, syntheticAssessmentState.generation);
+  nextAssessmentGeneration += 1;
+  assessmentStates.set(trustedWebContentsId, assessmentState);
+  registerTrustedShell(window.webContents, assessmentState.generation);
   window.once("closed", () => {
     const surface = ownedCalculatorSurface;
     ownedCalculatorSurface = null;
     if (calculatorSurface === surface) calculatorSurface = null;
     if (surface !== null) void surface.close().catch(() => undefined);
-    syntheticAssessmentStates.delete(trustedWebContentsId);
+    assessmentStates.delete(trustedWebContentsId);
     privilegedRouter.revokeTrustedCaller(trustedWebContentsId);
     if (mainWindow === window) mainWindow = null;
   });
@@ -263,7 +289,7 @@ async function createWindow(): Promise<BrowserWindow> {
     window.show();
     return window;
   } catch (error) {
-    syntheticAssessmentStates.delete(trustedWebContentsId);
+    assessmentStates.delete(trustedWebContentsId);
     privilegedRouter.revokeTrustedCaller(trustedWebContentsId);
     if (ownedCalculatorSurface !== null) {
       await ownedCalculatorSurface.close();

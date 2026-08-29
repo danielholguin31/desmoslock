@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { _electron as electron, expect, test } from "@playwright/test";
 
-test("v2 Electron shell isolates renderers and resets synthetic state for a reopened window", async () => {
+test("production Electron shell isolates renderers and resets assessment state for a reopened window", async () => {
   const userDataDirectory = await fs.mkdtemp(
     path.join(os.tmpdir(), "desmoslock-foundation-e2e-"),
   );
@@ -37,10 +37,10 @@ test("v2 Electron shell isolates renderers and resets synthetic state for a reop
     const window = await application.firstWindow();
 
     await expect(
-      window.getByRole("heading", { name: "DesmosLock v2" }),
+      window.getByRole("heading", { exact: true, name: "DesmosLock" }),
     ).toBeVisible();
     await expect(window.locator("[data-v2-status]")).toHaveText(
-      "Trusted shell ready · calculator isolated below",
+      "Secure calculator ready",
     );
     await expect(
       window.evaluate(() => ({
@@ -55,10 +55,13 @@ test("v2 Electron shell isolates renderers and resets synthetic state for a reop
         require: typeof globalThis.require,
       })),
     ).resolves.toEqual({
-      bridge: ["requestLock", "version"],
+      bridge: ["requestAssessmentLock", "version"],
       process: "undefined",
       require: "undefined",
     });
+    await expect(
+      window.getByRole("button", { name: /lock intent/i }),
+    ).toHaveCount(0);
 
     const preferences = await application.evaluate(({ BrowserWindow }) => {
       const [window] = BrowserWindow.getAllWindows();
@@ -82,10 +85,69 @@ test("v2 Electron shell isolates renderers and resets synthetic state for a reop
     expect(preferences.nodeIntegration).toBe(false);
     expect(preferences.sandbox).toBe(true);
 
-    await window.getByRole("button", { name: "Send lock intent" }).click();
-    await expect(window.locator("[data-v2-status]")).toHaveText(
-      "Main process accepted the synthetic lock intent",
-    );
+    await application.evaluate(({ BrowserWindow, session }) => {
+      const [shellWindow] = BrowserWindow.getAllWindows();
+      if (shellWindow === undefined) {
+        throw new Error("Electron created no BrowserWindow");
+      }
+      const trackedSession =
+        session.defaultSession as typeof session.defaultSession & {
+          shellDownloadDenials?: number;
+          shellDownloadPolicyObserved?: boolean;
+        };
+      trackedSession.shellDownloadDenials = 0;
+      trackedSession.shellDownloadPolicyObserved = false;
+      trackedSession.on(
+        "will-download",
+        (event, _item, initiatingWebContents) => {
+          if (initiatingWebContents?.id !== shellWindow.webContents.id) return;
+          trackedSession.shellDownloadPolicyObserved ||= event.defaultPrevented;
+          trackedSession.shellDownloadDenials =
+            (trackedSession.shellDownloadDenials ?? 0) + 1;
+          event.preventDefault();
+        },
+      );
+    });
+    await expect(
+      window.evaluate(async () => {
+        const permission = await navigator.permissions.query({
+          name: "geolocation",
+        });
+        const download = document.createElement("a");
+        download.download = "desmoslock-shell-download-must-not-exist.txt";
+        download.href = "data:text/plain,blocked";
+        download.click();
+        return permission.state;
+      }),
+    ).resolves.toBe("denied");
+    await expect
+      .poll(() =>
+        application.evaluate(({ session }) => {
+          const trackedSession =
+            session.defaultSession as typeof session.defaultSession & {
+              shellDownloadDenials?: number;
+              shellDownloadPolicyObserved?: boolean;
+            };
+          return {
+            count: trackedSession.shellDownloadDenials ?? 0,
+            deniedByProductionPolicy:
+              trackedSession.shellDownloadPolicyObserved ?? false,
+          };
+        }),
+      )
+      .toEqual({ count: 1, deniedByProductionPolicy: true });
+
+    await expect(
+      window.evaluate(() =>
+        (
+          globalThis as typeof globalThis & {
+            desmoslockDesktop?: {
+              requestAssessmentLock(): Promise<unknown>;
+            };
+          }
+        ).desmoslockDesktop?.requestAssessmentLock(),
+      ),
+    ).resolves.toEqual({ ok: true });
 
     await expect
       .poll(() =>
@@ -127,14 +189,22 @@ test("v2 Electron shell isolates renderers and resets synthetic state for a reop
       throw new Error("Electron did not reopen the trusted shell window");
     }
     await expect(
-      reopenedWindow.getByRole("heading", { name: "DesmosLock v2" }),
+      reopenedWindow.getByRole("heading", {
+        exact: true,
+        name: "DesmosLock",
+      }),
     ).toBeVisible();
-    await reopenedWindow
-      .getByRole("button", { name: "Send lock intent" })
-      .click();
-    await expect(reopenedWindow.locator("[data-v2-status]")).toHaveText(
-      "Main process accepted the synthetic lock intent",
-    );
+    await expect(
+      reopenedWindow.evaluate(() =>
+        (
+          globalThis as typeof globalThis & {
+            desmoslockDesktop?: {
+              requestAssessmentLock(): Promise<unknown>;
+            };
+          }
+        ).desmoslockDesktop?.requestAssessmentLock(),
+      ),
+    ).resolves.toEqual({ ok: true });
   } finally {
     await application.close();
     await fs.rm(userDataDirectory, { force: true, recursive: true });

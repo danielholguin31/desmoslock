@@ -18,6 +18,11 @@ import {
   type CalculatorSurface,
   type CalculatorSurfaceBounds,
 } from "./calculator-surface.js";
+import {
+  decideWindowOpen,
+  denyDisallowedNavigation,
+  installSessionDenialPolicy,
+} from "./session-denial-policy.js";
 import { createStaticProtocolHandler } from "./static-protocol.js";
 
 const calculatorScheme = "desmoslock-calculator";
@@ -90,12 +95,8 @@ async function registerCalculatorProtocol(
 function installAssessmentSessionPolicy(
   calculatorSession: Session,
   view: WebContentsView,
-): void {
-  const policy = createAssessmentSessionPolicy({
-    allowedResources: calculatorResourceManifest,
-    webContentsId: view.webContents.id,
-  });
-
+  policy: ReturnType<typeof createAssessmentSessionPolicy>,
+): () => void {
   calculatorSession.webRequest.onBeforeRequest(
     { urls: ["<all_urls>"] },
     (details, callback) => {
@@ -109,39 +110,13 @@ function installAssessmentSessionPolicy(
       });
     },
   );
-  calculatorSession.setPermissionCheckHandler((_webContents, permission) =>
-    policy.allowsPermission(permission),
+  const uninstallSessionPolicy = installSessionDenialPolicy(
+    calculatorSession,
+    policy,
   );
-  calculatorSession.setPermissionRequestHandler(
-    (_webContents, permission, callback) =>
-      callback(policy.allowsPermission(permission)),
-  );
-  calculatorSession.setDevicePermissionHandler(() => false);
-  calculatorSession.setDisplayMediaRequestHandler((_request, callback) =>
-    callback({}),
-  );
-  calculatorSession.setSpellCheckerEnabled(false);
-  calculatorSession.on("select-hid-device", (event, _details, callback) => {
-    event.preventDefault();
-    callback();
-  });
-  calculatorSession.on("select-usb-device", (event, _details, callback) => {
-    event.preventDefault();
-    callback();
-  });
-  calculatorSession.on(
-    "select-serial-port",
-    (event, _ports, _webContents, callback) => {
-      event.preventDefault();
-      callback("");
-    },
-  );
-  calculatorSession.on("will-download", (event) => {
-    if (!policy.allowsDownload()) event.preventDefault();
-  });
 
   const denyNavigation = (event: Electron.Event, url: string): void => {
-    if (!policy.allowsNavigation(url)) event.preventDefault();
+    denyDisallowedNavigation(event, url, `${calculatorScheme}:`, policy);
   };
   view.webContents.on("will-navigate", (event, url) =>
     denyNavigation(event, url),
@@ -161,9 +136,9 @@ function installAssessmentSessionPolicy(
       callback("");
     },
   );
-  view.webContents.setWindowOpenHandler(({ url }) => ({
-    action: policy.allowsPopup(url) ? "allow" : "deny",
-  }));
+  view.webContents.setWindowOpenHandler(({ url }) =>
+    decideWindowOpen(url, `${calculatorScheme}:`, policy),
+  );
   const restoreCalculatorDocument = (): void => {
     if (view.webContents.isDestroyed()) return;
     void view.webContents.loadURL(calculatorDocumentUrl).catch(() => undefined);
@@ -184,6 +159,7 @@ function installAssessmentSessionPolicy(
       restoreCalculatorDocument();
     }
   });
+  return uninstallSessionPolicy;
 }
 
 export async function createElectronCalculatorSurface(
@@ -203,7 +179,7 @@ export async function createElectronCalculatorSurface(
   let attached = false;
   let initializing = true;
   let parentClosed = options.parent.isDestroyed();
-  let policyInstalled = false;
+  let uninstallSessionPolicy: (() => void) | null = null;
   let protocolRegistered = false;
   let closePromise: Promise<void> | null = null;
 
@@ -232,17 +208,14 @@ export async function createElectronCalculatorSurface(
     options.parent.removeListener("closed", handleParentClosed);
     teardownWebContentsSynchronously();
 
-    if (policyInstalled) {
-      try {
-        calculatorSession.webRequest.onBeforeRequest(null);
-        calculatorSession.setPermissionCheckHandler(null);
-        calculatorSession.setPermissionRequestHandler(null);
-        calculatorSession.setDevicePermissionHandler(null);
-        calculatorSession.setDisplayMediaRequestHandler(null);
-        calculatorSession.removeAllListeners();
-      } catch {
-        // Continue into independent session cleanup tasks.
-      }
+    if (uninstallSessionPolicy !== null) {
+      uninstallSessionPolicy();
+      uninstallSessionPolicy = null;
+    }
+    try {
+      calculatorSession.webRequest.onBeforeRequest(null);
+    } catch {
+      // Continue into independent session cleanup tasks.
     }
     if (protocolRegistered) {
       try {
@@ -292,8 +265,18 @@ export async function createElectronCalculatorSurface(
     view = new WebContentsView({
       webPreferences: createCalculatorWebPreferences(partition),
     });
-    policyInstalled = true;
-    installAssessmentSessionPolicy(calculatorSession, view);
+    const assessmentPolicy = createAssessmentSessionPolicy({
+      allowedResources: calculatorResourceManifest,
+      webContentsId: view.webContents.id,
+    });
+    if (!assessmentPolicy.allowsInitialDocument(calculatorDocumentUrl)) {
+      throw new Error("Calculator initial document is not allowed");
+    }
+    uninstallSessionPolicy = installAssessmentSessionPolicy(
+      calculatorSession,
+      view,
+      assessmentPolicy,
+    );
     view.setBounds(options.bounds);
     view.webContents.setAudioMuted(true);
     view.webContents.setWebRTCIPHandlingPolicy("disable_non_proxied_udp");

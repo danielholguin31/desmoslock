@@ -27,7 +27,6 @@ body {
   color: white;
   display: flex;
   height: 140px;
-  justify-content: space-between;
   padding: 20px 28px;
 }
 
@@ -49,20 +48,4 @@ h1 {
   color: #cbd6e9;
   font-size: 13px;
   margin: 5px 0 0;
-}
-
-button {
-  background: #f3f7ff;
-  border: 1px solid #9eb1d4;
-  border-radius: 8px;
-  color: #172033;
-  cursor: pointer;
-  font: inherit;
-  font-weight: 700;
-  padding: 10px 14px;
-}
-
-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
 }

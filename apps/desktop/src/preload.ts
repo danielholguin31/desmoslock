@@ -1,13 +1,9 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-import {
-  createTrustedDesktopBridge,
-  type TrustedBridgeResult,
-} from "./trusted-bridge.js";
+import { createTrustedDesktopBridge } from "./trusted-bridge.js";
 
 const trustedDesktopBridge = createTrustedDesktopBridge(
-  async (channel, request) =>
-    ipcRenderer.invoke(channel, request) as Promise<TrustedBridgeResult>,
+  async (channel, request) => ipcRenderer.invoke(channel, request),
 );
 
 contextBridge.exposeInMainWorld("desmoslockDesktop", trustedDesktopBridge);

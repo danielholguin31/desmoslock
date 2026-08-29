@@ -237,7 +237,7 @@ test.describe.serial("isolated calculator surface", () => {
         ).desmoslockDesktop;
         return bridge === undefined ? [] : Object.keys(bridge).sort();
       }),
-    ).resolves.toEqual(["requestLock", "version"]);
+    ).resolves.toEqual(["requestAssessmentLock", "version"]);
 
     const isolation = await application.evaluate(
       async ({ app, webContents }, url) => {
@@ -385,6 +385,7 @@ test.describe.serial("isolated calculator surface", () => {
       async (input) => {
         const result: {
           bridge: string;
+          externalProtocol: string;
           fetch: string;
           nodeProcess: string;
           nodeRequire: string;
@@ -396,6 +397,7 @@ test.describe.serial("isolated calculator surface", () => {
           bridge: typeof (
             globalThis as typeof globalThis & { desmoslockDesktop?: unknown }
           ).desmoslockDesktop,
+          externalProtocol: "pending",
           fetch: "pending",
           nodeProcess: typeof (
             globalThis as typeof globalThis & { process?: unknown }
@@ -424,6 +426,15 @@ test.describe.serial("isolated calculator surface", () => {
           result.popup = popup === null ? "blocked" : "allowed";
         } catch {
           result.popup = "blocked";
+        }
+        try {
+          const external = window.open(
+            "desmoslock-unregistered://attacker.invalid",
+            "_blank",
+          );
+          result.externalProtocol = external === null ? "denied" : "allowed";
+        } catch {
+          result.externalProtocol = "denied";
         }
         if (navigator.permissions !== undefined) {
           try {
@@ -500,9 +511,6 @@ test.describe.serial("isolated calculator surface", () => {
         download.href = "data:text/plain,blocked";
         download.download = "desmoslock-hostile-fixture-must-not-exist.txt";
         download.click();
-        const external = document.createElement("a");
-        external.href = "desmoslock-unregistered://attacker.invalid";
-        external.click();
         location.assign(`${input.sinkOrigin}/navigation`);
         return result;
       },
@@ -516,6 +524,7 @@ test.describe.serial("isolated calculator surface", () => {
 
     expect(hostile).toMatchObject({
       bridge: "undefined",
+      externalProtocol: "denied",
       fetch: "blocked",
       nodeProcess: "undefined",
       nodeRequire: "undefined",
@@ -569,7 +578,7 @@ test.describe.serial("isolated calculator surface", () => {
     expect(tcpSinkConnections).toBe(0);
     expect(udpSinkRequests).toBe(0);
     await expect(shell.locator("[data-v2-status]")).toHaveText(
-      "Trusted shell ready · calculator isolated below",
+      "Secure calculator ready",
     );
 
     await typeCalculatorExpression(application, "(2,3)");
@@ -582,11 +591,18 @@ test.describe.serial("isolated calculator surface", () => {
     ).resolves.toBe(true);
   });
 
-  test("accepts only the trusted shell's fixed lock intent", async () => {
-    await shell.getByRole("button", { name: "Send lock intent" }).click();
-    await expect(shell.locator("[data-v2-status]")).toHaveText(
-      "Main process accepted the synthetic lock intent",
-    );
+  test("accepts only the trusted shell's fixed assessment-lock request", async () => {
+    await expect(
+      shell.evaluate(() =>
+        (
+          globalThis as typeof globalThis & {
+            desmoslockDesktop?: {
+              requestAssessmentLock(): Promise<unknown>;
+            };
+          }
+        ).desmoslockDesktop?.requestAssessmentLock(),
+      ),
+    ).resolves.toEqual({ ok: true });
   });
 
   test("destroys the owned calculator contents when its BrowserWindow closes", async () => {

@@ -135,9 +135,17 @@ async function launchPackaged(executablePath, userDataDirectory) {
 
 async function inspectRuntime(application) {
   const shell = await application.firstWindow();
-  const bridgeKeys = await shell.evaluate(() => {
+  const shellBoundary = await shell.evaluate(async () => {
     const bridge = globalThis.desmoslockDesktop;
-    return bridge === undefined ? [] : Object.keys(bridge).sort();
+    return {
+      bridgeKeys: bridge === undefined ? [] : Object.keys(bridge).sort(),
+      bridgeVersion: bridge?.version,
+      lockRequestResult: await bridge?.requestAssessmentLock(),
+      manualLockControls:
+        globalThis.document.querySelectorAll("[data-lock-intent]").length,
+      status:
+        globalThis.document.querySelector("[data-v2-status]")?.textContent,
+    };
   });
   const runtime = await application.evaluate(
     async ({ app, webContents }, url) => {
@@ -167,7 +175,52 @@ async function inspectRuntime(application) {
     },
     calculatorUrl,
   );
-  return { bridgeKeys, runtime };
+  return { runtime, shellBoundary };
+}
+
+async function runPackagedShellDenialProbe(application) {
+  const shell = await application.firstWindow();
+  await application.evaluate(({ BrowserWindow, session }) => {
+    const [shellWindow] = BrowserWindow.getAllWindows();
+    if (shellWindow === undefined) throw new Error("Packaged shell is missing");
+    const trackedSession = session.defaultSession;
+    trackedSession.packagedShellDownloadDenials = 0;
+    trackedSession.packagedShellDownloadPolicyObserved = false;
+    trackedSession.on(
+      "will-download",
+      (event, _item, initiatingWebContents) => {
+        if (initiatingWebContents?.id !== shellWindow.webContents.id) return;
+        trackedSession.packagedShellDownloadPolicyObserved ||=
+          event.defaultPrevented;
+        trackedSession.packagedShellDownloadDenials += 1;
+        event.preventDefault();
+      },
+    );
+  });
+  const permission = await shell.evaluate(async () => {
+    const result = await globalThis.navigator.permissions.query({
+      name: "geolocation",
+    });
+    const download = globalThis.document.createElement("a");
+    download.download = "desmoslock-packaged-shell-must-not-exist.txt";
+    download.href = "data:text/plain,blocked";
+    download.click();
+    return result.state;
+  });
+
+  const deadline = Date.now() + 1_000;
+  let download = { count: 0, deniedByProductionPolicy: false };
+  while (download.count === 0 && Date.now() < deadline) {
+    download = await application.evaluate(({ session }) => ({
+      count: session.defaultSession.packagedShellDownloadDenials ?? 0,
+      deniedByProductionPolicy:
+        session.defaultSession.packagedShellDownloadPolicyObserved ?? false,
+    }));
+    if (download.count === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  return { download, permission };
 }
 
 async function createHostileNetworkSinks() {
@@ -223,6 +276,7 @@ async function createHostileNetworkSinks() {
 async function hostileCalculatorProbe(input) {
   const result = {
     bridge: typeof globalThis.desmoslockDesktop,
+    externalProtocol: "pending",
     fetch: "pending",
     nodeProcess: typeof globalThis.process,
     nodeRequire: typeof globalThis.require,
@@ -249,6 +303,15 @@ async function hostileCalculatorProbe(input) {
     result.popup = popup === null ? "blocked" : "allowed";
   } catch {
     result.popup = "blocked";
+  }
+  try {
+    const external = globalThis.open(
+      "desmoslock-unregistered://attacker.invalid",
+      "_blank",
+    );
+    result.externalProtocol = external === null ? "denied" : "allowed";
+  } catch {
+    result.externalProtocol = "denied";
   }
 
   if (globalThis.navigator.permissions !== undefined) {
@@ -326,9 +389,6 @@ async function hostileCalculatorProbe(input) {
   download.href = "data:text/plain,blocked";
   download.download = "desmoslock-packaged-hostile-must-not-exist.txt";
   download.click();
-  const external = globalThis.document.createElement("a");
-  external.href = "desmoslock-unregistered://attacker.invalid";
-  external.click();
   globalThis.location.assign(`${input.httpOrigin}/navigation`);
   return result;
 }
@@ -454,6 +514,41 @@ try {
     expectedDistributionFiles,
     "Production build must contain only the reviewed runtime assets and no source maps",
   );
+  const productionRuntimeText = (
+    await Promise.all(
+      expectedDistributionFiles.map((relativePath) =>
+        fs.readFile(path.join(distributionRoot, relativePath), "utf8"),
+      ),
+    )
+  ).join("\n");
+  for (const prohibited of [
+    /\bsynthetic\b/i,
+    /authorized local fixture/i,
+    /controlled calculator/i,
+    /desmoslock\.security\.denial\.observers/i,
+    /no desktop bridge/i,
+    /\bopenExternal\s*\(/,
+    /sessionDenialObserverKey/,
+    /\.\s*openExternal\b/,
+    /\bSymbol\.for\s*\(/,
+    /test-lock-intent/i,
+    /Send lock intent/i,
+  ]) {
+    assert.doesNotMatch(
+      productionRuntimeText,
+      prohibited,
+      `Production runtime contains a prohibited test or dispatch surface: ${prohibited}`,
+    );
+  }
+  const shellDocument = await fs.readFile(
+    path.join(distributionRoot, "index.html"),
+    "utf8",
+  );
+  assert.doesNotMatch(
+    shellDocument,
+    /data-lock-intent|<button\b/i,
+    "Production shell must not expose a manual lock-intent control",
+  );
 
   const stagingRoot = path.join(temporaryRoot, "staging");
   await fs.mkdir(stagingRoot, { recursive: true });
@@ -502,7 +597,13 @@ try {
 
   application = await launchPackaged(executablePath, userDataDirectory);
   const firstLaunch = await inspectRuntime(application);
-  assert.deepEqual(firstLaunch.bridgeKeys, ["requestLock", "version"]);
+  assert.deepEqual(firstLaunch.shellBoundary, {
+    bridgeKeys: ["requestAssessmentLock", "version"],
+    bridgeVersion: "2.0.0",
+    lockRequestResult: { ok: true },
+    manualLockControls: 0,
+    status: "Secure calculator ready",
+  });
   assert.deepEqual(firstLaunch.runtime, {
     contextIsolation: true,
     devTools: false,
@@ -524,11 +625,16 @@ try {
     "Packaged app did not enable the Connection-Allowlist override",
   );
   assert.match(firstLaunch.runtime.remoteProxy, /PROXY 127\.0\.0\.1:9/);
+  assert.deepEqual(await runPackagedShellDenialProbe(application), {
+    download: { count: 1, deniedByProductionPolicy: true },
+    permission: "denied",
+  });
 
   networkSinks = await createHostileNetworkSinks();
   const hostile = await runPackagedHostileProbe(application, networkSinks);
   assert.deepEqual(hostile.result, {
     bridge: "undefined",
+    externalProtocol: "denied",
     fetch: "blocked",
     nodeProcess: "undefined",
     nodeRequire: "undefined",

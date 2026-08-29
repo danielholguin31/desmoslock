@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createTrustedDesktopBridge,
-  trustedRequestLockChannel,
+  trustedAssessmentLockChannel,
 } from "../src/trusted-bridge.js";
 
 describe("desktop v2 foundation", () => {
@@ -14,19 +14,38 @@ describe("desktop v2 foundation", () => {
     });
 
     expect(bridge).toEqual({
-      requestLock: expect.any(Function),
+      requestAssessmentLock: expect.any(Function),
       version: "2.0.0",
     });
-    await expect(bridge.requestLock()).resolves.toEqual({ ok: true });
+    await expect(bridge.requestAssessmentLock()).resolves.toEqual({ ok: true });
     expect(invocations).toEqual([
       {
-        channel: trustedRequestLockChannel,
+        channel: trustedAssessmentLockChannel,
         request: { intent: "engage" },
       },
     ]);
+    expect(trustedAssessmentLockChannel).toBe(
+      "desmoslock:assessment:request-lock",
+    );
     expect(Object.isFrozen(bridge)).toBe(true);
     expect("channels" in bridge).toBe(false);
     expect("releaseLock" in bridge).toBe(false);
     expect("store" in bridge).toBe(false);
+  });
+
+  it("fails closed when the main-process response is not exact", async () => {
+    for (const response of [
+      null,
+      { ok: true, extra: "unexpected" },
+      { ok: false },
+      { ok: false, reason: 7 },
+    ]) {
+      const bridge = createTrustedDesktopBridge(async () => response);
+
+      await expect(bridge.requestAssessmentLock()).resolves.toEqual({
+        ok: false,
+        reason: "invalid-response",
+      });
+    }
   });
 });

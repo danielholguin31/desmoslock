@@ -20,7 +20,7 @@ type ParsedExpression =
 function requiredElement<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
   if (element === null) {
-    throw new Error(`Controlled calculator markup is missing ${selector}`);
+    throw new Error(`Calculator markup is missing ${selector}`);
   }
   return element;
 }
