@@ -224,6 +224,7 @@ test("v2 data plane is migration-owned and clean-start only", () => {
 
 test("generation-3 Supabase configuration is versioned and fails closed", () => {
   const configuration = readText("supabase/config.toml");
+  const runbook = readText("docs/product-completion/reproducible-supabase.md");
   const authStart = configuration.indexOf("[auth]\n");
   const nextSection = configuration.indexOf("\n[", authStart + 1);
   const authSection = configuration.slice(
@@ -241,7 +242,13 @@ test("generation-3 Supabase configuration is versioned and fails closed", () => 
   assert.match(authSection, /^additional_redirect_urls = \[\]$/mu);
   assert.match(authSection, /^enable_signup = false$/mu);
   assert.match(authSection, /^enable_anonymous_sign_ins = false$/mu);
-
+  assert.deepEqual(
+    [...runbook.matchAll(/^npm run build(?::[a-z-]+)?$/gmu)].map(
+      ([command]) => command,
+    ),
+    ["npm run build", "npm run build"],
+    "both configured app examples use the clean-working aggregate build",
+  );
   for (const [workflowPath, expectedBuilds] of [
     [".github/workflows/ci.yml", 2],
     [".github/workflows/security.yml", 1],
@@ -262,6 +269,13 @@ test("generation-3 Supabase configuration is versioned and fails closed", () => 
       `${workflowPath} configures every app build explicitly`,
     );
   }
+});
+
+test("synthetic operator reports scoped completion rather than external verification", () => {
+  const backupRunner = readText("scripts/synthetic-backup/run.mjs");
+
+  assert.match(backupRunner, /receipt, status: "succeeded"/u);
+  assert.doesNotMatch(backupRunner, /receipt, status: "verified"/u);
 });
 
 test("legacy v1 and test-only support cannot enter a v2 release path", () => {

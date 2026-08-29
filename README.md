@@ -75,8 +75,8 @@ npm run db:stop
 
 See
 [`docs/product-completion/reproducible-supabase.md`](docs/product-completion/reproducible-supabase.md)
-for the public health/configuration contract, clean-target backup and restore
-operator, and the remote staging human gate.
+for the public health/configuration contract, synthetic-only export and
+seven-table local restore operator, and the remote staging human gate.
 
 The repository contract can also be checked directly:
 

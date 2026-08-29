@@ -60,7 +60,7 @@ async function run() {
 
 try {
   const receipt = await run();
-  process.stdout.write(`${JSON.stringify({ receipt, status: "verified" })}\n`);
+  process.stdout.write(`${JSON.stringify({ receipt, status: "succeeded" })}\n`);
 } catch (error) {
   const code =
     error instanceof SyntheticBackupRefusal ? error.code : "OPERATOR_FAILED";

@@ -42,6 +42,7 @@ const PUBLICATION_TIMEOUT_MS = 30_000;
 const PUBLICATION_WORKER_PATH = fileURLToPath(
   new URL("./publication-worker.mjs", import.meta.url),
 );
+const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const ROOT_DESCRIPTOR_LAUNCHER =
   "import os,sys; os.fchdir(3); os.execv(sys.argv[1], sys.argv[1:])";
 const ROOT_DESCRIPTOR_LAUNCHER_PATH = "/usr/bin/python3";
@@ -89,6 +90,14 @@ function isSafeOpaqueIdentifier(value) {
   return (
     typeof value === "string" &&
     /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value)
+  );
+}
+
+function isPrivateOwnedDirectory(stat, ownerUid) {
+  return (
+    stat.isDirectory() &&
+    stat.uid === ownerUid &&
+    (stat.mode & 0o7777) === 0o700
   );
 }
 
@@ -240,23 +249,43 @@ async function resolveBackupRoot(backupRoot) {
   let rootStat;
   let requestedRootStat;
   let canonicalRoot;
+  let canonicalRepositoryRoot;
+  const currentUid = process.geteuid?.();
   try {
-    requestedRootStat = await fs.lstat(backupRoot);
-    canonicalRoot = await fs.realpath(backupRoot);
+    const normalizedRoot = path.resolve(backupRoot);
+    requestedRootStat = await fs.lstat(normalizedRoot);
+    canonicalRoot = await fs.realpath(normalizedRoot);
+    canonicalRepositoryRoot = await fs.realpath(REPOSITORY_ROOT);
     rootStat = await fs.lstat(canonicalRoot);
   } catch {
     refuse("BACKUP_ROOT_INVALID");
   }
+  const repositoryRelativePath = path.relative(
+    canonicalRepositoryRoot,
+    canonicalRoot,
+  );
+  const isInsideRepository =
+    repositoryRelativePath === "" ||
+    (repositoryRelativePath !== ".." &&
+      !repositoryRelativePath.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(repositoryRelativePath));
   if (
+    !Number.isSafeInteger(currentUid) ||
     !requestedRootStat.isDirectory() ||
     requestedRootStat.isSymbolicLink() ||
-    !rootStat.isDirectory() ||
-    rootStat.isSymbolicLink()
+    rootStat.isSymbolicLink() ||
+    !sameIdentity(requestedRootStat, {
+      dev: rootStat.dev,
+      ino: rootStat.ino,
+    }) ||
+    !isPrivateOwnedDirectory(rootStat, currentUid) ||
+    isInsideRepository
   ) {
     refuse("BACKUP_ROOT_INVALID");
   }
   return {
     identity: { dev: rootStat.dev, ino: rootStat.ino },
+    ownerUid: currentUid,
     path: canonicalRoot,
   };
 }
@@ -724,8 +753,8 @@ export async function exportSyntheticBackup(specification, adapter) {
     );
     const rootStat = await rootHandle.stat();
     if (
-      !rootStat.isDirectory() ||
-      !sameIdentity(rootStat, canonicalRoot.identity)
+      !sameIdentity(rootStat, canonicalRoot.identity) ||
+      !isPrivateOwnedDirectory(rootStat, canonicalRoot.ownerUid)
     ) {
       refuse("BACKUP_WRITE_FAILED");
     }
@@ -830,8 +859,8 @@ export async function restoreSyntheticBackup(specification, adapter) {
   return {
     artifactSha256: manifest.artifact.sha256,
     fixtureDigest: manifest.fixture.digest,
+    postRestoreSyntheticFixtureVerified: true,
     sourceIdentity: manifest.source.identity,
     targetIdentity: restoredTarget.identity,
-    verified: true,
   };
 }

@@ -65,7 +65,8 @@ export function createBackendProbe(
     if (
       typeof serviceRoleKey !== "string" ||
       serviceRoleKey.length === 0 ||
-      typeof url !== "string"
+      typeof url !== "string" ||
+      typeof expectedOrigin !== "string"
     ) {
       throw new Error("Backend probe configuration is invalid");
     }
@@ -84,7 +85,7 @@ export function createBackendProbe(
     const isLocalOrigin =
       baseUrl.protocol === "http:" &&
       allowedLocalHost &&
-      (expectedOrigin === undefined || expectedOrigin === baseUrl.origin);
+      expectedOrigin === baseUrl.origin;
     const isPinnedHostedOrigin =
       baseUrl.protocol === "https:" &&
       baseUrl.port === "" &&

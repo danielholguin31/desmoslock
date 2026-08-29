@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import {
   CURRENT_MIGRATION_FILES,
@@ -19,6 +20,7 @@ import {
 const FIXTURE_DIGEST =
   "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca";
 const execFileAsync = promisify(execFile);
+const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
 function sourceObservation() {
   return {
@@ -103,6 +105,116 @@ async function assertRefusal(action, code) {
     return true;
   });
 }
+
+async function assertBackupRootRefusedBeforeAdapters(backupRoot) {
+  const calls = [];
+  await assertRefusal(
+    () =>
+      exportSyntheticBackup(
+        {
+          backupName: "staging-baseline",
+          backupRoot,
+          databaseAlias: "staging",
+          expectedDatabaseIdentity: "staging-instance-001",
+        },
+        {
+          async observeDatabase() {
+            calls.push("observeDatabase");
+            throw new Error("adapter boundary must remain untouched");
+          },
+        },
+      ),
+    "BACKUP_ROOT_INVALID",
+  );
+  assert.deepEqual(calls, []);
+  await assertRefusal(
+    () =>
+      restoreSyntheticBackup(
+        {
+          backupName: "staging-baseline",
+          backupRoot,
+          databaseAlias: "local-restore",
+          expectedDatabaseIdentity: "local-instance-001",
+          expectedManifestSha256: "0".repeat(64),
+        },
+        new Proxy(
+          {},
+          {
+            get(_target, property) {
+              calls.push(String(property));
+              throw new Error("adapter boundary must remain untouched");
+            },
+          },
+        ),
+      ),
+    "BACKUP_ROOT_INVALID",
+  );
+  assert.deepEqual(calls, []);
+}
+
+test("refuses a private backup root contained in the repository", async (context) => {
+  const backupRoot = await fs.mkdtemp(
+    path.join(REPOSITORY_ROOT, ".desmoslock-backup-root-test-"),
+  );
+  context.after(() => fs.rm(backupRoot, { force: true, recursive: true }));
+
+  await assertBackupRootRefusedBeforeAdapters(backupRoot);
+});
+
+test("refuses a wrong-owner private backup root", async (context) => {
+  const backupRoot = await fs.mkdtemp(
+    path.join(os.tmpdir(), "desmoslock-backup-root-test-"),
+  );
+  context.after(() => fs.rm(backupRoot, { force: true, recursive: true }));
+  const actualUid = process.geteuid?.();
+  if (!Number.isSafeInteger(actualUid)) {
+    context.skip("effective user identity is unavailable");
+    return;
+  }
+  context.mock.method(process, "geteuid", () => actualUid + 1);
+  await assertBackupRootRefusedBeforeAdapters(backupRoot);
+});
+
+test("refuses a current-user backup root with shared permissions", async (context) => {
+  const backupRoot = await fs.mkdtemp(
+    path.join(os.tmpdir(), "desmoslock-backup-root-test-"),
+  );
+  await fs.chmod(backupRoot, 0o750);
+  context.after(async () => {
+    await fs.chmod(backupRoot, 0o700);
+    await fs.rm(backupRoot, { force: true, recursive: true });
+  });
+
+  await assertBackupRootRefusedBeforeAdapters(backupRoot);
+});
+
+test("refuses a current-user backup root with permissions for others", async (context) => {
+  const backupRoot = await fs.mkdtemp(
+    path.join(os.tmpdir(), "desmoslock-backup-root-test-"),
+  );
+  await fs.chmod(backupRoot, 0o701);
+  context.after(async () => {
+    await fs.chmod(backupRoot, 0o700);
+    await fs.rm(backupRoot, { force: true, recursive: true });
+  });
+
+  await assertBackupRootRefusedBeforeAdapters(backupRoot);
+});
+
+test("refuses a leaf-symlink backup root even with a trailing separator", async (context) => {
+  const fixtureRoot = await fs.mkdtemp(
+    path.join(os.tmpdir(), "desmoslock-backup-root-test-"),
+  );
+  const backupRoot = path.join(fixtureRoot, "private-root");
+  const symlinkRoot = path.join(fixtureRoot, "root-link");
+  await fs.mkdir(backupRoot, { mode: 0o700 });
+  await fs.symlink(backupRoot, symlinkRoot, "dir");
+  context.after(() => fs.rm(fixtureRoot, { force: true, recursive: true }));
+
+  for (const requestedRoot of [symlinkRoot, `${symlinkRoot}${path.sep}`]) {
+    await assertBackupRootRefusedBeforeAdapters(requestedRoot);
+  }
+});
 
 test("backup contract includes every seeded v2 table", () => {
   assert.deepEqual(SYNTHETIC_TABLES, [
@@ -248,9 +360,9 @@ test("restores the verified bytes only into the independently identified empty l
   assert.deepEqual(restoreReceipt, {
     artifactSha256: receipt.artifactSha256,
     fixtureDigest: FIXTURE_DIGEST,
+    postRestoreSyntheticFixtureVerified: true,
     sourceIdentity: "staging-instance-001",
     targetIdentity: "local-instance-001",
-    verified: true,
   });
   assert.deepEqual(calls, [
     ["inspectDump", 0],

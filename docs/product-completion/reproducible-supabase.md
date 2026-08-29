@@ -89,7 +89,7 @@ Example local build:
 ```bash
 DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=local \
 DESMOSLOCK_PUBLIC_BACKEND_URL=http://127.0.0.1:54321 \
-npm run build:apps
+npm run build
 ```
 
 Example staging build after the remote gate has been approved:
@@ -97,7 +97,7 @@ Example staging build after the remote gate has been approved:
 ```bash
 DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=staging \
 DESMOSLOCK_PUBLIC_BACKEND_URL=https://PROJECT_REF.supabase.co \
-npm run build:apps
+npm run build
 ```
 
 `PROJECT_REF` is a placeholder, not a repository value.
@@ -117,12 +117,13 @@ response.
 The Edge runtime receives `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` from the
 Supabase platform. It must also receive
 `DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN`, independently set to the exact root
-origin of the approved 20-character project ref. Before attaching the service
-role key, the function requires `SUPABASE_URL` to match that pin and the
-`https://<project-ref>.supabase.co` shape exactly. Arbitrary HTTPS origins,
-ports, paths, credentials, and mismatched pins fail before any request. The
-service-role value is never a client build input and is never returned by the
-function.
+origin of `SUPABASE_URL` in every runtime. Local development permits HTTP only
+for `127.0.0.1`, `[::1]`, `host.docker.internal`, or `kong`, and still requires
+that exact independent origin pin. Hosted use additionally requires the exact
+`https://<20-character-project-ref>.supabase.co` shape. Arbitrary HTTPS origins,
+ports in hosted origins, paths, credentials, missing pins, and mismatched pins
+fail before any request. The service-role value is never a client build input
+and is never returned by the function.
 
 ## Synthetic backup and restore operator
 
@@ -158,8 +159,10 @@ it runs in isolated mode only long enough to `fchdir` the already-open root
 descriptor and immediately exec the exact current Node runtime.
 
 Before export, independently obtain and record the non-secret PostgreSQL cluster
-`system_identifier` for the intended staging project. Then use a private,
-pre-created, non-symlink backup root outside the repository:
+`system_identifier` for the intended staging project. Then use an absolute,
+pre-created backup root outside the repository whose final component is not a
+symlink. The directory must be owned by the operator's effective user and have
+exact private POSIX mode `0700`:
 
 ```bash
 npm run backup:export:synthetic -- \
@@ -168,14 +171,15 @@ npm run backup:export:synthetic -- \
   EXPECTED_STAGING_SYSTEM_IDENTIFIER
 ```
 
-The receipt includes the manifest and artifact hashes. Preserve the manifest
-hash out of band. Export uses a serializable-deferrable PostgreSQL snapshot,
-derives the fixture and digest again from the resulting archive, and requires
-those archive contents to match both source observations around the dump. Keep
-the synthetic staging project write-quiescent as an additional operational
-control.
+The export receipt includes the manifest and artifact hashes. Preserve the
+manifest hash out of band. Export uses a serializable-deferrable PostgreSQL
+snapshot, derives the fixture and digest again from the resulting archive, and
+requires those archive contents to match both source observations around the
+dump. Keep the synthetic staging project write-quiescent as an additional
+operational control.
 
-Create an empty migrated local restore target without running the seed:
+Create a migrated, unseeded local restore target whose seven managed synthetic
+tables contain no rows:
 
 ```bash
 npm run db:reset:empty
@@ -202,19 +206,24 @@ npm run backup:restore:synthetic -- \
 
 Restore refuses absolute or traversing artifact paths, noncanonical manifests,
 unknown fields, hash mismatches, links, oversized files, unexpected archive
-entries or rows, a changed migration set, production or staging targets,
-source/target identity collisions, and nonempty targets. The archive allowlist
-is exactly the seven synthetic tables, including `foundation_seed`. The
+entries or rows, a changed migration set, a target that fails the exact
+database/system-identifier/server-side-local-marker attestation, source/target
+system-identifier collisions, and targets whose seven managed tables are
+nonempty. The archive allowlist is exactly the seven synthetic tables, including
+`foundation_seed`. The
 PostgreSQL adapter rejects every archive-rendered statement except an exact
 allowlist of harmless dump scaffolding and the seven validated `COPY` blocks.
 It rebuilds a private dependency-ordered `COPY` plan from those validated rows;
 raw `pg_restore` SQL is never executed. The adapter then rechecks the cluster
 system identifier, exact database name, server-side local marker, normalized
-migration-file digest, exact migration versions, and emptiness and applies the
-plan in one serializable transaction. It verifies the fixture and foundation
-marker before commit. The operator re-hashes the immutable archive bytes,
-re-observes the target, and emits a verified receipt only when the externally
-visible fixture is exact.
+migration-set digest attestation, exact migration versions, and seven-table
+emptiness and applies the plan in one serializable transaction. It verifies the
+fixture and foundation marker before commit. Immediately before restore, the
+operator re-hashes the held archive bytes. After commit, it directly re-observes
+the target through PostgreSQL and emits a scoped local synthetic-fixture receipt
+only when the expected generation-3 seven-table fixture matches. This receipt is
+not evidence of the public health or web/desktop smoke journey; that remains
+part of the remote staging human gate below.
 
 Backup publication opens and verifies the canonical root descriptor, binds the
 new backup directory as the worker's current directory, and performs every file

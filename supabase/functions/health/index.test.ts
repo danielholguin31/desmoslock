@@ -279,6 +279,79 @@ Deno.test(
 );
 
 Deno.test(
+  "backend probe never sends the service key without an exact local origin pin",
+  async () => {
+    for (const expectedOrigin of [
+      undefined,
+      "http://127.0.0.1:54322",
+      "http://kong:8000",
+    ]) {
+      let requests = 0;
+      const probe = createBackendProbe(
+        {
+          DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: expectedOrigin,
+          SUPABASE_SERVICE_ROLE_KEY: "synthetic-test-only-key",
+          SUPABASE_URL: "http://127.0.0.1:54321",
+        },
+        async () => {
+          requests += 1;
+          return new Response(null, { status: 200 });
+        },
+        () => new AbortController().signal,
+      );
+
+      await assertRejects(() => probe());
+      assertEquals(requests, 0);
+    }
+  },
+);
+
+Deno.test(
+  "backend probe accepts every explicitly pinned local development origin",
+  async () => {
+    for (const origin of [
+      "http://127.0.0.1:54321",
+      "http://[::1]:54321",
+      "http://host.docker.internal:54321",
+      "http://kong:8000",
+    ]) {
+      let requests = 0;
+      const probe = createBackendProbe(
+        {
+          DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: origin,
+          SUPABASE_SERVICE_ROLE_KEY: "synthetic-test-only-key",
+          SUPABASE_URL: origin,
+        },
+        async (input) => {
+          requests += 1;
+          if (String(input).endsWith("/auth/v1/health")) {
+            return new Response(null, { status: 200 });
+          }
+          return new Response(
+            JSON.stringify([
+              {
+                fixture_digest:
+                  "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca",
+                fixture_valid: true,
+                fixture_version: "internal-baseline-v1",
+                migration_set_sha256:
+                  "06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49",
+                schema_generation: 3,
+              },
+            ]),
+            { status: 200 },
+          );
+        },
+        () => new AbortController().signal,
+      );
+
+      await probe();
+      assertEquals(requests, 2);
+    }
+  },
+);
+
+Deno.test(
   "backend probe rejects a hosted origin outside the independent pin",
   async () => {
     let requests = 0;
