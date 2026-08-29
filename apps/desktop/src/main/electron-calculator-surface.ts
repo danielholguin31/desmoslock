@@ -1,6 +1,4 @@
 import { randomUUID } from "node:crypto";
-import fs from "node:fs/promises";
-import path from "node:path";
 
 import {
   session,
@@ -9,34 +7,23 @@ import {
   type Session,
 } from "electron";
 
+import { createAssessmentSessionPolicy } from "./assessment-session-policy.js";
 import {
   calculatorDocumentUrl,
-  createAssessmentSessionPolicy,
-} from "./assessment-session-policy.js";
-import {
-  createCalculatorWebPreferences,
-  type CalculatorSurface,
-  type CalculatorSurfaceBounds,
+  calculatorResourceManifest,
+  calculatorScheme,
+  loadCalculatorProtocolAssets,
+} from "./calculator-assets.js";
+import type {
+  CalculatorSurface,
+  CalculatorSurfaceBounds,
 } from "./calculator-surface.js";
+import { createCalculatorWebPreferences } from "./hardened-web-preferences.js";
 import {
-  decideWindowOpen,
-  denyDisallowedNavigation,
+  installWebContentsEscapeDenial,
   installSessionDenialPolicy,
 } from "./session-denial-policy.js";
 import { createStaticProtocolHandler } from "./static-protocol.js";
-
-const calculatorScheme = "desmoslock-calculator";
-const calculatorResourceManifest = [
-  { resourceType: "mainFrame", url: calculatorDocumentUrl },
-  {
-    resourceType: "script",
-    url: "desmoslock-calculator://host/host.js",
-  },
-  {
-    resourceType: "stylesheet",
-    url: "desmoslock-calculator://host/styles.css",
-  },
-] as const;
 
 const calculatorContentSecurityPolicy = [
   "default-src 'none'",
@@ -64,26 +51,8 @@ async function registerCalculatorProtocol(
   calculatorSession: Session,
   outputDirectory: string,
 ): Promise<void> {
-  const [document, script, stylesheet] = await Promise.all([
-    fs.readFile(path.join(outputDirectory, "calculator", "index.html")),
-    fs.readFile(path.join(outputDirectory, "calculator", "host.js")),
-    fs.readFile(path.join(outputDirectory, "calculator", "styles.css")),
-  ]);
   const handle = createStaticProtocolHandler({
-    assets: {
-      [calculatorDocumentUrl]: {
-        body: Uint8Array.from(document).buffer,
-        contentType: "text/html; charset=utf-8",
-      },
-      "desmoslock-calculator://host/host.js": {
-        body: Uint8Array.from(script).buffer,
-        contentType: "text/javascript; charset=utf-8",
-      },
-      "desmoslock-calculator://host/styles.css": {
-        body: Uint8Array.from(stylesheet).buffer,
-        contentType: "text/css; charset=utf-8",
-      },
-    },
+    assets: await loadCalculatorProtocolAssets(outputDirectory),
     contentSecurityPolicy: calculatorContentSecurityPolicy,
   });
 
@@ -115,19 +84,11 @@ function installAssessmentSessionPolicy(
     policy,
   );
 
-  const denyNavigation = (event: Electron.Event, url: string): void => {
-    denyDisallowedNavigation(event, url, `${calculatorScheme}:`, policy);
-  };
-  view.webContents.on("will-navigate", (event, url) =>
-    denyNavigation(event, url),
+  installWebContentsEscapeDenial(
+    view.webContents,
+    `${calculatorScheme}:`,
+    policy,
   );
-  view.webContents.on("will-frame-navigate", (event) =>
-    denyNavigation(event, event.url),
-  );
-  view.webContents.on("will-redirect", (event, url) =>
-    denyNavigation(event, url),
-  );
-  view.webContents.on("will-attach-webview", (event) => event.preventDefault());
   view.webContents.on("will-prevent-unload", (event) => event.preventDefault());
   view.webContents.on(
     "select-bluetooth-device",
@@ -135,9 +96,6 @@ function installAssessmentSessionPolicy(
       event.preventDefault();
       callback("");
     },
-  );
-  view.webContents.setWindowOpenHandler(({ url }) =>
-    decideWindowOpen(url, `${calculatorScheme}:`, policy),
   );
   const restoreCalculatorDocument = (): void => {
     if (view.webContents.isDestroyed()) return;

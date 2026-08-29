@@ -1,4 +1,4 @@
-import type { Session } from "electron";
+import type { Session, WebContents } from "electron";
 
 export interface SessionCapabilityPolicy {
   allowsDownload(): boolean;
@@ -17,20 +17,24 @@ export const denyByDefaultCapabilityPolicy: SessionCapabilityPolicy =
     allowsPopup: () => false,
   });
 
+function usesControlledProtocol(
+  url: string,
+  controlledProtocol: string,
+): boolean {
+  try {
+    return new URL(url).protocol === controlledProtocol;
+  } catch {
+    return false;
+  }
+}
+
 export function denyDisallowedNavigation(
   event: Electron.Event,
   url: string,
   controlledProtocol: string,
   policy: SessionCapabilityPolicy,
 ): boolean {
-  let usesControlledProtocol = false;
-  try {
-    usesControlledProtocol = new URL(url).protocol === controlledProtocol;
-  } catch {
-    // Malformed URLs are treated as external and denied below.
-  }
-
-  const allowed = usesControlledProtocol
+  const allowed = usesControlledProtocol(url, controlledProtocol)
     ? policy.allowsNavigation(url)
     : policy.allowsExternalProtocol(url);
   if (allowed) return false;
@@ -44,16 +48,29 @@ export function decideWindowOpen(
   controlledProtocol: string,
   policy: SessionCapabilityPolicy,
 ): { readonly action: "allow" | "deny" } {
-  let usesControlledProtocol = false;
-  try {
-    usesControlledProtocol = new URL(url).protocol === controlledProtocol;
-  } catch {
-    // Malformed URLs are treated as external and denied below.
-  }
-  const allowed = usesControlledProtocol
+  const allowed = usesControlledProtocol(url, controlledProtocol)
     ? policy.allowsPopup(url)
     : policy.allowsExternalProtocol(url);
   return { action: allowed ? "allow" : "deny" };
+}
+
+export function installWebContentsEscapeDenial(
+  webContents: WebContents,
+  controlledProtocol: string,
+  policy: SessionCapabilityPolicy,
+): void {
+  webContents.setWindowOpenHandler(({ url }) =>
+    decideWindowOpen(url, controlledProtocol, policy),
+  );
+  const denyNavigation = (event: Electron.Event, url: string): void => {
+    denyDisallowedNavigation(event, url, controlledProtocol, policy);
+  };
+  webContents.on("will-navigate", (event, url) => denyNavigation(event, url));
+  webContents.on("will-frame-navigate", (event) =>
+    denyNavigation(event, event.url),
+  );
+  webContents.on("will-redirect", (event, url) => denyNavigation(event, url));
+  webContents.on("will-attach-webview", (event) => event.preventDefault());
 }
 
 export function installSessionDenialPolicy(

@@ -4,33 +4,46 @@ import path from "node:path";
 
 import { _electron as electron, expect, test } from "@playwright/test";
 
+import { createElectronLaunchProfile } from "../../../scripts/electron-launch-profile.mjs";
+
 test("production Electron shell isolates renderers and resets assessment state for a reopened window", async () => {
   const userDataDirectory = await fs.mkdtemp(
     path.join(os.tmpdir(), "desmoslock-foundation-e2e-"),
   );
-  const environment: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && key !== "ELECTRON_RUN_AS_NODE") {
-      environment[key] = value;
+  const launchProfile = (() => {
+    const previousRunAsNode = process.env.ELECTRON_RUN_AS_NODE;
+    const previousCredentialSentinel =
+      process.env.DESMOSLOCK_E2E_CREDENTIAL_SENTINEL;
+    try {
+      process.env.ELECTRON_RUN_AS_NODE = "1";
+      process.env.DESMOSLOCK_E2E_CREDENTIAL_SENTINEL =
+        "must-not-cross-boundary";
+      return createElectronLaunchProfile();
+    } finally {
+      if (previousRunAsNode === undefined) {
+        delete process.env.ELECTRON_RUN_AS_NODE;
+      } else {
+        process.env.ELECTRON_RUN_AS_NODE = previousRunAsNode;
+      }
+      if (previousCredentialSentinel === undefined) {
+        delete process.env.DESMOSLOCK_E2E_CREDENTIAL_SENTINEL;
+      } else {
+        process.env.DESMOSLOCK_E2E_CREDENTIAL_SENTINEL =
+          previousCredentialSentinel;
+      }
     }
-  }
-
-  const linuxLaunchFlags =
-    process.platform === "linux"
-      ? ["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu"]
-      : [];
-  if (process.platform === "linux") {
-    environment.ELECTRON_DISABLE_SANDBOX = "1";
-  }
+  })();
 
   const application = await electron.launch({
     args: [
-      ...linuxLaunchFlags,
+      ...launchProfile.args,
       `--user-data-dir=${userDataDirectory}`,
       path.resolve("apps/desktop"),
     ],
-    env: environment,
-    ...(process.platform === "linux" ? { chromiumSandbox: false } : {}),
+    env: launchProfile.env,
+    ...(launchProfile.chromiumSandbox === undefined
+      ? {}
+      : { chromiumSandbox: launchProfile.chromiumSandbox }),
   });
 
   try {
@@ -84,6 +97,18 @@ test("production Electron shell isolates renderers and resets assessment state f
     expect(preferences.disableDialogs).toBe(true);
     expect(preferences.nodeIntegration).toBe(false);
     expect(preferences.sandbox).toBe(true);
+
+    expect(
+      await application.evaluate(() => ({
+        credentialSentinel: "DESMOSLOCK_E2E_CREDENTIAL_SENTINEL" in process.env,
+        electronRunAsNode: "ELECTRON_RUN_AS_NODE" in process.env,
+        nodeOptions: "NODE_OPTIONS" in process.env,
+      })),
+    ).toEqual({
+      credentialSentinel: false,
+      electronRunAsNode: false,
+      nodeOptions: false,
+    });
 
     await application.evaluate(({ BrowserWindow, session }) => {
       const [shellWindow] = BrowserWindow.getAllWindows();

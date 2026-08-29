@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  calculatorDocumentUrl,
-  createAssessmentSessionPolicy,
-} from "../src/main/assessment-session-policy.js";
+import { createAssessmentSessionPolicy } from "../src/main/assessment-session-policy.js";
+import { calculatorDocumentUrl } from "../src/main/calculator-assets.js";
 
 describe("assessment session policy", () => {
   const policy = createAssessmentSessionPolicy({

@@ -1,5 +1,4 @@
-export const calculatorDocumentUrl =
-  "desmoslock-calculator://host/index.html" as const;
+import { calculatorDocumentUrl } from "./calculator-assets.js";
 
 export interface AssessmentNetworkRequest {
   readonly method: string;

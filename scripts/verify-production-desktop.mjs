@@ -11,6 +11,13 @@ import { fileURLToPath } from "node:url";
 import { packager } from "@electron/packager";
 import { _electron as electron } from "@playwright/test";
 
+import {
+  hardenPackagedElectron,
+  verifyPackagedElectronFuses,
+} from "./electron-fuse-policy.mjs";
+import { createElectronLaunchProfile } from "./electron-launch-profile.mjs";
+import { runHostileCalculatorProbe } from "../tests/e2e/electron/support/hostile-calculator-probe.mjs";
+
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -19,6 +26,13 @@ const desktopRoot = path.join(repositoryRoot, "apps", "desktop");
 const distributionRoot = path.join(desktopRoot, "dist");
 const calculatorUrl = "desmoslock-calculator://host/index.html";
 const packagedExecutableName = "desmoslock-internal";
+const forbiddenPackagedSwitches = Object.freeze([
+  "--inspect=0",
+  "--remote-debugging-pipe",
+  "--remote-debugging-port=0",
+]);
+const diagnosticEndpointPattern =
+  /(?:Debugger|DevTools) listening|ws:\/\/[^\s]+\/devtools\//i;
 const expectedDistributionFiles = [
   "calculator/host.js",
   "calculator/index.html",
@@ -29,17 +43,6 @@ const expectedDistributionFiles = [
   "renderer.js",
   "styles.css",
 ];
-
-function launchEnvironment() {
-  const environment = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && key !== "ELECTRON_RUN_AS_NODE") {
-      environment[key] = value;
-    }
-  }
-  if (process.platform === "linux") environment.ELECTRON_DISABLE_SANDBOX = "1";
-  return environment;
-}
 
 async function run(command, arguments_, options = {}) {
   await new Promise((resolve, reject) => {
@@ -101,6 +104,126 @@ async function packagedExecutable(packageDirectory) {
   return executable;
 }
 
+function createCapturedChild(executablePath, arguments_, environment) {
+  const child = spawn(executablePath, arguments_, {
+    cwd: path.dirname(executablePath),
+    env: environment,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  let stdout = "";
+  child.stderr.setEncoding("utf8");
+  child.stdout.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  return {
+    child,
+    output: () => `${stdout}${stderr}`,
+  };
+}
+
+async function waitForChildExit(child, timeoutMilliseconds) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return { code: child.exitCode, signal: child.signalCode };
+  }
+
+  return Promise.race([
+    new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code, signal) => resolve({ code, signal }));
+    }),
+    new Promise((resolve) =>
+      setTimeout(() => resolve(null), timeoutMilliseconds),
+    ),
+  ]);
+}
+
+async function terminateChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGTERM");
+  if ((await waitForChildExit(child, 3_000)) !== null) return;
+  child.kill("SIGKILL");
+  await waitForChildExit(child, 3_000);
+}
+
+async function verifyExternalPackagedLaunch(executablePath, userDataDirectory) {
+  const launchProfile = createElectronLaunchProfile();
+  const captured = createCapturedChild(
+    executablePath,
+    [...launchProfile.args, `--user-data-dir=${userDataDirectory}`],
+    launchProfile.env,
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  try {
+    assert.equal(
+      captured.child.exitCode,
+      null,
+      `Packaged executable did not remain active:\n${captured.output()}`,
+    );
+    assert.equal(
+      captured.child.signalCode,
+      null,
+      `Packaged executable terminated early:\n${captured.output()}`,
+    );
+    assert.doesNotMatch(captured.output(), diagnosticEndpointPattern);
+  } finally {
+    await terminateChild(captured.child);
+  }
+  assert.ok(
+    captured.child.exitCode !== null || captured.child.signalCode !== null,
+    "Packaged executable remained active after bounded termination",
+  );
+}
+
+async function verifyForbiddenPackagedSwitch(
+  executablePath,
+  userDataDirectory,
+  forbiddenSwitch,
+) {
+  const launchProfile = createElectronLaunchProfile();
+  const captured = createCapturedChild(
+    executablePath,
+    [
+      ...launchProfile.args,
+      forbiddenSwitch,
+      `--user-data-dir=${userDataDirectory}`,
+    ],
+    launchProfile.env,
+  );
+  const result = await waitForChildExit(captured.child, 5_000);
+  if (result === null) {
+    await terminateChild(captured.child);
+    throw new Error(`Packaged executable accepted ${forbiddenSwitch}`);
+  }
+
+  assert.equal(
+    result.code,
+    78,
+    `Packaged executable did not fail closed for ${forbiddenSwitch}`,
+  );
+  assert.equal(result.signal, null);
+  assert.match(
+    captured.output(),
+    /Packaged runtime rejected a diagnostic switch\./,
+  );
+  assert.doesNotMatch(captured.output(), diagnosticEndpointPattern);
+  assert.equal(
+    captured.child.exitCode,
+    result.code,
+    `Packaged executable remained active after rejecting ${forbiddenSwitch}`,
+  );
+  return {
+    diagnosticEndpointObserved: false,
+    exitCode: result.code,
+    switch: forbiddenSwitch,
+  };
+}
+
 async function waitForCalculator(application) {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
@@ -114,19 +237,21 @@ async function waitForCalculator(application) {
     if (count === 1) return;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error("Packaged calculator surface did not become ready");
+  throw new Error("Internal calculator surface did not become ready");
 }
 
-async function launchPackaged(executablePath, userDataDirectory) {
-  const linuxLaunchFlags =
-    process.platform === "linux"
-      ? ["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu"]
-      : [];
+async function launchInternalProductionBuild(userDataDirectory) {
+  const launchProfile = createElectronLaunchProfile();
   const application = await electron.launch({
-    args: [...linuxLaunchFlags, `--user-data-dir=${userDataDirectory}`],
-    env: launchEnvironment(),
-    executablePath,
-    ...(process.platform === "linux" ? { chromiumSandbox: false } : {}),
+    args: [
+      ...launchProfile.args,
+      `--user-data-dir=${userDataDirectory}`,
+      desktopRoot,
+    ],
+    env: launchProfile.env,
+    ...(launchProfile.chromiumSandbox === undefined
+      ? {}
+      : { chromiumSandbox: launchProfile.chromiumSandbox }),
   });
   await application.firstWindow();
   await waitForCalculator(application);
@@ -178,11 +303,11 @@ async function inspectRuntime(application) {
   return { runtime, shellBoundary };
 }
 
-async function runPackagedShellDenialProbe(application) {
+async function runInternalShellDenialProbe(application) {
   const shell = await application.firstWindow();
   await application.evaluate(({ BrowserWindow, session }) => {
     const [shellWindow] = BrowserWindow.getAllWindows();
-    if (shellWindow === undefined) throw new Error("Packaged shell is missing");
+    if (shellWindow === undefined) throw new Error("Internal shell is missing");
     const trackedSession = session.defaultSession;
     trackedSession.packagedShellDownloadDenials = 0;
     trackedSession.packagedShellDownloadPolicyObserved = false;
@@ -273,127 +398,7 @@ async function createHostileNetworkSinks() {
   };
 }
 
-async function hostileCalculatorProbe(input) {
-  const result = {
-    bridge: typeof globalThis.desmoslockDesktop,
-    externalProtocol: "pending",
-    fetch: "pending",
-    nodeProcess: typeof globalThis.process,
-    nodeRequire: typeof globalThis.require,
-    permission: "unavailable",
-    popup: "pending",
-    rtcPeerConnection: "unavailable",
-    webTransport: "unavailable",
-  };
-
-  const controller = new globalThis.AbortController();
-  globalThis.setTimeout(() => controller.abort(), 300);
-  try {
-    await globalThis.fetch(`${input.httpOrigin}/fetch`, {
-      mode: "no-cors",
-      signal: controller.signal,
-    });
-    result.fetch = "allowed";
-  } catch {
-    result.fetch = "blocked";
-  }
-
-  try {
-    const popup = globalThis.open(`${input.httpOrigin}/popup`, "_blank");
-    result.popup = popup === null ? "blocked" : "allowed";
-  } catch {
-    result.popup = "blocked";
-  }
-  try {
-    const external = globalThis.open(
-      "desmoslock-unregistered://attacker.invalid",
-      "_blank",
-    );
-    result.externalProtocol = external === null ? "denied" : "allowed";
-  } catch {
-    result.externalProtocol = "denied";
-  }
-
-  if (globalThis.navigator.permissions !== undefined) {
-    try {
-      result.permission = (
-        await globalThis.navigator.permissions.query({ name: "geolocation" })
-      ).state;
-    } catch {
-      result.permission = "denied";
-    }
-  }
-
-  const image = globalThis.document.createElement("img");
-  image.src = `${input.httpOrigin}/image`;
-  globalThis.document.body.append(image);
-  try {
-    const socket = new globalThis.WebSocket(
-      input.httpOrigin.replace("http", "ws") + "/socket",
-    );
-    socket.addEventListener("open", () => socket.close(), { once: true });
-  } catch {
-    // Constructor rejection is an expected blocked outcome.
-  }
-
-  if (typeof globalThis.RTCPeerConnection !== "undefined") {
-    try {
-      const peer = new globalThis.RTCPeerConnection({
-        iceServers: [
-          { urls: `stun:127.0.0.1:${input.udpPort}` },
-          {
-            credential: "hostile",
-            urls: `turn:127.0.0.1:${input.tcpPort}?transport=tcp`,
-            username: "hostile",
-          },
-        ],
-        iceTransportPolicy: "relay",
-      });
-      peer.createDataChannel("hostile");
-      await peer.setLocalDescription(await peer.createOffer());
-      await new Promise((resolve) => globalThis.setTimeout(resolve, 700));
-      peer.close();
-      result.rtcPeerConnection = "constructed";
-    } catch (caught) {
-      result.rtcPeerConnection =
-        caught !== null && typeof caught === "object" && "name" in caught
-          ? String(caught.name)
-          : `unexpected:${String(caught)}`;
-    }
-  }
-
-  if (typeof globalThis.WebTransport !== "undefined") {
-    try {
-      const transport = new globalThis.WebTransport(
-        `https://127.0.0.1:${input.udpPort}/hostile`,
-      );
-      result.webTransport = await Promise.race([
-        transport.ready.then(
-          () => "allowed",
-          () => "rejected",
-        ),
-        new Promise((resolve) =>
-          globalThis.setTimeout(() => resolve("timeout"), 700),
-        ),
-      ]);
-      transport.close();
-    } catch {
-      result.webTransport = "rejected";
-    }
-  }
-
-  const iframe = globalThis.document.createElement("iframe");
-  iframe.src = `${input.httpOrigin}/frame`;
-  globalThis.document.body.append(iframe);
-  const download = globalThis.document.createElement("a");
-  download.href = "data:text/plain,blocked";
-  download.download = "desmoslock-packaged-hostile-must-not-exist.txt";
-  download.click();
-  globalThis.location.assign(`${input.httpOrigin}/navigation`);
-  return result;
-}
-
-async function runPackagedHostileProbe(application, sinks) {
+async function runInternalHostileProbe(application, sinks) {
   await application.evaluate(({ webContents }, url) => {
     const calculator = webContents
       .getAllWebContents()
@@ -430,7 +435,7 @@ async function runPackagedHostileProbe(application, sinks) {
         tcpPort: sinks.tcpPort,
         udpPort: sinks.udpPort,
       },
-      probeSource: hostileCalculatorProbe.toString(),
+      probeSource: runHostileCalculatorProbe.toString(),
     },
   );
 
@@ -593,9 +598,16 @@ try {
   });
   assert.equal(packageDirectories.length, 1);
   const executablePath = await packagedExecutable(packageDirectories[0]);
-  const userDataDirectory = path.join(temporaryRoot, "user-data");
+  await hardenPackagedElectron(executablePath);
+  assert.deepEqual(await verifyPackagedElectronFuses(executablePath), {
+    EnableNodeCliInspectArguments: "DISABLE",
+    EnableNodeOptionsEnvironmentVariable: "DISABLE",
+    RunAsNode: "DISABLE",
+  });
 
-  application = await launchPackaged(executablePath, userDataDirectory);
+  const userDataDirectory = path.join(temporaryRoot, "internal-user-data");
+
+  application = await launchInternalProductionBuild(userDataDirectory);
   const firstLaunch = await inspectRuntime(application);
   assert.deepEqual(firstLaunch.shellBoundary, {
     bridgeKeys: ["requestAssessmentLock", "version"],
@@ -608,7 +620,7 @@ try {
     contextIsolation: true,
     devTools: false,
     enabledFeatures: firstLaunch.runtime.enabledFeatures,
-    isPackaged: true,
+    isPackaged: false,
     isPersistent: false,
     nodeIntegration: false,
     preload: undefined,
@@ -622,16 +634,16 @@ try {
     firstLaunch.runtime.enabledFeatures.includes(
       "OverrideConnectionAllowlistOriginTrial",
     ),
-    "Packaged app did not enable the Connection-Allowlist override",
+    "Internal production build did not enable the Connection-Allowlist override",
   );
   assert.match(firstLaunch.runtime.remoteProxy, /PROXY 127\.0\.0\.1:9/);
-  assert.deepEqual(await runPackagedShellDenialProbe(application), {
+  assert.deepEqual(await runInternalShellDenialProbe(application), {
     download: { count: 1, deniedByProductionPolicy: true },
     permission: "denied",
   });
 
   networkSinks = await createHostileNetworkSinks();
-  const hostile = await runPackagedHostileProbe(application, networkSinks);
+  const hostile = await runInternalHostileProbe(application, networkSinks);
   assert.deepEqual(hostile.result, {
     bridge: "undefined",
     externalProtocol: "denied",
@@ -657,7 +669,7 @@ try {
   await application.close();
   application = null;
 
-  application = await launchPackaged(executablePath, userDataDirectory);
+  application = await launchInternalProductionBuild(userDataDirectory);
   assert.deepEqual(await readCalculatorState(application), {
     databases: [],
     expressions: ["y=x"],
@@ -666,8 +678,30 @@ try {
   await application.close();
   application = null;
 
+  await verifyExternalPackagedLaunch(
+    executablePath,
+    path.join(temporaryRoot, "packaged-user-data"),
+  );
+  const rejectedSwitches = [];
+  for (const forbiddenSwitch of forbiddenPackagedSwitches) {
+    rejectedSwitches.push(
+      await verifyForbiddenPackagedSwitch(
+        executablePath,
+        path.join(
+          temporaryRoot,
+          `rejected-${forbiddenSwitch.replaceAll(/[^a-z]+/gi, "-")}`,
+        ),
+        forbiddenSwitch,
+      ),
+    );
+  }
+  assert.deepEqual(
+    rejectedSwitches.map((receipt) => receipt.switch),
+    forbiddenPackagedSwitches,
+  );
+
   process.stdout.write(
-    "Unsigned production-mode package passed hostile isolation and relaunch checks.\n",
+    "Internal production-build isolation and external packaged launch policy passed; physical packaged UI acceptance remains gated.\n",
   );
 } finally {
   if (application !== null) await application.close();

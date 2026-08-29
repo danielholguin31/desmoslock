@@ -25,17 +25,34 @@ external protocols by default. Production ships no denial-observer registry and 
 not import or call Electron's `shell.openExternal`. A non-shipped Electron fixture
 instruments permission-handler construction and confirms that the exact
 `openExternal` permission request receives `false` before isolated test observers run;
-an observer failure cannot change that already-delivered denial. The packaged verifier
-separately requires the external `window.open` call to return no window, the calculator
-URL and BrowserWindow count to remain unchanged, and the packaged runtime to contain no
-external-dispatch call or diagnostic registry.
+an observer failure cannot change that already-delivered denial. The non-shipped
+Playwright isolation harness separately requires the external `window.open` call to
+return no window and the calculator URL and BrowserWindow count to remain unchanged.
+That harness exercises the unpackaged production build; it uses Electron's internal
+automation channel and is not black-box package or release acceptance. Production
+assets must contain no external-dispatch call, diagnostic registry, or test API.
 
 This is evidence of denial at Electron's pre-dispatch permission/window boundary, not
 OS-level dispatch telemetry. Verification deliberately does not register a URL handler
 or launch another application.
 
-`npm run test:electron:production` is a verification seam, not a release path. It
-creates an unsigned package in a temporary directory, launches it twice against the
-same application profile, proves that calculator state and browser storage do not
-survive relaunch, and removes the package. It performs no signing, notarization,
-publication, deployment, or legacy-v1 packaging.
+`npm run test:electron:production` is a containment and package-policy seam, not a
+release path. It runs the hostile and relaunch assertions against an unpackaged
+production build, then creates an unsigned package in a temporary directory. The
+package has the `RunAsNode`, `EnableNodeOptionsEnvironmentVariable`, and
+`EnableNodeCliInspectArguments` Electron fuses disabled. An external child-process
+harness launches the exact executable without a diagnostic endpoint, verifies a
+normal bounded launch, and requires `--inspect=0`, `--remote-debugging-port=0`, and
+`--remote-debugging-pipe` to exit nonzero without advertising a debugger listener or
+leaving a process alive. Every Electron launch receives a small explicit platform
+environment rather than ambient parent variables. The seam removes the package and
+performs no signing, notarization, publication, deployment, or legacy-v1 packaging.
+
+This automated evidence does not claim physical black-box calculator interaction in
+the package. That acceptance remains an issue 37 human/physical gate: XCUITest must
+drive the exact `.app` or mounted-DMG application on a visible clean Mac using
+OS-delivered clicks and typing, capture window screenshots, and prove visible plot
+creation, zoom change, expression removal, and plot disappearance through screenshot
+or pixel-delta receipts bound to the exact artifact. macOS Accessibility/Automation
+and likely Screen Recording approval are required human gates; no shipped diagnostic
+or test seam substitutes for them.

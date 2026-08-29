@@ -14,13 +14,15 @@ import {
 import type { RepositoryBuildIdentity } from "@desmoslock/contracts";
 
 import type { CalculatorSurface } from "./main/calculator-surface.js";
+import { calculatorScheme } from "./main/calculator-assets.js";
 import { createElectronCalculatorSurface } from "./main/electron-calculator-surface.js";
+import { createTrustedShellWebPreferences } from "./main/hardened-web-preferences.js";
+import { assertPackagedLaunchArguments } from "./main/packaged-launch-policy.js";
 import { createPrivilegedRequestRouter } from "./main/privileged-request-router.js";
 import {
-  decideWindowOpen,
   denyByDefaultCapabilityPolicy,
-  denyDisallowedNavigation,
   installSessionDenialPolicy,
+  installWebContentsEscapeDenial,
 } from "./main/session-denial-policy.js";
 import { createStaticProtocolHandler } from "./main/static-protocol.js";
 import { createTrustedRequestHandler } from "./main/trusted-request-handler.js";
@@ -34,6 +36,13 @@ export const desktopBuild: RepositoryBuildIdentity = {
 
 export const desktopChannel = "internal-v2" as const;
 export const trustedShellUrl = "desmoslock-app://shell/index.html" as const;
+
+try {
+  assertPackagedLaunchArguments(app.isPackaged, process.argv);
+} catch {
+  process.stderr.write("Packaged runtime rejected a diagnostic switch.\n");
+  process.exit(78);
+}
 
 const shellScheme = "desmoslock-app";
 const shellBarHeight = 140;
@@ -68,7 +77,7 @@ if (!existingChromiumFeatures.includes(connectionAllowlistOverride)) {
 }
 
 protocol.registerSchemesAsPrivileged(
-  [shellScheme, "desmoslock-calculator"].map((scheme) => ({
+  [shellScheme, calculatorScheme].map((scheme) => ({
     privileges: {
       allowExtensions: false,
       allowServiceWorkers: false,
@@ -163,26 +172,6 @@ async function ensureShellProtocol(outputDirectory: string): Promise<void> {
   shellProtocolRegistered = true;
 }
 
-function denyShellEscape(webContents: WebContents): void {
-  webContents.setWindowOpenHandler(({ url }) =>
-    decideWindowOpen(url, `${shellScheme}:`, denyByDefaultCapabilityPolicy),
-  );
-  const denyNavigation = (event: Electron.Event, url: string): void => {
-    denyDisallowedNavigation(
-      event,
-      url,
-      `${shellScheme}:`,
-      denyByDefaultCapabilityPolicy,
-    );
-  };
-  webContents.on("will-navigate", (event, url) => denyNavigation(event, url));
-  webContents.on("will-frame-navigate", (event) =>
-    denyNavigation(event, event.url),
-  );
-  webContents.on("will-redirect", (event, url) => denyNavigation(event, url));
-  webContents.on("will-attach-webview", (event) => event.preventDefault());
-}
-
 function registerTrustedShell(
   webContents: WebContents,
   assessmentGeneration: string,
@@ -231,25 +220,16 @@ async function createWindow(): Promise<BrowserWindow> {
     minHeight: 560,
     minWidth: 860,
     show: false,
-    webPreferences: {
-      allowRunningInsecureContent: false,
-      contextIsolation: true,
-      devTools: false,
-      disableDialogs: true,
-      enableWebSQL: false,
-      experimentalFeatures: false,
-      nodeIntegration: false,
-      nodeIntegrationInSubFrames: false,
-      nodeIntegrationInWorker: false,
-      preload: path.join(outputDirectory, "preload.cjs"),
-      sandbox: true,
-      spellcheck: false,
-      webSecurity: true,
-      webviewTag: false,
-    },
+    webPreferences: createTrustedShellWebPreferences(
+      path.join(outputDirectory, "preload.cjs"),
+    ),
     width: 1080,
   });
-  denyShellEscape(window.webContents);
+  installWebContentsEscapeDenial(
+    window.webContents,
+    `${shellScheme}:`,
+    denyByDefaultCapabilityPolicy,
+  );
   const trustedWebContentsId = window.webContents.id;
   const assessmentState = {
     generation: `internal-assessment-${nextAssessmentGeneration}`,

@@ -271,7 +271,7 @@ test("legacy v1 and test-only support cannot enter a v2 release path", () => {
   assert.doesNotThrow(() => assertLegacyReleaseTombstone(releaseWorkflow));
 });
 
-test("Electron CI acceptance includes the packaged hostile verifier", () => {
+test("Electron CI acceptance includes internal isolation and external package policy verification", () => {
   const rootPackage = readJson("package.json");
   const ciWorkflow = readText(".github/workflows/ci.yml");
 

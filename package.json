@@ -47,6 +47,7 @@
     "verify:required-check-probe": "node scripts/verify-required-check-probe.mjs"
   },
   "devDependencies": {
+    "@electron/fuses": "^2.1.3",
     "@electron/packager": "^20.3.0",
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.62.1",

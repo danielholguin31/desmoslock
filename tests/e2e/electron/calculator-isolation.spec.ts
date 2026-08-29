@@ -13,18 +13,10 @@ import {
   type Page,
 } from "@playwright/test";
 
-const calculatorUrl = "desmoslock-calculator://host/index.html";
+import { createElectronLaunchProfile } from "../../../scripts/electron-launch-profile.mjs";
+import { runHostileCalculatorProbe } from "./support/hostile-calculator-probe.mjs";
 
-function launchEnvironment(): Record<string, string> {
-  const environment: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && key !== "ELECTRON_RUN_AS_NODE") {
-      environment[key] = value;
-    }
-  }
-  if (process.platform === "linux") environment.ELECTRON_DISABLE_SANDBOX = "1";
-  return environment;
-}
+const calculatorUrl = "desmoslock-calculator://host/index.html";
 
 async function callCalculator<Result, Argument>(
   application: ElectronApplication,
@@ -174,18 +166,17 @@ test.describe.serial("isolated calculator surface", () => {
       path.join(os.tmpdir(), "desmoslock-isolation-e2e-"),
     );
 
-    const linuxLaunchFlags =
-      process.platform === "linux"
-        ? ["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu"]
-        : [];
+    const launchProfile = createElectronLaunchProfile();
     application = await electron.launch({
       args: [
-        ...linuxLaunchFlags,
+        ...launchProfile.args,
         `--user-data-dir=${userDataDirectory}`,
         path.resolve("apps/desktop"),
       ],
-      env: launchEnvironment(),
-      ...(process.platform === "linux" ? { chromiumSandbox: false } : {}),
+      env: launchProfile.env,
+      ...(launchProfile.chromiumSandbox === undefined
+        ? {}
+        : { chromiumSandbox: launchProfile.chromiumSandbox }),
     });
     shell = await application.firstWindow();
     await expect
@@ -382,143 +373,11 @@ test.describe.serial("isolated calculator surface", () => {
 
     const hostile = await callCalculator(
       application,
-      async (input) => {
-        const result: {
-          bridge: string;
-          externalProtocol: string;
-          fetch: string;
-          nodeProcess: string;
-          nodeRequire: string;
-          permission: string;
-          popup: string;
-          rtcPeerConnection: string;
-          webTransport: string;
-        } = {
-          bridge: typeof (
-            globalThis as typeof globalThis & { desmoslockDesktop?: unknown }
-          ).desmoslockDesktop,
-          externalProtocol: "pending",
-          fetch: "pending",
-          nodeProcess: typeof (
-            globalThis as typeof globalThis & { process?: unknown }
-          ).process,
-          nodeRequire: typeof (
-            globalThis as typeof globalThis & { require?: unknown }
-          ).require,
-          permission: "unavailable",
-          popup: "pending",
-          rtcPeerConnection: "unavailable",
-          webTransport: "unavailable",
-        };
-        const controller = new AbortController();
-        setTimeout(() => controller.abort(), 300);
-        try {
-          await fetch(`${input.sinkOrigin}/fetch`, {
-            mode: "no-cors",
-            signal: controller.signal,
-          });
-          result.fetch = "allowed";
-        } catch {
-          result.fetch = "blocked";
-        }
-        try {
-          const popup = window.open(`${input.sinkOrigin}/popup`, "_blank");
-          result.popup = popup === null ? "blocked" : "allowed";
-        } catch {
-          result.popup = "blocked";
-        }
-        try {
-          const external = window.open(
-            "desmoslock-unregistered://attacker.invalid",
-            "_blank",
-          );
-          result.externalProtocol = external === null ? "denied" : "allowed";
-        } catch {
-          result.externalProtocol = "denied";
-        }
-        if (navigator.permissions !== undefined) {
-          try {
-            result.permission = (
-              await navigator.permissions.query({ name: "geolocation" })
-            ).state;
-          } catch {
-            result.permission = "denied";
-          }
-        }
-        const image = document.createElement("img");
-        image.src = `${input.sinkOrigin}/image`;
-        document.body.append(image);
-        try {
-          const socket = new WebSocket(`${input.sinkWebSocketOrigin}/socket`);
-          socket.addEventListener("open", () => socket.close(), { once: true });
-        } catch {
-          // Constructor rejection is an expected blocked outcome.
-        }
-        if (typeof RTCPeerConnection !== "undefined") {
-          try {
-            const peer = new RTCPeerConnection({
-              iceServers: [
-                { urls: `stun:127.0.0.1:${input.udpSinkPort}` },
-                {
-                  credential: "hostile",
-                  urls: `turn:127.0.0.1:${input.tcpSinkPort}?transport=tcp`,
-                  username: "hostile",
-                },
-              ],
-              iceTransportPolicy: "relay",
-            });
-            let emittedCandidate = false;
-            peer.addEventListener("icecandidate", (event) => {
-              if (event.candidate !== null) emittedCandidate = true;
-            });
-            peer.createDataChannel("hostile");
-            await peer.setLocalDescription(await peer.createOffer());
-            await new Promise((resolve) => setTimeout(resolve, 700));
-            result.rtcPeerConnection = emittedCandidate
-              ? "candidate"
-              : "no-candidate";
-            peer.close();
-          } catch (caught) {
-            result.rtcPeerConnection =
-              caught instanceof DOMException
-                ? caught.name
-                : `unexpected:${String(caught)}`;
-          }
-        }
-        if (typeof WebTransport !== "undefined") {
-          try {
-            const transport = new WebTransport(
-              `https://127.0.0.1:${input.udpSinkPort}/hostile`,
-            );
-            result.webTransport = await Promise.race([
-              transport.ready.then(
-                () => "allowed",
-                () => "rejected",
-              ),
-              new Promise<string>((resolve) =>
-                setTimeout(() => resolve("timeout"), 700),
-              ),
-            ]);
-            transport.close();
-          } catch {
-            result.webTransport = "rejected";
-          }
-        }
-        const iframe = document.createElement("iframe");
-        iframe.src = `${input.sinkOrigin}/frame`;
-        document.body.append(iframe);
-        const download = document.createElement("a");
-        download.href = "data:text/plain,blocked";
-        download.download = "desmoslock-hostile-fixture-must-not-exist.txt";
-        download.click();
-        location.assign(`${input.sinkOrigin}/navigation`);
-        return result;
-      },
+      runHostileCalculatorProbe,
       {
-        sinkOrigin,
-        sinkWebSocketOrigin: sinkOrigin.replace("http", "ws"),
-        tcpSinkPort,
-        udpSinkPort,
+        httpOrigin: sinkOrigin,
+        tcpPort: tcpSinkPort,
+        udpPort: udpSinkPort,
       },
     );
 

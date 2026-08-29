@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createCalculatorWebPreferences } from "../src/main/calculator-surface.js";
+import { createCalculatorWebPreferences } from "../src/main/hardened-web-preferences.js";
 
 describe("calculator surface boundary", () => {
   it("builds a sandboxed, preload-free, ephemeral web preferences contract", () => {

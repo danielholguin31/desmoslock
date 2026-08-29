@@ -5,16 +5,7 @@ import path from "node:path";
 import { _electron as electron, expect, test } from "@playwright/test";
 import { build } from "esbuild";
 
-function launchEnvironment(): Record<string, string> {
-  const environment: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && key !== "ELECTRON_RUN_AS_NODE") {
-      environment[key] = value;
-    }
-  }
-  if (process.platform === "linux") environment.ELECTRON_DISABLE_SANDBOX = "1";
-  return environment;
-}
+import { createElectronLaunchProfile } from "../../../scripts/electron-launch-profile.mjs";
 
 test("closing the parent during calculator startup leaves no orphaned renderer", async () => {
   const temporaryRoot = await fs.mkdtemp(
@@ -49,14 +40,13 @@ test("closing the parent during calculator startup leaves no orphaned renderer",
     target: "node24",
   });
 
-  const linuxLaunchFlags =
-    process.platform === "linux"
-      ? ["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu"]
-      : [];
+  const launchProfile = createElectronLaunchProfile();
   const application = await electron.launch({
-    args: [...linuxLaunchFlags, fixturePath, outputDirectory, resultPath],
-    env: launchEnvironment(),
-    ...(process.platform === "linux" ? { chromiumSandbox: false } : {}),
+    args: [...launchProfile.args, fixturePath, outputDirectory, resultPath],
+    env: launchProfile.env,
+    ...(launchProfile.chromiumSandbox === undefined
+      ? {}
+      : { chromiumSandbox: launchProfile.chromiumSandbox }),
   });
 
   try {
