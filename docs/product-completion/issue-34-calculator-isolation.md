@@ -41,18 +41,31 @@ release path. It runs the hostile and relaunch assertions against an unpackaged
 production build, then creates an unsigned package in a temporary directory. The
 package has the `RunAsNode`, `EnableNodeOptionsEnvironmentVariable`, and
 `EnableNodeCliInspectArguments` Electron fuses disabled. An external child-process
-harness launches the exact executable in an isolated process group, verifies a normal
-bounded launch, and requires `--inspect=0`, `--remote-debugging-port=0`, and
-`--remote-debugging-pipe` to exit nonzero. It waits for process close and both output
-pipes to reach EOF before freezing and inspecting output, then terminates the whole
-group and positively verifies that it is empty. No launch may advertise a debugger
-listener or leave a helper alive. Every Electron launch receives a small explicit
-platform environment rather than ambient parent variables. The seam removes the
-package and performs no signing, notarization, publication, deployment, or legacy-v1
-packaging.
+harness launches the exact executable as a non-detached child of a dedicated detached
+sentinel. The sentinel remains the session and process-group leader after the executable
+exits; the verifier parent never stores a signal capability for, probes, or signals a
+numeric process-group ID. The sentinel attests a persistent TERM-resistant canary,
+records the executable's observed descendants and its current same-group identities,
+arms an unconditional self-inclusive `SIGKILL`, and signals only its own current group
+with `kill(0, ...)`. The parent accepts retirement only after the sentinel closes by that
+`SIGKILL`, both target output pipes reach EOF, and every recorded PID/start-time identity
+has disappeared. A retired or lost capability makes no later process-group system call,
+so numeric ID reuse cannot redirect cleanup to an unrelated group.
 
-This process-group proof covers the POSIX CI and macOS package gate. Windows execution
-fails closed until an atomic Job Object adapter can provide the same containment and
+The harness verifies a normal bounded launch and requires `--inspect=0`,
+`--remote-debugging-port=0`, and `--remote-debugging-pipe` to exit nonzero. No launch may
+advertise a debugger listener or leave a same-group or recorded helper alive. Every
+Electron launch receives a small explicit platform environment rather than ambient
+parent variables. The seam removes the package and performs no signing, notarization,
+publication, deployment, or legacy-v1 packaging.
+
+This proof covers same-group processes and exact PID/start-time identities observed
+before termination on POSIX CI and the macOS package gate. A recorded descendant that
+has already used `setsid` makes verification fail closed because the sentinel's group
+signal cannot remove it. macOS does not provide this harness an atomic ownership handle
+that can prove the absence of every arbitrary descendant that escapes into a new session
+after the snapshot, so the receipt does not make that broader claim. Windows execution
+fails closed until an atomic Job Object adapter can provide the scoped containment and
 positive-empty guarantee; it does not fall back to leader-only termination.
 
 This automated evidence does not claim physical black-box calculator interaction in

@@ -1,25 +1,35 @@
-export interface IsolatedProcessCloseReceipt {
-  readonly exitCode: number | null;
+export interface IsolatedProcessOutputReceipt {
   readonly output: string;
-  readonly signal: NodeJS.Signals | null;
   readonly stderr: string;
   readonly stderrEof: true;
   readonly stdout: string;
   readonly stdoutEof: true;
 }
 
+export interface IsolatedProcessCloseReceipt extends IsolatedProcessOutputReceipt {
+  readonly exitCode: number | null;
+  readonly signal: NodeJS.Signals | null;
+}
+
 export interface IsolatedProcessTerminationReceipt {
-  readonly close: IsolatedProcessCloseReceipt;
+  readonly close: IsolatedProcessCloseReceipt | null;
   readonly forceSignalSent: boolean;
   readonly gracefulSignalSent: boolean;
+  readonly output: IsolatedProcessOutputReceipt;
+  readonly targetOutcome:
+    | {
+        readonly kind: "observed";
+        readonly exitCode: number | null;
+        readonly signal: NodeJS.Signals | null;
+      }
+    | { readonly kind: "unobserved-before-final-kill" };
   readonly treeEmpty: true;
 }
 
 export interface IsolatedProcessTree {
-  readonly pid: number;
   isEmpty(): boolean;
-  leaderIsRunning(): boolean;
   output(): string;
+  targetIsRunning(): boolean;
   terminate(options?: {
     readonly forceMilliseconds?: number;
     readonly graceMilliseconds?: number;
@@ -34,4 +44,4 @@ export function spawnIsolatedProcessTree(options: {
   readonly command: string;
   readonly cwd: string;
   readonly environment: Readonly<Record<string, string>>;
-}): IsolatedProcessTree;
+}): Promise<IsolatedProcessTree>;

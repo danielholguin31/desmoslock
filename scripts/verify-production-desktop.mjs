@@ -107,7 +107,7 @@ async function packagedExecutable(packageDirectory) {
 
 async function verifyExternalPackagedLaunch(executablePath, userDataDirectory) {
   const launchProfile = createElectronLaunchProfile();
-  const tree = spawnIsolatedProcessTree({
+  const tree = await spawnIsolatedProcessTree({
     arguments: [...launchProfile.args, `--user-data-dir=${userDataDirectory}`],
     command: executablePath,
     cwd: path.dirname(executablePath),
@@ -118,7 +118,7 @@ async function verifyExternalPackagedLaunch(executablePath, userDataDirectory) {
   try {
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     assert.equal(
-      tree.leaderIsRunning(),
+      tree.targetIsRunning(),
       true,
       `Packaged executable did not remain active:\n${tree.output()}`,
     );
@@ -126,7 +126,7 @@ async function verifyExternalPackagedLaunch(executablePath, userDataDirectory) {
     termination = await tree.terminate();
   }
   assert.equal(termination.treeEmpty, true);
-  assert.doesNotMatch(termination.close.output, diagnosticEndpointPattern);
+  assert.doesNotMatch(termination.output.output, diagnosticEndpointPattern);
 }
 
 async function verifyForbiddenPackagedSwitch(
@@ -135,7 +135,7 @@ async function verifyForbiddenPackagedSwitch(
   forbiddenSwitch,
 ) {
   const launchProfile = createElectronLaunchProfile();
-  const tree = spawnIsolatedProcessTree({
+  const tree = await spawnIsolatedProcessTree({
     arguments: [
       ...launchProfile.args,
       forbiddenSwitch,
