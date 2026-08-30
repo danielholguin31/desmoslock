@@ -32,6 +32,14 @@ That harness exercises the unpackaged production build; it uses Electron's inter
 automation channel and is not black-box package or release acceptance. Production
 assets must contain no external-dispatch call, diagnostic registry, or test API.
 
+Calculator teardown closes the owned WebContents synchronously, then independently
+attempts policy removal, protocol removal, and the storage, cache, authentication, and
+connection cleanup operations. Repeated callers observe one cached result; every cleanup
+failure is retained in an aggregate. A parent-driven cleanup failure is reported to the
+desktop lifecycle supervisor, which fails closed instead of leaving an unobserved failed
+session cleanup on macOS. Startup preserves its primary failure alongside any teardown
+failures and still clears references and destroys the window.
+
 Required Linux CI uses an explicitly non-release compatibility profile with Chromium's
 OS/process sandbox disabled by `--no-sandbox`, `--disable-setuid-sandbox`, Playwright's
 `chromiumSandbox: false`, and `ELECTRON_DISABLE_SANDBOX=1`. Reading
@@ -63,12 +71,14 @@ so numeric ID reuse cannot redirect cleanup to an unrelated group.
 The harness verifies a normal bounded launch and requires `--inspect=0`,
 `--remote-debugging-port=0`, and `--remote-debugging-pipe` to exit nonzero. On macOS, the
 exact packaged executable must also reject `--no-sandbox` and
-`--disable-setuid-sandbox`; the ordinary macOS package launch receives neither those
-switches nor the sandbox-disabling environment control. No launch may advertise a
-debugger listener or leave a same-group or recorded helper alive. Every Electron launch
-receives a small explicit platform environment rather than ambient parent variables. The
-seam removes the package and performs no signing, notarization, publication, deployment,
-or legacy-v1 packaging.
+`--disable-setuid-sandbox`, plus an otherwise sanitized launch that injects
+`ELECTRON_DISABLE_SANDBOX=1`. Each hostile launch must exit with the policy status before
+opening a window. The ordinary macOS package launch receives neither those switches nor
+the sandbox-disabling environment control. No launch may advertise a debugger listener
+or leave a same-group or recorded helper alive. Every Electron launch receives a small
+explicit platform environment rather than ambient parent variables. The seam removes the
+package and performs no signing, notarization, publication, deployment, or legacy-v1
+packaging.
 
 This retirement proof covers the original process group and exact PID/start-time
 identities observed before termination on the host where the seam runs. Its success

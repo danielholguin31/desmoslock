@@ -1,8 +1,75 @@
 import { describe, expect, it } from "vitest";
 
-import { assertPackagedLaunchArguments } from "../src/main/packaged-launch-policy.js";
+import {
+  assertPackagedLaunchArguments,
+  assertPackagedLaunchPolicy,
+} from "../src/main/packaged-launch-policy.js";
 
 describe("packaged launch policy", () => {
+  it.each(["1", "0", "false", ""])(
+    "rejects Electron's sandbox-disabling environment control value %j in a packaged macOS executable",
+    (value) => {
+      expect(() =>
+        assertPackagedLaunchPolicy(
+          true,
+          {
+            arguments: ["DesmosLock"],
+            commandLine: { hasSwitch: () => false },
+            environment: { ELECTRON_DISABLE_SANDBOX: value },
+          },
+          "darwin",
+        ),
+      ).toThrow("Packaged runtime forbids sandbox-disabling launch controls");
+    },
+  );
+
+  it.each(["no-sandbox", "disable-setuid-sandbox"])(
+    "rejects effective %s command-line state in a packaged macOS executable",
+    (sandboxDisablingSwitch) => {
+      expect(() =>
+        assertPackagedLaunchPolicy(
+          true,
+          {
+            arguments: ["DesmosLock"],
+            commandLine: {
+              hasSwitch: (name) => name === sandboxDisablingSwitch,
+            },
+            environment: {},
+          },
+          "darwin",
+        ),
+      ).toThrow("Packaged runtime forbids sandbox-disabling launch controls");
+    },
+  );
+
+  it("allows the non-release Linux compatibility profile to disable Chromium's sandbox", () => {
+    expect(() =>
+      assertPackagedLaunchPolicy(
+        true,
+        {
+          arguments: ["DesmosLock", "--no-sandbox"],
+          commandLine: { hasSwitch: () => true },
+          environment: { ELECTRON_DISABLE_SANDBOX: "1" },
+        },
+        "linux",
+      ),
+    ).not.toThrow();
+  });
+
+  it("allows development launches to carry sandbox-disabling controls", () => {
+    expect(() =>
+      assertPackagedLaunchPolicy(
+        false,
+        {
+          arguments: ["Electron", "--no-sandbox"],
+          commandLine: { hasSwitch: () => true },
+          environment: { ELECTRON_DISABLE_SANDBOX: "1" },
+        },
+        "darwin",
+      ),
+    ).not.toThrow();
+  });
+
   it("rejects --no-sandbox in a packaged macOS executable", () => {
     expect(() =>
       assertPackagedLaunchArguments(

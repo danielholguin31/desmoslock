@@ -14,9 +14,40 @@ import {
 } from "@playwright/test";
 
 import { createElectronLaunchProfile } from "../../../scripts/electron-launch-profile.mjs";
+import {
+  acquireWithLocalCleanup,
+  type CleanupTask,
+  runIndependentCleanupTasks,
+  waitForResourceAcquisition,
+} from "../../../scripts/production-desktop-resource-safety.mjs";
 import { runHostileCalculatorProbe } from "./support/hostile-calculator-probe.mjs";
 
 const calculatorUrl = "desmoslock-calculator://host/index.html";
+
+function closeServer(server: http.Server | net.Server): Promise<void> {
+  if (!server.listening) return Promise.resolve();
+  return new Promise<void>((resolve, reject) =>
+    server.close((error) => (error === undefined ? resolve() : reject(error))),
+  );
+}
+
+function closeUdpSocket(socket: dgram.Socket): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    try {
+      socket.close(() => resolve());
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "ERR_SOCKET_DGRAM_NOT_RUNNING"
+      ) {
+        resolve();
+        return;
+      }
+      reject(error);
+    }
+  });
+}
 
 async function callCalculator<Result, Argument>(
   application: ElectronApplication,
@@ -125,85 +156,117 @@ async function typeCalculatorExpression(
 test.describe.serial("isolated calculator surface", () => {
   let application: ElectronApplication;
   let shell: Page;
-  let sink: http.Server;
   let sinkOrigin: string;
   let sinkRequests = 0;
-  let tcpSink: net.Server;
   let tcpSinkConnections = 0;
   let tcpSinkPort: number;
-  let udpSink: dgram.Socket;
   let udpSinkPort: number;
   let udpSinkRequests = 0;
-  let userDataDirectory: string;
+  let cleanupTasks: CleanupTask[] = [];
 
   test.beforeAll(async () => {
-    sink = http.createServer((_request, response) => {
-      sinkRequests += 1;
-      response.writeHead(204).end();
-    });
-    sink.on("upgrade", (request) => {
-      sinkRequests += 1;
-      request.socket.destroy();
-    });
-    await new Promise<void>((resolve) => sink.listen(0, "127.0.0.1", resolve));
-    const address = sink.address() as AddressInfo;
-    sinkOrigin = `http://127.0.0.1:${address.port}`;
-    udpSink = dgram.createSocket("udp4");
-    udpSink.on("message", () => {
-      udpSinkRequests += 1;
-    });
-    await new Promise<void>((resolve) => udpSink.bind(0, "127.0.0.1", resolve));
-    udpSinkPort = udpSink.address().port;
-    tcpSink = net.createServer((socket) => {
-      tcpSinkConnections += 1;
-      socket.destroy();
-    });
-    await new Promise<void>((resolve) =>
-      tcpSink.listen(0, "127.0.0.1", resolve),
-    );
-    tcpSinkPort = (tcpSink.address() as AddressInfo).port;
-    userDataDirectory = await fs.mkdtemp(
-      path.join(os.tmpdir(), "desmoslock-isolation-e2e-"),
+    const acquired = await acquireWithLocalCleanup(
+      async (registerLocalCleanup) => {
+        const acquiredCleanupTasks: CleanupTask[] = [];
+        const registerCleanup = (cleanup: CleanupTask) => {
+          registerLocalCleanup(cleanup);
+          acquiredCleanupTasks.push(cleanup);
+        };
+
+        const acquiredSink = http.createServer((_request, response) => {
+          sinkRequests += 1;
+          response.writeHead(204).end();
+        });
+        acquiredSink.on("upgrade", (request) => {
+          sinkRequests += 1;
+          request.socket.destroy();
+        });
+        registerCleanup(() => closeServer(acquiredSink));
+        await waitForResourceAcquisition(acquiredSink, () =>
+          acquiredSink.listen(0, "127.0.0.1"),
+        );
+        const address = acquiredSink.address() as AddressInfo;
+        const acquiredSinkOrigin = `http://127.0.0.1:${address.port}`;
+
+        const acquiredUdpSink = dgram.createSocket("udp4");
+        acquiredUdpSink.on("message", () => {
+          udpSinkRequests += 1;
+        });
+        registerCleanup(() => closeUdpSocket(acquiredUdpSink));
+        await waitForResourceAcquisition(acquiredUdpSink, () =>
+          acquiredUdpSink.bind(0, "127.0.0.1"),
+        );
+        const acquiredUdpSinkPort = acquiredUdpSink.address().port;
+
+        const acquiredTcpSink = net.createServer((socket) => {
+          tcpSinkConnections += 1;
+          socket.destroy();
+        });
+        registerCleanup(() => closeServer(acquiredTcpSink));
+        await waitForResourceAcquisition(acquiredTcpSink, () =>
+          acquiredTcpSink.listen(0, "127.0.0.1"),
+        );
+        const acquiredTcpSinkPort = (acquiredTcpSink.address() as AddressInfo)
+          .port;
+
+        const acquiredUserDataDirectory = await fs.mkdtemp(
+          path.join(os.tmpdir(), "desmoslock-isolation-e2e-"),
+        );
+        registerCleanup(() =>
+          fs.rm(acquiredUserDataDirectory, { force: true, recursive: true }),
+        );
+
+        const launchProfile = createElectronLaunchProfile();
+        const acquiredApplication = await electron.launch({
+          args: [
+            ...launchProfile.args,
+            `--user-data-dir=${acquiredUserDataDirectory}`,
+            path.resolve("apps/desktop"),
+          ],
+          env: launchProfile.env,
+          ...(launchProfile.chromiumSandbox === undefined
+            ? {}
+            : { chromiumSandbox: launchProfile.chromiumSandbox }),
+        });
+        registerCleanup(() => acquiredApplication.close());
+        const acquiredShell = await acquiredApplication.firstWindow();
+        await expect
+          .poll(() =>
+            acquiredApplication.evaluate(
+              ({ webContents }, url) =>
+                webContents
+                  .getAllWebContents()
+                  .filter((contents) => contents.getURL() === url).length,
+              calculatorUrl,
+            ),
+          )
+          .toBe(1);
+
+        return {
+          application: acquiredApplication,
+          cleanupTasks: acquiredCleanupTasks,
+          shell: acquiredShell,
+          sinkOrigin: acquiredSinkOrigin,
+          tcpSinkPort: acquiredTcpSinkPort,
+          udpSinkPort: acquiredUdpSinkPort,
+        };
+      },
     );
 
-    const launchProfile = createElectronLaunchProfile();
-    application = await electron.launch({
-      args: [
-        ...launchProfile.args,
-        `--user-data-dir=${userDataDirectory}`,
-        path.resolve("apps/desktop"),
-      ],
-      env: launchProfile.env,
-      ...(launchProfile.chromiumSandbox === undefined
-        ? {}
-        : { chromiumSandbox: launchProfile.chromiumSandbox }),
-    });
-    shell = await application.firstWindow();
-    await expect
-      .poll(() =>
-        application.evaluate(
-          ({ webContents }, url) =>
-            webContents
-              .getAllWebContents()
-              .filter((contents) => contents.getURL() === url).length,
-          calculatorUrl,
-        ),
-      )
-      .toBe(1);
+    ({
+      application,
+      cleanupTasks,
+      shell,
+      sinkOrigin,
+      tcpSinkPort,
+      udpSinkPort,
+    } = acquired);
   });
 
   test.afterAll(async () => {
-    await application.close();
-    await new Promise<void>((resolve, reject) =>
-      sink.close((error) => (error === undefined ? resolve() : reject(error))),
-    );
-    await new Promise<void>((resolve) => udpSink.close(() => resolve()));
-    await new Promise<void>((resolve, reject) =>
-      tcpSink.close((error) =>
-        error === undefined ? resolve() : reject(error),
-      ),
-    );
-    await fs.rm(userDataDirectory, { force: true, recursive: true });
+    const acquiredCleanupTasks = cleanupTasks;
+    cleanupTasks = [];
+    await runIndependentCleanupTasks([...acquiredCleanupTasks].reverse());
   });
 
   test("keeps the trusted preload in the shell and out of the calculator", async () => {

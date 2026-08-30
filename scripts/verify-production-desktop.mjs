@@ -35,6 +35,7 @@ const desktopRoot = path.join(repositoryRoot, "apps", "desktop");
 const distributionRoot = path.join(desktopRoot, "dist");
 const calculatorUrl = "desmoslock-calculator://host/index.html";
 const packagedExecutableName = "desmoslock-internal";
+const sandboxDisablingEnvironmentVariable = "ELECTRON_DISABLE_SANDBOX";
 const forbiddenPackagedSwitches = Object.freeze([
   "--inspect=0",
   "--remote-debugging-pipe",
@@ -208,13 +209,74 @@ async function verifyForbiddenPackagedSwitch(
     `Packaged executable did not fail closed for ${forbiddenSwitch}`,
   );
   assert.equal(result.signal, null);
-  assert.match(result.output, /Packaged runtime rejected a forbidden switch\./);
+  assert.match(
+    result.output,
+    /Packaged runtime rejected a forbidden launch control\./,
+  );
   assert.doesNotMatch(result.output, diagnosticEndpointPattern);
   return {
     diagnosticEndpointObserved: false,
     exitCode: result.exitCode,
     recordedProcessIdentitiesGone: termination.recordedProcessIdentitiesGone,
     switch: forbiddenSwitch,
+  };
+}
+
+async function verifyForbiddenPackagedEnvironmentControl(
+  executablePath,
+  userDataDirectory,
+) {
+  const launchProfile = createElectronLaunchProfile();
+  assert.equal(
+    launchProfile.env[sandboxDisablingEnvironmentVariable],
+    undefined,
+    "The baseline packaged launch profile must not carry the sandbox-disabling environment control",
+  );
+  const tree = await spawnIsolatedProcessTree({
+    arguments: [...launchProfile.args, `--user-data-dir=${userDataDirectory}`],
+    command: executablePath,
+    cwd: path.dirname(executablePath),
+    environment: {
+      ...launchProfile.env,
+      [sandboxDisablingEnvironmentVariable]: "1",
+    },
+  });
+  const { finalizerResult: termination, operationResult: result } =
+    await runWithFinalizer(
+      async () => {
+        const close = await tree.waitForClose(5_000);
+        if (close === null) {
+          throw new Error(
+            `Packaged executable accepted ${sandboxDisablingEnvironmentVariable}=1`,
+          );
+        }
+        return close;
+      },
+      () => tree.terminate(),
+      "Packaged environment-control rejection and process retirement both failed",
+    );
+
+  assert.equal(
+    termination.recordedProcessIdentitiesGone,
+    true,
+    `A recorded packaged process identity survived rejection of ${sandboxDisablingEnvironmentVariable}`,
+  );
+  assert.equal(
+    result.exitCode,
+    78,
+    `Packaged executable did not fail closed for ${sandboxDisablingEnvironmentVariable}=1`,
+  );
+  assert.equal(result.signal, null);
+  assert.match(
+    result.output,
+    /Packaged runtime rejected a forbidden launch control\./,
+  );
+  assert.doesNotMatch(result.output, diagnosticEndpointPattern);
+  return {
+    control: sandboxDisablingEnvironmentVariable,
+    diagnosticEndpointObserved: false,
+    exitCode: result.exitCode,
+    recordedProcessIdentitiesGone: termination.recordedProcessIdentitiesGone,
   };
 }
 
@@ -718,6 +780,19 @@ await runWithIndependentCleanup(async () => {
     rejectedSwitches.map((receipt) => receipt.switch),
     forbiddenPackagedSwitches,
   );
+  if (process.platform === "darwin") {
+    const rejectedEnvironmentControl =
+      await verifyForbiddenPackagedEnvironmentControl(
+        executablePath,
+        path.join(temporaryRoot, "rejected-sandbox-environment-control"),
+      );
+    assert.deepEqual(rejectedEnvironmentControl, {
+      control: sandboxDisablingEnvironmentVariable,
+      diagnosticEndpointObserved: false,
+      exitCode: 78,
+      recordedProcessIdentitiesGone: true,
+    });
+  }
 
   process.stdout.write(
     process.platform === "linux"

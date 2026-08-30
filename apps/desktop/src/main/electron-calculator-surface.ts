@@ -43,6 +43,7 @@ const calculatorContentSecurityPolicy = [
 
 export interface ElectronCalculatorSurfaceOptions {
   readonly bounds: CalculatorSurfaceBounds;
+  readonly onCleanupFailure: (error: unknown) => void;
   readonly outputDirectory: string;
   readonly parent: BrowserWindow;
 }
@@ -140,62 +141,104 @@ export async function createElectronCalculatorSurface(
   let uninstallSessionPolicy: (() => void) | null = null;
   let protocolRegistered = false;
   let closePromise: Promise<void> | null = null;
+  const pendingTeardownFailures: unknown[] = [];
 
-  const teardownWebContentsSynchronously = (): void => {
-    if (view === null) return;
-    if (attached && !options.parent.isDestroyed()) {
+  const teardownWebContentsSynchronously = (): readonly unknown[] => {
+    const failures: unknown[] = [];
+    if (view === null) return failures;
+    if (attached) {
       try {
-        options.parent.contentView.removeChildView(view);
-      } catch {
-        // A concurrent parent teardown already owns the view hierarchy.
+        if (!options.parent.isDestroyed()) {
+          options.parent.contentView.removeChildView(view);
+        }
+      } catch (error) {
+        failures.push(error);
       }
     }
     attached = false;
-    if (!view.webContents.isDestroyed()) {
+    let webContentsDestroyed = false;
+    try {
+      webContentsDestroyed = view.webContents.isDestroyed();
+    } catch (error) {
+      failures.push(error);
+    }
+    if (!webContentsDestroyed) {
       try {
         view.webContents.close({ waitForBeforeUnload: false });
-      } catch {
-        // Treat an already-disposing WebContents as closed.
+      } catch (error) {
+        failures.push(error);
       }
     }
+    return failures;
   };
 
-  const closeSurface = async (): Promise<void> => {
+  const closeSurface = (): Promise<void> => {
     if (closePromise !== null) return closePromise;
     closed = true;
-    options.parent.removeListener("closed", handleParentClosed);
-    teardownWebContentsSynchronously();
+    let resolveClose!: () => void;
+    let rejectClose!: (error: unknown) => void;
+    closePromise = new Promise<void>((resolve, reject) => {
+      resolveClose = resolve;
+      rejectClose = reject;
+    });
 
-    if (uninstallSessionPolicy !== null) {
-      uninstallSessionPolicy();
-      uninstallSessionPolicy = null;
-    }
-    try {
-      calculatorSession.webRequest.onBeforeRequest(null);
-    } catch {
-      // Continue into independent session cleanup tasks.
-    }
-    if (protocolRegistered) {
+    const runCleanup = async (): Promise<void> => {
+      const synchronousFailures = pendingTeardownFailures.splice(0);
       try {
-        calculatorSession.protocol.unhandle(calculatorScheme);
-      } catch {
-        // The dedicated session is still cleared below.
+        synchronousFailures.push(...teardownWebContentsSynchronously());
+      } catch (error) {
+        synchronousFailures.push(error);
       }
-    }
 
-    closePromise = Promise.allSettled([
-      Promise.resolve().then(() => calculatorSession.clearStorageData()),
-      Promise.resolve().then(() => calculatorSession.clearCache()),
-      Promise.resolve().then(() => calculatorSession.clearAuthCache()),
-      Promise.resolve().then(() => calculatorSession.closeAllConnections()),
-    ]).then(() => undefined);
+      const uninstallPolicy = uninstallSessionPolicy;
+      uninstallSessionPolicy = null;
+      const unregisterProtocol = protocolRegistered;
+      protocolRegistered = false;
+      const cleanupTasks = [
+        () => options.parent.removeListener("closed", handleParentClosed),
+        ...(uninstallPolicy === null ? [] : [uninstallPolicy]),
+        () => calculatorSession.webRequest.onBeforeRequest(null),
+        ...(unregisterProtocol
+          ? [() => calculatorSession.protocol.unhandle(calculatorScheme)]
+          : []),
+        () => calculatorSession.clearStorageData(),
+        () => calculatorSession.clearCache(),
+        () => calculatorSession.clearAuthCache(),
+        () => calculatorSession.closeAllConnections(),
+      ];
+
+      const outcomes = await Promise.allSettled(
+        cleanupTasks.map((cleanup) => Promise.resolve().then(cleanup)),
+      );
+      const failures = [
+        ...synchronousFailures,
+        ...outcomes.flatMap((outcome) =>
+          outcome.status === "rejected" ? [outcome.reason] : [],
+        ),
+      ];
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures,
+          "CalculatorSurface session cleanup failed",
+        );
+      }
+    };
+
+    void runCleanup().then(resolveClose, rejectClose);
     return closePromise;
   };
 
   function handleParentClosed(): void {
     parentClosed = true;
-    teardownWebContentsSynchronously();
-    if (!initializing) void closeSurface();
+    if (initializing) {
+      try {
+        pendingTeardownFailures.push(...teardownWebContentsSynchronously());
+      } catch (error) {
+        pendingTeardownFailures.push(error);
+      }
+      return;
+    }
+    void closeSurface().catch(options.onCleanupFailure);
   }
 
   const requireLiveParent = (): void => {
@@ -249,7 +292,19 @@ export async function createElectronCalculatorSurface(
     requireLiveParent();
   } catch (error) {
     initializing = false;
-    await closeSurface();
+    try {
+      await closeSurface();
+    } catch (cleanupError) {
+      const cleanupFailures =
+        cleanupError instanceof AggregateError
+          ? cleanupError.errors
+          : [cleanupError];
+      throw new AggregateError(
+        [error, ...cleanupFailures],
+        "CalculatorSurface initialization and cleanup both failed",
+        { cause: cleanupError },
+      );
+    }
     throw error;
   }
 

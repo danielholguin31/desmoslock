@@ -6,8 +6,19 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { spawnIsolatedProcessTree } from "../../scripts/isolated-process-tree.mjs";
+import {
+  findProcessIdentity,
+  readProcessIdentityTable,
+  waitForProcessIdentitiesToDisappear,
+} from "../../scripts/process-identity-table.mjs";
 
 const onlyPosix = process.platform === "win32" ? it.skip : it;
+const escapedChildWatchdogMilliseconds = 5_000;
+
+type RecordedProcessIdentity = Readonly<{
+  processId: number;
+  startedAt: string;
+}>;
 
 async function runIsolatedDriver(source: string): Promise<{
   code: number | null;
@@ -80,19 +91,58 @@ async function waitForLeaderStop(
   expect(tree.targetIsRunning()).toBe(false);
 }
 
-function forceKillProcessIfAlive(processId: number): void {
-  try {
-    process.kill(processId, "SIGKILL");
-  } catch (error) {
-    if (
-      error !== null &&
-      typeof error === "object" &&
-      "code" in error &&
-      error.code === "ESRCH"
-    ) {
-      return;
-    }
-    throw error;
+async function recordProcessIdentity(
+  processId: number,
+): Promise<RecordedProcessIdentity> {
+  const identity = findProcessIdentity(
+    await readProcessIdentityTable(),
+    processId,
+  ) as RecordedProcessIdentity | null;
+  if (identity === null) {
+    throw new Error(`Could not record process identity for pid ${processId}`);
+  }
+  return Object.freeze({
+    processId: identity.processId,
+    startedAt: identity.startedAt,
+  });
+}
+
+async function processIdentityIsPresent(
+  recordedIdentity: RecordedProcessIdentity,
+): Promise<boolean> {
+  const currentIdentity = findProcessIdentity(
+    await readProcessIdentityTable(),
+    recordedIdentity.processId,
+  ) as RecordedProcessIdentity | null;
+  return currentIdentity?.startedAt === recordedIdentity.startedAt;
+}
+
+async function waitForProcessIdentityToDisappear(
+  recordedIdentity: RecordedProcessIdentity,
+): Promise<void> {
+  const remainingIdentities = (await waitForProcessIdentitiesToDisappear(
+    [recordedIdentity],
+    1_000,
+  )) as readonly RecordedProcessIdentity[];
+  if (remainingIdentities.length !== 0) {
+    throw new Error(
+      `Process identity ${recordedIdentity.processId}:${recordedIdentity.startedAt} did not disappear after cooperative cleanup`,
+    );
+  }
+}
+
+function throwCombinedErrors(
+  errors: readonly unknown[],
+  message: string,
+): void {
+  const uniqueErrors = [...new Set(errors)];
+  if (uniqueErrors.length === 1) {
+    throw uniqueErrors[0];
+  }
+  if (uniqueErrors.length > 1) {
+    throw new AggregateError(uniqueErrors, message, {
+      cause: uniqueErrors[0],
+    });
   }
 }
 
@@ -499,11 +549,20 @@ describe("isolated process tree", () => {
   onlyPosix(
     "does not claim an empty tree after an immediate leader exit hides a setsid child",
     async () => {
+      const cleanupDirectory = await fs.mkdtemp(
+        path.join(os.tmpdir(), "desmoslock-immediate-exit-"),
+      );
+      const cleanupPath = path.join(cleanupDirectory, "stop");
       const escapedChild = [
         'const fs = require("node:fs");',
+        `const cleanupPath = ${JSON.stringify(cleanupPath)};`,
         "fs.closeSync(1);",
         "fs.closeSync(2);",
         'process.on("SIGTERM", () => {});',
+        "setInterval(() => {",
+        "  if (fs.existsSync(cleanupPath)) process.exit(0);",
+        "}, 10);",
+        `setTimeout(() => process.kill(-process.pid, "SIGKILL"), ${escapedChildWatchdogMilliseconds});`,
         "setInterval(() => {}, 1_000);",
       ].join("\n");
       const target = [
@@ -516,19 +575,25 @@ describe("isolated process tree", () => {
         "fs.writeSync(1, `escaped-ready:${escaped.pid}\\n`);",
         "process.exit(0);",
       ].join("\n");
-      const tree = await spawnIsolatedProcessTree({
-        arguments: ["-e", target],
-        command: process.execPath,
-        cwd: process.cwd(),
-        environment: {},
-      });
-      let escapedPid: number | null = null;
+      let tree: Awaited<ReturnType<typeof spawnIsolatedProcessTree>> | null =
+        null;
+      let escapedIdentity: RecordedProcessIdentity | null = null;
+      let testFailure: unknown = null;
 
       try {
+        tree = await spawnIsolatedProcessTree({
+          arguments: ["-e", target],
+          command: process.execPath,
+          cwd: process.cwd(),
+          environment: {},
+        });
         await waitForOutput(tree, "escaped-ready:");
-        escapedPid = Number(tree.output().match(/escaped-ready:(\d+)/)?.[1]);
+        const escapedPid = Number(
+          tree.output().match(/escaped-ready:(\d+)/)?.[1],
+        );
         expect(Number.isSafeInteger(escapedPid)).toBe(true);
         expect(escapedPid).toBeGreaterThan(1);
+        escapedIdentity = await recordProcessIdentity(escapedPid);
         await expect(tree.waitForClose(1_000)).resolves.toMatchObject({
           exitCode: 0,
           signal: null,
@@ -541,20 +606,46 @@ describe("isolated process tree", () => {
           graceMilliseconds: 50,
         });
 
-        expect(() => process.kill(escapedPid, 0)).not.toThrow();
+        expect(await processIdentityIsPresent(escapedIdentity)).toBe(true);
         expect(receipt).toMatchObject({
           recordedProcessIdentitiesGone: true,
         });
         expect(receipt).not.toHaveProperty("treeEmpty");
         expect(tree.isRetired()).toBe(true);
-      } finally {
+      } catch (error) {
+        testFailure = error;
+      }
+
+      const cleanupFailures: unknown[] = [];
+      await fs.writeFile(cleanupPath, "stop\n").catch((error) => {
+        cleanupFailures.push(error);
+      });
+      if (escapedIdentity !== null) {
+        await waitForProcessIdentityToDisappear(escapedIdentity).catch(
+          (error) => {
+            cleanupFailures.push(error);
+          },
+        );
+      }
+      if (tree !== null) {
         await tree
           .terminate({ forceMilliseconds: 150, graceMilliseconds: 50 })
-          .catch(() => undefined);
-        if (escapedPid !== null && escapedPid > 1) {
-          forceKillProcessIfAlive(escapedPid);
-        }
+          .catch((error) => {
+            cleanupFailures.push(error);
+          });
       }
+      await fs
+        .rm(cleanupDirectory, { force: true, recursive: true })
+        .catch((error) => {
+          cleanupFailures.push(error);
+        });
+
+      throwCombinedErrors(
+        testFailure === null
+          ? cleanupFailures
+          : [testFailure, ...cleanupFailures],
+        "Immediate-exit containment regression failed and cleanup also failed",
+      );
     },
   );
 });

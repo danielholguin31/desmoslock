@@ -17,7 +17,7 @@ import type { CalculatorSurface } from "./main/calculator-surface.js";
 import { calculatorScheme } from "./main/calculator-assets.js";
 import { createElectronCalculatorSurface } from "./main/electron-calculator-surface.js";
 import { createTrustedShellWebPreferences } from "./main/hardened-web-preferences.js";
-import { assertPackagedLaunchArguments } from "./main/packaged-launch-policy.js";
+import { assertPackagedLaunchPolicy } from "./main/packaged-launch-policy.js";
 import { createPrivilegedRequestRouter } from "./main/privileged-request-router.js";
 import {
   denyByDefaultCapabilityPolicy,
@@ -38,9 +38,15 @@ export const desktopChannel = "internal-v2" as const;
 export const trustedShellUrl = "desmoslock-app://shell/index.html" as const;
 
 try {
-  assertPackagedLaunchArguments(app.isPackaged, process.argv);
+  assertPackagedLaunchPolicy(app.isPackaged, {
+    arguments: process.argv,
+    commandLine: app.commandLine,
+    environment: process.env,
+  });
 } catch {
-  process.stderr.write("Packaged runtime rejected a forbidden switch.\n");
+  process.stderr.write(
+    "Packaged runtime rejected a forbidden launch control.\n",
+  );
   process.exit(78);
 }
 
@@ -243,7 +249,7 @@ async function createWindow(): Promise<BrowserWindow> {
     const surface = ownedCalculatorSurface;
     ownedCalculatorSurface = null;
     if (calculatorSurface === surface) calculatorSurface = null;
-    if (surface !== null) void surface.close().catch(() => undefined);
+    if (surface !== null) void surface.close().catch(() => app.exit(1));
     assessmentStates.delete(trustedWebContentsId);
     privilegedRouter.revokeTrustedCaller(trustedWebContentsId);
     if (mainWindow === window) mainWindow = null;
@@ -256,12 +262,11 @@ async function createWindow(): Promise<BrowserWindow> {
     await window.loadURL(trustedShellUrl);
     ownedCalculatorSurface = await createElectronCalculatorSurface({
       bounds: calculatorBounds(window),
+      onCleanupFailure: () => app.exit(1),
       outputDirectory,
       parent: window,
     });
     if (window.isDestroyed()) {
-      await ownedCalculatorSurface.close();
-      ownedCalculatorSurface = null;
       throw new Error("Desktop window closed during calculator startup");
     }
     calculatorSurface = ownedCalculatorSurface;
@@ -271,11 +276,36 @@ async function createWindow(): Promise<BrowserWindow> {
   } catch (error) {
     assessmentStates.delete(trustedWebContentsId);
     privilegedRouter.revokeTrustedCaller(trustedWebContentsId);
+    const cleanupFailures: unknown[] = [];
     if (ownedCalculatorSurface !== null) {
-      await ownedCalculatorSurface.close();
+      const surface = ownedCalculatorSurface;
       ownedCalculatorSurface = null;
+      if (calculatorSurface === surface) calculatorSurface = null;
+      try {
+        await surface.close();
+      } catch (cleanupError) {
+        cleanupFailures.push(
+          ...(cleanupError instanceof AggregateError
+            ? cleanupError.errors
+            : [cleanupError]),
+        );
+      }
     }
-    if (!window.isDestroyed()) window.destroy();
+    if (mainWindow === window) mainWindow = null;
+    if (!window.isDestroyed()) {
+      try {
+        window.destroy();
+      } catch (cleanupError) {
+        cleanupFailures.push(cleanupError);
+      }
+    }
+    if (cleanupFailures.length > 0) {
+      throw new AggregateError(
+        [error, ...cleanupFailures],
+        "Desktop window startup and cleanup both failed",
+        { cause: error },
+      );
+    }
     throw error;
   }
 }

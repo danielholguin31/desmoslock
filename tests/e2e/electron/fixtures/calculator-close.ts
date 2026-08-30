@@ -11,6 +11,27 @@ import {
 import { createElectronCalculatorSurface } from "../../../../apps/desktop/src/main/electron-calculator-surface.js";
 
 const calculatorUrl = "desmoslock-calculator://host/index.html";
+
+interface SerializedFailure {
+  readonly errors?: readonly SerializedFailure[];
+  readonly message: string;
+  readonly name: string;
+}
+
+function serializeFailure(reason: unknown): SerializedFailure {
+  if (reason instanceof AggregateError) {
+    return {
+      errors: reason.errors.map((error: unknown) => serializeFailure(error)),
+      message: reason.message,
+      name: reason.name,
+    };
+  }
+  if (reason instanceof Error) {
+    return { message: reason.message, name: reason.name };
+  }
+  return { message: String(reason), name: "UnknownFailure" };
+}
+
 function requiredArgument(offset: number): string {
   const value = process.argv.at(offset);
   if (value === undefined) {
@@ -36,6 +57,7 @@ async function runProbe(): Promise<void> {
   const parent = new BrowserWindow({ show: false });
   const surface = await createElectronCalculatorSurface({
     bounds: { height: 400, width: 600, x: 0, y: 0 },
+    onCleanupFailure: () => app.exit(1),
     outputDirectory,
     parent,
   });
@@ -63,19 +85,22 @@ async function runProbe(): Promise<void> {
     clearStorageData: () => Promise<void>;
     closeAllConnections: () => Promise<void>;
   };
-  calculatorSession.clearStorageData = async () => {
+  calculatorSession.clearStorageData = () => {
     calls.storage += 1;
     cleanupObservedWebContentsClose = calls.webContentsClose === 1;
     throw new Error("synthetic storage cleanup failure");
   };
   calculatorSession.clearCache = async () => {
     calls.cache += 1;
+    throw new Error("synthetic cache cleanup failure");
   };
   calculatorSession.clearAuthCache = async () => {
     calls.auth += 1;
+    throw new Error("synthetic auth cleanup failure");
   };
   calculatorSession.closeAllConnections = async () => {
     calls.connections += 1;
+    throw new Error("synthetic connection cleanup failure");
   };
 
   const outcomes = await Promise.allSettled([surface.close(), surface.close()]);
@@ -94,8 +119,16 @@ async function runProbe(): Promise<void> {
       .filter((contents) => contents.getURL() === calculatorUrl).length,
     calls,
     cleanupObservedWebContentsClose,
-    outcomes: outcomes.map((outcome) => outcome.status),
+    outcomes: outcomes.map((outcome) =>
+      outcome.status === "fulfilled"
+        ? { status: outcome.status }
+        : { reason: serializeFailure(outcome.reason), status: outcome.status },
+    ),
     parentDestroyed: parent.isDestroyed(),
+    sameRejectionReason:
+      outcomes[0]?.status === "rejected" &&
+      outcomes[1]?.status === "rejected" &&
+      outcomes[0].reason === outcomes[1].reason,
   };
   parent.close();
   await fs.writeFile(resultPath, JSON.stringify(result));

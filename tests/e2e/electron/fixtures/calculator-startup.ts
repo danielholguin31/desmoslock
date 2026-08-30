@@ -64,6 +64,7 @@ async function runProbe(): Promise<void> {
   };
   const creation = createElectronCalculatorSurface({
     bounds: { height: 400, width: 600, x: 0, y: 0 },
+    onCleanupFailure: () => app.exit(1),
     outputDirectory,
     parent,
   });
