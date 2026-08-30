@@ -546,6 +546,7 @@ export async function spawnIsolatedProcessTree(options) {
           forceSignalSent: true,
           gracefulSignalSent: true,
           output,
+          recordedProcessIdentitiesGone: true,
           targetOutcome:
             close === null
               ? Object.freeze({ kind: "unobserved-before-final-kill" })
@@ -554,7 +555,6 @@ export async function spawnIsolatedProcessTree(options) {
                   kind: "observed",
                   signal: close.signal,
                 }),
-          treeEmpty: true,
         });
       } catch (error) {
         state = states.lost;
@@ -603,7 +603,7 @@ export async function spawnIsolatedProcessTree(options) {
   }
 
   return Object.freeze({
-    isEmpty: () => refreshLostState() === states.retired,
+    isRetired: () => refreshLostState() === states.retired,
     output: lifecycle.output,
     targetIsRunning: () => {
       if (refreshLostState() === states.retired) return false;

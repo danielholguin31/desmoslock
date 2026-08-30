@@ -3,6 +3,66 @@ import { describe, expect, it } from "vitest";
 import { assertPackagedLaunchArguments } from "../src/main/packaged-launch-policy.js";
 
 describe("packaged launch policy", () => {
+  it("rejects --no-sandbox in a packaged macOS executable", () => {
+    expect(() =>
+      assertPackagedLaunchArguments(
+        true,
+        ["DesmosLock", "--no-sandbox"],
+        "darwin",
+      ),
+    ).toThrow(
+      "Packaged runtime forbids sandbox-disabling command-line switches",
+    );
+  });
+
+  it("rejects --disable-setuid-sandbox in a packaged macOS executable", () => {
+    expect(() =>
+      assertPackagedLaunchArguments(
+        true,
+        ["DesmosLock", "--disable-setuid-sandbox"],
+        "darwin",
+      ),
+    ).toThrow(
+      "Packaged runtime forbids sandbox-disabling command-line switches",
+    );
+  });
+
+  it.each([
+    "--no-sandbox=true",
+    "--disable-setuid-sandbox=true",
+    "-no-sandbox",
+    "-disable-setuid-sandbox",
+    " --no-sandbox",
+    "\t--disable-setuid-sandbox ",
+  ])(
+    "rejects valued sandbox-disabling switch %s in a packaged macOS executable",
+    (argument) => {
+      expect(() =>
+        assertPackagedLaunchArguments(true, ["DesmosLock", argument], "darwin"),
+      ).toThrow(
+        "Packaged runtime forbids sandbox-disabling command-line switches",
+      );
+    },
+  );
+
+  it.each([
+    "--no-sandbox",
+    "--no-sandbox=true",
+    "-no-sandbox",
+    " --no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-setuid-sandbox=true",
+    "-disable-setuid-sandbox",
+    " --disable-setuid-sandbox",
+  ])(
+    "allows %s for the explicitly non-release Linux CI harness",
+    (argument) => {
+      expect(() =>
+        assertPackagedLaunchArguments(true, ["DesmosLock", argument], "linux"),
+      ).not.toThrow();
+    },
+  );
+
   it.each([
     "--inspect",
     "--inspect=0",

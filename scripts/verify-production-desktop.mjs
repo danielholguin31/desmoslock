@@ -17,6 +17,14 @@ import {
 } from "./electron-fuse-policy.mjs";
 import { createElectronLaunchProfile } from "./electron-launch-profile.mjs";
 import { spawnIsolatedProcessTree } from "./isolated-process-tree.mjs";
+import {
+  acquireReadyElectronApplication,
+  acquireWithLocalCleanup,
+  runIndependentCleanupTasks,
+  runWithFinalizer,
+  runWithIndependentCleanup,
+  waitForResourceAcquisition,
+} from "./production-desktop-resource-safety.mjs";
 import { runHostileCalculatorProbe } from "../tests/e2e/electron/support/hostile-calculator-probe.mjs";
 
 const repositoryRoot = path.resolve(
@@ -31,6 +39,18 @@ const forbiddenPackagedSwitches = Object.freeze([
   "--inspect=0",
   "--remote-debugging-pipe",
   "--remote-debugging-port=0",
+  ...(process.platform === "darwin"
+    ? [
+        "--no-sandbox",
+        "--no-sandbox=true",
+        "-no-sandbox",
+        " --no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-setuid-sandbox=true",
+        "-disable-setuid-sandbox",
+        " --disable-setuid-sandbox",
+      ]
+    : []),
 ]);
 const diagnosticEndpointPattern =
   /(?:Debugger|DevTools) listening|ws:\/\/[^\s]+\/devtools\//i;
@@ -105,8 +125,26 @@ async function packagedExecutable(packageDirectory) {
   return executable;
 }
 
+function assertMacPackagedLaunchHasNoSandboxDisablingControl(launchProfile) {
+  if (process.platform !== "darwin") return;
+  assert.equal(
+    launchProfile.args.some(
+      (argument) =>
+        argument === "--no-sandbox" || argument === "--disable-setuid-sandbox",
+    ),
+    false,
+    "macOS packaged verification cannot use a sandbox-disabling switch",
+  );
+  assert.equal(
+    launchProfile.env.ELECTRON_DISABLE_SANDBOX,
+    undefined,
+    "macOS packaged verification cannot disable the sandbox by environment",
+  );
+}
+
 async function verifyExternalPackagedLaunch(executablePath, userDataDirectory) {
   const launchProfile = createElectronLaunchProfile();
+  assertMacPackagedLaunchHasNoSandboxDisablingControl(launchProfile);
   const tree = await spawnIsolatedProcessTree({
     arguments: [...launchProfile.args, `--user-data-dir=${userDataDirectory}`],
     command: executablePath,
@@ -114,18 +152,19 @@ async function verifyExternalPackagedLaunch(executablePath, userDataDirectory) {
     environment: launchProfile.env,
   });
 
-  let termination;
-  try {
-    await new Promise((resolve) => setTimeout(resolve, 1_500));
-    assert.equal(
-      tree.targetIsRunning(),
-      true,
-      `Packaged executable did not remain active:\n${tree.output()}`,
-    );
-  } finally {
-    termination = await tree.terminate();
-  }
-  assert.equal(termination.treeEmpty, true);
+  const { finalizerResult: termination } = await runWithFinalizer(
+    async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      assert.equal(
+        tree.targetIsRunning(),
+        true,
+        `Packaged executable did not remain active:\n${tree.output()}`,
+      );
+    },
+    () => tree.terminate(),
+    "Packaged launch assertion and process retirement both failed",
+  );
+  assert.equal(termination.recordedProcessIdentitiesGone, true);
   assert.doesNotMatch(termination.output.output, diagnosticEndpointPattern);
 }
 
@@ -145,21 +184,23 @@ async function verifyForbiddenPackagedSwitch(
     cwd: path.dirname(executablePath),
     environment: launchProfile.env,
   });
-  let result;
-  let termination;
-  try {
-    result = await tree.waitForClose(5_000);
-    if (result === null) {
-      throw new Error(`Packaged executable accepted ${forbiddenSwitch}`);
-    }
-  } finally {
-    termination = await tree.terminate();
-  }
+  const { finalizerResult: termination, operationResult: result } =
+    await runWithFinalizer(
+      async () => {
+        const close = await tree.waitForClose(5_000);
+        if (close === null) {
+          throw new Error(`Packaged executable accepted ${forbiddenSwitch}`);
+        }
+        return close;
+      },
+      () => tree.terminate(),
+      `Packaged switch rejection and process retirement both failed for ${forbiddenSwitch}`,
+    );
 
   assert.equal(
-    termination.treeEmpty,
+    termination.recordedProcessIdentitiesGone,
     true,
-    `Packaged process tree survived rejection of ${forbiddenSwitch}`,
+    `A recorded packaged process identity survived rejection of ${forbiddenSwitch}`,
   );
   assert.equal(
     result.exitCode,
@@ -167,16 +208,13 @@ async function verifyForbiddenPackagedSwitch(
     `Packaged executable did not fail closed for ${forbiddenSwitch}`,
   );
   assert.equal(result.signal, null);
-  assert.match(
-    result.output,
-    /Packaged runtime rejected a diagnostic switch\./,
-  );
+  assert.match(result.output, /Packaged runtime rejected a forbidden switch\./);
   assert.doesNotMatch(result.output, diagnosticEndpointPattern);
   return {
     diagnosticEndpointObserved: false,
     exitCode: result.exitCode,
+    recordedProcessIdentitiesGone: termination.recordedProcessIdentitiesGone,
     switch: forbiddenSwitch,
-    treeEmpty: termination.treeEmpty,
   };
 }
 
@@ -198,20 +236,24 @@ async function waitForCalculator(application) {
 
 async function launchInternalProductionBuild(userDataDirectory) {
   const launchProfile = createElectronLaunchProfile();
-  const application = await electron.launch({
-    args: [
-      ...launchProfile.args,
-      `--user-data-dir=${userDataDirectory}`,
-      desktopRoot,
-    ],
-    env: launchProfile.env,
-    ...(launchProfile.chromiumSandbox === undefined
-      ? {}
-      : { chromiumSandbox: launchProfile.chromiumSandbox }),
+  return acquireReadyElectronApplication({
+    launch: () =>
+      electron.launch({
+        args: [
+          ...launchProfile.args,
+          `--user-data-dir=${userDataDirectory}`,
+          desktopRoot,
+        ],
+        env: launchProfile.env,
+        ...(launchProfile.chromiumSandbox === undefined
+          ? {}
+          : { chromiumSandbox: launchProfile.chromiumSandbox }),
+      }),
+    ready: async (application) => {
+      await application.firstWindow();
+      await waitForCalculator(application);
+    },
   });
-  await application.firstWindow();
-  await waitForCalculator(application);
-  return application;
 }
 
 async function inspectRuntime(application) {
@@ -236,6 +278,10 @@ async function inspectRuntime(application) {
       if (calculator === undefined) throw new Error("Calculator is missing");
       const preferences = calculator.getLastWebPreferences();
       return {
+        chromiumSandboxDisabledByLaunch:
+          app.commandLine.hasSwitch("no-sandbox") ||
+          app.commandLine.hasSwitch("disable-setuid-sandbox") ||
+          process.env.ELECTRON_DISABLE_SANDBOX === "1",
         contextIsolation: preferences.contextIsolation,
         devTools: preferences.devTools ?? false,
         enabledFeatures: app.commandLine
@@ -249,7 +295,7 @@ async function inspectRuntime(application) {
         remoteProxy: await calculator.session.resolveProxy(
           "https://attacker.invalid",
         ),
-        sandbox: preferences.sandbox,
+        rendererSandboxPreference: preferences.sandbox,
         storagePath: calculator.session.getStoragePath(),
         webviewTag: preferences.webviewTag,
       };
@@ -305,53 +351,69 @@ async function runInternalShellDenialProbe(application) {
 }
 
 async function createHostileNetworkSinks() {
-  const counters = { http: 0, tcp: 0, udp: 0 };
-  const httpServer = http.createServer((_request, response) => {
-    counters.http += 1;
-    response.writeHead(204).end();
-  });
-  httpServer.on("upgrade", (request) => {
-    counters.http += 1;
-    request.socket.destroy();
-  });
-  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
-  const httpAddress = httpServer.address();
-  assert.ok(
-    httpAddress !== null && typeof httpAddress !== "string",
-    "HTTP sink did not expose an address",
-  );
+  return acquireWithLocalCleanup(async (registerCleanup) => {
+    const cleanupTasks = [];
+    const trackCleanup = (cleanup) => {
+      cleanupTasks.push(cleanup);
+      registerCleanup(cleanup);
+    };
+    const counters = { http: 0, tcp: 0, udp: 0 };
+    const httpServer = http.createServer((_request, response) => {
+      counters.http += 1;
+      response.writeHead(204).end();
+    });
+    httpServer.on("upgrade", (request) => {
+      counters.http += 1;
+      request.socket.destroy();
+    });
+    await waitForResourceAcquisition(httpServer, () =>
+      httpServer.listen(0, "127.0.0.1"),
+    );
+    trackCleanup(
+      () => new Promise((resolve) => httpServer.close(() => resolve())),
+    );
+    const httpAddress = httpServer.address();
+    assert.ok(
+      httpAddress !== null && typeof httpAddress !== "string",
+      "HTTP sink did not expose an address",
+    );
 
-  const udpServer = dgram.createSocket("udp4");
-  udpServer.on("message", () => {
-    counters.udp += 1;
-  });
-  await new Promise((resolve) => udpServer.bind(0, "127.0.0.1", resolve));
-  const udpAddress = udpServer.address();
+    const udpServer = dgram.createSocket("udp4");
+    udpServer.on("message", () => {
+      counters.udp += 1;
+    });
+    await waitForResourceAcquisition(udpServer, () =>
+      udpServer.bind(0, "127.0.0.1"),
+    );
+    trackCleanup(
+      () => new Promise((resolve) => udpServer.close(() => resolve())),
+    );
+    const udpAddress = udpServer.address();
 
-  const tcpServer = net.createServer((socket) => {
-    counters.tcp += 1;
-    socket.destroy();
-  });
-  await new Promise((resolve) => tcpServer.listen(0, "127.0.0.1", resolve));
-  const tcpAddress = tcpServer.address();
-  assert.ok(
-    tcpAddress !== null && typeof tcpAddress !== "string",
-    "TCP sink did not expose an address",
-  );
+    const tcpServer = net.createServer((socket) => {
+      counters.tcp += 1;
+      socket.destroy();
+    });
+    await waitForResourceAcquisition(tcpServer, () =>
+      tcpServer.listen(0, "127.0.0.1"),
+    );
+    trackCleanup(
+      () => new Promise((resolve) => tcpServer.close(() => resolve())),
+    );
+    const tcpAddress = tcpServer.address();
+    assert.ok(
+      tcpAddress !== null && typeof tcpAddress !== "string",
+      "TCP sink did not expose an address",
+    );
 
-  return {
-    close: async () => {
-      await Promise.allSettled([
-        new Promise((resolve) => httpServer.close(() => resolve())),
-        new Promise((resolve) => udpServer.close(() => resolve())),
-        new Promise((resolve) => tcpServer.close(() => resolve())),
-      ]);
-    },
-    counters,
-    httpOrigin: `http://127.0.0.1:${httpAddress.port}`,
-    tcpPort: tcpAddress.port,
-    udpPort: udpAddress.port,
-  };
+    return {
+      close: () => runIndependentCleanupTasks([...cleanupTasks].reverse()),
+      counters,
+      httpOrigin: `http://127.0.0.1:${httpAddress.port}`,
+      tcpPort: tcpAddress.port,
+      udpPort: udpAddress.port,
+    };
+  });
 }
 
 async function runInternalHostileProbe(application, sinks) {
@@ -464,7 +526,7 @@ const temporaryRoot = await fs.mkdtemp(
 let application = null;
 let networkSinks = null;
 
-try {
+await runWithIndependentCleanup(async () => {
   await run(process.execPath, [
     path.join(repositoryRoot, "scripts", "build-app.mjs"),
     "desktop",
@@ -573,6 +635,7 @@ try {
     status: "Secure calculator ready",
   });
   assert.deepEqual(firstLaunch.runtime, {
+    chromiumSandboxDisabledByLaunch: process.platform === "linux",
     contextIsolation: true,
     devTools: false,
     enabledFeatures: firstLaunch.runtime.enabledFeatures,
@@ -582,7 +645,7 @@ try {
     preload: undefined,
     registeredPreloads: 0,
     remoteProxy: firstLaunch.runtime.remoteProxy,
-    sandbox: true,
+    rendererSandboxPreference: true,
     storagePath: null,
     webviewTag: false,
   });
@@ -657,10 +720,16 @@ try {
   );
 
   process.stdout.write(
-    "Internal production-build isolation and external packaged launch policy passed; physical packaged UI acceptance remains gated.\n",
+    process.platform === "linux"
+      ? "Internal production-build renderer policy and process-supervision checks passed under the non-release Linux compatibility profile; Chromium's OS sandbox was disabled and physical packaged UI acceptance remains gated.\n"
+      : "Internal production-build renderer policy and external packaged launch policy passed without a sandbox-disabling launch control; active-sandbox attestation and physical packaged UI acceptance remain gated.\n",
   );
-} finally {
-  if (application !== null) await application.close();
-  if (networkSinks !== null) await networkSinks.close();
-  await fs.rm(temporaryRoot, { force: true, recursive: true });
-}
+}, [
+  async () => {
+    if (application !== null) await application.close();
+  },
+  async () => {
+    if (networkSinks !== null) await networkSinks.close();
+  },
+  () => fs.rm(temporaryRoot, { force: true, recursive: true }),
+]);

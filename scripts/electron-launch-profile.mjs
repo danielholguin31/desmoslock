@@ -50,7 +50,10 @@ function pickEnvironment(sourceEnvironment, keys, platform) {
 /**
  * Returns the complete, intentionally small process boundary for Electron test
  * launches. Ambient execution controls and credentials never cross this
- * boundary merely because they exist in the parent process.
+ * boundary merely because they exist in the parent process. The Linux branch is
+ * an explicitly non-release compatibility profile: it disables Chromium's OS
+ * sandbox, so callers may assert requested renderer preferences but must not
+ * present the launch as active-sandbox evidence.
  */
 export function createElectronLaunchProfile(
   sourceEnvironment = process.env,

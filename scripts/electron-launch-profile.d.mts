@@ -1,5 +1,6 @@
 export interface ElectronLaunchProfile {
   args: string[];
+  /** Present only for the non-release Linux compatibility profile. */
   chromiumSandbox?: false;
   env: Record<string, string>;
 }

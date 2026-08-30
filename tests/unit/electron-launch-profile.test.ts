@@ -40,7 +40,7 @@ describe("Electron launch profile", () => {
     });
   });
 
-  it("adds only Linux display/session variables and the explicit CI sandbox override", () => {
+  it("labels the Linux test profile with its non-release sandbox override", () => {
     expect(createElectronLaunchProfile(ambientEnvironment, "linux")).toEqual({
       args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu"],
       chromiumSandbox: false,

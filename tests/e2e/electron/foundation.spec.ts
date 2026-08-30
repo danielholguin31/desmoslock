@@ -6,7 +6,7 @@ import { _electron as electron, expect, test } from "@playwright/test";
 
 import { createElectronLaunchProfile } from "../../../scripts/electron-launch-profile.mjs";
 
-test("production Electron shell isolates renderers and resets assessment state for a reopened window", async () => {
+test("production Electron shell configures renderer boundaries and resets assessment state for a reopened window", async () => {
   const userDataDirectory = await fs.mkdtemp(
     path.join(os.tmpdir(), "desmoslock-foundation-e2e-"),
   );

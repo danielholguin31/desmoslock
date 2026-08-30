@@ -80,6 +80,22 @@ async function waitForLeaderStop(
   expect(tree.targetIsRunning()).toBe(false);
 }
 
+function forceKillProcessIfAlive(processId: number): void {
+  try {
+    process.kill(processId, "SIGKILL");
+  } catch (error) {
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ESRCH"
+    ) {
+      return;
+    }
+    throw error;
+  }
+}
+
 describe("isolated process tree", () => {
   onlyPosix(
     "returns bounded spawn failures without signaling its parent session group",
@@ -176,7 +192,7 @@ describe("isolated process tree", () => {
         expect(receipt?.output).toContain(marker);
         expect(Object.isFrozen(receipt)).toBe(true);
         expect(tree.targetIsRunning()).toBe(false);
-        expect(tree.isEmpty()).toBe(false);
+        expect(tree.isRetired()).toBe(false);
       } finally {
         await tree.terminate({
           forceMilliseconds: 3_000,
@@ -187,7 +203,7 @@ describe("isolated process tree", () => {
   );
 
   onlyPosix(
-    "force-terminates a surviving descendant and positively empties the group",
+    "force-terminates a surviving descendant and retires recorded identities",
     async () => {
       const helper = [
         "process.stdout.write(`helper-ready:${process.pid}\\n`);",
@@ -222,7 +238,7 @@ describe("isolated process tree", () => {
         expect(Number.isSafeInteger(helperPid)).toBe(true);
         expect(helperPid).toBeGreaterThan(1);
         expect(() => process.kill(helperPid, 0)).not.toThrow();
-        expect(tree.isEmpty()).toBe(false);
+        expect(tree.isRetired()).toBe(false);
         expect(await tree.waitForClose(25)).toBeNull();
 
         const receipt = await tree.terminate({
@@ -233,7 +249,7 @@ describe("isolated process tree", () => {
         expect(receipt).toMatchObject({
           forceSignalSent: true,
           gracefulSignalSent: true,
-          treeEmpty: true,
+          recordedProcessIdentitiesGone: true,
         });
         expect(receipt.close).toMatchObject({
           exitCode: 0,
@@ -242,7 +258,7 @@ describe("isolated process tree", () => {
           stdoutEof: true,
         });
         expect(receipt.close?.output).toContain("helper-ignored-term");
-        expect(tree.isEmpty()).toBe(true);
+        expect(tree.isRetired()).toBe(true);
         expect(() => process.kill(helperPid, 0)).toThrow(
           expect.objectContaining({ code: "ESRCH" }),
         );
@@ -255,7 +271,7 @@ describe("isolated process tree", () => {
   );
 
   onlyPosix(
-    "retires an empty containment before later calls can reach a reused group id",
+    "retires containment before later calls can reach a reused group id",
     async () => {
       const tree = await spawnIsolatedProcessTree({
         arguments: ["-e", "setInterval(() => {}, 1_000)"],
@@ -275,7 +291,7 @@ describe("isolated process tree", () => {
         const secondTermination = tree.terminate();
         expect(secondTermination).toBe(firstTermination);
         const termination = await firstTermination;
-        expect(tree.isEmpty()).toBe(true);
+        expect(tree.isRetired()).toBe(true);
         expect(await tree.terminate()).toBe(termination);
         expect(kill).not.toHaveBeenCalled();
       } finally {
@@ -315,7 +331,7 @@ describe("isolated process tree", () => {
       });
       expect(receipt.output.output).toContain("force-only-target-ready");
       expect(tree.targetIsRunning()).toBe(false);
-      expect(tree.isEmpty()).toBe(true);
+      expect(tree.isRetired()).toBe(true);
     },
   );
 
@@ -334,15 +350,15 @@ describe("isolated process tree", () => {
       ).resolves.toMatchObject({
         forceSignalSent: true,
         gracefulSignalSent: true,
-        treeEmpty: true,
+        recordedProcessIdentitiesGone: true,
       });
-      expect(tree.isEmpty()).toBe(true);
+      expect(tree.isRetired()).toBe(true);
       expect(tree.targetIsRunning()).toBe(false);
     },
   );
 
   onlyPosix(
-    "kills TERM-resistant same-group descendants forked near the force deadline",
+    "kills TERM-resistant same-group descendants forked after the termination snapshot",
     async () => {
       const grandchild = [
         'process.on("SIGTERM", () => {});',
@@ -357,7 +373,7 @@ describe("isolated process tree", () => {
         '  spawn(process.execPath, ["-e", ' +
           `${JSON.stringify(grandchild)}], {` +
           ' stdio: ["ignore", "inherit", "inherit"] });',
-        "}, 170);",
+        "}, 100);",
         "setInterval(() => {}, 1_000);",
       ].join("\n");
       const target = [
@@ -383,16 +399,16 @@ describe("isolated process tree", () => {
       await waitForOutput(tree, "fork-target-ready");
       const receipt = await tree.terminate({
         forceMilliseconds: 3_000,
-        graceMilliseconds: 250,
+        graceMilliseconds: 750,
       });
 
       expect(receipt).toMatchObject({
-        treeEmpty: true,
+        recordedProcessIdentitiesGone: true,
         targetOutcome: { exitCode: 0, kind: "observed", signal: null },
       });
       expect(receipt.output.output).toContain("late-helper-ready");
       expect(receipt.output.output).toContain("late-grandchild-ready");
-      expect(tree.isEmpty()).toBe(true);
+      expect(tree.isRetired()).toBe(true);
     },
   );
 
@@ -425,7 +441,7 @@ describe("isolated process tree", () => {
             graceMilliseconds: 50,
           }),
         ).rejects.toThrow(/containment was lost.*sentinel closed/i);
-        expect(tree.isEmpty()).toBe(false);
+        expect(tree.isRetired()).toBe(false);
         expect(kill).not.toHaveBeenCalled();
       } finally {
         kill.mockRestore();
@@ -470,13 +486,75 @@ describe("isolated process tree", () => {
       await expect(
         tree.terminate({ forceMilliseconds: 150, graceMilliseconds: 50 }),
       ).rejects.toThrow(/recorded process identities survived/i);
-      expect(tree.isEmpty()).toBe(false);
+      expect(tree.isRetired()).toBe(false);
       expect(() => process.kill(escapedPid, 0)).not.toThrow();
 
       await new Promise((resolve) => setTimeout(resolve, 800));
       expect(() => process.kill(escapedPid, 0)).toThrow(
         expect.objectContaining({ code: "ESRCH" }),
       );
+    },
+  );
+
+  onlyPosix(
+    "does not claim an empty tree after an immediate leader exit hides a setsid child",
+    async () => {
+      const escapedChild = [
+        'const fs = require("node:fs");',
+        "fs.closeSync(1);",
+        "fs.closeSync(2);",
+        'process.on("SIGTERM", () => {});',
+        "setInterval(() => {}, 1_000);",
+      ].join("\n");
+      const target = [
+        'const { spawn } = require("node:child_process");',
+        'const fs = require("node:fs");',
+        'const escaped = spawn(process.execPath, ["-e", ' +
+          `${JSON.stringify(escapedChild)}], {` +
+          ' detached: true, stdio: ["ignore", "inherit", "inherit"] });',
+        "escaped.unref();",
+        "fs.writeSync(1, `escaped-ready:${escaped.pid}\\n`);",
+        "process.exit(0);",
+      ].join("\n");
+      const tree = await spawnIsolatedProcessTree({
+        arguments: ["-e", target],
+        command: process.execPath,
+        cwd: process.cwd(),
+        environment: {},
+      });
+      let escapedPid: number | null = null;
+
+      try {
+        await waitForOutput(tree, "escaped-ready:");
+        escapedPid = Number(tree.output().match(/escaped-ready:(\d+)/)?.[1]);
+        expect(Number.isSafeInteger(escapedPid)).toBe(true);
+        expect(escapedPid).toBeGreaterThan(1);
+        await expect(tree.waitForClose(1_000)).resolves.toMatchObject({
+          exitCode: 0,
+          signal: null,
+          stderrEof: true,
+          stdoutEof: true,
+        });
+
+        const receipt = await tree.terminate({
+          forceMilliseconds: 150,
+          graceMilliseconds: 50,
+        });
+
+        expect(() => process.kill(escapedPid, 0)).not.toThrow();
+        expect(receipt).toMatchObject({
+          recordedProcessIdentitiesGone: true,
+        });
+        expect(receipt).not.toHaveProperty("treeEmpty");
+        expect(tree.isRetired()).toBe(true);
+      } finally {
+        await tree
+          .terminate({ forceMilliseconds: 150, graceMilliseconds: 50 })
+          .catch(() => undefined);
+        if (escapedPid !== null && escapedPid > 1) {
+          forceKillProcessIfAlive(escapedPid);
+        }
+      }
     },
   );
 });

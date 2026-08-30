@@ -16,6 +16,12 @@ export interface IsolatedProcessTerminationReceipt {
   readonly forceSignalSent: boolean;
   readonly gracefulSignalSent: boolean;
   readonly output: IsolatedProcessOutputReceipt;
+  /**
+   * Every {processId, startedAt} identity in the sentinel's retirement
+   * snapshot disappeared. Descendants that escaped before observation are
+   * outside this claim.
+   */
+  readonly recordedProcessIdentitiesGone: true;
   readonly targetOutcome:
     | {
         readonly kind: "observed";
@@ -23,11 +29,11 @@ export interface IsolatedProcessTerminationReceipt {
         readonly signal: NodeJS.Signals | null;
       }
     | { readonly kind: "unobserved-before-final-kill" };
-  readonly treeEmpty: true;
 }
 
 export interface IsolatedProcessTree {
-  isEmpty(): boolean;
+  /** Whether this handle completed its one-way retirement protocol. */
+  isRetired(): boolean;
   output(): string;
   targetIsRunning(): boolean;
   terminate(options?: {

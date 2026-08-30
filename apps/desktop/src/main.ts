@@ -40,7 +40,7 @@ export const trustedShellUrl = "desmoslock-app://shell/index.html" as const;
 try {
   assertPackagedLaunchArguments(app.isPackaged, process.argv);
 } catch {
-  process.stderr.write("Packaged runtime rejected a diagnostic switch.\n");
+  process.stderr.write("Packaged runtime rejected a forbidden switch.\n");
   process.exit(78);
 }
 

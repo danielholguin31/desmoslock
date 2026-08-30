@@ -270,7 +270,7 @@ test.describe.serial("isolated calculator surface", () => {
           remoteProxy: await calculator.session.resolveProxy(
             "https://attacker.invalid",
           ),
-          sandbox: preferences.sandbox,
+          rendererSandboxPreference: preferences.sandbox,
           storagePath: calculator.session.getStoragePath(),
           webviewTag: preferences.webviewTag,
         };
@@ -285,7 +285,7 @@ test.describe.serial("isolated calculator surface", () => {
       isPersistent: false,
       nodeIntegration: false,
       registeredPreloads: 0,
-      sandbox: true,
+      rendererSandboxPreference: true,
       storagePath: null,
       webviewTag: false,
     });

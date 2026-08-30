@@ -32,6 +32,14 @@ That harness exercises the unpackaged production build; it uses Electron's inter
 automation channel and is not black-box package or release acceptance. Production
 assets must contain no external-dispatch call, diagnostic registry, or test API.
 
+Required Linux CI uses an explicitly non-release compatibility profile with Chromium's
+OS/process sandbox disabled by `--no-sandbox`, `--disable-setuid-sandbox`, Playwright's
+`chromiumSandbox: false`, and `ELECTRON_DISABLE_SANDBOX=1`. Reading
+`getLastWebPreferences().sandbox` proves only that production code requested Electron's
+per-WebContents sandbox preference. It does not attest an active Chromium or OS sandbox.
+The renderer-preference, context-isolation, Node-exclusion, session-policy, and process-
+supervision checks remain valid within that narrower boundary.
+
 This is evidence of denial at Electron's pre-dispatch permission/window boundary, not
 OS-level dispatch telemetry. Verification deliberately does not register a URL handler
 or launch another application.
@@ -53,20 +61,27 @@ has disappeared. A retired or lost capability makes no later process-group syste
 so numeric ID reuse cannot redirect cleanup to an unrelated group.
 
 The harness verifies a normal bounded launch and requires `--inspect=0`,
-`--remote-debugging-port=0`, and `--remote-debugging-pipe` to exit nonzero. No launch may
-advertise a debugger listener or leave a same-group or recorded helper alive. Every
-Electron launch receives a small explicit platform environment rather than ambient
-parent variables. The seam removes the package and performs no signing, notarization,
-publication, deployment, or legacy-v1 packaging.
+`--remote-debugging-port=0`, and `--remote-debugging-pipe` to exit nonzero. On macOS, the
+exact packaged executable must also reject `--no-sandbox` and
+`--disable-setuid-sandbox`; the ordinary macOS package launch receives neither those
+switches nor the sandbox-disabling environment control. No launch may advertise a
+debugger listener or leave a same-group or recorded helper alive. Every Electron launch
+receives a small explicit platform environment rather than ambient parent variables. The
+seam removes the package and performs no signing, notarization, publication, deployment,
+or legacy-v1 packaging.
 
-This proof covers same-group processes and exact PID/start-time identities observed
-before termination on POSIX CI and the macOS package gate. A recorded descendant that
-has already used `setsid` makes verification fail closed because the sentinel's group
-signal cannot remove it. macOS does not provide this harness an atomic ownership handle
-that can prove the absence of every arbitrary descendant that escapes into a new session
-after the snapshot, so the receipt does not make that broader claim. Windows execution
-fails closed until an atomic Job Object adapter can provide the scoped containment and
-positive-empty guarantee; it does not fall back to leader-only termination.
+This retirement proof covers the original process group and exact PID/start-time
+identities observed before termination on the host where the seam runs. Its success
+receipt is named `recordedProcessIdentitiesGone`, and the one-way handle state is
+`isRetired`; neither claims that an arbitrary process tree is empty. An immediate parent
+can create a `setsid` child, close inherited output pipes, and exit before the polling
+sentinel observes that child. The regression suite demonstrates that exact limitation
+and requires the receipt not to expose `treeEmpty`. A surviving recorded descendant that
+has already used `setsid` still makes verification fail closed because the sentinel's
+group signal cannot remove it. Required CI currently runs only the unsandboxed Linux
+compatibility profile; it produces neither a macOS package receipt nor an active-
+Chromium-sandbox attestation. Windows execution fails closed until an atomic Job Object
+adapter can provide scoped containment; it does not fall back to leader-only termination.
 
 This automated evidence does not claim physical black-box calculator interaction in
 the package. That acceptance remains an issue 37 human/physical gate: XCUITest must
@@ -75,4 +90,5 @@ OS-delivered clicks and typing, capture window screenshots, and prove visible pl
 creation, zoom change, expression removal, and plot disappearance through screenshot
 or pixel-delta receipts bound to the exact artifact. macOS Accessibility/Automation
 and likely Screen Recording approval are required human gates; no shipped diagnostic
-or test seam substitutes for them.
+or test seam substitutes for them. The clean-Mac launch must use no sandbox-disabling
+control, but its UI receipt remains separate from an active Chromium-sandbox attestation.

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { createCalculatorWebPreferences } from "../src/main/hardened-web-preferences.js";
 
 describe("calculator surface boundary", () => {
-  it("builds a sandboxed, preload-free, ephemeral web preferences contract", () => {
+  it("requests Electron's sandbox preference in a preload-free ephemeral contract", () => {
     const preferences = createCalculatorWebPreferences(
       "desmoslock-calculator-7b96d41e",
     );
