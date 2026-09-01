@@ -36,17 +36,28 @@ const distributionRoot = path.join(desktopRoot, "dist");
 const calculatorUrl = "desmoslock-calculator://host/index.html";
 const packagedExecutableName = "desmoslock-internal";
 const sandboxDisablingEnvironmentVariable = "ELECTRON_DISABLE_SANDBOX";
+const sandboxWeakeningOrInliningSwitchNames = Object.freeze([
+  "no-sandbox",
+  "disable-gpu-sandbox",
+  "disable-namespace-sandbox",
+  "disable-sandbox",
+  "disable-seccomp-filter-sandbox",
+  "disable-seccomp-sandbox",
+  "disable-setuid-sandbox",
+  "in-process-gpu",
+  "no-zygote",
+  "single-process",
+]);
 const forbiddenPackagedSwitches = Object.freeze([
   "--inspect=0",
   "--remote-debugging-pipe",
   "--remote-debugging-port=0",
   ...(process.platform === "darwin"
     ? [
-        "--no-sandbox",
+        ...sandboxWeakeningOrInliningSwitchNames.map((name) => `--${name}`),
         "--no-sandbox=true",
         "-no-sandbox",
         " --no-sandbox",
-        "--disable-setuid-sandbox",
         "--disable-setuid-sandbox=true",
         "-disable-setuid-sandbox",
         " --disable-setuid-sandbox",
@@ -109,7 +120,7 @@ async function packagedExecutable(packageDirectory) {
     const executableDirectory = path.join(appBundle, "Contents", "MacOS");
     const executable = path.join(executableDirectory, packagedExecutableName);
     await fs.access(executable, fs.constants.X_OK);
-    return executable;
+    return Object.freeze({ appBundle, executable });
   }
 
   if (process.platform === "win32") {
@@ -118,12 +129,29 @@ async function packagedExecutable(packageDirectory) {
       `${packagedExecutableName}.exe`,
     );
     await fs.access(executable);
-    return executable;
+    return Object.freeze({ appBundle: null, executable });
   }
 
   const executable = path.join(packageDirectory, packagedExecutableName);
   await fs.access(executable, fs.constants.X_OK);
-  return executable;
+  return Object.freeze({ appBundle: null, executable });
+}
+
+function parsePackagedPolicyBoundary(output) {
+  const match = output.match(/^Packaged runtime policy boundary: (.+)$/m);
+  assert.notEqual(
+    match,
+    null,
+    "Exact packaged application did not emit its rejection-boundary receipt",
+  );
+  return JSON.parse(match[1]);
+}
+
+function normalizedSwitchName(argument) {
+  return argument
+    .trim()
+    .replace(/^-{1,2}/, "")
+    .split("=", 1)[0];
 }
 
 function assertMacPackagedLaunchHasNoSandboxDisablingControl(launchProfile) {
@@ -214,7 +242,20 @@ async function verifyForbiddenPackagedSwitch(
     /Packaged runtime rejected a forbidden launch control\./,
   );
   assert.doesNotMatch(result.output, diagnosticEndpointPattern);
+  const boundary = parsePackagedPolicyBoundary(result.output);
+  const normalizedName = normalizedSwitchName(forbiddenSwitch);
+  assert.equal(boundary.isPackaged, true);
+  assert.equal(boundary.environmentSandboxControlPresent, false);
+  assert.deepEqual(boundary.argumentSwitches, [normalizedName]);
+  assert.ok(Array.isArray(boundary.commandLineSwitches));
+  if (forbiddenSwitch.startsWith("--")) {
+    assert.ok(
+      boundary.commandLineSwitches.includes(normalizedName),
+      `Electron app.commandLine did not expose ${forbiddenSwitch} in the exact packaged application`,
+    );
+  }
   return {
+    boundary,
     diagnosticEndpointObserved: false,
     exitCode: result.exitCode,
     recordedProcessIdentitiesGone: termination.recordedProcessIdentitiesGone,
@@ -272,7 +313,15 @@ async function verifyForbiddenPackagedEnvironmentControl(
     /Packaged runtime rejected a forbidden launch control\./,
   );
   assert.doesNotMatch(result.output, diagnosticEndpointPattern);
+  const boundary = parsePackagedPolicyBoundary(result.output);
+  assert.deepEqual(boundary, {
+    argumentSwitches: [],
+    commandLineSwitches: ["no-sandbox"],
+    environmentSandboxControlPresent: true,
+    isPackaged: true,
+  });
   return {
+    boundary,
     control: sandboxDisablingEnvironmentVariable,
     diagnosticEndpointObserved: false,
     exitCode: result.exitCode,
@@ -677,7 +726,20 @@ await runWithIndependentCleanup(async () => {
     quiet: true,
   });
   assert.equal(packageDirectories.length, 1);
-  const executablePath = await packagedExecutable(packageDirectories[0]);
+  const packagedArtifact = await packagedExecutable(packageDirectories[0]);
+  const executablePath = packagedArtifact.executable;
+  if (process.platform === "darwin") {
+    assert.equal(
+      executablePath,
+      path.join(
+        packagedArtifact.appBundle,
+        "Contents",
+        "MacOS",
+        packagedExecutableName,
+      ),
+      "Packaged policy verification must exercise the executable inside the exact generated .app",
+    );
+  }
   await hardenPackagedElectron(executablePath);
   assert.deepEqual(await verifyPackagedElectronFuses(executablePath), {
     EnableNodeCliInspectArguments: "DISABLE",
@@ -787,6 +849,12 @@ await runWithIndependentCleanup(async () => {
         path.join(temporaryRoot, "rejected-sandbox-environment-control"),
       );
     assert.deepEqual(rejectedEnvironmentControl, {
+      boundary: {
+        argumentSwitches: [],
+        commandLineSwitches: ["no-sandbox"],
+        environmentSandboxControlPresent: true,
+        isPackaged: true,
+      },
       control: sandboxDisablingEnvironmentVariable,
       diagnosticEndpointObserved: false,
       exitCode: 78,
@@ -796,8 +864,8 @@ await runWithIndependentCleanup(async () => {
 
   process.stdout.write(
     process.platform === "linux"
-      ? "Internal production-build renderer policy and process-supervision checks passed under the non-release Linux compatibility profile; Chromium's OS sandbox was disabled and physical packaged UI acceptance remains gated.\n"
-      : "Internal production-build renderer policy and external packaged launch policy passed without a sandbox-disabling launch control; active-sandbox attestation and physical packaged UI acceptance remain gated.\n",
+      ? "Internal production-build renderer policy and process-supervision checks passed under the non-release Linux compatibility profile; Chromium's OS sandbox was disabled. Issue #34 remains incomplete pending Desmos rights/exact assets and exact packaged physical UI acceptance.\n"
+      : "Internal production-build renderer policy and exact packaged launch policy passed without a sandbox-disabling launch control. Issue #34 remains incomplete pending Desmos rights/exact assets and exact signed/notarized packaged physical UI acceptance.\n",
   );
 }, [
   async () => {

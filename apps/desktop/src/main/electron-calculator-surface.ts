@@ -146,10 +146,12 @@ export async function createElectronCalculatorSurface(
   const teardownWebContentsSynchronously = (): readonly unknown[] => {
     const failures: unknown[] = [];
     if (view === null) return failures;
+    const ownedView = view;
+    view = null;
     if (attached) {
       try {
         if (!options.parent.isDestroyed()) {
-          options.parent.contentView.removeChildView(view);
+          options.parent.contentView.removeChildView(ownedView);
         }
       } catch (error) {
         failures.push(error);
@@ -158,13 +160,13 @@ export async function createElectronCalculatorSurface(
     attached = false;
     let webContentsDestroyed = false;
     try {
-      webContentsDestroyed = view.webContents.isDestroyed();
+      webContentsDestroyed = ownedView.webContents.isDestroyed();
     } catch (error) {
       failures.push(error);
     }
     if (!webContentsDestroyed) {
       try {
-        view.webContents.close({ waitForBeforeUnload: false });
+        ownedView.webContents.close({ waitForBeforeUnload: false });
       } catch (error) {
         failures.push(error);
       }
@@ -308,13 +310,18 @@ export async function createElectronCalculatorSurface(
     throw error;
   }
 
+  const liveView = view;
+  if (liveView === null) {
+    throw new Error("CalculatorSurface closed before initialization completed");
+  }
+
   return Object.freeze({
     partition,
-    webContentsId: view.webContents.id,
+    webContentsId: liveView.webContents.id,
     close: closeSurface,
     setBounds(bounds: CalculatorSurfaceBounds) {
-      if (!closed && view !== null && !view.webContents.isDestroyed()) {
-        view.setBounds(bounds);
+      if (!closed && !liveView.webContents.isDestroyed()) {
+        liveView.setBounds(bounds);
       }
     },
   });

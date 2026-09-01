@@ -6,11 +6,67 @@ const execFileAsync = promisify(execFile);
 const psExecutable = ["/bin/ps", "/usr/bin/ps"].find((candidate) =>
   fs.existsSync(candidate),
 );
+const processStartPattern =
+  "(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{1,2}\\s+\\d{2}:\\d{2}:\\d{2}\\s+\\d{4}";
+const processIdentityLinePattern = new RegExp(
+  `^\\s*(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+(${processStartPattern})\\s*$`,
+);
+const retirementIdentityLinePattern = new RegExp(
+  `^\\s*(\\d+)\\s+(${processStartPattern})\\s*$`,
+);
 
 function validatePid(pid, name) {
   if (!Number.isSafeInteger(pid) || pid <= 1) {
     throw new Error(`${name} must be a safe positive pid greater than one`);
   }
+}
+
+function parseSafeInteger(value, name, minimum) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum) {
+    throw new Error(`${name} is malformed`);
+  }
+  return parsed;
+}
+
+export function parseProcessIdentityTable(stdout) {
+  const identities = [];
+  for (const line of stdout.split("\n")) {
+    if (line.trim().length === 0) continue;
+    const match = line.match(processIdentityLinePattern);
+    if (match === null) {
+      throw new Error("Trusted ps returned a malformed process identity row");
+    }
+    identities.push(
+      Object.freeze({
+        parentPid: parseSafeInteger(match[2], "Process parent pid", 0),
+        processGroupId: parseSafeInteger(match[3], "Process group identity", 1),
+        processId: parseSafeInteger(match[1], "Process identity", 1),
+        startedAt: match[4],
+      }),
+    );
+  }
+  return Object.freeze(identities);
+}
+
+export function parseRetirementIdentityTable(stdout) {
+  const identities = [];
+  for (const line of stdout.split("\n")) {
+    if (line.trim().length === 0) continue;
+    const match = line.match(retirementIdentityLinePattern);
+    if (match === null) {
+      throw new Error(
+        "Trusted ps returned a malformed retirement identity row",
+      );
+    }
+    identities.push(
+      Object.freeze({
+        processId: parseSafeInteger(match[1], "Retirement identity", 1),
+        startedAt: match[2],
+      }),
+    );
+  }
+  return Object.freeze(identities);
 }
 
 export async function readProcessIdentityTable() {
@@ -29,20 +85,7 @@ export async function readProcessIdentityTable() {
       timeout: 2_000,
     },
   );
-  const identities = [];
-  for (const line of stdout.split("\n")) {
-    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+?)\s*$/);
-    if (match === null) continue;
-    identities.push(
-      Object.freeze({
-        parentPid: Number(match[2]),
-        processGroupId: Number(match[3]),
-        processId: Number(match[1]),
-        startedAt: match[4],
-      }),
-    );
-  }
-  return Object.freeze(identities);
+  return parseProcessIdentityTable(stdout);
 }
 
 async function readRetirementIdentityTable() {
@@ -61,18 +104,7 @@ async function readRetirementIdentityTable() {
       timeout: 2_000,
     },
   );
-  const identities = [];
-  for (const line of stdout.split("\n")) {
-    const match = line.match(/^\s*(\d+)\s+(.+?)\s*$/);
-    if (match === null) continue;
-    identities.push(
-      Object.freeze({
-        processId: Number(match[1]),
-        startedAt: match[2],
-      }),
-    );
-  }
-  return Object.freeze(identities);
+  return parseRetirementIdentityTable(stdout);
 }
 
 export function findProcessIdentity(identities, processId) {
@@ -82,9 +114,22 @@ export function findProcessIdentity(identities, processId) {
   );
 }
 
-export function selectDescendantProcessIdentities(identities, rootProcessId) {
-  validatePid(rootProcessId, "Descendant root");
-  const selected = new Set([rootProcessId]);
+export function selectDescendantProcessIdentities(identities, rootIdentity) {
+  validatePid(rootIdentity?.processId, "Descendant root");
+  if (
+    typeof rootIdentity.startedAt !== "string" ||
+    rootIdentity.startedAt.length === 0
+  ) {
+    throw new Error("Descendant root must include its process start identity");
+  }
+  const liveRoot = identities.some(
+    (identity) =>
+      identity.processId === rootIdentity.processId &&
+      identity.startedAt === rootIdentity.startedAt,
+  );
+  if (!liveRoot) return Object.freeze([]);
+
+  const selected = new Set([rootIdentity.processId]);
   let changed = true;
   while (changed) {
     changed = false;

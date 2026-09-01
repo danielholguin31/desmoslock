@@ -5,6 +5,12 @@ import path from "node:path";
 import { _electron as electron, expect, test } from "@playwright/test";
 
 import { createElectronLaunchProfile } from "../../../scripts/electron-launch-profile.mjs";
+import {
+  acquireReadyElectronApplication,
+  closeElectronApplicationCooperatively,
+  runIndependentCleanupTasks,
+  trackElectronApplicationForCooperativeCleanup,
+} from "../../../scripts/production-desktop-resource-safety.mjs";
 
 test("production Electron shell configures renderer boundaries and resets assessment state for a reopened window", async () => {
   const userDataDirectory = await fs.mkdtemp(
@@ -34,16 +40,23 @@ test("production Electron shell configures renderer boundaries and resets assess
     }
   })();
 
-  const application = await electron.launch({
-    args: [
-      ...launchProfile.args,
-      `--user-data-dir=${userDataDirectory}`,
-      path.resolve("apps/desktop"),
-    ],
-    env: launchProfile.env,
-    ...(launchProfile.chromiumSandbox === undefined
-      ? {}
-      : { chromiumSandbox: launchProfile.chromiumSandbox }),
+  const application = await acquireReadyElectronApplication({
+    launch: () =>
+      electron.launch({
+        args: [
+          ...launchProfile.args,
+          `--user-data-dir=${userDataDirectory}`,
+          path.resolve("apps/desktop"),
+        ],
+        env: launchProfile.env,
+        ...(launchProfile.chromiumSandbox === undefined
+          ? {}
+          : { chromiumSandbox: launchProfile.chromiumSandbox }),
+      }),
+    ready: async (acquiredApplication) => {
+      await trackElectronApplicationForCooperativeCleanup(acquiredApplication);
+      await acquiredApplication.firstWindow();
+    },
   });
 
   try {
@@ -231,7 +244,9 @@ test("production Electron shell configures renderer boundaries and resets assess
       ),
     ).resolves.toEqual({ ok: true });
   } finally {
-    await application.close();
-    await fs.rm(userDataDirectory, { force: true, recursive: true });
+    await runIndependentCleanupTasks([
+      () => closeElectronApplicationCooperatively(application),
+      () => fs.rm(userDataDirectory, { force: true, recursive: true }),
+    ]);
   }
 });

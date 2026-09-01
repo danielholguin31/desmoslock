@@ -17,7 +17,10 @@ import type { CalculatorSurface } from "./main/calculator-surface.js";
 import { calculatorScheme } from "./main/calculator-assets.js";
 import { createElectronCalculatorSurface } from "./main/electron-calculator-surface.js";
 import { createTrustedShellWebPreferences } from "./main/hardened-web-preferences.js";
-import { assertPackagedLaunchPolicy } from "./main/packaged-launch-policy.js";
+import {
+  assertPackagedLaunchPolicy,
+  inspectPackagedLaunchPolicyBoundary,
+} from "./main/packaged-launch-policy.js";
 import { createPrivilegedRequestRouter } from "./main/privileged-request-router.js";
 import {
   denyByDefaultCapabilityPolicy,
@@ -37,15 +40,24 @@ export const desktopBuild: RepositoryBuildIdentity = {
 export const desktopChannel = "internal-v2" as const;
 export const trustedShellUrl = "desmoslock-app://shell/index.html" as const;
 
+const packagedLaunchControls = {
+  arguments: process.argv,
+  commandLine: app.commandLine,
+  environment: process.env,
+};
 try {
-  assertPackagedLaunchPolicy(app.isPackaged, {
-    arguments: process.argv,
-    commandLine: app.commandLine,
-    environment: process.env,
-  });
+  assertPackagedLaunchPolicy(app.isPackaged, packagedLaunchControls);
 } catch {
   process.stderr.write(
     "Packaged runtime rejected a forbidden launch control.\n",
+  );
+  process.stderr.write(
+    `Packaged runtime policy boundary: ${JSON.stringify(
+      inspectPackagedLaunchPolicyBoundary(
+        app.isPackaged,
+        packagedLaunchControls,
+      ),
+    )}\n`,
   );
   process.exit(78);
 }

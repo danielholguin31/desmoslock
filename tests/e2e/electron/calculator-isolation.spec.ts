@@ -16,8 +16,10 @@ import {
 import { createElectronLaunchProfile } from "../../../scripts/electron-launch-profile.mjs";
 import {
   acquireWithLocalCleanup,
+  closeElectronApplicationCooperatively,
   type CleanupTask,
   runIndependentCleanupTasks,
+  trackElectronApplicationForCooperativeCleanup,
   waitForResourceAcquisition,
 } from "../../../scripts/production-desktop-resource-safety.mjs";
 import { runHostileCalculatorProbe } from "./support/hostile-calculator-probe.mjs";
@@ -228,7 +230,18 @@ test.describe.serial("isolated calculator surface", () => {
             ? {}
             : { chromiumSandbox: launchProfile.chromiumSandbox }),
         });
-        registerCleanup(() => acquiredApplication.close());
+        const child = acquiredApplication.process();
+        registerLocalCleanup(() =>
+          child.exitCode === null && child.signalCode === null
+            ? acquiredApplication.close()
+            : undefined,
+        );
+        await trackElectronApplicationForCooperativeCleanup(
+          acquiredApplication,
+        );
+        registerCleanup(() =>
+          closeElectronApplicationCooperatively(acquiredApplication),
+        );
         const acquiredShell = await acquiredApplication.firstWindow();
         await expect
           .poll(() =>

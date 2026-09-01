@@ -39,6 +39,7 @@ let targetObservationEnabled = false;
 let targetObservationFailure = null;
 let targetObservationPromise = Promise.resolve();
 let targetObservationTimer = null;
+let targetRootIdentity = null;
 let targetState = targetStates.idle;
 
 process.on("SIGTERM", () => {
@@ -179,8 +180,19 @@ function rememberTargetIdentities(identities) {
 async function observeTargetTree() {
   if (target === null || !isSafePid(target.pid)) return;
   const identities = await readProcessIdentityTable();
+  if (targetRootIdentity === null) {
+    const candidate = findProcessIdentity(identities, target.pid);
+    if (
+      candidate === null ||
+      candidate.parentPid !== process.pid ||
+      candidate.processGroupId !== process.pid
+    ) {
+      throw new Error("Sentinel could not attest the target root identity");
+    }
+    targetRootIdentity = candidate;
+  }
   rememberTargetIdentities(
-    selectDescendantProcessIdentities(identities, target.pid),
+    selectDescendantProcessIdentities(identities, targetRootIdentity),
   );
 }
 
@@ -299,8 +311,8 @@ async function beginTermination(message) {
     throw new Error("Sentinel process identities changed before retirement");
   }
   const targetIdentities =
-    target !== null && isSafePid(target.pid)
-      ? selectDescendantProcessIdentities(identities, target.pid)
+    targetRootIdentity !== null
+      ? selectDescendantProcessIdentities(identities, targetRootIdentity)
       : [];
   const groupIdentities = selectProcessGroupIdentities(identities, process.pid);
   const recordedIdentities = uniqueIdentities([

@@ -6,7 +6,12 @@ import { _electron as electron, expect, test } from "@playwright/test";
 import { build } from "esbuild";
 
 import { createElectronLaunchProfile } from "../../../scripts/electron-launch-profile.mjs";
-import { runWithIndependentCleanup } from "../../../scripts/production-desktop-resource-safety.mjs";
+import {
+  acquireWithLocalCleanup,
+  closeElectronApplicationCooperatively,
+  runWithIndependentCleanup,
+  trackElectronApplicationForCooperativeCleanup,
+} from "../../../scripts/production-desktop-resource-safety.mjs";
 
 test("closing the parent during calculator startup leaves no orphaned renderer", async () => {
   const cleanupTasks: (() => Promise<void>)[] = [];
@@ -48,27 +53,32 @@ test("closing the parent during calculator startup leaves no orphaned renderer",
     });
 
     const launchProfile = createElectronLaunchProfile();
-    const application = await electron.launch({
-      args: [
-        ...launchProfile.args,
-        `--user-data-dir=${userDataDirectory}`,
-        fixturePath,
-        outputDirectory,
-        resultPath,
-      ],
-      env: launchProfile.env,
-      ...(launchProfile.chromiumSandbox === undefined
-        ? {}
-        : { chromiumSandbox: launchProfile.chromiumSandbox }),
-    });
-    cleanupTasks.unshift(async () => {
-      const child = application.process();
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      const exited = new Promise<void>((resolve) =>
-        child.once("exit", () => resolve()),
+    await acquireWithLocalCleanup(async (registerCleanup) => {
+      const acquiredApplication = await electron.launch({
+        args: [
+          ...launchProfile.args,
+          `--user-data-dir=${userDataDirectory}`,
+          fixturePath,
+          outputDirectory,
+          resultPath,
+        ],
+        env: launchProfile.env,
+        ...(launchProfile.chromiumSandbox === undefined
+          ? {}
+          : { chromiumSandbox: launchProfile.chromiumSandbox }),
+      });
+      const child = acquiredApplication.process();
+      registerCleanup(() =>
+        child.exitCode === null && child.signalCode === null
+          ? acquiredApplication.close()
+          : undefined,
       );
-      child.kill("SIGKILL");
-      await exited;
+      await trackElectronApplicationForCooperativeCleanup(acquiredApplication);
+      const cleanup = () =>
+        closeElectronApplicationCooperatively(acquiredApplication);
+      registerCleanup(cleanup);
+      cleanupTasks.unshift(cleanup);
+      return acquiredApplication;
     });
 
     await expect

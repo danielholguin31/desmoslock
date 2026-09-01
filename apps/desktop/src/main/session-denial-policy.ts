@@ -144,12 +144,20 @@ export function installSessionDenialPolicy(
         targetSession.removeListener("select-serial-port", handleSerialPort),
       () => targetSession.removeListener("will-download", handleDownload),
     ];
+    const failures: unknown[] = [];
     for (const reset of resets) {
       try {
         reset();
-      } catch {
+      } catch (error) {
         // Every remaining fail-closed reset still gets a chance to run.
+        failures.push(error);
       }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "Electron session denial-policy uninstall failed",
+      );
     }
   };
 }

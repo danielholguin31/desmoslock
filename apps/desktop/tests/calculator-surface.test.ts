@@ -402,6 +402,12 @@ describe("calculator surface boundary", () => {
     const initializationFailure = new Error(
       "calculator document failed to load",
     );
+    const removeChildFailure = new Error(
+      "calculator detach failed during initialization",
+    );
+    const webContentsCloseFailure = new Error(
+      "calculator close failed during initialization",
+    );
     const failures = {
       auth: new Error("auth cleanup failed"),
       cache: new Error("cache cleanup failed"),
@@ -410,6 +416,8 @@ describe("calculator surface boundary", () => {
     };
     const harness = createElectronSurfaceHarness(failures, {
       loadUrlFailure: initializationFailure,
+      removeChildFailure,
+      webContentsCloseFailure,
     });
     const { outputDirectory, temporaryRoot } =
       await createCalculatorOutputDirectory();
@@ -426,6 +434,8 @@ describe("calculator surface boundary", () => {
         expect.objectContaining({
           errors: [
             initializationFailure,
+            removeChildFailure,
+            webContentsCloseFailure,
             failures.storage,
             failures.cache,
             failures.auth,
@@ -434,6 +444,8 @@ describe("calculator surface boundary", () => {
           message: "CalculatorSurface initialization and cleanup both failed",
         }),
       );
+      expect(harness.rendererTeardown.removeChildView).toHaveBeenCalledOnce();
+      expect(harness.rendererTeardown.close).toHaveBeenCalledOnce();
       expect(harness.cleanup.clearStorageData).toHaveBeenCalledOnce();
       expect(harness.cleanup.clearCache).toHaveBeenCalledOnce();
       expect(harness.cleanup.clearAuthCache).toHaveBeenCalledOnce();

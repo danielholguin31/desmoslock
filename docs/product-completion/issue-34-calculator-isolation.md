@@ -1,9 +1,14 @@
 # Issue 34 calculator-isolation boundary
 
-Issue 34 is implemented for the internal pre-release line with an authorized,
-repository-owned local graphing surface. The surface preserves the observable
-expression, plot, removal, and zoom interactions needed to verify containment without
-importing recovered code or acquiring third-party calculator content.
+**Completion status: incomplete.** The repository implements and verifies the internal
+pre-release containment boundary with an authorized, repository-owned local graphing
+surface. Issue 34 must remain open until both external gates below are satisfied: the
+owner supplies documented Desmos embedding/redistribution rights plus the exact approved
+asset or origin manifest, and a human-bound receipt proves externally observable graphing
+behavior in the exact packaged macOS artifact. The local surface preserves expression,
+plot, removal, and zoom interactions for containment verification without importing
+recovered code or acquiring third-party calculator content; it does not satisfy either
+completion gate.
 
 The local surface is not the Desmos API and does not imply permission to redistribute or
 embed Desmos. Replacing it with literal Desmos content remains an external human
@@ -69,16 +74,21 @@ has disappeared. A retired or lost capability makes no later process-group syste
 so numeric ID reuse cannot redirect cleanup to an unrelated group.
 
 The harness verifies a normal bounded launch and requires `--inspect=0`,
-`--remote-debugging-port=0`, and `--remote-debugging-pipe` to exit nonzero. On macOS, the
-exact packaged executable must also reject `--no-sandbox` and
-`--disable-setuid-sandbox`, plus an otherwise sanitized launch that injects
-`ELECTRON_DISABLE_SANDBOX=1`. Each hostile launch must exit with the policy status before
-opening a window. The ordinary macOS package launch receives neither those switches nor
-the sandbox-disabling environment control. No launch may advertise a debugger listener
-or leave a same-group or recorded helper alive. Every Electron launch receives a small
-explicit platform environment rather than ambient parent variables. The seam removes the
-package and performs no signing, notarization, publication, deployment, or legacy-v1
-packaging.
+`--remote-debugging-port=0`, and `--remote-debugging-pipe` to exit with policy status 78.
+On macOS, it launches the executable inside the exact generated `.app` and requires every
+prohibited sandbox-weakening or process-inlining switch—including `--no-sandbox`,
+`--disable-gpu-sandbox`, `--disable-setuid-sandbox`, `--single-process`,
+`--in-process-gpu`, and the remaining enumerated policy controls—to exit with status 78.
+The rejection receipt is emitted by the real packaged main process and binds the result
+to its observed `app.isPackaged`, `process.argv`, and `app.commandLine` state; helper-only
+policy tests do not satisfy this seam. The exact packaged app also rejects an otherwise
+sanitized launch that injects `ELECTRON_DISABLE_SANDBOX=1`. Each hostile launch must exit
+before opening a window. The ordinary macOS package launch receives neither those
+switches nor the sandbox-disabling environment control. No launch may advertise a
+debugger listener or leave a same-group or recorded helper alive. Every Electron launch
+receives a small explicit platform environment rather than ambient parent variables. The
+seam removes the unsigned package and performs no signing, notarization, publication,
+deployment, or legacy-v1 packaging.
 
 This retirement proof covers the original process group and exact PID/start-time
 identities observed before termination on the host where the seam runs. Its success
@@ -93,12 +103,15 @@ compatibility profile; it produces neither a macOS package receipt nor an active
 Chromium-sandbox attestation. Windows execution fails closed until an atomic Job Object
 adapter can provide scoped containment; it does not fall back to leader-only termination.
 
-This automated evidence does not claim physical black-box calculator interaction in
-the package. That acceptance remains an issue 37 human/physical gate: XCUITest must
-drive the exact `.app` or mounted-DMG application on a visible clean Mac using
+This automated evidence does not complete issue 34 and does not claim physical black-box
+calculator interaction in the package. Exact packaged, externally observable graphing
+acceptance remains a human/physical gate (tracked with issue 37): XCUITest must drive the
+exact signed/notarized `.app` or mounted-DMG application on a visible clean Mac using
 OS-delivered clicks and typing, capture window screenshots, and prove visible plot
 creation, zoom change, expression removal, and plot disappearance through screenshot
 or pixel-delta receipts bound to the exact artifact. macOS Accessibility/Automation
 and likely Screen Recording approval are required human gates; no shipped diagnostic
 or test seam substitutes for them. The clean-Mac launch must use no sandbox-disabling
 control, but its UI receipt remains separate from an active Chromium-sandbox attestation.
+Until that receipt and the Desmos rights/exact-asset decision both exist, every #34
+completion receipt must report these as unmet gates.

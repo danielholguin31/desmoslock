@@ -1,6 +1,17 @@
+import type { ChildProcess } from "node:child_process";
 import type { EventEmitter } from "node:events";
 
 export type CleanupTask = () => Promise<unknown> | unknown;
+
+export function closeElectronApplicationCooperatively(application: {
+  close(): Promise<unknown> | unknown;
+  process(): ChildProcess;
+}): Promise<void>;
+
+export function trackElectronApplicationForCooperativeCleanup(application: {
+  close(): Promise<unknown> | unknown;
+  process(): ChildProcess;
+}): Promise<void>;
 
 export function acquireWithLocalCleanup<Result>(
   acquire: (

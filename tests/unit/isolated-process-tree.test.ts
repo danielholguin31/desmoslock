@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,7 +7,10 @@ import { describe, expect, it, vi } from "vitest";
 import { spawnIsolatedProcessTree } from "../../scripts/isolated-process-tree.mjs";
 import {
   findProcessIdentity,
+  parseProcessIdentityTable,
+  parseRetirementIdentityTable,
   readProcessIdentityTable,
+  selectDescendantProcessIdentities,
   waitForProcessIdentitiesToDisappear,
 } from "../../scripts/process-identity-table.mjs";
 
@@ -26,48 +28,41 @@ async function runIsolatedDriver(source: string): Promise<{
   stderr: string;
   stdout: string;
 }> {
-  const driver = spawn(
-    process.execPath,
-    ["--input-type=module", "--eval", source],
-    {
-      detached: true,
-      env: {},
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  if (!Number.isSafeInteger(driver.pid) || driver.pid <= 1) {
-    throw new Error("Isolated spawn-failure driver did not receive a safe pid");
+  const tree = await spawnIsolatedProcessTree({
+    arguments: ["--input-type=module", "--eval", source],
+    command: process.execPath,
+    cwd: process.cwd(),
+    environment: {},
+  });
+  let close;
+  let operationFailure: unknown = null;
+  try {
+    close = await tree.waitForClose(2_000);
+    if (close === null) {
+      throw new Error("Isolated spawn-failure driver timed out");
+    }
+  } catch (error) {
+    operationFailure = error;
   }
-  let stderr = "";
-  let stdout = "";
-  driver.stderr.setEncoding("utf8");
-  driver.stdout.setEncoding("utf8");
-  driver.stderr.on("data", (chunk) => {
-    stderr += chunk;
-  });
-  driver.stdout.on("data", (chunk) => {
-    stdout += chunk;
-  });
-
-  const result = await new Promise<{
-    code: number | null;
-    signal: NodeJS.Signals | null;
-  }>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      driver.kill("SIGKILL");
-      reject(new Error("Isolated spawn-failure driver timed out"));
-    }, 2_000);
-    driver.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    driver.once("close", (code, signal) => {
-      clearTimeout(timeout);
-      resolve({ code, signal });
-    });
-  });
-
-  return { ...result, stderr, stdout };
+  let cleanupFailure: unknown = null;
+  try {
+    await tree.terminate();
+  } catch (error) {
+    cleanupFailure = error;
+  }
+  throwCombinedErrors(
+    [operationFailure, cleanupFailure].filter((error) => error !== null),
+    "Isolated spawn-failure driver and cooperative cleanup both failed",
+  );
+  if (close === null || close === undefined) {
+    throw new Error("Isolated spawn-failure driver produced no close receipt");
+  }
+  return {
+    code: close.exitCode,
+    signal: close.signal,
+    stderr: close.stderr,
+    stdout: close.stdout,
+  };
 }
 
 async function waitForOutput(
@@ -145,6 +140,50 @@ function throwCombinedErrors(
     });
   }
 }
+
+describe("process identity table", () => {
+  const root = Object.freeze({
+    parentPid: 2,
+    processGroupId: 42,
+    processId: 42,
+    startedAt: "Mon Sep 1 12:34:56 2026",
+  });
+  const child = Object.freeze({
+    parentPid: 42,
+    processGroupId: 42,
+    processId: 43,
+    startedAt: "Mon Sep 1 12:34:57 2026",
+  });
+
+  it("does not walk descendants from a stale reused root pid", () => {
+    expect(
+      selectDescendantProcessIdentities([root, child], {
+        processId: root.processId,
+        startedAt: "Mon Sep 1 11:00:00 2026",
+      }),
+    ).toEqual([]);
+    expect(selectDescendantProcessIdentities([root, child], root)).toEqual([
+      root,
+      child,
+    ]);
+  });
+
+  it("fails closed on malformed or unsafe trusted-ps rows", () => {
+    expect(() =>
+      parseProcessIdentityTable(
+        "42 2 42 Mon Sep 1 12:34:56 2026\nmalformed row\n",
+      ),
+    ).toThrow("malformed process identity row");
+    expect(() =>
+      parseProcessIdentityTable(
+        "999999999999999999999 2 42 Mon Sep 1 12:34:56 2026\n",
+      ),
+    ).toThrow("Process identity is malformed");
+    expect(() =>
+      parseRetirementIdentityTable("42 definitely-not-a-start-time\n"),
+    ).toThrow("malformed retirement identity row");
+  });
+});
 
 describe("isolated process tree", () => {
   onlyPosix(

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertPackagedLaunchArguments,
   assertPackagedLaunchPolicy,
+  sandboxWeakeningOrInliningSwitchNames,
 } from "../src/main/packaged-launch-policy.js";
 
 describe("packaged launch policy", () => {
@@ -19,11 +20,13 @@ describe("packaged launch policy", () => {
           },
           "darwin",
         ),
-      ).toThrow("Packaged runtime forbids sandbox-disabling launch controls");
+      ).toThrow(
+        "Packaged runtime forbids sandbox-weakening or process-inlining launch controls",
+      );
     },
   );
 
-  it.each(["no-sandbox", "disable-setuid-sandbox"])(
+  it.each(sandboxWeakeningOrInliningSwitchNames)(
     "rejects effective %s command-line state in a packaged macOS executable",
     (sandboxDisablingSwitch) => {
       expect(() =>
@@ -38,7 +41,9 @@ describe("packaged launch policy", () => {
           },
           "darwin",
         ),
-      ).toThrow("Packaged runtime forbids sandbox-disabling launch controls");
+      ).toThrow(
+        "Packaged runtime forbids sandbox-weakening or process-inlining launch controls",
+      );
     },
   );
 
@@ -48,7 +53,12 @@ describe("packaged launch policy", () => {
         true,
         {
           arguments: ["DesmosLock", "--no-sandbox"],
-          commandLine: { hasSwitch: () => true },
+          commandLine: {
+            hasSwitch: (name) =>
+              sandboxWeakeningOrInliningSwitchNames.includes(
+                name as (typeof sandboxWeakeningOrInliningSwitchNames)[number],
+              ),
+          },
           environment: { ELECTRON_DISABLE_SANDBOX: "1" },
         },
         "linux",
@@ -70,29 +80,20 @@ describe("packaged launch policy", () => {
     ).not.toThrow();
   });
 
-  it("rejects --no-sandbox in a packaged macOS executable", () => {
-    expect(() =>
-      assertPackagedLaunchArguments(
-        true,
-        ["DesmosLock", "--no-sandbox"],
-        "darwin",
-      ),
-    ).toThrow(
-      "Packaged runtime forbids sandbox-disabling command-line switches",
-    );
-  });
-
-  it("rejects --disable-setuid-sandbox in a packaged macOS executable", () => {
-    expect(() =>
-      assertPackagedLaunchArguments(
-        true,
-        ["DesmosLock", "--disable-setuid-sandbox"],
-        "darwin",
-      ),
-    ).toThrow(
-      "Packaged runtime forbids sandbox-disabling command-line switches",
-    );
-  });
+  it.each(sandboxWeakeningOrInliningSwitchNames)(
+    "rejects --%s in a packaged macOS executable",
+    (name) => {
+      expect(() =>
+        assertPackagedLaunchArguments(
+          true,
+          ["DesmosLock", `--${name}`],
+          "darwin",
+        ),
+      ).toThrow(
+        "Packaged runtime forbids sandbox-weakening or process-inlining command-line switches",
+      );
+    },
+  );
 
   it.each([
     "--no-sandbox=true",
@@ -107,7 +108,7 @@ describe("packaged launch policy", () => {
       expect(() =>
         assertPackagedLaunchArguments(true, ["DesmosLock", argument], "darwin"),
       ).toThrow(
-        "Packaged runtime forbids sandbox-disabling command-line switches",
+        "Packaged runtime forbids sandbox-weakening or process-inlining command-line switches",
       );
     },
   );
