@@ -1,4 +1,5 @@
-import { EventEmitter } from "node:events";
+import { spawn } from "node:child_process";
+import { EventEmitter, once } from "node:events";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -8,29 +9,89 @@ import {
   runIndependentCleanupTasks,
   runWithFinalizer,
   runWithIndependentCleanup,
+  trackElectronApplicationForCooperativeCleanup,
   waitForResourceAcquisition,
 } from "../../scripts/production-desktop-resource-safety.mjs";
+import {
+  findProcessIdentity,
+  readProcessIdentityTable,
+} from "../../scripts/process-identity-table.mjs";
 
 describe("production desktop verifier resource safety", () => {
-  it("closes an acquired application when readiness fails before the caller can retain it", async () => {
+  it("verifies recorded process retirement when readiness partially succeeds before failing", async () => {
     const readinessFailure = new Error("first window failed");
-    const application = {
-      close: vi.fn().mockResolvedValue(undefined),
-    };
-    const launch = vi.fn().mockResolvedValue(application);
-    const ready = vi.fn().mockRejectedValue(readinessFailure);
+    const descendantSource = [
+      'process.once("SIGTERM", () => {',
+      "  setTimeout(() => process.exit(0), 250);",
+      "});",
+      'process.send?.("ready");',
+      "setInterval(() => {}, 1_000);",
+    ].join("\n");
+    const applicationSource = [
+      'const { spawn } = require("node:child_process");',
+      `const descendant = spawn(process.execPath, ["-e", ${JSON.stringify(descendantSource)}], {`,
+      '  stdio: ["ignore", "ignore", "ignore", "ipc"],',
+      "});",
+      'descendant.once("message", () => {',
+      "  process.stdout.write(`ready:${descendant.pid}\\n`);",
+      "});",
+      'process.once("SIGTERM", () => {',
+      '  descendant.kill("SIGTERM");',
+      "  process.exit(0);",
+      "});",
+      "setInterval(() => {}, 1_000);",
+    ].join("\n");
+    const child = spawn(process.execPath, ["-e", applicationSource], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const [readyOutput] = await once(child.stdout, "data");
+      const descendantPid = Number(
+        String(readyOutput).trim().replace("ready:", ""),
+      );
+      const descendantIdentity = findProcessIdentity(
+        await readProcessIdentityTable(),
+        descendantPid,
+      );
+      expect(descendantIdentity).not.toBeNull();
+      const application = {
+        close: vi.fn(async () => {
+          const exit = once(child, "exit");
+          child.kill("SIGTERM");
+          await exit;
+        }),
+        firstWindow: vi.fn().mockRejectedValue(readinessFailure),
+        process: () => child,
+      };
+      const launch = vi.fn().mockResolvedValue(application);
+      const ready = vi.fn(async () => {
+        await trackElectronApplicationForCooperativeCleanup(application);
+        await application.firstWindow();
+      });
 
-    await expect(
-      acquireReadyElectronApplication({
-        launch,
-        ready,
-      }),
-    ).rejects.toBe(readinessFailure);
+      await expect(
+        acquireReadyElectronApplication({
+          launch,
+          ready,
+        }),
+      ).rejects.toBe(readinessFailure);
 
-    expect(launch).toHaveBeenCalledOnce();
-    expect(ready).toHaveBeenCalledOnce();
-    expect(ready).toHaveBeenCalledWith(application);
-    expect(application.close).toHaveBeenCalledOnce();
+      expect(launch).toHaveBeenCalledOnce();
+      expect(ready).toHaveBeenCalledOnce();
+      expect(ready).toHaveBeenCalledWith(application);
+      expect(application.firstWindow).toHaveBeenCalledOnce();
+      expect(application.close).toHaveBeenCalledOnce();
+      expect(child.exitCode).toBe(0);
+      expect(
+        findProcessIdentity(await readProcessIdentityTable(), descendantPid),
+      ).not.toEqual(descendantIdentity);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const exit = once(child, "exit");
+        child.kill("SIGTERM");
+        await exit;
+      }
+    }
   });
 
   it("cleans earlier resources when a later acquisition fails before the caller can retain them", async () => {

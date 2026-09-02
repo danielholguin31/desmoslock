@@ -138,7 +138,7 @@ export async function acquireWithLocalCleanup(acquire) {
 export async function acquireReadyElectronApplication({ launch, ready }) {
   return acquireWithLocalCleanup(async (registerCleanup) => {
     const application = await launch();
-    registerCleanup(() => application.close());
+    registerCleanup(() => closeElectronApplicationCooperatively(application));
     await ready(application);
     return application;
   });

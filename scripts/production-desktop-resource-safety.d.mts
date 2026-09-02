@@ -20,7 +20,10 @@ export function acquireWithLocalCleanup<Result>(
 ): Promise<Result>;
 
 export function acquireReadyElectronApplication<
-  Application extends { close(): Promise<unknown> | unknown },
+  Application extends {
+    close(): Promise<unknown> | unknown;
+    process(): ChildProcess;
+  },
 >(options: {
   launch(): Promise<Application> | Application;
   ready(application: Application): Promise<unknown> | unknown;
