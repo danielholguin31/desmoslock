@@ -129,15 +129,20 @@ function configurationError() {
 }
 
 function validateConnection(connection, environment) {
+  const expectedKeys =
+    environment === "staging"
+      ? [
+          "database",
+          "host",
+          "password",
+          "port",
+          "sslMode",
+          "sslRootCert",
+          "user",
+        ]
+      : ["database", "host", "password", "port", "sslMode", "user"];
   if (
-    !hasExactKeys(connection, [
-      "database",
-      "host",
-      "password",
-      "port",
-      "sslMode",
-      "user",
-    ]) ||
+    !hasExactKeys(connection, expectedKeys) ||
     typeof connection.database !== "string" ||
     !/^[A-Za-z0-9_.-]{1,63}$/u.test(connection.database) ||
     typeof connection.host !== "string" ||
@@ -159,8 +164,11 @@ function validateConnection(connection, environment) {
       (connection.sslMode !== "disable" ||
         (connection.host !== "127.0.0.1" && connection.host !== "[::1]"))) ||
     (environment === "staging" &&
-      connection.sslMode !== "require" &&
-      connection.sslMode !== "verify-full")
+      (connection.sslMode !== "verify-full" ||
+        typeof connection.sslRootCert !== "string" ||
+        !path.isAbsolute(connection.sslRootCert) ||
+        path.parse(connection.sslRootCert).root === connection.sslRootCert ||
+        connection.sslRootCert.includes("\0")))
   ) {
     configurationError();
   }
@@ -270,7 +278,15 @@ export function loadPostgresAdapterConfiguration(environment, profileAlias) {
           host: requiredProcessValue(environment, `${prefix}PGHOST`),
           password: requiredProcessValue(environment, `${prefix}PGPASSWORD`),
           port: requiredProcessValue(environment, `${prefix}PGPORT`),
-          sslMode: isStaging ? "require" : "disable",
+          sslMode: isStaging ? "verify-full" : "disable",
+          ...(isStaging
+            ? {
+                sslRootCert: requiredProcessValue(
+                  environment,
+                  "DESMOSLOCK_STAGING_PGSSLROOTCERT",
+                ),
+              }
+            : {}),
           user: requiredProcessValue(environment, `${prefix}PGUSER`),
         },
         environment: isStaging ? "staging" : "local",
@@ -296,6 +312,9 @@ function connectionEnvironment(connection) {
     PGPASSWORD: connection.password,
     PGPORT: connection.port,
     PGSSLMODE: connection.sslMode,
+    ...(connection.sslRootCert === undefined
+      ? {}
+      : { PGSSLROOTCERT: connection.sslRootCert }),
     PGUSER: connection.user,
   };
 }

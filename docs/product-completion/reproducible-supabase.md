@@ -148,7 +148,7 @@ Required executable-path fields are command-scoped:
 Connection fields are also command-scoped:
 
 - export reads only `DESMOSLOCK_STAGING_PGHOST`, `PGPORT`, `PGDATABASE`,
-  `PGUSER`, and `PGPASSWORD`
+  `PGUSER`, `PGPASSWORD`, and `PGSSLROOTCERT`
 - restore reads only `DESMOSLOCK_LOCAL_RESTORE_PGHOST`, `PGPORT`,
   `PGDATABASE`, `PGUSER`, and `PGPASSWORD`
 
@@ -156,12 +156,21 @@ Restore also requires `DESMOSLOCK_LOCAL_RESTORE_MARKER`, an opaque 32–128
 character local-target marker containing only letters, digits, `.`, `_`, or
 `-`. It is not read during export.
 
-Supply them through an approved credential-injection mechanism. The staging
-profile requires TLS. The local restore profile requires numeric loopback and
-disables TLS. PostgreSQL client executables must be absolute paths. Backup
-publication is POSIX-only and requires the system `/usr/bin/python3` launcher;
-it runs in isolated mode only long enough to `fchdir` the already-open root
-descriptor and immediately exec the exact current Node runtime.
+Supply them through an approved credential-injection mechanism.
+`DESMOSLOCK_STAGING_PGSSLROOTCERT` must be the absolute path to the operator's
+explicitly provisioned PEM CA bundle for the staging PostgreSQL certificate.
+The staging profile passes that path to libpq as `PGSSLROOTCERT` and fixes
+`PGSSLMODE=verify-full`, so both the certificate chain and the configured
+`DESMOSLOCK_STAGING_PGHOST` name must authenticate. A missing path, a relative
+path, or the filesystem root is rejected before a PostgreSQL subprocess runs;
+an absent, unreadable, malformed, or non-matching CA bundle is refused by
+libpq. The operator does not inherit a home-directory certificate or ambient
+system trust configuration. The local restore profile remains numeric loopback,
+passes `PGSSLMODE=disable`, and does not read or pass the staging CA path.
+PostgreSQL client executables must be absolute paths. Backup publication is
+POSIX-only and requires the system `/usr/bin/python3` launcher; it runs in
+isolated mode only long enough to `fchdir` the already-open root descriptor and
+immediately exec the exact current Node runtime.
 
 Before export, independently obtain and record the non-secret PostgreSQL cluster
 `system_identifier` for the intended staging project. Then use an absolute,

@@ -40,7 +40,8 @@ const configuration = {
         host: "db.synthetic.invalid",
         password: "synthetic-staging-test-password",
         port: "5432",
-        sslMode: "require",
+        sslMode: "verify-full",
+        sslRootCert: "/operator-trust/staging-root-ca.pem",
         user: "postgres.synthetic",
       },
       environment: "staging",
@@ -257,6 +258,7 @@ test("operator process configuration reads only the selected command profile", (
       DESMOSLOCK_STAGING_PGHOST: "db.synthetic.invalid",
       DESMOSLOCK_STAGING_PGPASSWORD: "synthetic-staging-test-password",
       DESMOSLOCK_STAGING_PGPORT: "5432",
+      DESMOSLOCK_STAGING_PGSSLROOTCERT: "/operator-trust/staging-root-ca.pem",
       DESMOSLOCK_STAGING_PGUSER: "postgres.synthetic",
       UNRELATED_CREDENTIAL: "must-not-be-read",
     },
@@ -321,6 +323,28 @@ test("operator process configuration reads only the selected command profile", (
     () => loadPostgresAdapterConfiguration({}, "staging"),
     /POSTGRES_ADAPTER_CONFIGURATION_INVALID/,
   );
+  for (const sslRootCert of [undefined, "relative/root-ca.pem", "/"]) {
+    assert.throws(
+      () =>
+        loadPostgresAdapterConfiguration(
+          {
+            DESMOSLOCK_PG_DUMP_PATH: "/operator-tools/pg_dump",
+            DESMOSLOCK_PG_RESTORE_PATH: "/operator-tools/pg_restore",
+            DESMOSLOCK_PSQL_PATH: "/operator-tools/psql",
+            DESMOSLOCK_STAGING_PGDATABASE: "postgres",
+            DESMOSLOCK_STAGING_PGHOST: "db.synthetic.invalid",
+            DESMOSLOCK_STAGING_PGPASSWORD: "synthetic-staging-test-password",
+            DESMOSLOCK_STAGING_PGPORT: "5432",
+            ...(sslRootCert === undefined
+              ? {}
+              : { DESMOSLOCK_STAGING_PGSSLROOTCERT: sslRootCert }),
+            DESMOSLOCK_STAGING_PGUSER: "postgres.synthetic",
+          },
+          "staging",
+        ),
+      /POSTGRES_ADAPTER_CONFIGURATION_INVALID/,
+    );
+  }
   assert.throws(
     () => loadPostgresAdapterConfiguration({}, "unknown"),
     /POSTGRES_ADAPTER_CONFIGURATION_INVALID/,
@@ -467,12 +491,21 @@ test("Postgres adapter keeps credentials out of argv and exposes only symbolic d
     calls[0].environment.PGPASSWORD,
     "synthetic-staging-test-password",
   );
+  for (const call of calls.slice(0, 2)) {
+    assert.equal(call.environment.PGSSLMODE, "verify-full");
+    assert.equal(
+      call.environment.PGSSLROOTCERT,
+      "/operator-trust/staging-root-ca.pem",
+    );
+  }
   assert.equal(calls[2].environment.PGPASSWORD, undefined);
   assert.deepEqual(calls[3].input, archive);
   assert.equal(
     calls[4].environment.PGPASSWORD,
     "synthetic-local-test-password",
   );
+  assert.equal(calls[4].environment.PGSSLMODE, "disable");
+  assert.equal(calls[4].environment.PGSSLROOTCERT, undefined);
   assert.match(
     calls[4].input.toString("utf8"),
     /begin isolation level serializable/i,
