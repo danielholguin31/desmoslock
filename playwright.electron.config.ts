@@ -10,4 +10,10 @@ export default defineConfig({
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
   },
+  webServer: {
+    command: "node scripts/serve-backend-health-fixture.mjs 43175",
+    reuseExistingServer: false,
+    timeout: 30_000,
+    url: "http://127.0.0.1:43175/functions/v1/health",
+  },
 });

@@ -6,6 +6,7 @@ import { verifyEvidenceContract } from "./repository-contract/evidence-contract.
 import { verifyLegacyQuarantineContract } from "./repository-contract/legacy-quarantine-contract.mjs";
 import { readJson } from "./repository-contract/shared.mjs";
 import { verifySourceReconciliationContract } from "./repository-contract/source-reconciliation-contract.mjs";
+import { verifySupabaseContract } from "./repository-contract/supabase-contract.mjs";
 import { verifyWorkspaceContract } from "./repository-contract/workspace-contract.mjs";
 
 const repositoryRoot = path.resolve(
@@ -22,6 +23,7 @@ verifyLegacyQuarantineContract(repositoryRoot, reconciliation.draftRelease);
 verifySourceReconciliationContract(repositoryRoot, reconciliation);
 verifyEvidenceContract(repositoryRoot, reconciliation.retainedEvidence);
 verifyCiContract(repositoryRoot);
+verifySupabaseContract(repositoryRoot);
 
 process.stdout.write(
   "Repository contract verified: v2-only workspaces and release paths are guarded.\n",

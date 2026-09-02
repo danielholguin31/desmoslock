@@ -7,7 +7,11 @@ test("v2 web artifact exposes only the internal foundation surface", async ({
 
   await expect(page.getByRole("heading", { name: "DesmosLock" })).toBeVisible();
   await expect(page.locator("[data-v2-status]")).toHaveText(
-    "Internal foundation only — customer flows are not enabled",
+    "Synthetic backend ready",
+  );
+  await expect(page.locator("[data-v2-status]")).toHaveAttribute(
+    "data-backend-status",
+    "ready",
   );
   await expect(page.locator("form")).toHaveCount(0);
   await expect(

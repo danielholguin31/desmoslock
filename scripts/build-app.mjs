@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
 
+import { parsePublicBackendConfiguration } from "../packages/contracts/dist/index.js";
+
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -17,6 +19,23 @@ if (appName !== "desktop" && appName !== "web") {
 const appRoot = path.join(repositoryRoot, "apps", appName);
 const sourceRoot = path.join(appRoot, "src");
 const outputRoot = path.join(appRoot, "dist");
+const publicBackendConfiguration = parsePublicBackendConfiguration({
+  environment: process.env.DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT,
+  url: process.env.DESMOSLOCK_PUBLIC_BACKEND_URL,
+});
+
+if (publicBackendConfiguration === null) {
+  throw new Error("Public backend build configuration is invalid");
+}
+
+const browserDefine = {
+  __DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT__: JSON.stringify(
+    publicBackendConfiguration.environment,
+  ),
+  __DESMOSLOCK_PUBLIC_BACKEND_URL__: JSON.stringify(
+    publicBackendConfiguration.url,
+  ),
+};
 
 await fs.rm(outputRoot, { force: true, recursive: true });
 await fs.mkdir(outputRoot, { recursive: true });
@@ -24,6 +43,7 @@ await fs.mkdir(outputRoot, { recursive: true });
 if (appName === "desktop") {
   await build({
     bundle: true,
+    define: browserDefine,
     entryPoints: [
       path.join(sourceRoot, "main.ts"),
       path.join(sourceRoot, "preload.ts"),
@@ -37,6 +57,7 @@ if (appName === "desktop") {
   });
   await build({
     bundle: true,
+    define: browserDefine,
     entryPoints: [path.join(sourceRoot, "renderer.ts")],
     format: "esm",
     outdir: outputRoot,
@@ -51,6 +72,7 @@ if (appName === "desktop") {
 } else {
   await build({
     bundle: true,
+    define: browserDefine,
     entryPoints: [path.join(sourceRoot, "main.ts")],
     format: "esm",
     outdir: outputRoot,

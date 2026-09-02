@@ -1,5 +1,7 @@
 import type { WorkspaceSummary } from "@desmoslock/contracts";
 
+import { updateWebBackendStatus } from "./backend-status.js";
+
 export const internalWorkspacePreview: readonly WorkspaceSummary[] = [];
 
 const status =
@@ -8,6 +10,5 @@ const status =
     : document.querySelector<HTMLElement>("[data-v2-status]");
 
 if (status !== null) {
-  status.textContent =
-    "Internal foundation only — customer flows are not enabled";
+  void updateWebBackendStatus(status, globalThis.fetch.bind(globalThis));
 }

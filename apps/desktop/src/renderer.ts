@@ -1,5 +1,7 @@
+import { updateDesktopBackendStatus } from "./backend-status.js";
+
 const status = document.querySelector<HTMLElement>("[data-v2-status]");
 
 if (status !== null) {
-  status.textContent = "DesmosLock v2 internal workspace";
+  void updateDesktopBackendStatus(status, globalThis.fetch.bind(globalThis));
 }

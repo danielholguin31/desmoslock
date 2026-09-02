@@ -14,7 +14,12 @@ published, or presented as current product behavior.
 
 - Repository: `danielholguin31/desmoslock`
 - Integration branch: `main`
-- Product source: `apps/`, `packages/`, and the v2 migrations under `supabase/`
+- Product source: `apps/`, `packages/`, `supabase/config.toml`,
+  `supabase/functions/deno.json`, `supabase/functions/health/`,
+  `supabase/migrations/`, `supabase/seed.sql`, and
+  `supabase/tests/database/`
+- Operations source: `scripts/synthetic-backup/` for the synthetic-only backup
+  and local-restore boundary
 - Dependency source: the root `package.json` and root `package-lock.json`
 - Required verification: `.github/workflows/ci.yml` and
   `.github/workflows/security.yml`
@@ -25,6 +30,10 @@ Every future artifact must be built from a reviewed commit contained in `main`,
 with root, workspace, internal-dependency, and lockfile versions in agreement.
 Creating that signed, immutable v2 pipeline is later work; no legacy workflow or
 branch may substitute for it.
+
+These exact Supabase and operator paths are canonical only for the reviewed v2
+internal baseline. They do not confer authority on legacy standalone SQL,
+including `supabase/enterprise.sql`, or on any legacy deployment/operator path.
 
 This local reconciliation does not complete issue 29. Downstream v2 behavior,
 CI evidence for the exact merged head, remote pull-request and branch cleanup,
@@ -45,11 +54,17 @@ npm run format:check
 npm run lint
 npm run typecheck
 npm test
-npm run build
+DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=local \
+DESMOSLOCK_PUBLIC_BACKEND_URL=http://127.0.0.1:54321 \
+  npm run build
 ```
 
+Both public backend values are mandatory. An absent or partial configuration
+fails before bundling; there is no implicit loopback or staging default.
+
 The disposable v2 database starts from `supabase/migrations/` and
-`supabase/seed.sql`. It does not import legacy users or product rows.
+`supabase/seed.sql`. It does not import legacy users or product rows. The
+generation-3 seed creates only the fixed two-School synthetic internal baseline.
 
 ```bash
 npm run db:start
@@ -57,6 +72,11 @@ npm run db:reset
 npm run test:db
 npm run db:stop
 ```
+
+See
+[`docs/product-completion/reproducible-supabase.md`](docs/product-completion/reproducible-supabase.md)
+for the public health/configuration contract, synthetic-only export and
+seven-table local restore operator, and the remote staging human gate.
 
 The repository contract can also be checked directly:
 

@@ -11,10 +11,18 @@ export default defineConfig({
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
   },
-  webServer: {
-    command: "node scripts/serve-static.mjs apps/web/dist 43173",
-    reuseExistingServer: false,
-    timeout: 30_000,
-    url: "http://127.0.0.1:43173",
-  },
+  webServer: [
+    {
+      command: "node scripts/serve-static.mjs apps/web/dist 43173",
+      reuseExistingServer: false,
+      timeout: 30_000,
+      url: "http://127.0.0.1:43173",
+    },
+    {
+      command: "node scripts/serve-backend-health-fixture.mjs 43174",
+      reuseExistingServer: false,
+      timeout: 30_000,
+      url: "http://127.0.0.1:43174/functions/v1/health",
+    },
+  ],
 });
