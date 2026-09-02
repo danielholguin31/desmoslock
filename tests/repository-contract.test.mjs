@@ -10,6 +10,7 @@ import {
   assertLegacyReleaseTombstone,
   expectedLegacyReleaseTombstone,
 } from "../scripts/release-tombstone-contract.mjs";
+import { assertSupabaseAuthConfiguration } from "../scripts/repository-contract/supabase-contract.mjs";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -242,6 +243,63 @@ test("generation-3 Supabase configuration is versioned and fails closed", () => 
   assert.match(authSection, /^additional_redirect_urls = \[\]$/mu);
   assert.match(authSection, /^enable_signup = false$/mu);
   assert.match(authSection, /^enable_anonymous_sign_ins = false$/mu);
+  assert.doesNotThrow(() => assertSupabaseAuthConfiguration(configuration));
+  for (const [label, unsafeConfiguration] of [
+    [
+      "site URL made routable",
+      configuration.replace(
+        'site_url = "https://desmoslock.invalid"',
+        'site_url = "https://example.com"',
+      ),
+    ],
+    [
+      "redirect added",
+      configuration.replace(
+        "additional_redirect_urls = []",
+        'additional_redirect_urls = ["https://example.com"]',
+      ),
+    ],
+    [
+      "global signup enabled",
+      configuration.replace("enable_signup = false", "enable_signup = true"),
+    ],
+    [
+      "anonymous sign-in enabled",
+      configuration.replace(
+        "enable_anonymous_sign_ins = false",
+        "enable_anonymous_sign_ins = true",
+      ),
+    ],
+    [
+      "email confirmations disabled",
+      configuration.replace(
+        "enable_confirmations = true",
+        "enable_confirmations = false",
+      ),
+    ],
+    [
+      "email resend interval reduced",
+      configuration.replace('max_frequency = "1m"', 'max_frequency = "1s"'),
+    ],
+    [
+      "email OTP shortened",
+      configuration.replace("otp_length = 8", "otp_length = 6"),
+    ],
+    [
+      "TOTP enrollment disabled",
+      configuration.replace("enroll_enabled = true", "enroll_enabled = false"),
+    ],
+    [
+      "TOTP verification disabled",
+      configuration.replace("verify_enabled = true", "verify_enabled = false"),
+    ],
+  ]) {
+    assert.throws(
+      () => assertSupabaseAuthConfiguration(unsafeConfiguration),
+      undefined,
+      label,
+    );
+  }
   assert.deepEqual(
     [...runbook.matchAll(/^npm run build(?::[a-z-]+)?$/gmu)].map(
       ([command]) => command,

@@ -66,9 +66,14 @@ npm run test:electron
 The web and desktop tests build against a credential-free loopback health
 fixture and verify the same public contract through their rendered status.
 The versioned Auth configuration is intentionally fail-closed for this ticket:
-it uses a non-routable placeholder origin and disables email and anonymous
-signup. Issue 31 must replace that placeholder only as part of its separately
-reviewed identity and session design.
+it uses a non-routable placeholder origin and disables global and anonymous
+signup. It also explicitly preserves the hosted-safe Auth settings that differ
+from Supabase CLI defaults: email confirmations remain required, email resend
+frequency remains one minute, email OTPs remain eight digits, and TOTP
+enrollment and verification remain enabled. These values must be explicit
+because `supabase config push` includes defaults for omitted supported fields.
+Issue 31 must replace the placeholder only as part of its separately reviewed
+identity and session design.
 
 The public build configuration has exactly two fields:
 
@@ -250,9 +255,27 @@ through a separate approved cleanup procedure.
 
 ## Remote staging human gate
 
-No hosted project, credential, deployment, or remote configuration was changed
-while implementing this ticket. An authorized operator must perform and record
-all of the following later:
+The guarded Supabase CLI 2.115.0 configuration pass applied only the intended
+API schema allowlist change. Its bundled Auth diff was declined because the
+previous local file omitted supported fields and would have disabled TOTP
+enrollment and verification, disabled email confirmations, reduced email
+resend frequency from one minute to one second, and shortened email OTPs from
+eight digits to six. The approved non-routable `site_url` and global
+`enable_signup = false` settings were then applied individually through the
+dashboard; none of the unsafe Auth changes were applied.
+
+The repository now pins the corresponding supported CLI fields as
+`auth.email.enable_confirmations = true`, `auth.email.max_frequency = "1m"`,
+`auth.email.otp_length = 8`,
+`auth.mfa.totp.enroll_enabled = true`, and
+`auth.mfa.totp.verify_enabled = true`. The repository contract rejects removal
+or regression of any of these fields as well as the fail-closed site URL,
+global signup, anonymous sign-in, and redirect allowlist settings.
+
+This regression-fix follow-up made no further hosted call and does not provide
+evidence for a database migration, seed, function deployment, backup, or
+restore. An authorized operator must complete or provide the missing receipts
+for the unresolved gates:
 
 1. Select a newly created, empty, synthetic-only staging project and independently
    record its project identity and PostgreSQL `system_identifier`.
@@ -261,12 +284,13 @@ all of the following later:
 3. Link the Supabase CLI using an approved account and credential channel, then
    independently read back the linked project identity.
 4. Review the versioned `supabase/config.toml`: the API schema allowlist must
-   include `desmoslock_v2`, `health` must remain public, and Auth must remain at
-   its fail-closed placeholder with signup disabled for issue 30.
-5. Obtain explicit approval before `supabase config push`. That command has no
-   dry-run mode. Afterward, read back and record the hosted API, Auth, and
-   function settings instead of treating the local file as proof of remote
-   state.
+   include `desmoslock_v2`, `health` must remain public, and every explicit Auth
+   value above must remain unchanged for issue 30.
+5. Before any future `supabase config push`, inspect the complete diff and
+   obtain explicit approval for every proposed setting. That command has no
+   dry-run mode. Reject a bundled diff that changes an unapproved setting.
+   Afterward, read back and record the hosted API, Auth, and function settings
+   instead of treating the local file as proof of remote state.
 6. Review `supabase db push --linked --include-seed --skip-vault --dry-run`.
 7. After explicit approval, run the corresponding non-dry-run migration and seed.
 8. Set `DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN` through the approved hosted secret
