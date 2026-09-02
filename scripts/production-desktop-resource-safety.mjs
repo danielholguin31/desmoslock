@@ -138,7 +138,14 @@ export async function acquireWithLocalCleanup(acquire) {
 export async function acquireReadyElectronApplication({ launch, ready }) {
   return acquireWithLocalCleanup(async (registerCleanup) => {
     const application = await launch();
-    registerCleanup(() => closeElectronApplicationCooperatively(application));
+    let identityTrackingSucceeded = false;
+    registerCleanup(() =>
+      identityTrackingSucceeded
+        ? closeElectronApplicationCooperatively(application)
+        : application.close(),
+    );
+    await trackElectronApplicationForCooperativeCleanup(application);
+    identityTrackingSucceeded = true;
     await ready(application);
     return application;
   });

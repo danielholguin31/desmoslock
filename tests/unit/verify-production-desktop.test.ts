@@ -9,7 +9,6 @@ import {
   runIndependentCleanupTasks,
   runWithFinalizer,
   runWithIndependentCleanup,
-  trackElectronApplicationForCooperativeCleanup,
   waitForResourceAcquisition,
 } from "../../scripts/production-desktop-resource-safety.mjs";
 import {
@@ -18,7 +17,7 @@ import {
 } from "../../scripts/process-identity-table.mjs";
 
 describe("production desktop verifier resource safety", () => {
-  it("verifies recorded process retirement when readiness partially succeeds before failing", async () => {
+  it("retires a descendant that outlives its leader when readiness fails", async () => {
     const readinessFailure = new Error("first window failed");
     const descendantSource = [
       'process.once("SIGTERM", () => {',
@@ -65,7 +64,6 @@ describe("production desktop verifier resource safety", () => {
       };
       const launch = vi.fn().mockResolvedValue(application);
       const ready = vi.fn(async () => {
-        await trackElectronApplicationForCooperativeCleanup(application);
         await application.firstWindow();
       });
 
@@ -92,6 +90,27 @@ describe("production desktop verifier resource safety", () => {
         await exit;
       }
     }
+  });
+
+  it("falls back to raw close when application identity tracking fails", async () => {
+    const trackingFailure = new Error("application process unavailable");
+    const application = {
+      close: vi.fn().mockResolvedValue(undefined),
+      process: vi.fn(() => {
+        throw trackingFailure;
+      }),
+    };
+    const ready = vi.fn();
+
+    await expect(
+      acquireReadyElectronApplication({
+        launch: vi.fn().mockResolvedValue(application),
+        ready,
+      }),
+    ).rejects.toBe(trackingFailure);
+
+    expect(application.close).toHaveBeenCalledOnce();
+    expect(ready).not.toHaveBeenCalled();
   });
 
   it("cleans earlier resources when a later acquisition fails before the caller can retain them", async () => {
