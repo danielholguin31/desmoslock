@@ -39,3 +39,55 @@ export function parseExactRecord(
     return null;
   }
 }
+
+export function parseExactArray(
+  value: unknown,
+  maximumLength: number,
+): readonly unknown[] | null {
+  if (!Array.isArray(value)) return null;
+
+  try {
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+    if (
+      lengthDescriptor === undefined ||
+      !("value" in lengthDescriptor) ||
+      !Number.isSafeInteger(lengthDescriptor.value) ||
+      lengthDescriptor.value < 0 ||
+      lengthDescriptor.value > maximumLength
+    ) {
+      return null;
+    }
+
+    const length = lengthDescriptor.value as number;
+    const ownKeys = Reflect.ownKeys(value);
+    if (
+      ownKeys.length !== length + 1 ||
+      !ownKeys.includes("length") ||
+      ownKeys.some(
+        (key) =>
+          typeof key !== "string" ||
+          (key !== "length" &&
+            (!/^(?:0|[1-9][0-9]*)$/u.test(key) || Number(key) >= length)),
+      )
+    ) {
+      return null;
+    }
+
+    const snapshot: unknown[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (
+        descriptor === undefined ||
+        !("value" in descriptor) ||
+        !descriptor.enumerable
+      ) {
+        return null;
+      }
+      snapshot.push(descriptor.value as unknown);
+    }
+
+    return snapshot;
+  } catch {
+    return null;
+  }
+}
