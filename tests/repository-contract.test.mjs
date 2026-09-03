@@ -417,6 +417,27 @@ test("generation-4 attests the exact normalized migration history", () => {
   );
 });
 
+test("the runbook names every runtime-only staff lifecycle backup guard", () => {
+  const runbook = readText("docs/product-completion/reproducible-supabase.md");
+  const runtimeLifecycleTables = [
+    "application_session_revocation_cutoffs",
+    "application_session_revocations",
+    "staff_audit_events",
+    "staff_invitations",
+    "staff_password_recovery_operations",
+  ];
+
+  assert.match(runbook, /five runtime-only staff lifecycle tables/u);
+  assert.doesNotMatch(runbook, /three staff lifecycle tables/u);
+  for (const table of runtimeLifecycleTables) {
+    assert.equal(
+      runbook.includes(`\`${table}\``),
+      true,
+      `${table} must remain explicit in the operator runbook`,
+    );
+  }
+});
+
 test("staff Auth schema and prerequisites have a required disposable CI lane", () => {
   const rootPackage = readJson("package.json");
   const workflow = readText(".github/workflows/ci.yml");

@@ -274,10 +274,13 @@ Restore refuses absolute or traversing artifact paths, noncanonical manifests,
 unknown fields, hash mismatches, links, oversized files, unexpected archive
 entries or rows, a changed migration set, a target that fails the exact
 database/system-identifier/server-side-local-marker attestation, source/target
-system-identifier collisions, and targets whose seven managed tables or three
-staff lifecycle tables are nonempty. The archive allowlist is exactly the seven
-synthetic tables, including `foundation_seed`; Auth, invitation, application
-revocation, and audit data are never added. The
+system-identifier collisions, and targets whose seven managed tables or any of
+the five runtime-only staff lifecycle tables are nonempty. Those runtime-only
+tables are `application_session_revocation_cutoffs`,
+`application_session_revocations`, `staff_audit_events`, `staff_invitations`,
+and `staff_password_recovery_operations`. The archive allowlist is exactly the
+seven synthetic tables, including `foundation_seed`; Auth, invitation,
+application revocation, password-recovery, and audit data are never added. The
 PostgreSQL adapter rejects every archive-rendered statement except an exact
 allowlist of harmless dump scaffolding and the seven validated `COPY` blocks.
 The generation-4 profile and Membership layouts accept PostgreSQL null markers
