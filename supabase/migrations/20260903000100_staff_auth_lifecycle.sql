@@ -193,7 +193,7 @@ create unique index staff_invitations_one_open_user_per_school
 create table desmoslock_v2.application_session_revocations (
   user_id uuid not null references auth.users (id) on delete restrict,
   session_id uuid not null,
-  workspace_id uuid not null references desmoslock_v2.workspaces (id) on delete restrict,
+  workspace_id uuid references desmoslock_v2.workspaces (id) on delete restrict,
   revoked_by_profile_id uuid not null references desmoslock_v2.profiles (id) on delete restrict,
   reason_code text not null,
   revoked_at timestamp with time zone not null default now(),
@@ -204,6 +204,49 @@ create table desmoslock_v2.application_session_revocations (
 
 create index application_session_revocations_session_lookup
   on desmoslock_v2.application_session_revocations (session_id, user_id);
+
+create table desmoslock_v2.staff_password_recovery_operations (
+  id uuid primary key,
+  auth_user_id uuid not null references auth.users (id) on delete restrict,
+  auth_session_id uuid not null unique,
+  profile_id uuid not null references desmoslock_v2.profiles (id) on delete restrict,
+  status text not null,
+  started_at timestamp with time zone not null default now(),
+  expires_at timestamp with time zone not null,
+  completed_at timestamp with time zone,
+  constraint staff_password_recovery_operations_status_check
+    check (status in ('sessions_revoked', 'completed')),
+  constraint staff_password_recovery_operations_expiry_check
+    check (expires_at > started_at),
+  constraint staff_password_recovery_operations_lifecycle_check
+    check (
+      (
+        status = 'sessions_revoked'
+        and completed_at is null
+      )
+      or (
+        status = 'completed'
+        and completed_at is not null
+        and completed_at >= started_at
+      )
+  )
+);
+
+create index staff_password_recovery_operations_user_status_window
+  on desmoslock_v2.staff_password_recovery_operations (
+    auth_user_id,
+    status,
+    expires_at
+  );
+
+create table desmoslock_v2.application_session_revocation_cutoffs (
+  user_id uuid primary key references auth.users (id) on delete restrict,
+  invalid_before timestamp with time zone not null,
+  last_recovery_operation_id uuid not null
+    references desmoslock_v2.staff_password_recovery_operations (id)
+    on delete restrict,
+  updated_at timestamp with time zone not null default now()
+);
 
 create table desmoslock_v2.staff_audit_events (
   id uuid primary key default gen_random_uuid(),
@@ -228,7 +271,9 @@ create table desmoslock_v2.staff_audit_events (
         'invitation_revoked',
         'membership_revoked',
         'session_revoked',
-        'account_recovery'
+        'account_recovery',
+        'password_recovery_sessions_revoked',
+        'password_recovery_completed'
       )
     ),
   constraint staff_audit_events_result_check
@@ -243,7 +288,9 @@ create table desmoslock_v2.staff_audit_events (
         'invitation_accepted',
         'invitation_expired',
         'invitation_revoked',
-        'membership_revoked'
+        'membership_revoked',
+        'recovery_sessions_revoked',
+        'recovery_completed'
       )
     )
 );
@@ -251,12 +298,18 @@ create table desmoslock_v2.staff_audit_events (
 alter table desmoslock_v2.staff_invitations enable row level security;
 alter table desmoslock_v2.application_session_revocations enable row level security;
 alter table desmoslock_v2.staff_audit_events enable row level security;
+alter table desmoslock_v2.staff_password_recovery_operations enable row level security;
+alter table desmoslock_v2.application_session_revocation_cutoffs enable row level security;
 
 revoke all on table desmoslock_v2.staff_invitations
   from public, anon, authenticated, service_role;
 revoke all on table desmoslock_v2.application_session_revocations
   from public, anon, authenticated, service_role;
 revoke all on table desmoslock_v2.staff_audit_events
+  from public, anon, authenticated, service_role;
+revoke all on table desmoslock_v2.staff_password_recovery_operations
+  from public, anon, authenticated, service_role;
+revoke all on table desmoslock_v2.application_session_revocation_cutoffs
   from public, anon, authenticated, service_role;
 
 create function desmoslock_v2.internal_reject_staff_audit_mutation()
@@ -375,6 +428,7 @@ declare
   current_email_confirmed_at timestamp with time zone;
   current_user_deleted_at timestamp with time zone;
   current_user_banned_until timestamp with time zone;
+  current_session_created_at timestamp with time zone;
   current_session_aal text;
   current_session_factor_id uuid;
   jwt_expiration text;
@@ -424,8 +478,14 @@ begin
     return;
   end if;
 
-  select auth_session.aal::text, auth_session.factor_id
-  into current_session_aal, current_session_factor_id
+  select
+    auth_session.created_at,
+    auth_session.aal::text,
+    auth_session.factor_id
+  into
+    current_session_created_at,
+    current_session_aal,
+    current_session_factor_id
   from auth.sessions as auth_session
   where auth_session.id = current_session_id
     and auth_session.user_id = current_user_id
@@ -442,10 +502,42 @@ begin
 
   if exists (
     select 1
-    from desmoslock_v2.application_session_revocations as revocation
-    where revocation.user_id = current_user_id
-      and revocation.session_id = current_session_id
+    from auth.mfa_amr_claims as amr_claim
+    where amr_claim.session_id = current_session_id
+      and amr_claim.authentication_method = 'recovery'
   ) then
+    return query
+      select 'forbidden'::text, current_user_id, current_session_id;
+    return;
+  end if;
+
+  if exists (
+      select 1
+      from desmoslock_v2.staff_password_recovery_operations as recovery_operation
+      where recovery_operation.auth_user_id = current_user_id
+        and recovery_operation.status = 'sessions_revoked'
+        and (
+          recovery_operation.expires_at > statement_timestamp()
+          or current_session_created_at is null
+          or current_session_created_at <= recovery_operation.expires_at
+        )
+    )
+    or exists (
+      select 1
+      from desmoslock_v2.application_session_revocations as revocation
+      where revocation.user_id = current_user_id
+        and revocation.session_id = current_session_id
+    )
+    or exists (
+      select 1
+      from desmoslock_v2.application_session_revocation_cutoffs as cutoff
+      where cutoff.user_id = current_user_id
+        and (
+          current_session_created_at is null
+          or current_session_created_at <= cutoff.invalid_before
+        )
+    )
+  then
     return query
       select 'session_revoked'::text, current_user_id, current_session_id;
     return;
@@ -474,6 +566,137 @@ end;
 $$;
 
 revoke all on function desmoslock_v2.internal_authenticated_staff_session(boolean)
+  from public, anon, authenticated, service_role;
+
+create function desmoslock_v2.internal_authenticated_recovery_session()
+returns table (
+  code text,
+  user_id uuid,
+  session_id uuid,
+  jwt_expires_at timestamp with time zone
+)
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  request_jwt jsonb;
+  current_user_id uuid;
+  current_session_id uuid;
+  current_email_confirmed_at timestamp with time zone;
+  current_user_deleted_at timestamp with time zone;
+  current_user_banned_until timestamp with time zone;
+  current_session_not_after timestamp with time zone;
+  jwt_expiration text;
+  parsed_jwt_expires_at timestamp with time zone;
+begin
+  request_jwt := auth.jwt();
+  current_user_id := auth.uid();
+  current_session_id := desmoslock_v2.internal_request_session_id();
+
+  if current_user_id is null then
+    return query
+      select 'unauthenticated'::text, null::uuid, null::uuid,
+        null::timestamp with time zone;
+    return;
+  end if;
+
+  select
+    auth_user.email_confirmed_at,
+    auth_user.deleted_at,
+    auth_user.banned_until
+  into
+    current_email_confirmed_at,
+    current_user_deleted_at,
+    current_user_banned_until
+  from auth.users as auth_user
+  where auth_user.id = current_user_id;
+
+  if not found or current_user_deleted_at is not null
+    or (
+      current_user_banned_until is not null
+      and current_user_banned_until > statement_timestamp()
+    )
+  then
+    return query
+      select 'unauthenticated'::text, null::uuid, null::uuid,
+        null::timestamp with time zone;
+    return;
+  end if;
+
+  if current_email_confirmed_at is null then
+    return query
+      select 'email_unverified'::text, current_user_id, null::uuid,
+        null::timestamp with time zone;
+    return;
+  end if;
+
+  jwt_expiration := request_jwt ->> 'exp';
+  if current_session_id is null
+    or jwt_expiration is null
+    or jwt_expiration !~ '^[0-9]{1,20}$'
+    or jwt_expiration::numeric <= extract(epoch from statement_timestamp())
+  then
+    return query
+      select 'session_expired'::text, current_user_id, null::uuid,
+        null::timestamp with time zone;
+    return;
+  end if;
+
+  begin
+    parsed_jwt_expires_at := to_timestamp(jwt_expiration::double precision);
+  exception
+    when datetime_field_overflow or numeric_value_out_of_range then
+      return query
+        select 'session_expired'::text, current_user_id, null::uuid,
+          null::timestamp with time zone;
+      return;
+  end;
+
+  select auth_session.not_after
+  into current_session_not_after
+  from auth.sessions as auth_session
+  where auth_session.id = current_session_id
+    and auth_session.user_id = current_user_id
+    and (
+      auth_session.not_after is null
+      or auth_session.not_after > statement_timestamp()
+    );
+
+  if not found then
+    return query
+      select 'session_expired'::text, current_user_id, current_session_id,
+        null::timestamp with time zone;
+    return;
+  end if;
+
+  if not exists (
+    select 1
+    from auth.mfa_amr_claims as amr_claim
+    where amr_claim.session_id = current_session_id
+      and amr_claim.authentication_method = 'recovery'
+  ) then
+    return query
+      select 'forbidden'::text, current_user_id, current_session_id,
+        null::timestamp with time zone;
+    return;
+  end if;
+
+  if current_session_not_after is not null then
+    parsed_jwt_expires_at := least(
+      parsed_jwt_expires_at,
+      current_session_not_after
+    );
+  end if;
+
+  return query
+    select 'ok'::text, current_user_id, current_session_id,
+      parsed_jwt_expires_at;
+end;
+$$;
+
+revoke all on function desmoslock_v2.internal_authenticated_recovery_session()
   from public, anon, authenticated, service_role;
 
 create function desmoslock_v2.internal_authorize_staff(
@@ -751,6 +974,7 @@ create function desmoslock_v2.current_staff_context()
 returns table (
   code text,
   profile_id uuid,
+  display_name text,
   school_id uuid,
   school_slug text,
   school_name text,
@@ -774,6 +998,7 @@ begin
     return query select
       session_result.code,
       null::uuid,
+      null::text,
       null::uuid,
       null::text,
       null::text,
@@ -787,6 +1012,7 @@ begin
     return query select
       'membership_inactive'::text,
       null::uuid,
+      null::text,
       null::uuid,
       null::text,
       null::text,
@@ -799,12 +1025,15 @@ begin
   select
     'ok'::text,
     current_profile_id,
+    profile.display_name,
     workspace.id,
     workspace.slug,
     workspace.display_name,
     membership.role,
     membership.role_revision
   from desmoslock_v2.memberships as membership
+  join desmoslock_v2.profiles as profile
+    on profile.id = membership.profile_id
   join desmoslock_v2.workspaces as workspace
     on workspace.id = membership.workspace_id
   where membership.profile_id = current_profile_id
@@ -815,6 +1044,7 @@ begin
     return query select
       'membership_inactive'::text,
       current_profile_id,
+      null::text,
       null::uuid,
       null::text,
       null::text,
@@ -827,6 +1057,220 @@ $$;
 revoke all on function desmoslock_v2.current_staff_context()
   from public, anon, authenticated, service_role;
 grant execute on function desmoslock_v2.current_staff_context() to authenticated;
+
+create function desmoslock_v2.internal_authorize_owner_management()
+returns table (
+  code text,
+  user_id uuid,
+  session_id uuid,
+  profile_id uuid
+)
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  session_result record;
+  current_profile_id uuid;
+begin
+  select *
+  into session_result
+  from desmoslock_v2.internal_authenticated_staff_session(true);
+
+  if session_result.code <> 'ok' then
+    return query select
+      session_result.code,
+      session_result.user_id,
+      session_result.session_id,
+      null::uuid;
+    return;
+  end if;
+
+  current_profile_id := desmoslock_v2.internal_current_profile();
+  if current_profile_id is null
+    or not exists (
+      select 1
+      from desmoslock_v2.memberships as membership
+      where membership.profile_id = current_profile_id
+        and membership.status = 'active'
+    )
+  then
+    return query select
+      'membership_inactive'::text,
+      session_result.user_id,
+      session_result.session_id,
+      current_profile_id;
+    return;
+  end if;
+
+  if not exists (
+    select 1
+    from desmoslock_v2.memberships as membership
+    where membership.profile_id = current_profile_id
+      and membership.role = 'owner'
+      and membership.status = 'active'
+  ) then
+    return query select
+      'forbidden'::text,
+      session_result.user_id,
+      session_result.session_id,
+      current_profile_id;
+    return;
+  end if;
+
+  return query select
+    'ok'::text,
+    session_result.user_id,
+    session_result.session_id,
+    current_profile_id;
+end;
+$$;
+
+revoke all on function desmoslock_v2.internal_authorize_owner_management()
+  from public, anon, authenticated, service_role;
+
+create function desmoslock_v2.current_manageable_staff()
+returns table (
+  code text,
+  school_id uuid,
+  profile_id uuid,
+  display_name text,
+  email text,
+  membership_role text
+)
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  authorization_result record;
+begin
+  select *
+  into authorization_result
+  from desmoslock_v2.internal_authorize_owner_management();
+
+  if authorization_result.code <> 'ok' then
+    return query select
+      authorization_result.code,
+      null::uuid,
+      null::uuid,
+      null::text,
+      null::text,
+      null::text;
+    return;
+  end if;
+
+  return query
+  select
+    'ok'::text,
+    target_membership.workspace_id,
+    target_profile.id,
+    target_profile.display_name,
+    desmoslock_v2.internal_normalize_staff_email(auth_user.email),
+    target_membership.role
+  from desmoslock_v2.memberships as owner_membership
+  join desmoslock_v2.memberships as target_membership
+    on target_membership.workspace_id = owner_membership.workspace_id
+  join desmoslock_v2.profiles as target_profile
+    on target_profile.id = target_membership.profile_id
+  join auth.users as auth_user
+    on auth_user.id = target_profile.auth_user_id
+  where owner_membership.profile_id = authorization_result.profile_id
+    and owner_membership.role = 'owner'
+    and owner_membership.status = 'active'
+    and target_membership.status = 'active'
+    and target_membership.role in ('admin', 'teacher')
+    and desmoslock_v2.internal_normalize_staff_email(auth_user.email) is not null
+  order by
+    target_membership.workspace_id,
+    lower(target_profile.display_name),
+    target_profile.id
+  limit 501;
+end;
+$$;
+
+revoke all on function desmoslock_v2.current_manageable_staff()
+  from public, anon, authenticated, service_role;
+grant execute on function desmoslock_v2.current_manageable_staff()
+  to authenticated;
+
+create function desmoslock_v2.current_manageable_staff_invitations()
+returns table (
+  code text,
+  invitation_id uuid,
+  school_id uuid,
+  invited_email text,
+  invited_role text,
+  invitation_status text,
+  expires_at timestamp with time zone
+)
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  authorization_result record;
+begin
+  select *
+  into authorization_result
+  from desmoslock_v2.internal_authorize_owner_management();
+
+  if authorization_result.code <> 'ok' then
+    return query select
+      authorization_result.code,
+      null::uuid,
+      null::uuid,
+      null::text,
+      null::text,
+      null::text,
+      null::timestamp with time zone;
+    return;
+  end if;
+
+  return query
+  select
+    'ok'::text,
+    invitation.id,
+    invitation.workspace_id,
+    invitation.invited_email_normalized,
+    invitation.role,
+    invitation.status,
+    case
+      when invitation.status = 'pending_delivery'
+        then invitation.delivery_lease_expires_at
+      else invitation.expires_at
+    end
+  from desmoslock_v2.memberships as owner_membership
+  join desmoslock_v2.staff_invitations as invitation
+    on invitation.workspace_id = owner_membership.workspace_id
+  where owner_membership.profile_id = authorization_result.profile_id
+    and owner_membership.role = 'owner'
+    and owner_membership.status = 'active'
+    and (
+      (
+        invitation.status = 'pending_delivery'
+        and invitation.delivery_lease_expires_at > statement_timestamp()
+      )
+      or (
+        invitation.status in ('delivery_ready', 'pending_acceptance')
+        and invitation.expires_at > statement_timestamp()
+      )
+    )
+  order by
+    invitation.workspace_id,
+    invitation.invited_email_normalized,
+    invitation.id
+  limit 501;
+end;
+$$;
+
+revoke all on function desmoslock_v2.current_manageable_staff_invitations()
+  from public, anon, authenticated, service_role;
+grant execute on function desmoslock_v2.current_manageable_staff_invitations()
+  to authenticated;
 
 create function desmoslock_v2.current_staff_invitations()
 returns table (
@@ -1523,7 +1967,7 @@ declare
 begin
   select *
   into session_result
-  from desmoslock_v2.internal_authenticated_staff_session(true);
+  from desmoslock_v2.internal_authenticated_staff_session(false);
 
   if session_result.code <> 'ok' then
     return query select session_result.code;
@@ -1901,7 +2345,6 @@ as $$
 declare
   session_result record;
   current_profile_id uuid;
-  membership_result record;
 begin
   select *
   into session_result
@@ -1930,32 +2373,13 @@ begin
     return;
   end if;
 
-  select membership.workspace_id, membership.role
-  into membership_result
-  from desmoslock_v2.memberships as membership
-  where membership.profile_id = current_profile_id
-    and membership.status = 'active'
-  order by membership.workspace_id
-  limit 1;
-
-  if not found then
-    return query select
-      'membership_inactive'::text,
-      session_result.user_id,
-      session_result.session_id,
-      current_profile_id,
-      null::uuid,
-      null::text;
-    return;
-  end if;
-
   return query select
     'ok'::text,
     session_result.user_id,
     session_result.session_id,
     current_profile_id,
-    membership_result.workspace_id,
-    membership_result.role;
+    null::uuid,
+    null::text;
 end;
 $$;
 
@@ -1973,7 +2397,7 @@ declare
 begin
   select *
   into authorization_result
-  from desmoslock_v2.internal_authorize_any_staff(true);
+  from desmoslock_v2.internal_authorize_any_staff(false);
 
   if authorization_result.code <> 'ok' then
     return query select authorization_result.code;
@@ -1989,7 +2413,7 @@ begin
   ) values (
     authorization_result.user_id,
     authorization_result.session_id,
-    authorization_result.workspace_id,
+    null,
     authorization_result.profile_id,
     'current_session'
   );
@@ -1997,7 +2421,7 @@ begin
   perform desmoslock_v2.internal_append_auth_event(
     'session_revoked',
     'ok',
-    authorization_result.workspace_id,
+    null,
     authorization_result.profile_id,
     authorization_result.profile_id,
     null,
@@ -2024,7 +2448,7 @@ declare
 begin
   select *
   into authorization_result
-  from desmoslock_v2.internal_authorize_any_staff(true);
+  from desmoslock_v2.internal_authorize_any_staff(false);
 
   if authorization_result.code <> 'ok' then
     return query select authorization_result.code;
@@ -2041,7 +2465,7 @@ begin
   select
     authorization_result.user_id,
     auth_session.id,
-    authorization_result.workspace_id,
+    null,
     authorization_result.profile_id,
     'account_recovery'
   from auth.sessions as auth_session
@@ -2051,7 +2475,7 @@ begin
   perform desmoslock_v2.internal_append_auth_event(
     'account_recovery',
     'ok',
-    authorization_result.workspace_id,
+    null,
     authorization_result.profile_id,
     authorization_result.profile_id,
     null,
@@ -2065,6 +2489,498 @@ $$;
 revoke all on function desmoslock_v2.revoke_all_current_user_staff_sessions()
   from public, anon, authenticated, service_role;
 grant execute on function desmoslock_v2.revoke_all_current_user_staff_sessions()
+  to authenticated;
+
+create function desmoslock_v2.begin_staff_password_recovery(
+  requested_operation_id uuid
+)
+returns table (
+  code text,
+  operation_id uuid,
+  expires_at timestamp with time zone
+)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  recovery_session record;
+  current_profile_id uuid;
+  existing_operation desmoslock_v2.staff_password_recovery_operations%rowtype;
+  operation_found boolean;
+  recovery_now timestamp with time zone;
+  operation_expires_at timestamp with time zone;
+begin
+  select *
+  into recovery_session
+  from desmoslock_v2.internal_authenticated_recovery_session();
+
+  if recovery_session.code <> 'ok' then
+    return query select
+      recovery_session.code,
+      null::uuid,
+      null::timestamp with time zone;
+    return;
+  end if;
+
+  if $1 is null then
+    return query select
+      'invalid_request'::text,
+      null::uuid,
+      null::timestamp with time zone;
+    return;
+  end if;
+
+  select profile.id
+  into current_profile_id
+  from desmoslock_v2.profiles as profile
+  where profile.auth_user_id = recovery_session.user_id
+  for update;
+
+  if not found then
+    return query select
+      'membership_inactive'::text,
+      null::uuid,
+      null::timestamp with time zone;
+    return;
+  end if;
+
+  select *
+  into existing_operation
+  from desmoslock_v2.staff_password_recovery_operations as operation
+  where operation.id = $1
+  for update;
+  operation_found := found;
+
+  -- Re-read provider authority after the per-profile serialization lock and
+  -- any exact operation-row lock. This prevents a waiting recovery request
+  -- from acting on pre-lock session state.
+  select *
+  into recovery_session
+  from desmoslock_v2.internal_authenticated_recovery_session();
+
+  if recovery_session.code <> 'ok' then
+    return query select
+      recovery_session.code,
+      null::uuid,
+      null::timestamp with time zone;
+    return;
+  end if;
+
+  -- The profile row is the per-account recovery serialization lock. Capture
+  -- one fresh wall-clock linearization point after that lock (and any exact
+  -- operation-row lock) rather than reusing the outer RPC statement start.
+  recovery_now := clock_timestamp();
+
+  if recovery_session.jwt_expires_at <= recovery_now then
+    return query select
+      'session_expired'::text,
+      null::uuid,
+      null::timestamp with time zone;
+    return;
+  end if;
+
+  if operation_found then
+    if existing_operation.auth_user_id <> recovery_session.user_id
+      or existing_operation.auth_session_id <> recovery_session.session_id
+      or existing_operation.profile_id <> current_profile_id
+    then
+      return query select
+        'conflict'::text,
+        null::uuid,
+        null::timestamp with time zone;
+      return;
+    end if;
+
+    if existing_operation.status = 'completed' then
+      return query select
+        'recovery_completed'::text,
+        existing_operation.id,
+        existing_operation.expires_at;
+      return;
+    end if;
+
+    if existing_operation.expires_at <= recovery_now then
+      return query select
+        'recovery_expired'::text,
+        null::uuid,
+        null::timestamp with time zone;
+      return;
+    end if;
+
+    return query select
+      'recovery_sessions_revoked'::text,
+      existing_operation.id,
+      existing_operation.expires_at;
+    return;
+  end if;
+
+  if not exists (
+    select 1
+    from auth.sessions as auth_session
+    where auth_session.id = recovery_session.session_id
+      and auth_session.user_id = recovery_session.user_id
+      and (
+        auth_session.not_after is null
+        or auth_session.not_after > recovery_now
+      )
+      and exists (
+        select 1
+        from auth.mfa_amr_claims as amr_claim
+        where amr_claim.session_id = auth_session.id
+          and amr_claim.authentication_method = 'recovery'
+      )
+      and not exists (
+        select 1
+        from desmoslock_v2.application_session_revocations as revocation
+        where revocation.user_id = recovery_session.user_id
+          and revocation.session_id = recovery_session.session_id
+      )
+      and not exists (
+        select 1
+        from desmoslock_v2.application_session_revocation_cutoffs as cutoff
+        where cutoff.user_id = recovery_session.user_id
+          and (
+            auth_session.created_at is null
+            or auth_session.created_at <= cutoff.invalid_before
+          )
+      )
+  ) then
+    return query select
+      'conflict'::text,
+      null::uuid,
+      null::timestamp with time zone;
+    return;
+  end if;
+
+  if exists (
+    select 1
+    from desmoslock_v2.staff_password_recovery_operations as operation
+    where operation.auth_user_id = recovery_session.user_id
+      and operation.auth_session_id <> recovery_session.session_id
+      and operation.status = 'sessions_revoked'
+      and operation.expires_at > recovery_now
+  ) then
+    return query select
+      'conflict'::text,
+      null::uuid,
+      null::timestamp with time zone;
+    return;
+  end if;
+
+  if exists (
+    select 1
+    from desmoslock_v2.staff_password_recovery_operations as operation
+    where operation.auth_session_id = recovery_session.session_id
+  ) then
+    return query select
+      'conflict'::text,
+      null::uuid,
+      null::timestamp with time zone;
+    return;
+  end if;
+
+  operation_expires_at := least(
+    recovery_now + interval '15 minutes',
+    recovery_session.jwt_expires_at
+  );
+  if operation_expires_at <= recovery_now then
+    return query select
+      'session_expired'::text,
+      null::uuid,
+      null::timestamp with time zone;
+    return;
+  end if;
+
+  begin
+    insert into desmoslock_v2.staff_password_recovery_operations (
+      id,
+      auth_user_id,
+      auth_session_id,
+      profile_id,
+      status,
+      started_at,
+      expires_at
+    ) values (
+      $1,
+      recovery_session.user_id,
+      recovery_session.session_id,
+      current_profile_id,
+      'sessions_revoked',
+      recovery_now,
+      operation_expires_at
+    );
+  exception
+    when unique_violation then
+      select *
+      into existing_operation
+      from desmoslock_v2.staff_password_recovery_operations as operation
+      where operation.id = $1
+      for update;
+      operation_found := found;
+
+      -- A uniqueness wait may outlive the first post-lock clock sample.
+      -- Re-read provider authority and refresh the clock before authorizing
+      -- an exact reconciliation result.
+      select *
+      into recovery_session
+      from desmoslock_v2.internal_authenticated_recovery_session();
+
+      if recovery_session.code <> 'ok' then
+        return query select
+          recovery_session.code,
+          null::uuid,
+          null::timestamp with time zone;
+        return;
+      end if;
+
+      recovery_now := clock_timestamp();
+
+      if recovery_session.jwt_expires_at <= recovery_now then
+        return query select
+          'session_expired'::text,
+          null::uuid,
+          null::timestamp with time zone;
+        return;
+      end if;
+
+      if operation_found
+        and existing_operation.auth_user_id = recovery_session.user_id
+        and existing_operation.auth_session_id = recovery_session.session_id
+        and existing_operation.profile_id = current_profile_id
+      then
+        if existing_operation.status = 'completed' then
+          return query select
+            'recovery_completed'::text,
+            existing_operation.id,
+            existing_operation.expires_at;
+          return;
+        end if;
+
+        if existing_operation.expires_at > recovery_now then
+          return query select
+            'recovery_sessions_revoked'::text,
+            existing_operation.id,
+            existing_operation.expires_at;
+          return;
+        end if;
+
+        return query select
+          'recovery_expired'::text,
+          null::uuid,
+          null::timestamp with time zone;
+        return;
+      end if;
+
+      return query select
+        'conflict'::text,
+        null::uuid,
+        null::timestamp with time zone;
+      return;
+  end;
+
+  insert into desmoslock_v2.application_session_revocations (
+    user_id,
+    session_id,
+    workspace_id,
+    revoked_by_profile_id,
+    reason_code
+  )
+  select
+    recovery_session.user_id,
+    auth_session.id,
+    null,
+    current_profile_id,
+    'account_recovery'
+  from auth.sessions as auth_session
+  where auth_session.user_id = recovery_session.user_id
+  on conflict (user_id, session_id) do nothing;
+
+  perform desmoslock_v2.internal_append_auth_event(
+    'password_recovery_sessions_revoked',
+    'recovery_sessions_revoked',
+    null,
+    current_profile_id,
+    current_profile_id,
+    null,
+    recovery_session.session_id
+  );
+
+  return query select
+    'recovery_sessions_revoked'::text,
+    $1,
+    operation_expires_at;
+end;
+$$;
+
+revoke all on function desmoslock_v2.begin_staff_password_recovery(uuid)
+  from public, anon, authenticated, service_role;
+grant execute on function desmoslock_v2.begin_staff_password_recovery(uuid)
+  to authenticated;
+
+create function desmoslock_v2.finish_staff_password_recovery(
+  operation_id uuid
+)
+returns table (code text)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  recovery_session record;
+  current_profile_id uuid;
+  recovery_operation desmoslock_v2.staff_password_recovery_operations%rowtype;
+  operation_found boolean;
+  recovery_now timestamp with time zone;
+  revocation_cutoff timestamp with time zone;
+begin
+  select *
+  into recovery_session
+  from desmoslock_v2.internal_authenticated_recovery_session();
+
+  if recovery_session.code <> 'ok' then
+    return query select recovery_session.code;
+    return;
+  end if;
+
+  if $1 is null then
+    return query select 'invalid_request'::text;
+    return;
+  end if;
+
+  select profile.id
+  into current_profile_id
+  from desmoslock_v2.profiles as profile
+  where profile.auth_user_id = recovery_session.user_id
+  for update;
+
+  if not found then
+    return query select 'conflict'::text;
+    return;
+  end if;
+
+  select *
+  into recovery_operation
+  from desmoslock_v2.staff_password_recovery_operations as operation
+  where operation.id = $1
+  for update;
+  operation_found := found;
+
+  -- Re-read provider authority only after both account and operation locks.
+  select *
+  into recovery_session
+  from desmoslock_v2.internal_authenticated_recovery_session();
+
+  if recovery_session.code <> 'ok' then
+    return query select recovery_session.code;
+    return;
+  end if;
+
+  -- This is the completion linearization point: both the per-account profile
+  -- lock and the exact operation lock are held, so all remaining freshness,
+  -- expiry, and cutoff decisions use this single fresh wall-clock value.
+  recovery_now := clock_timestamp();
+
+  if recovery_session.jwt_expires_at <= recovery_now then
+    return query select 'session_expired'::text;
+    return;
+  end if;
+
+  if not operation_found
+    or recovery_operation.auth_user_id <> recovery_session.user_id
+    or recovery_operation.auth_session_id <> recovery_session.session_id
+    or recovery_operation.profile_id <> current_profile_id
+  then
+    return query select 'conflict'::text;
+    return;
+  end if;
+
+  if recovery_operation.status = 'completed' then
+    return query select 'recovery_completed'::text;
+    return;
+  end if;
+
+  if recovery_operation.expires_at <= recovery_now then
+    return query select 'recovery_expired'::text;
+    return;
+  end if;
+
+  revocation_cutoff := recovery_now;
+
+  insert into desmoslock_v2.application_session_revocations (
+    user_id,
+    session_id,
+    workspace_id,
+    revoked_by_profile_id,
+    reason_code
+  )
+  select
+    recovery_session.user_id,
+    auth_session.id,
+    null,
+    current_profile_id,
+    'account_recovery'
+  from auth.sessions as auth_session
+  where auth_session.user_id = recovery_session.user_id
+  on conflict (user_id, session_id) do nothing;
+
+  insert into desmoslock_v2.application_session_revocation_cutoffs as cutoff (
+    user_id,
+    invalid_before,
+    last_recovery_operation_id,
+    updated_at
+  ) values (
+    recovery_session.user_id,
+    revocation_cutoff,
+    recovery_operation.id,
+    revocation_cutoff
+  )
+  on conflict (user_id) do update
+  set
+    invalid_before = greatest(
+      cutoff.invalid_before,
+      excluded.invalid_before
+    ),
+    last_recovery_operation_id = case
+      when excluded.invalid_before
+        >= cutoff.invalid_before
+        then excluded.last_recovery_operation_id
+      else cutoff.last_recovery_operation_id
+    end,
+    updated_at = greatest(
+      cutoff.updated_at,
+      excluded.updated_at
+    );
+
+  update desmoslock_v2.staff_password_recovery_operations
+  set
+    status = 'completed',
+    completed_at = revocation_cutoff
+  where id = recovery_operation.id
+    and status = 'sessions_revoked';
+
+  if not found then
+    return query select 'conflict'::text;
+    return;
+  end if;
+
+  perform desmoslock_v2.internal_append_auth_event(
+    'password_recovery_completed',
+    'recovery_completed',
+    null,
+    recovery_operation.profile_id,
+    recovery_operation.profile_id,
+    null,
+    recovery_session.session_id
+  );
+
+  return query select 'recovery_completed'::text;
+end;
+$$;
+
+revoke all on function desmoslock_v2.finish_staff_password_recovery(uuid)
+  from public, anon, authenticated, service_role;
+grant execute on function desmoslock_v2.finish_staff_password_recovery(uuid)
   to authenticated;
 
 create or replace function desmoslock_v2.current_school_summary()
@@ -2283,11 +3199,19 @@ comment on column desmoslock_v2.staff_invitations.delivery_lease_expires_at is
 comment on table desmoslock_v2.staff_invitations is
   'Default-deny, server-owned invitation lifecycle with opaque request-key replay and a bounded pending-delivery lease; normalized target email and request key are never audited.';
 comment on table desmoslock_v2.application_session_revocations is
-  'Application-layer session tombstones checked in addition to live Auth session state.';
+  'Account-wide application-layer session tombstones checked in addition to live Auth session state; workspace_id is null for self-service and password-recovery revocation.';
+comment on table desmoslock_v2.staff_password_recovery_operations is
+  'Default-deny, fifteen-minute password-recovery ordering state bound to one provider-verified recovery session and staff profile; no password, token, PKCE material, provider error, contact PII, or School selection is persisted.';
+comment on table desmoslock_v2.application_session_revocation_cutoffs is
+  'Default-deny account recovery cutoff. Protected sessions created at or before the latest completed-recovery linearization point remain revoked even when a concurrent Auth-session insert was absent from the final sweep snapshot.';
 comment on table desmoslock_v2.staff_audit_events is
   'Append-only minimized auth audit with typed codes and no PII, secrets, payloads, or provider errors.';
 comment on function desmoslock_v2.current_staff_context() is
-  'Caller-scoped rows: code, profile_id, school_id, school_slug, school_name, membership_role, role_revision; failures are one code row with null context.';
+  'Caller-scoped rows: code, profile_id, display_name, school_id, school_slug, school_name, membership_role, role_revision; display_name is the canonical bound profile value, and failures are one code row with null context.';
+comment on function desmoslock_v2.current_manageable_staff() is
+  'Owner-only AAL2/TOTP projection of active Administrator and Teacher identities across Schools the caller currently owns; deterministic LIMIT 501 lets the adapter fail closed above the 500-item product cap.';
+comment on function desmoslock_v2.current_manageable_staff_invitations() is
+  'Owner-only AAL2/TOTP projection of live revocable invitations across Schools the caller currently owns; no request key, token, or provider detail is returned, and deterministic LIMIT 501 is an overflow sentinel.';
 comment on function desmoslock_v2.current_staff_invitations() is
   'Recipient-scoped rows: code, invitation_id, school_id, school_name, invited_role, expires_at; target email is never returned.';
 comment on function desmoslock_v2.internal_baseline_status() is
@@ -2307,12 +3231,16 @@ comment on function desmoslock_v2.internal_publish_staff_invitation(uuid) is
 comment on function desmoslock_v2.internal_fail_staff_invitation(uuid, text) is
   'Service-only terminal failure for pending_delivery or delivery_ready. Success code invitation_delivery_failed records only a stable code.';
 comment on function desmoslock_v2.accept_staff_invitation(uuid, text) is
-  'Recipient-bound identity and normalized email are matched before state reads; AAL2/TOTP mutation returns code only. Refresh current_staff_context after invitation_accepted.';
+  'Recipient-bound identity and normalized email are matched before state reads; a provider-verified ordinary AAL1 session may accept, while every protected staff mutation remains AAL2/TOTP-gated. Refresh current_staff_context after invitation_accepted.';
 comment on function desmoslock_v2.revoke_staff_invitation(uuid) is
   'Owner-only AAL2/TOTP mutation returning one stable code row.';
 comment on function desmoslock_v2.revoke_membership(uuid, uuid) is
   'Owner-only AAL2/TOTP School-scoped revocation returning one stable code row.';
 comment on function desmoslock_v2.revoke_current_staff_session() is
-  'AAL2/TOTP application-session revocation returning one stable code row.';
+  'Caller-scoped application-session revocation available to an ordinary provider-authenticated staff session without AAL2; returns one stable code row.';
 comment on function desmoslock_v2.revoke_all_current_user_staff_sessions() is
-  'AAL2/TOTP account-recovery seam revoking all known Auth sessions at the application boundary.';
+  'Caller-scoped account-wide application revocation available without AAL2; no caller-selected user or School is accepted.';
+comment on function desmoslock_v2.begin_staff_password_recovery(uuid) is
+  'Provider-recovery-session-only begin seam. A per-profile lock admits one live operation winner, exact winner replay stays idempotent despite its own tombstone, and ordinary sessions present or created through the operation window remain application-revoked.';
+comment on function desmoslock_v2.finish_staff_password_recovery(uuid) is
+  'Provider-recovery-session-only completion seam bound to the same live Auth recovery session and operation. It re-sweeps known sessions and advances an account cutoff before completion; it is idempotent but cannot make the external password update transactionally atomic.';

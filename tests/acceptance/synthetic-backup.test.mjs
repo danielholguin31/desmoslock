@@ -29,7 +29,7 @@ const MIGRATION_ATTESTATIONS = Object.freeze({
   "20260903000200_staff_auth_generation_4.sql": Object.freeze({
     migrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
     rawSha256:
-      "a16dd3bb897d6a3f6492cc4c9d3c35444c896b1f46394482ee4b08a09cddada5",
+      "4e7321c8d9d6d3e4c27e07ab38d75252a8922868842c40c0723c349c251cac44",
   }),
 });
 const execFileAsync = promisify(execFile);

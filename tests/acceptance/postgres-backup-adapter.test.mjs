@@ -65,9 +65,11 @@ const expectedFixture = {
   version: "internal-baseline-v2",
 };
 const RUNTIME_LIFECYCLE_TABLES = Object.freeze([
-  "staff_invitations",
+  "application_session_revocation_cutoffs",
   "application_session_revocations",
   "staff_audit_events",
+  "staff_invitations",
+  "staff_password_recovery_operations",
 ]);
 
 function syntheticArchiveSql() {

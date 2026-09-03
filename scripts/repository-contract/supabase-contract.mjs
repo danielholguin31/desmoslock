@@ -11,7 +11,7 @@ export const expectedMigrationFiles = Object.freeze([
   "20260903000200_staff_auth_generation_4.sql",
 ]);
 export const expectedMigrationSetSha256 =
-  "56f1ce26c8b3aa642ef0533e12d1cae59ece17f8dc9ce9157ede3ea392b14c6a";
+  "ce79427901195258897e0b75c80acfb7b50699eb223af5289cf5d5d59958f2b7";
 
 const currentAttestationFile = "20260903000200_staff_auth_generation_4.sql";
 export const expectedMigrationAttestations = Object.freeze({
@@ -24,7 +24,7 @@ export const expectedMigrationAttestations = Object.freeze({
   [currentAttestationFile]: Object.freeze({
     migrationSetSha256: expectedMigrationSetSha256,
     rawSha256:
-      "a16dd3bb897d6a3f6492cc4c9d3c35444c896b1f46394482ee4b08a09cddada5",
+      "4e7321c8d9d6d3e4c27e07ab38d75252a8922868842c40c0723c349c251cac44",
   }),
 });
 const attestedMigrationFiles = Object.freeze(

@@ -10,7 +10,7 @@ language sql
 immutable
 set search_path = ''
 as $$
-  select '56f1ce26c8b3aa642ef0533e12d1cae59ece17f8dc9ce9157ede3ea392b14c6a'::text;
+  select 'ce79427901195258897e0b75c80acfb7b50699eb223af5289cf5d5d59958f2b7'::text;
 $$;
 -- desmoslock-migration-set-sha256:end
 

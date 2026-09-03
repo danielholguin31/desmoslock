@@ -442,7 +442,7 @@ test("generation-4 attests the exact normalized migration history", () => {
     "20260903000200_staff_auth_generation_4.sql": {
       migrationSetSha256: expectedMigrationSetSha256,
       rawSha256:
-        "a16dd3bb897d6a3f6492cc4c9d3c35444c896b1f46394482ee4b08a09cddada5",
+        "4e7321c8d9d6d3e4c27e07ab38d75252a8922868842c40c0723c349c251cac44",
     },
   });
   assert.doesNotThrow(() => assertMigrationSetAttestation(migrations));
@@ -501,6 +501,27 @@ test("generation-4 attests the exact normalized migration history", () => {
       ),
     /does not attest the current migration set/u,
   );
+});
+
+test("the runbook names every runtime-only staff lifecycle backup guard", () => {
+  const runbook = readText("docs/product-completion/reproducible-supabase.md");
+  const runtimeLifecycleTables = [
+    "application_session_revocation_cutoffs",
+    "application_session_revocations",
+    "staff_audit_events",
+    "staff_invitations",
+    "staff_password_recovery_operations",
+  ];
+
+  assert.match(runbook, /five runtime-only staff lifecycle tables/u);
+  assert.doesNotMatch(runbook, /three staff lifecycle tables/u);
+  for (const table of runtimeLifecycleTables) {
+    assert.equal(
+      runbook.includes(`\`${table}\``),
+      true,
+      `${table} must remain explicit in the operator runbook`,
+    );
+  }
 });
 
 test("staff Auth schema and prerequisites have a required disposable CI lane", () => {

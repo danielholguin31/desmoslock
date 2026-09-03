@@ -54,7 +54,7 @@ The fixture contract is generation `4`, version `internal-baseline-v2`, with
 SHA-256
 `f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201`.
 The exact discovered migration file set has normalized SHA-256
-`56f1ce26c8b3aa642ef0533e12d1cae59ece17f8dc9ce9157ede3ea392b14c6a`.
+`ce79427901195258897e0b75c80acfb7b50699eb223af5289cf5d5d59958f2b7`.
 The published generation-3 migration retains its contemporaneous digest
 `06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49`;
 only the later generation-4 migration records the current aggregate. The
@@ -274,10 +274,13 @@ Restore refuses absolute or traversing artifact paths, noncanonical manifests,
 unknown fields, hash mismatches, links, oversized files, unexpected archive
 entries or rows, a changed migration set, a target that fails the exact
 database/system-identifier/server-side-local-marker attestation, source/target
-system-identifier collisions, and targets whose seven managed tables or three
-staff lifecycle tables are nonempty. The archive allowlist is exactly the seven
-synthetic tables, including `foundation_seed`; Auth, invitation, application
-revocation, and audit data are never added. The
+system-identifier collisions, and targets whose seven managed tables or any of
+the five runtime-only staff lifecycle tables are nonempty. Those runtime-only
+tables are `application_session_revocation_cutoffs`,
+`application_session_revocations`, `staff_audit_events`, `staff_invitations`,
+and `staff_password_recovery_operations`. The archive allowlist is exactly the
+seven synthetic tables, including `foundation_seed`; Auth, invitation,
+application revocation, password-recovery, and audit data are never added. The
 PostgreSQL adapter rejects every archive-rendered statement except an exact
 allowlist of harmless dump scaffolding and the seven validated `COPY` blocks.
 The generation-4 profile and Membership layouts accept PostgreSQL null markers
