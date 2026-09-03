@@ -3,10 +3,11 @@ import {
   readProcessIdentityTable,
   selectDescendantProcessIdentities,
   selectProcessGroupIdentities,
-  waitForProcessIdentitiesToDisappear,
 } from "./process-identity-table.mjs";
 
 const electronApplicationCleanupStates = new WeakMap();
+const electronRetirementObservationMilliseconds = 2_000;
+const electronRetirementPollMilliseconds = 10;
 
 function retirementIdentity(identity) {
   return Object.freeze({
@@ -17,6 +18,43 @@ function retirementIdentity(identity) {
 
 function processIdentityKey(identity) {
   return `${identity.processId}:${identity.startedAt}`;
+}
+
+function trackedProcessIdentity(identity) {
+  return Object.freeze({
+    processGroupId: identity.processGroupId,
+    processId: identity.processId,
+    startedAt: identity.startedAt,
+  });
+}
+
+function rememberProcessIdentity(state, identity) {
+  const key = processIdentityKey(identity);
+  const recorded = state.recordedIdentities.get(key);
+  if (
+    recorded !== undefined &&
+    recorded.processGroupId !== identity.processGroupId
+  ) {
+    throw new Error(
+      `Electron process identity became ambiguous: ${key} changed process groups`,
+    );
+  }
+  state.recordedIdentities.set(key, trackedProcessIdentity(identity));
+}
+
+function findLiveRecordedIdentities(state, identities) {
+  const live = [];
+  for (const identity of identities) {
+    const recorded = state.recordedIdentities.get(processIdentityKey(identity));
+    if (recorded === undefined) continue;
+    if (recorded.processGroupId !== identity.processGroupId) {
+      throw new Error(
+        `Electron process identity became ambiguous: ${processIdentityKey(identity)} changed process groups`,
+      );
+    }
+    live.push(identity);
+  }
+  return live;
 }
 
 function captureLiveElectronProcessIdentities(state, identities) {
@@ -46,10 +84,7 @@ function captureLiveElectronProcessIdentities(state, identities) {
     ...selectProcessGroupIdentities(identities, liveRoot.processGroupId),
   ]) {
     snapshotIdentities.set(processIdentityKey(identity), identity);
-    state.recordedIdentities.set(
-      processIdentityKey(identity),
-      retirementIdentity(identity),
-    );
+    rememberProcessIdentity(state, identity);
   }
   return Object.freeze({
     processGroupId: liveRoot.processGroupId,
@@ -58,6 +93,72 @@ function captureLiveElectronProcessIdentities(state, identities) {
     ),
     rootIdentity: retirementIdentity(liveRoot),
   });
+}
+
+async function observeElectronProcessRetirement(state, closeLifecycle) {
+  if (state.rootIdentity === null) return;
+
+  while (true) {
+    const sampledAfterCloseSettled = closeLifecycle.settled;
+    const identities = await readProcessIdentityTable();
+    let liveRecordedIdentities = findLiveRecordedIdentities(state, identities);
+    const processGroupIdentities = selectProcessGroupIdentities(
+      identities,
+      state.rootIdentity.processGroupId,
+    );
+
+    if (processGroupIdentities.length > 0) {
+      const continuityAnchorPresent = processGroupIdentities.some(
+        (identity) => {
+          const recorded = state.recordedIdentities.get(
+            processIdentityKey(identity),
+          );
+          return (
+            recorded !== undefined &&
+            recorded.processGroupId === state.rootIdentity.processGroupId
+          );
+        },
+      );
+      if (!continuityAnchorPresent) {
+        throw new Error(
+          "Electron process group identity became ambiguous after application close",
+        );
+      }
+      for (const identity of processGroupIdentities) {
+        rememberProcessIdentity(state, identity);
+      }
+      liveRecordedIdentities = findLiveRecordedIdentities(state, identities);
+    }
+
+    for (const liveIdentity of liveRecordedIdentities) {
+      for (const descendant of selectDescendantProcessIdentities(
+        identities,
+        liveIdentity,
+      )) {
+        rememberProcessIdentity(state, descendant);
+      }
+    }
+    liveRecordedIdentities = findLiveRecordedIdentities(state, identities);
+
+    if (sampledAfterCloseSettled && closeLifecycle.settled) {
+      if (
+        processGroupIdentities.length === 0 &&
+        liveRecordedIdentities.length === 0
+      ) {
+        return;
+      }
+      if (Date.now() >= closeLifecycle.retirementDeadline) {
+        throw new Error(
+          `Electron cooperative close left recorded process identities alive: ${liveRecordedIdentities
+            .map(({ processId, startedAt }) => `${processId}:${startedAt}`)
+            .join(", ")}`,
+        );
+      }
+    }
+    await new Promise((resolve) =>
+      setTimeout(resolve, electronRetirementPollMilliseconds),
+    );
+  }
 }
 
 export async function trackElectronApplicationForCooperativeCleanup(
@@ -123,30 +224,35 @@ export async function closeElectronApplicationCooperatively(application) {
       }
     }
 
-    if (state.child.exitCode === null && state.child.signalCode === null) {
-      try {
+    const closeLifecycle = {
+      retirementDeadline: Number.POSITIVE_INFINITY,
+      settled: false,
+    };
+    let retirementObservationFailure = null;
+    const retirementObservation =
+      state.recordedIdentities.size === 0
+        ? Promise.resolve()
+        : observeElectronProcessRetirement(state, closeLifecycle).catch(
+            (error) => {
+              retirementObservationFailure = error;
+            },
+          );
+
+    try {
+      if (state.child.exitCode === null && state.child.signalCode === null) {
         await application.close();
-      } catch (error) {
-        failures.push(error);
       }
+    } catch (error) {
+      failures.push(error);
+    } finally {
+      closeLifecycle.retirementDeadline =
+        Date.now() + electronRetirementObservationMilliseconds;
+      closeLifecycle.settled = true;
     }
 
-    if (state.recordedIdentities.size > 0) {
-      try {
-        const remaining = await waitForProcessIdentitiesToDisappear(
-          [...state.recordedIdentities.values()],
-          2_000,
-        );
-        if (remaining.length > 0) {
-          throw new Error(
-            `Electron cooperative close left recorded process identities alive: ${remaining
-              .map(({ processId, startedAt }) => `${processId}:${startedAt}`)
-              .join(", ")}`,
-          );
-        }
-      } catch (error) {
-        failures.push(error);
-      }
+    await retirementObservation;
+    if (retirementObservationFailure !== null) {
+      failures.push(retirementObservationFailure);
     }
 
     if (failures.length > 0) {

@@ -16,9 +16,24 @@ import {
 import {
   findProcessIdentity,
   readProcessIdentityTable,
+  waitForProcessIdentitiesToDisappear,
 } from "../../scripts/process-identity-table.mjs";
 
 const onlyPosix = process.platform === "win32" ? it.skip : it;
+
+function killIsolatedProcessGroup(processGroupId: number): void {
+  try {
+    process.kill(-processGroupId, "SIGKILL");
+  } catch (error) {
+    if (!(
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "ESRCH"
+    )) {
+      throw error;
+    }
+  }
+}
 
 describe("production desktop verifier resource safety", () => {
   it("retires a descendant that outlives its leader when readiness fails", async () => {
@@ -229,6 +244,151 @@ describe("production desktop verifier resource safety", () => {
         }
       }
     },
+  );
+
+  onlyPosix(
+    "discovers same-group descendants spawned while cooperative close exits the root",
+    async () => {
+      const canarySource = [
+        'process.send?.({ type: "canary-ready" });',
+        'process.once("message", (message) => {',
+        '  if (message === "retire") {',
+        "    setTimeout(() => process.exit(0), 250);",
+        "  }",
+        "});",
+        "setInterval(() => {}, 1_000);",
+      ].join("\n");
+      const lateDescendantSource = [
+        'process.send?.({ type: "late-descendant-ready" });',
+        "setTimeout(() => process.exit(0), 500);",
+      ].join("\n");
+      const applicationSource = [
+        'const { spawn } = require("node:child_process");',
+        `const canary = spawn(process.execPath, ["-e", ${JSON.stringify(canarySource)}], {`,
+        '  stdio: ["ignore", "ignore", "ignore", "ipc"],',
+        "});",
+        'canary.once("message", () => {',
+        '  process.send?.({ processId: canary.pid, type: "root-ready" });',
+        "});",
+        'process.once("message", (message) => {',
+        '  if (message !== "close-root") return;',
+        `  const late = spawn(process.execPath, ["-e", ${JSON.stringify(lateDescendantSource)}], {`,
+        '    stdio: ["ignore", "ignore", "ignore", "ipc"],',
+        "  });",
+        '  late.once("message", () => {',
+        '    process.send?.({ processId: late.pid, type: "late-descendant-ready" });',
+        '    canary.send("retire");',
+        "    canary.unref();",
+        "    late.unref();",
+        "    setTimeout(() => process.exit(0), 100);",
+        "  });",
+        "});",
+        "setInterval(() => {}, 1_000);",
+      ].join("\n");
+
+      for (let iteration = 0; iteration < 5; iteration += 1) {
+        const child = spawn(process.execPath, ["-e", applicationSource], {
+          detached: true,
+          stdio: ["ignore", "ignore", "ignore", "ipc"],
+        });
+        const processGroupId = child.pid;
+        if (processGroupId === undefined) {
+          throw new Error("Test application did not expose a process id");
+        }
+        let lateIdentity:
+          | Awaited<
+              ReturnType<typeof refreshElectronApplicationProcessIdentities>
+            >["processIdentities"][number]
+          | null = null;
+        let lateDescendantOutlivedRoot = false;
+        let recordedIdentities: Awaited<
+          ReturnType<typeof refreshElectronApplicationProcessIdentities>
+        >["processIdentities"] = [];
+
+        try {
+          const [rootReady] = (await once(child, "message")) as [
+            { processId: number; type: string },
+          ];
+          expect(rootReady.type).toBe("root-ready");
+          const application = {
+            close: vi.fn(async () => {
+              const lateReadyPromise = once(child, "message");
+              const rootExit = once(child, "exit");
+              child.send("close-root");
+              const [lateReady] = (await lateReadyPromise) as [
+                { processId: number; type: string },
+              ];
+              expect(lateReady.type).toBe("late-descendant-ready");
+              lateIdentity = findProcessIdentity(
+                await readProcessIdentityTable(),
+                lateReady.processId,
+              );
+              expect(lateIdentity).toMatchObject({
+                processGroupId,
+                processId: lateReady.processId,
+              });
+              expect(recordedIdentities).not.toContainEqual(
+                expect.objectContaining({ processId: lateReady.processId }),
+              );
+              await rootExit;
+              lateDescendantOutlivedRoot =
+                findProcessIdentity(
+                  await readProcessIdentityTable(),
+                  lateReady.processId,
+                )?.startedAt === lateIdentity?.startedAt;
+            }),
+            process: () => child,
+          };
+          const beforeClose =
+            await refreshElectronApplicationProcessIdentities(application);
+          recordedIdentities = beforeClose.processIdentities;
+          expect(beforeClose.processIdentities).toContainEqual(
+            expect.objectContaining({ processId: rootReady.processId }),
+          );
+
+          await expect(
+            closeElectronApplicationCooperatively(application),
+          ).resolves.toBeUndefined();
+
+          expect(application.close).toHaveBeenCalledOnce();
+          expect(lateDescendantOutlivedRoot).toBe(true);
+          expect(lateIdentity).not.toBeNull();
+          expect(
+            findProcessIdentity(
+              await readProcessIdentityTable(),
+              lateIdentity!.processId,
+            ),
+          ).not.toEqual(lateIdentity);
+        } finally {
+          const cleanupIdentities = [
+            ...recordedIdentities,
+            ...(lateIdentity === null ? [] : [lateIdentity]),
+          ];
+          const currentIdentities = await readProcessIdentityTable();
+          const exactOwnedIdentityIsLive = cleanupIdentities.some((recorded) =>
+            currentIdentities.some(
+              (current) =>
+                current.processGroupId === processGroupId &&
+                current.processId === recorded.processId &&
+                current.startedAt === recorded.startedAt,
+            ),
+          );
+          const rootIsLive =
+            child.exitCode === null && child.signalCode === null;
+          const rootExit = rootIsLive ? once(child, "exit") : null;
+          if (rootIsLive || exactOwnedIdentityIsLive) {
+            killIsolatedProcessGroup(processGroupId);
+            if (rootExit !== null) await rootExit;
+            const remaining = await waitForProcessIdentitiesToDisappear(
+              cleanupIdentities,
+              2_000,
+            );
+            expect(remaining).toEqual([]);
+          }
+        }
+      }
+    },
+    15_000,
   );
 
   it("cleans earlier resources when a later acquisition fails before the caller can retain them", async () => {
