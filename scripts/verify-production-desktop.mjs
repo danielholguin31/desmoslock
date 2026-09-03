@@ -17,6 +17,7 @@ import {
 } from "./electron-fuse-policy.mjs";
 import { createElectronLaunchProfile } from "./electron-launch-profile.mjs";
 import { spawnIsolatedProcessTree } from "./isolated-process-tree.mjs";
+import { assertPackagedSwitchRejectionBoundary } from "./packaged-switch-rejection-boundary.mjs";
 import {
   acquireReadyElectronApplication,
   acquireWithLocalCleanup,
@@ -148,13 +149,6 @@ function parsePackagedPolicyBoundary(output) {
   return JSON.parse(match[1]);
 }
 
-function normalizedSwitchName(argument) {
-  return argument
-    .trim()
-    .replace(/^-{1,2}/, "")
-    .split("=", 1)[0];
-}
-
 function assertMacPackagedLaunchHasNoSandboxDisablingControl(launchProfile) {
   if (process.platform !== "darwin") return;
   assert.equal(
@@ -244,17 +238,11 @@ async function verifyForbiddenPackagedSwitch(
   );
   assert.doesNotMatch(result.output, diagnosticEndpointPattern);
   const boundary = parsePackagedPolicyBoundary(result.output);
-  const normalizedName = normalizedSwitchName(forbiddenSwitch);
-  assert.equal(boundary.isPackaged, true);
-  assert.equal(boundary.environmentSandboxControlPresent, false);
-  assert.deepEqual(boundary.argumentSwitches, [normalizedName]);
-  assert.ok(Array.isArray(boundary.commandLineSwitches));
-  if (forbiddenSwitch.startsWith("--")) {
-    assert.ok(
-      boundary.commandLineSwitches.includes(normalizedName),
-      `Electron app.commandLine did not expose ${forbiddenSwitch} in the exact packaged application`,
-    );
-  }
+  assertPackagedSwitchRejectionBoundary({
+    boundary,
+    forbiddenSwitch,
+    launchProfile,
+  });
   return {
     boundary,
     diagnosticEndpointObserved: false,
