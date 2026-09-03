@@ -2936,7 +2936,7 @@ select results_eq(
     from desmoslock_v2.internal_baseline_status()
   $$,
   $$values (
-    '7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca'::text,
+    'f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201'::text,
     true
   )$$,
   'runtime staff rows never invalidate the pinned synthetic health fixture'

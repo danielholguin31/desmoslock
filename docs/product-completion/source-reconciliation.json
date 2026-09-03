@@ -11,8 +11,7 @@
         "apps",
         "packages",
         "supabase/config.toml",
-        "supabase/functions/deno.json",
-        "supabase/functions/health",
+        "supabase/functions",
         "supabase/migrations",
         "supabase/seed.sql",
         "supabase/tests/database"

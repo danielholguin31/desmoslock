@@ -356,7 +356,7 @@ test("generation-4 attests the exact normalized migration history", () => {
     "20260903000200_staff_auth_generation_4.sql": {
       migrationSetSha256: expectedMigrationSetSha256,
       rawSha256:
-        "bf55012c9edae81c191e241eee806a09918cc34211b3a0ac3eacbb9f1d6ff321",
+        "a16dd3bb897d6a3f6492cc4c9d3c35444c896b1f46394482ee4b08a09cddada5",
     },
   });
   assert.doesNotThrow(() => assertMigrationSetAttestation(migrations));
@@ -431,6 +431,11 @@ test("staff Auth schema and prerequisites have a required disposable CI lane", (
   assert.equal(
     rootPackage.scripts?.["test:staff-auth"],
     "npm run test:db && npm run test:staff-auth:stack && npm run test:edge && npm run test:unit",
+  );
+  assert.equal(
+    rootPackage.scripts?.["test:edge"],
+    "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts",
+    "the Edge suite must lint all sources and explicitly typecheck every deployed entrypoint",
   );
   assert.equal(
     rootPackage.scripts?.["test:staff-auth:stack"],
@@ -543,6 +548,7 @@ test("legacy v1 and test-only support cannot enter a v2 release path", () => {
 test("Electron CI acceptance includes internal isolation and external package policy verification", () => {
   const rootPackage = readJson("package.json");
   const ciWorkflow = readText(".github/workflows/ci.yml");
+  const productionVerifier = readText("scripts/verify-production-desktop.mjs");
 
   assert.equal(
     rootPackage.scripts?.["test:electron:production"],
@@ -553,6 +559,16 @@ test("Electron CI acceptance includes internal isolation and external package po
     /(?:^|&& )npm run test:electron:production$/,
   );
   assert.match(ciWorkflow, /xvfb-run -a npm run test:electron/);
+  assert.match(
+    productionVerifier,
+    /capabilities: \["auth", "database", "rest"\],[\s\S]*fixtureDigest:\s*"f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",[\s\S]*fixtureVersion: "internal-baseline-v2",[\s\S]*schemaGeneration: 4,/u,
+    "the packaged desktop probe must serve the exact generation-4 health fixture",
+  );
+  assert.doesNotMatch(
+    productionVerifier,
+    /internal-baseline-v1|7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca|schemaGeneration: 3/u,
+    "the packaged desktop probe must not silently fall back to generation 3",
+  );
 });
 
 test("the production desktop command cannot bypass observed application retirement", () => {
@@ -823,8 +839,7 @@ test("source-reconciliation ledger exactly covers both evidence inputs", () => {
       "apps",
       "packages",
       "supabase/config.toml",
-      "supabase/functions/deno.json",
-      "supabase/functions/health",
+      "supabase/functions",
       "supabase/migrations",
       "supabase/seed.sql",
       "supabase/tests/database",
@@ -837,6 +852,22 @@ test("source-reconciliation ledger exactly covers both evidence inputs", () => {
     ),
     false,
   );
+  for (const edgeSource of [
+    "supabase/functions/_shared/http.ts",
+    "supabase/functions/_shared/supabase-http.ts",
+    "supabase/functions/account-recovery/index.ts",
+    "supabase/functions/health/index.ts",
+    "supabase/functions/staff-invitations/index.ts",
+  ]) {
+    assert.equal(
+      ledger.canonicalSource.canonicalPaths.product.some(
+        (sourceRoot) =>
+          edgeSource === sourceRoot || edgeSource.startsWith(`${sourceRoot}/`),
+      ),
+      true,
+      `${edgeSource} must remain inside the canonical product source`,
+    );
+  }
   assert.deepEqual(ledger.canonicalSource.integrationBaseline, {
     commit: baseline,
     tree: baselineTree,

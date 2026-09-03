@@ -77,7 +77,9 @@ export function verifyCiContract(repositoryRoot) {
     rootPackage.scripts?.["test:staff-auth"] !==
       "npm run test:db && npm run test:staff-auth:stack && npm run test:edge && npm run test:unit" ||
     rootPackage.scripts?.["test:staff-auth:stack"] !==
-      "node --test tests/acceptance/staff-auth-stack.test.mjs"
+      "node --test tests/acceptance/staff-auth-stack.test.mjs" ||
+    rootPackage.scripts?.["test:edge"] !==
+      "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts"
   ) {
     fail(
       "Root package does not expose the exact staff Auth schema and prerequisite lane",

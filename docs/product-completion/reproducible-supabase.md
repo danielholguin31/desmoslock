@@ -20,10 +20,11 @@ passwords, invitations, application-session revocations, audit events, join
 codes, billing data, real School data, or real student data. Its seeded profiles
 are explicitly unbound and its seeded Memberships are active at revision one
 with no acceptance or revocation fields set.
-The database tables remain default-deny; an authenticated caller can use only
-the no-argument
-`desmoslock_v2.current_school_summary()` read model. The service role alone can
-execute `desmoslock_v2.internal_baseline_status()` for the public health
+The database tables remain default-deny. Authenticated callers can execute the
+no-argument `desmoslock_v2.current_school_summary()` read model and the reviewed
+staff lifecycle RPCs, which enforce caller identity, session generation,
+membership state, and role at their function boundaries. The service role alone
+can execute `desmoslock_v2.internal_baseline_status()` for the public health
 function. It has no direct table privilege on the foundation, fixture, or
 attestation tables.
 
@@ -39,8 +40,12 @@ health function, and operator modules in this repository are the authority.
 - `supabase/migrations/20260903000200_staff_auth_generation_4.sql`
 - `supabase/seed.sql`
 - `supabase/config.toml`
+- `supabase/functions/deno.json`
+- `supabase/functions/_shared/http.ts`
 - `supabase/functions/_shared/supabase-http.ts`
+- `supabase/functions/account-recovery/index.ts`
 - `supabase/functions/health/index.ts`
+- `supabase/functions/staff-invitations/index.ts`
 - `scripts/synthetic-backup/operator.mjs`
 - `scripts/synthetic-backup/publication-worker.mjs`
 - `scripts/synthetic-backup/postgres-adapter.mjs`
@@ -49,7 +54,7 @@ The fixture contract is generation `4`, version `internal-baseline-v2`, with
 SHA-256
 `f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201`.
 The exact discovered migration file set has normalized SHA-256
-`0ef2ff06cf7b93e67d4cf10ab422b96b41a486f65a7a6e52c07ce493a6e5dc66`.
+`56f1ce26c8b3aa642ef0533e12d1cae59ece17f8dc9ce9157ede3ea392b14c6a`.
 The published generation-3 migration retains its contemporaneous digest
 `06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49`;
 only the later generation-4 migration records the current aggregate. The
