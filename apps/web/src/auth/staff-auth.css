@@ -81,6 +81,11 @@
   padding: 0.65rem 0.75rem;
 }
 
+.staff-auth input[aria-invalid="true"] {
+  border-color: var(--staff-auth-danger, #b42318);
+  box-shadow: 0 0 0 1px var(--staff-auth-danger, #b42318);
+}
+
 .staff-auth button {
   background: var(--staff-auth-action-background, #0f172a);
   border: 2px solid transparent;

@@ -1,7 +1,8 @@
-import type {
-  ManagedStaffRole,
-  StaffAuthController,
-  StaffAuthSnapshot,
+import {
+  parseStaffDisplayName,
+  type ManagedStaffRole,
+  type StaffAuthController,
+  type StaffAuthSnapshot,
 } from "./staff-auth-controller.js";
 
 export type StaffAuthViewActionId =
@@ -12,9 +13,12 @@ export type StaffAuthViewActionId =
   | "complete_password_recovery"
   | "create_administrator_invitation"
   | "create_teacher_invitation"
+  | "confirm_staff_invitation_revocation"
   | "confirm_staff_membership_revocation"
+  | "cancel_staff_invitation_revocation"
   | "cancel_staff_membership_revocation"
   | "request_recovery"
+  | "review_staff_invitation_revocation"
   | "review_staff_membership_revocation"
   | "resend_email_verification"
   | "retry"
@@ -32,21 +36,41 @@ export interface StaffAuthViewAction {
 
 export interface StaffAuthViewField {
   readonly autocomplete: HTMLInputElement["autocomplete"];
-  readonly id: "email" | "new_password" | "password" | "target_email" | "totp";
+  readonly id:
+    | "display_name"
+    | "email"
+    | "new_password"
+    | "password"
+    | "target_email"
+    | "totp";
   readonly group?: "invitation" | "membership";
   readonly label: string;
   readonly type: "email" | "password" | "text";
 }
 
-export interface StaffAuthViewSelect {
-  readonly group: "membership";
-  readonly id: "staff_membership";
-  readonly label: string;
-  readonly options: readonly {
-    readonly label: string;
-    readonly value: string;
-  }[];
-}
+export type StaffAuthViewSelect =
+  | {
+      readonly group: "membership";
+      readonly id: "staff_membership";
+      readonly label: string;
+      readonly options: readonly {
+        readonly label: string;
+        readonly profileId: string;
+        readonly schoolId: string;
+        readonly value: string;
+      }[];
+    }
+  | {
+      readonly group: "invitation";
+      readonly id: "staff_invitation";
+      readonly label: string;
+      readonly options: readonly {
+        readonly invitationId: string;
+        readonly label: string;
+        readonly schoolId: string;
+        readonly value: string;
+      }[];
+    };
 
 export interface StaffAuthViewImage {
   readonly alt: string;
@@ -72,7 +96,11 @@ export type StaffAuthViewIntent =
     }
   | { readonly email: string; readonly type: "request_password_recovery" }
   | { readonly type: "resend_email_verification" }
-  | { readonly password: string; readonly type: "accept_invitation" }
+  | {
+      readonly displayName: string;
+      readonly password: string;
+      readonly type: "accept_invitation";
+    }
   | { readonly type: "begin_totp_enrollment" }
   | { readonly code: string; readonly type: "verify_totp" }
   | { readonly type: "cancel_totp" }
@@ -87,9 +115,17 @@ export type StaffAuthViewIntent =
       readonly type: "create_staff_invitation";
     }
   | {
-      readonly membershipId: string;
+      readonly profileId: string;
+      readonly schoolId: string;
       readonly type: "review_staff_membership_revocation";
     }
+  | {
+      readonly invitationId: string;
+      readonly schoolId: string;
+      readonly type: "review_staff_invitation_revocation";
+    }
+  | { readonly type: "confirm_staff_invitation_revocation" }
+  | { readonly type: "cancel_staff_invitation_revocation" }
   | { readonly type: "confirm_staff_membership_revocation" }
   | { readonly type: "cancel_staff_membership_revocation" };
 
@@ -112,6 +148,13 @@ const newPasswordField: StaffAuthViewField = {
   id: "new_password",
   label: "Create password",
   type: "password",
+};
+
+const displayNameField: StaffAuthViewField = {
+  autocomplete: "name",
+  id: "display_name",
+  label: "Your name",
+  type: "text",
 };
 
 const totpField: StaffAuthViewField = {
@@ -170,11 +213,23 @@ export function createStaffAuthViewModel(
   if (snapshot.kind === "invitation_ready") {
     return {
       actions: [{ id: "accept_invitation", label: "Accept invitation" }],
-      fields: [newPasswordField],
+      fields: [displayNameField, newPasswordField],
       heading: `Join ${snapshot.schoolLabel}`,
-      message: `${snapshot.intendedEmail} was invited as ${roleWithArticle(snapshot.role)}.`,
+      message: `${snapshot.intendedEmail} was invited as ${roleWithArticle(snapshot.role)}. Enter the name staff will see and create a password.`,
       status: snapshot.kind,
       tone: "info",
+    };
+  }
+
+  if (snapshot.kind === "invitation_step_up_required") {
+    return {
+      actions: [{ id: "back_to_sign_in", label: "Back to sign in" }],
+      fields: [],
+      heading: "Additional verification required",
+      message:
+        "This invitation needs a new verified session. Sign in, then request a fresh invitation link.",
+      status: snapshot.kind,
+      tone: "warning",
     };
   }
 
@@ -345,6 +400,12 @@ export function createStaffAuthViewModel(
               label: "Invite Teacher",
             },
             {
+              group: "invitation",
+              id: "review_staff_invitation_revocation",
+              label: "Review pending invitation revocation",
+              tone: "danger",
+            },
+            {
               group: "membership",
               id: "review_staff_membership_revocation",
               label: "Review staff access revocation",
@@ -377,18 +438,49 @@ export function createStaffAuthViewModel(
         ? {
             selects: [
               {
+                group: "invitation" as const,
+                id: "staff_invitation" as const,
+                label: "Pending Administrator or Teacher invitation",
+                options: snapshot.manageableInvitations.map((entry) => ({
+                  invitationId: entry.invitationId,
+                  label: `${entry.email} — ${roleLabel(entry.role)} — expires ${entry.expiresAt}`,
+                  schoolId: entry.schoolId,
+                  value: entry.invitationId,
+                })),
+              },
+              {
                 group: "membership" as const,
                 id: "staff_membership" as const,
                 label: "Administrator or Teacher",
                 options: snapshot.manageableStaff.map((entry) => ({
                   label: `${entry.profile.displayName} — ${entry.profile.email} — ${roleLabel(entry.role)}`,
-                  value: entry.membershipId,
+                  profileId: entry.profile.id,
+                  schoolId: entry.schoolId,
+                  value: entry.profile.id,
                 })),
               },
             ],
           }
         : {}),
       tone: "success",
+    };
+  }
+
+  if (snapshot.kind === "confirming_staff_invitation_revocation") {
+    return {
+      actions: [
+        {
+          id: "confirm_staff_invitation_revocation",
+          label: "Revoke pending invitation",
+          tone: "danger",
+        },
+        { id: "cancel_staff_invitation_revocation", label: "Cancel" },
+      ],
+      fields: [],
+      heading: "Confirm pending invitation revocation",
+      message: `Revoke the pending ${roleLabel(snapshot.target.role)} invitation for ${snapshot.target.email} at ${snapshot.schoolLabel}?`,
+      status: snapshot.kind,
+      tone: "warning",
     };
   }
 
@@ -412,16 +504,24 @@ export function createStaffAuthViewModel(
 
   if (
     snapshot.kind === "staff_invitation_created" ||
+    snapshot.kind === "staff_invitation_revoked" ||
     snapshot.kind === "staff_membership_revoked"
   ) {
-    const invited = snapshot.kind === "staff_invitation_created";
+    const created = snapshot.kind === "staff_invitation_created";
+    const revokedInvitation = snapshot.kind === "staff_invitation_revoked";
     return {
       actions: [{ id: "back_to_sign_in", label: "Continue" }],
       fields: [],
-      heading: invited ? "Invitation created" : "Membership revoked",
-      message: invited
+      heading: created
+        ? "Invitation created"
+        : revokedInvitation
+          ? "Invitation revoked"
+          : "Membership revoked",
+      message: created
         ? `${roleLabel(snapshot.targetRole)} invitation created for ${snapshot.schoolLabel}.`
-        : `${roleLabel(snapshot.targetRole)} membership revoked for ${snapshot.schoolLabel}.`,
+        : revokedInvitation
+          ? `${roleLabel(snapshot.targetRole)} invitation revoked for ${snapshot.schoolLabel}.`
+          : `${roleLabel(snapshot.targetRole)} membership revoked for ${snapshot.schoolLabel}.`,
       status: snapshot.kind,
       tone: "success",
     };
@@ -429,16 +529,25 @@ export function createStaffAuthViewModel(
 
   if (
     snapshot.kind === "staff_invitation_rejected" ||
+    snapshot.kind === "staff_invitation_revocation_rejected" ||
     snapshot.kind === "staff_membership_revocation_rejected"
   ) {
-    const invitation = snapshot.kind === "staff_invitation_rejected";
+    const invitationCreation = snapshot.kind === "staff_invitation_rejected";
+    const invitationRevocation =
+      snapshot.kind === "staff_invitation_revocation_rejected";
     return {
       actions: [{ id: "back_to_sign_in", label: "Continue" }],
       fields: [],
-      heading: invitation ? "Invitation not created" : "Membership not revoked",
-      message: invitation
+      heading: invitationCreation
+        ? "Invitation not created"
+        : invitationRevocation
+          ? "Invitation not revoked"
+          : "Membership not revoked",
+      message: invitationCreation
         ? "The staff invitation was not authorized or could not be created."
-        : "The staff membership revocation was not authorized or could not be completed.",
+        : invitationRevocation
+          ? "The pending invitation revocation was not authorized or could not be completed."
+          : "The staff membership revocation was not authorized or could not be completed.",
       status: snapshot.kind,
       tone: "danger",
     };
@@ -514,9 +623,10 @@ export function createStaffAuthViewModel(
     snapshot.kind === "accepting_invitation" ||
     snapshot.kind === "enrolling_totp" ||
     snapshot.kind === "verifying_totp" ||
-    snapshot.kind === "processing_pkce_callback" ||
+    snapshot.kind === "processing_recovery_callback" ||
     snapshot.kind === "updating_password" ||
     snapshot.kind === "creating_staff_invitation" ||
+    snapshot.kind === "revoking_staff_invitation" ||
     snapshot.kind === "revoking_staff_membership"
   ) {
     const heading =
@@ -526,20 +636,22 @@ export function createStaffAuthViewModel(
           : "Signing out"
         : snapshot.kind === "creating_staff_invitation"
           ? `Creating ${roleLabel(snapshot.targetRole)} invitation`
-          : snapshot.kind === "revoking_staff_membership"
-            ? `Revoking ${roleLabel(snapshot.targetRole)} membership`
-            : {
-                accepting_invitation: "Accepting invitation",
-                bootstrapping: "Checking staff access",
-                enrolling_totp: "Preparing authenticator",
-                inspecting_invitation: "Checking invitation",
-                processing_pkce_callback: "Checking authentication link",
-                requesting_recovery: "Requesting recovery",
-                sending_email_verification: "Sending verification email",
-                signing_in: "Signing in",
-                updating_password: "Updating password",
-                verifying_totp: "Verifying authenticator",
-              }[snapshot.kind];
+          : snapshot.kind === "revoking_staff_invitation"
+            ? `Revoking ${roleLabel(snapshot.targetRole)} invitation`
+            : snapshot.kind === "revoking_staff_membership"
+              ? `Revoking ${roleLabel(snapshot.targetRole)} membership`
+              : {
+                  accepting_invitation: "Accepting invitation",
+                  bootstrapping: "Checking staff access",
+                  enrolling_totp: "Preparing authenticator",
+                  inspecting_invitation: "Checking invitation",
+                  processing_recovery_callback: "Checking recovery link",
+                  requesting_recovery: "Requesting recovery",
+                  sending_email_verification: "Sending verification email",
+                  signing_in: "Signing in",
+                  updating_password: "Updating password",
+                  verifying_totp: "Verifying authenticator",
+                }[snapshot.kind];
     return {
       actions: [],
       fields: [],
@@ -597,11 +709,30 @@ export function renderStaffAuthView(
     message.focus();
   };
   const emit = (action: StaffAuthViewActionId) => {
-    const intent = createIntent(action, inputs, selects);
-    if (intent === null) {
+    if (
+      action === "accept_invitation" &&
+      parseStaffDisplayName(inputs.display_name?.value) === null
+    ) {
+      section.dataset.authTone = "danger";
       message.setAttribute("aria-live", "assertive");
-      message.textContent = "Select an Administrator or Teacher to continue.";
-      selects.staff_membership?.focus();
+      message.textContent =
+        "Enter your name without leading, trailing, or control characters and keep it within 160 UTF-8 bytes.";
+      inputs.display_name?.setAttribute("aria-invalid", "true");
+      inputs.display_name?.focus();
+      return;
+    }
+    inputs.display_name?.removeAttribute("aria-invalid");
+    const intent = createIntent(action, inputs, selects, view);
+    if (intent === null) {
+      const pendingInvitation = action === "review_staff_invitation_revocation";
+      message.setAttribute("aria-live", "assertive");
+      message.textContent = pendingInvitation
+        ? "Select a pending Administrator or Teacher invitation to continue."
+        : "Select an Administrator or Teacher to continue.";
+      (pendingInvitation
+        ? selects.staff_invitation
+        : selects.staff_membership
+      )?.focus();
       return;
     }
     let outcome: Promise<void> | void;
@@ -643,7 +774,7 @@ export function renderStaffAuthView(
       fieldset.className = "staff-auth__group";
       const legend = document.createElement("legend");
       legend.textContent = {
-        invitation: "Invite staff",
+        invitation: "Manage staff invitations",
         membership: "Revoke staff access",
         session: "Session controls",
       }[group];
@@ -661,6 +792,9 @@ export function renderStaffAuthView(
       input.name = field.id;
       input.required = true;
       input.type = field.type;
+      if (field.id === "display_name") {
+        input.maxLength = 160;
+      }
       inputs[field.id] = input;
       label.append(labelText, input);
       container.append(label);
@@ -676,7 +810,10 @@ export function renderStaffAuthView(
       const placeholder = document.createElement("option");
       placeholder.disabled = true;
       placeholder.selected = true;
-      placeholder.textContent = "Select staff member";
+      placeholder.textContent =
+        field.id === "staff_invitation"
+          ? "Select pending invitation"
+          : "Select staff member";
       placeholder.value = "";
       select.append(placeholder);
       for (const optionModel of field.options) {
@@ -731,6 +868,7 @@ function createIntent(
   action: StaffAuthViewActionId,
   inputs: Partial<Record<StaffAuthViewField["id"], HTMLInputElement>>,
   selects: Partial<Record<StaffAuthViewSelect["id"], HTMLSelectElement>>,
+  view: StaffAuthViewModel,
 ): StaffAuthViewIntent | null {
   switch (action) {
     case "sign_in":
@@ -748,6 +886,7 @@ function createIntent(
       return { type: "resend_email_verification" };
     case "accept_invitation":
       return {
+        displayName: inputs.display_name?.value ?? "",
         password: inputs.new_password?.value ?? "",
         type: "accept_invitation",
       };
@@ -778,13 +917,36 @@ function createIntent(
           action === "create_administrator_invitation" ? "admin" : "teacher",
         type: "create_staff_invitation",
       };
-    case "review_staff_membership_revocation":
-      return selects.staff_membership?.value
-        ? {
-            membershipId: selects.staff_membership.value,
+    case "review_staff_membership_revocation": {
+      const selectedValue = selects.staff_membership?.value ?? "";
+      const selected = view.selects
+        ?.find((model) => model.id === "staff_membership")
+        ?.options.find((option) => option.value === selectedValue);
+      return selected === undefined
+        ? null
+        : {
+            profileId: selected.profileId,
+            schoolId: selected.schoolId,
             type: "review_staff_membership_revocation",
-          }
-        : null;
+          };
+    }
+    case "review_staff_invitation_revocation": {
+      const selectedValue = selects.staff_invitation?.value ?? "";
+      const selected = view.selects
+        ?.find((model) => model.id === "staff_invitation")
+        ?.options.find((option) => option.value === selectedValue);
+      return selected === undefined
+        ? null
+        : {
+            invitationId: selected.invitationId,
+            schoolId: selected.schoolId,
+            type: "review_staff_invitation_revocation",
+          };
+    }
+    case "confirm_staff_invitation_revocation":
+      return { type: "confirm_staff_invitation_revocation" };
+    case "cancel_staff_invitation_revocation":
+      return { type: "cancel_staff_invitation_revocation" };
     case "confirm_staff_membership_revocation":
       return { type: "confirm_staff_membership_revocation" };
     case "cancel_staff_membership_revocation":
@@ -843,6 +1005,9 @@ export function bindStaffAuthView(
 function clearTransientInputs(
   inputs: Partial<Record<StaffAuthViewField["id"], HTMLInputElement>>,
 ): void {
+  if (inputs.display_name !== undefined) {
+    inputs.display_name.value = "";
+  }
   if (inputs.password !== undefined) {
     inputs.password.value = "";
   }

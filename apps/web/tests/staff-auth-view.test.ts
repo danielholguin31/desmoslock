@@ -51,6 +51,10 @@ class FakeElement {
     this.ownerDocument.activeElement = this;
   }
 
+  removeAttribute(name: string) {
+    delete this.attributes[name];
+  }
+
   setAttribute(name: string, value: string) {
     this.attributes[name] = value;
   }
@@ -88,11 +92,23 @@ function authenticatedSnapshot(role: "administrator" | "owner" | "teacher") {
     },
     identityGeneration: `identity-${role}`,
     kind: "authenticated" as const,
+    manageableInvitations:
+      role === "owner"
+        ? [
+            {
+              email: "pending@example.test",
+              expiresAt: "2026-09-04T12:00:00.000Z",
+              invitationId: "invitation-pending",
+              role: "teacher" as const,
+              schoolId: "school-1",
+              state: "pending" as const,
+            },
+          ]
+        : [],
     manageableStaff:
       role === "owner"
         ? [
             {
-              membershipId: "membership-target",
               profile: {
                 displayName: "Ada Administrator",
                 email: "ada@example.test",
@@ -175,6 +191,12 @@ describe("staff auth view", () => {
       actions: [{ id: "accept_invitation", label: "Accept invitation" }],
       fields: [
         {
+          autocomplete: "name",
+          id: "display_name",
+          label: "Your name",
+          type: "text",
+        },
+        {
           autocomplete: "new-password",
           id: "new_password",
           label: "Create password",
@@ -182,10 +204,102 @@ describe("staff auth view", () => {
         },
       ],
       heading: "Join Synthetic High School",
-      message: "admin@example.test was invited as an Administrator.",
       status: "invitation_ready",
     });
+    expect(view.message).toContain(
+      "admin@example.test was invited as an Administrator.",
+    );
     expect(view.message).not.toContain("as an admin");
+  });
+
+  it.each(["", " Leading", "Trailing ", "Bad\u0000Name", "😀".repeat(41)])(
+    "blocks invalid invitation display name %j in the visible form",
+    (displayName) => {
+      const document = new FakeDocument();
+      const root = new FakeElement(document, "main");
+      const intents: StaffAuthViewIntent[] = [];
+      renderStaffAuthView(
+        root as unknown as HTMLElement,
+        {
+          intendedEmail: "teacher@example.test",
+          kind: "invitation_ready",
+          revision: 1,
+          role: "teacher",
+          schoolLabel: "Synthetic High School",
+        },
+        (intent) => {
+          intents.push(intent);
+        },
+      );
+      const nodes = descendants(root);
+      const name = nodes.find(({ name }) => name === "display_name");
+      const password = nodes.find(({ name }) => name === "new_password");
+      const form = nodes.find(({ tagName }) => tagName === "form");
+      if (name === undefined || password === undefined || form === undefined) {
+        throw new Error("expected invitation form");
+      }
+      name.value = displayName;
+      password.value = "new-password";
+      form.listeners.get("submit")?.({ preventDefault() {} } as Event);
+
+      expect(intents).toEqual([]);
+      expect(name.attributes["aria-invalid"]).toBe("true");
+      expect(document.activeElement).toBe(name);
+      expect(
+        nodes.find(({ tagName }) => tagName === "p")?.textContent,
+      ).toContain("160 UTF-8 bytes");
+    },
+  );
+
+  it("submits and clears a valid 160-byte invitation display name", () => {
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    const intents: StaffAuthViewIntent[] = [];
+    renderStaffAuthView(
+      root as unknown as HTMLElement,
+      {
+        intendedEmail: "teacher@example.test",
+        kind: "invitation_ready",
+        revision: 1,
+        role: "teacher",
+        schoolLabel: "Synthetic High School",
+      },
+      (intent) => {
+        intents.push(intent);
+      },
+    );
+    const nodes = descendants(root);
+    const name = nodes.find(({ name }) => name === "display_name");
+    const password = nodes.find(({ name }) => name === "new_password");
+    const form = nodes.find(({ tagName }) => tagName === "form");
+    if (name === undefined || password === undefined || form === undefined) {
+      throw new Error("expected invitation form");
+    }
+    name.value = "😀".repeat(40);
+    password.value = "new-password";
+    form.listeners.get("submit")?.({ preventDefault() {} } as Event);
+
+    expect(intents).toEqual([
+      {
+        displayName: "😀".repeat(40),
+        password: "new-password",
+        type: "accept_invitation",
+      },
+    ]);
+    expect(name.value).toBe("");
+    expect(password.value).toBe("");
+  });
+
+  it("renders an explicit recoverable invitation step-up notice", () => {
+    expect(
+      createStaffAuthViewModel({
+        kind: "invitation_step_up_required",
+        revision: 1,
+      }),
+    ).toMatchObject({
+      heading: "Additional verification required",
+      tone: "warning",
+    });
   });
 
   it("renders password-recovery request and callback failures without identity or provider detail", () => {
@@ -194,7 +308,7 @@ describe("staff auth view", () => {
       revision: 1,
     });
     const rejectedCallback = createStaffAuthViewModel({
-      code: "state_mismatch",
+      code: "recovery_state_mismatch",
       kind: "callback_rejected",
       revision: 2,
     });
@@ -214,7 +328,7 @@ describe("staff auth view", () => {
       tone: "danger",
     });
     expect(JSON.stringify([notice, rejectedCallback])).not.toContain(
-      "state_mismatch",
+      "recovery_state_mismatch",
     );
   });
 
@@ -416,8 +530,8 @@ describe("staff auth view", () => {
       "Verifying authenticator",
     ],
     [
-      { kind: "processing_pkce_callback", revision: 1 } as const,
-      "Checking authentication link",
+      { kind: "processing_recovery_callback", revision: 1 } as const,
+      "Checking recovery link",
     ],
     [
       { kind: "sending_email_verification", revision: 1 } as const,
@@ -525,17 +639,34 @@ describe("staff auth view", () => {
     expect(owner.actions.map(({ id }) => id)).toEqual([
       "create_administrator_invitation",
       "create_teacher_invitation",
+      "review_staff_invitation_revocation",
       "review_staff_membership_revocation",
       "sign_out_local",
       "revoke_all_sessions",
     ]);
     expect(owner.fields.map(({ id }) => id)).toEqual(["target_email"]);
-    expect(owner.selects?.[0]).toMatchObject({
+    expect(
+      owner.selects?.find(({ id }) => id === "staff_membership"),
+    ).toMatchObject({
       id: "staff_membership",
       options: [
         {
           label: "Ada Administrator — ada@example.test — Administrator",
-          value: "membership-target",
+          profileId: "profile-target",
+          schoolId: "school-1",
+          value: "profile-target",
+        },
+      ],
+    });
+    expect(
+      owner.selects?.find(({ id }) => id === "staff_invitation"),
+    ).toMatchObject({
+      id: "staff_invitation",
+      options: [
+        {
+          invitationId: "invitation-pending",
+          schoolId: "school-1",
+          value: "invitation-pending",
         },
       ],
     });
@@ -549,6 +680,16 @@ describe("staff auth view", () => {
   it.each([
     [
       {
+        kind: "staff_invitation_revoked",
+        revision: 1,
+        schoolLabel: "Synthetic High School",
+        targetRole: "teacher",
+      } as const,
+      "Invitation revoked",
+      "Teacher invitation revoked for Synthetic High School.",
+    ],
+    [
+      {
         kind: "staff_invitation_created",
         revision: 1,
         schoolLabel: "Synthetic High School",
@@ -556,6 +697,11 @@ describe("staff auth view", () => {
       } as const,
       "Invitation created",
       "Administrator invitation created for Synthetic High School.",
+    ],
+    [
+      { kind: "staff_invitation_revocation_rejected", revision: 1 } as const,
+      "Invitation not revoked",
+      "The pending invitation revocation was not authorized or could not be completed.",
     ],
     [
       {
@@ -639,6 +785,9 @@ describe("staff auth view", () => {
     );
     const nodes = descendants(root);
     const email = nodes.find(({ name }) => name === "target_email");
+    const pendingInvitation = nodes.find(
+      ({ name }) => name === "staff_invitation",
+    );
     const membership = nodes.find(({ name }) => name === "staff_membership");
     const inviteTeacher = nodes.find(
       ({ dataset }) => dataset.authAction === "create_teacher_invitation",
@@ -647,11 +796,17 @@ describe("staff auth view", () => {
       ({ dataset }) =>
         dataset.authAction === "review_staff_membership_revocation",
     );
+    const reviewInvitationRevocation = nodes.find(
+      ({ dataset }) =>
+        dataset.authAction === "review_staff_invitation_revocation",
+    );
     if (
       email === undefined ||
+      pendingInvitation === undefined ||
       membership === undefined ||
       inviteTeacher === undefined ||
-      reviewRevocation === undefined
+      reviewRevocation === undefined ||
+      reviewInvitationRevocation === undefined
     ) {
       throw new Error("expected Owner staff-management controls");
     }
@@ -667,8 +822,17 @@ describe("staff auth view", () => {
     } as Event);
     expect(intents).toEqual([]);
 
-    membership.value = "membership-target";
+    reviewInvitationRevocation.listeners.get("click")?.({
+      preventDefault() {},
+    } as Event);
+    expect(intents).toEqual([]);
+
+    pendingInvitation.value = "invitation-pending";
+    membership.value = "profile-target";
     inviteTeacher.listeners.get("click")?.({ preventDefault() {} } as Event);
+    reviewInvitationRevocation.listeners.get("click")?.({
+      preventDefault() {},
+    } as Event);
     membershipForm?.listeners.get("submit")?.({
       preventDefault() {},
     } as Event);
@@ -680,7 +844,13 @@ describe("staff auth view", () => {
         type: "create_staff_invitation",
       },
       {
-        membershipId: "membership-target",
+        invitationId: "invitation-pending",
+        schoolId: "school-1",
+        type: "review_staff_invitation_revocation",
+      },
+      {
+        profileId: "profile-target",
+        schoolId: "school-1",
         type: "review_staff_membership_revocation",
       },
     ]);
@@ -690,8 +860,15 @@ describe("staff auth view", () => {
         .map(({ textContent }) => textContent)
         .filter(Boolean)
         .join(" "),
-    ).not.toContain("membership-target");
+    ).not.toContain("profile-target");
+    expect(
+      nodes
+        .map(({ textContent }) => textContent)
+        .filter(Boolean)
+        .join(" "),
+    ).not.toContain("invitation-pending");
     expect(reviewRevocation.dataset.authActionTone).toBe("danger");
+    expect(reviewInvitationRevocation.dataset.authActionTone).toBe("danger");
   });
 
   it("requires an identity-and-School confirmation before destructive revocation", () => {
@@ -719,7 +896,30 @@ describe("staff auth view", () => {
       message:
         "Revoke Administrator access for Ada Administrator (ada@example.test) at Synthetic High School?",
     });
-    expect(JSON.stringify(view)).not.toContain("membership-target");
+    expect(JSON.stringify(view)).not.toContain("profile-target");
+  });
+
+  it("requires email, role, and School confirmation before revoking an invitation", () => {
+    const view = createStaffAuthViewModel({
+      kind: "confirming_staff_invitation_revocation",
+      revision: 2,
+      schoolLabel: "Synthetic High School",
+      target: { email: "pending@example.test", role: "teacher" },
+    });
+    expect(view).toMatchObject({
+      actions: [
+        {
+          id: "confirm_staff_invitation_revocation",
+          label: "Revoke pending invitation",
+          tone: "danger",
+        },
+        { id: "cancel_staff_invitation_revocation", label: "Cancel" },
+      ],
+      heading: "Confirm pending invitation revocation",
+      message:
+        "Revoke the pending Teacher invitation for pending@example.test at Synthetic High School?",
+    });
+    expect(JSON.stringify(view)).not.toContain("invitation-pending");
   });
 
   it("makes the binding disposer idempotently own controller and DOM teardown", () => {

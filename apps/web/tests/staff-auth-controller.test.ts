@@ -7,6 +7,7 @@ import {
   type StaffAuthAction,
   type StaffAuthAdapter,
   type StaffAuthBoundaryIdentity,
+  type StaffAuthBoundaryManagedInvitation,
   type StaffAuthBoundaryManagedStaff,
   type StaffAuthBoundaryResult,
   type StaffAuthController,
@@ -37,7 +38,6 @@ function identity(
 function manageableStaff(): StaffAuthBoundaryManagedStaff[] {
   return [
     {
-      membershipId: "target-admin-membership",
       profile: {
         displayName: "Ada Administrator",
         email: "ada@example.test",
@@ -47,7 +47,6 @@ function manageableStaff(): StaffAuthBoundaryManagedStaff[] {
       schoolId: "school-1",
     },
     {
-      membershipId: "target-teacher-membership",
       profile: {
         displayName: "Theo Teacher",
         email: "theo@example.test",
@@ -59,6 +58,19 @@ function manageableStaff(): StaffAuthBoundaryManagedStaff[] {
   ];
 }
 
+function manageableInvitations(): StaffAuthBoundaryManagedInvitation[] {
+  return [
+    {
+      email: "pending@example.test",
+      expiresAt: "2026-09-04T12:00:00.000Z",
+      invitationId: "invitation-pending",
+      role: "teacher",
+      schoolId: "school-1",
+      state: "pending",
+    },
+  ];
+}
+
 function access(
   role: "admin" | "owner" | "teacher",
   options: {
@@ -66,6 +78,7 @@ function access(
     email?: string;
     identity?: StaffAuthBoundaryIdentity;
     identityGeneration?: string;
+    manageableInvitations?: readonly StaffAuthBoundaryManagedInvitation[];
     manageableStaff?: readonly StaffAuthBoundaryManagedStaff[];
     secondFactor?: "challenge_required" | "enrollment_required" | "satisfied";
     sessionGeneration?: string;
@@ -79,6 +92,7 @@ function access(
     identity: options.identity ?? identity(role, options.email),
     identityGeneration: options.identityGeneration ?? `identity-${role}`,
     kind: "access_granted" as const,
+    manageableInvitations: options.manageableInvitations ?? [],
     manageableStaff:
       options.manageableStaff ?? (role === "owner" ? manageableStaff() : []),
     sessionGeneration: options.sessionGeneration ?? `session-${role}`,
@@ -135,16 +149,41 @@ function createController(
   options: {
     clear?: () => void;
     history?: (url: string) => void;
-    invitationHistory?: (url: string) => void;
     nextOperationId?: () => string;
     now?: () => number;
-    stateResult?: "accepted" | "invalid" | "replayed";
+    recoveryFlowResult?:
+      | { status: "invalid" | "replayed" }
+      | {
+          expiresAt: number;
+          state: string;
+          status: "accepted";
+          verifier: string;
+        };
   } = {},
 ): StaffAuthController {
   let sequence = 0;
   return createStaffAuthController({
     adapter,
     callback: {
+      flows: {
+        async consume() {
+          return (
+            options.recoveryFlowResult ?? {
+              expiresAt: Date.parse("2026-09-03T12:05:00.000Z"),
+              state: "s".repeat(43),
+              status: "accepted",
+              verifier: "v".repeat(43),
+            }
+          );
+        },
+        async create() {
+          return {
+            codeChallenge: "c".repeat(43),
+            flowId: "f".repeat(22),
+            state: "s".repeat(43),
+          };
+        },
+      },
       history: {
         replaceState(_data, _unused, url) {
           options.history?.(url);
@@ -152,27 +191,11 @@ function createController(
       },
       route: {
         origin: "https://app.example.test",
-        pathname: "/auth/callback",
-      },
-      states: {
-        async consume() {
-          return options.stateResult ?? "accepted";
-        },
+        pathname: "/",
       },
     },
     clock: {
       now: () => options.now?.() ?? Date.parse("2026-09-03T12:00:00.000Z"),
-    },
-    invitationCallback: {
-      history: {
-        replaceState(_data, _unused, url) {
-          options.invitationHistory?.(url);
-        },
-      },
-      route: {
-        origin: "https://app.example.test",
-        pathname: "/auth/invitation",
-      },
     },
     operationIds: {
       next() {
@@ -376,6 +399,30 @@ describe("staff auth controller", () => {
     expect(JSON.stringify(unknown)).not.toContain("unknown@example.test");
   });
 
+  it("adds only bounded public PKCE values to a recovery request", async () => {
+    const requests: StaffAuthMutation[] = [];
+    const controller = createController(
+      createAdapter({ kind: "signed_out" }, async (request) => {
+        requests.push(request);
+        return { kind: "recovery_request_received" };
+      }),
+    );
+    await controller.dispatch({ type: "bootstrap" });
+    await controller.dispatch({
+      email: "teacher@example.test",
+      type: "request_password_recovery",
+    });
+
+    expect(requests[0]).toMatchObject({
+      codeChallenge: "c".repeat(43),
+      email: "teacher@example.test",
+      flowId: "f".repeat(22),
+      state: "s".repeat(43),
+      type: "request_password_recovery",
+    });
+    expect(JSON.stringify(requests[0])).not.toContain("verifier");
+  });
+
   it.each(["invalid", "expired", "replayed"] as const)(
     "rejects a %s invitation without retaining its token",
     async (reason) => {
@@ -387,7 +434,7 @@ describe("staff auth controller", () => {
       );
       await controller.dispatch({ type: "bootstrap" });
       await controller.dispatch({
-        callbackUrl: `https://app.example.test/auth/invitation?token=SENTINEL-${reason}`,
+        callbackUrl: `https://app.example.test/?auth=invite&token_hash=SENTINEL-${reason}`,
         type: "inspect_invitation",
       });
 
@@ -421,11 +468,12 @@ describe("staff auth controller", () => {
     const controller = createController(adapter);
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: "https://app.example.test/auth/invitation?token=one-time",
+      callbackUrl: "https://app.example.test/?auth=invite&token_hash=one-time",
       type: "inspect_invitation",
     });
     await controller.dispatch({
       password: "new-password",
+      displayName: "Invited Teacher",
       type: "accept_invitation",
     });
 
@@ -459,7 +507,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: "https://app.example.test/auth/invitation?token=one-time",
+      callbackUrl: "https://app.example.test/?auth=invite&token_hash=one-time",
       type: "inspect_invitation",
     });
 
@@ -1045,20 +1093,19 @@ describe("staff auth controller", () => {
     const controller = createController(
       createAdapter({ kind: "signed_out" }, async (request) => {
         requests.push(request);
-        return request.type === "exchange_pkce_code"
+        return request.type === "exchange_recovery_code"
           ? { kind: "password_recovery_ready" }
-          : { kind: "password_recovery_complete" };
+          : { kind: "password_recovery_complete", sessionScope: "all" };
       }),
       { history },
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl:
-        "https://app.example.test/auth/callback?code=SENTINEL-code&state=SENTINEL-state&flow=password_recovery",
-      type: "complete_pkce_callback",
+      callbackUrl: `https://app.example.test/?auth=recovery&code=SENTINEL-code&state=${"s".repeat(43)}&flow=${"f".repeat(22)}`,
+      type: "consume_recovery_callback",
     });
 
-    expect(history).toHaveBeenCalledWith("/auth/callback");
+    expect(history).toHaveBeenCalledWith("/");
     expect(controller.getSnapshot()).toMatchObject({
       kind: "password_recovery_ready",
     });
@@ -1072,10 +1119,42 @@ describe("staff auth controller", () => {
     });
     expect(requests[0]).toMatchObject({
       authorizationCode: "SENTINEL-code",
-      flow: "password_recovery",
-      type: "exchange_pkce_code",
+      type: "exchange_recovery_code",
+      verifier: "v".repeat(43),
     });
   });
+
+  it.each([
+    { kind: "password_recovery_complete" },
+    { kind: "password_recovery_complete", sessionScope: "local" },
+    { kind: "signed_out" },
+  ])(
+    "rejects recovery completion without authoritative global-session scope %#",
+    async (completion) => {
+      const controller = createController(
+        createAdapter({ kind: "signed_out" }, async (request) =>
+          request.type === "exchange_recovery_code"
+            ? { kind: "password_recovery_ready" }
+            : (completion as unknown as StaffAuthBoundaryResult),
+        ),
+      );
+      await controller.dispatch({ type: "bootstrap" });
+      await controller.dispatch({
+        callbackUrl: `https://app.example.test/?auth=recovery&code=one&state=${"s".repeat(43)}&flow=${"f".repeat(22)}`,
+        type: "consume_recovery_callback",
+      });
+      await controller.dispatch({
+        password: "new password",
+        type: "complete_password_recovery",
+      });
+
+      expect(controller.getSnapshot()).toMatchObject({
+        code: "invalid_backend_result",
+        kind: "dependency_failure",
+        operation: "password_recovery",
+      });
+    },
+  );
 
   it("turns a malformed callback success into invalid_backend_result instead of wedging", async () => {
     const adapter = createAdapter({ kind: "signed_out" });
@@ -1087,29 +1166,31 @@ describe("staff auth controller", () => {
     const controller = createController(adapter);
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl:
-        "https://app.example.test/auth/callback?code=one&state=two&flow=sign_in",
-      type: "complete_pkce_callback",
+      callbackUrl: `https://app.example.test/?auth=recovery&code=one&state=${"s".repeat(43)}&flow=${"f".repeat(22)}`,
+      type: "consume_recovery_callback",
     });
 
     expect(controller.getSnapshot()).toMatchObject({
       code: "invalid_backend_result",
       kind: "dependency_failure",
-      operation: "pkce_callback",
+      operation: "recovery_callback",
     });
   });
 
-  it("grants callback access only from the authoritative matching flow result", async () => {
+  it("rejects access grants from a recovery-only callback", async () => {
     const controller = createController(
       createAdapter({ kind: "signed_out" }, async () => access("teacher")),
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl:
-        "https://app.example.test/auth/callback?code=one&state=two&flow=email_verification",
-      type: "complete_pkce_callback",
+      callbackUrl: `https://app.example.test/?auth=recovery&code=one&state=${"s".repeat(43)}&flow=${"f".repeat(22)}`,
+      type: "consume_recovery_callback",
     });
-    expect(controller.getSnapshot()).toMatchObject({ kind: "authenticated" });
+    expect(controller.getSnapshot()).toMatchObject({
+      code: "invalid_backend_result",
+      kind: "dependency_failure",
+      operation: "recovery_callback",
+    });
   });
 
   it("rejects a mutation response with a mismatched operation ID", async () => {
@@ -1243,23 +1324,187 @@ describe("staff auth controller", () => {
     expect(perform).not.toHaveBeenCalled();
   });
 
-  it.each(["admin", "teacher"] as const)(
-    "lets an AAL2 Owner revoke a %s Membership through the adapter",
-    async (targetRole) => {
-      const controller = createController(
-        createAdapter(access("owner"), async (request) => ({
-          actor: access("owner"),
-          kind: "staff_membership_revoked",
-          membershipId:
-            request.type === "revoke_staff_membership"
-              ? request.membershipId
+  it("lets an AAL2 Owner revoke a selected same-School pending invitation", async () => {
+    const invitations = manageableInvitations();
+    const owner = access("owner", { manageableInvitations: invitations });
+    const requests: StaffAuthMutation[] = [];
+    const controller = createController(
+      createAdapter(owner, async (request) => {
+        requests.push(request);
+        return {
+          actor: owner,
+          invitationId:
+            request.type === "revoke_staff_invitation"
+              ? request.invitationId
               : "wrong",
-          revokedRole: targetRole,
+          kind: "staff_invitation_revoked",
+          revokedRole: "teacher",
+          schoolId:
+            request.type === "revoke_staff_invitation"
+              ? request.schoolId
+              : "wrong",
+        };
+      }),
+    );
+    await controller.dispatch({ type: "bootstrap" });
+    await controller.dispatch({
+      invitationId: "invitation-pending",
+      schoolId: "school-1",
+      type: "review_staff_invitation_revocation",
+    });
+    expect(controller.getSnapshot()).toMatchObject({
+      kind: "confirming_staff_invitation_revocation",
+      target: { email: "pending@example.test", role: "teacher" },
+    });
+    expect(JSON.stringify(controller.getSnapshot())).not.toContain(
+      "invitation-pending",
+    );
+    await controller.dispatch({ type: "confirm_staff_invitation_revocation" });
+
+    expect(requests[0]).toMatchObject({
+      invitationId: "invitation-pending",
+      schoolId: "school-1",
+      type: "revoke_staff_invitation",
+    });
+    expect(controller.getSnapshot()).toMatchObject({
+      kind: "staff_invitation_revoked",
+      schoolLabel: "Synthetic High School",
+      targetRole: "teacher",
+    });
+  });
+
+  it.each(["invitation", "school", "role"] as const)(
+    "rejects pending invitation revocation result with mismatched %s authority",
+    async (field) => {
+      const invitations = manageableInvitations();
+      const owner = access("owner", { manageableInvitations: invitations });
+      const controller = createController(
+        createAdapter(owner, async () => ({
+          actor: owner,
+          invitationId:
+            field === "invitation" ? "other-invitation" : "invitation-pending",
+          kind: "staff_invitation_revoked",
+          revokedRole: field === "role" ? "admin" : "teacher",
+          schoolId: field === "school" ? "other-school" : "school-1",
         })),
       );
       await controller.dispatch({ type: "bootstrap" });
       await controller.dispatch({
-        membershipId: `target-${targetRole}-membership`,
+        invitationId: "invitation-pending",
+        schoolId: "school-1",
+        type: "review_staff_invitation_revocation",
+      });
+      await controller.dispatch({
+        type: "confirm_staff_invitation_revocation",
+      });
+      expect(controller.getSnapshot()).toMatchObject({
+        code: "invalid_backend_result",
+        kind: "dependency_failure",
+        operation: "staff_invitation_revocation",
+      });
+    },
+  );
+
+  it("invalidates pending invitation selection when authority generation changes", async () => {
+    const invitations = manageableInvitations();
+    const owner = access("owner", { manageableInvitations: invitations });
+    let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
+    const perform = vi.fn();
+    const adapter = createAdapter(owner);
+    adapter.perform = perform;
+    adapter.subscribe = (listener) => {
+      emit = listener;
+      return () => undefined;
+    };
+    const controller = createController(adapter);
+    await controller.dispatch({ type: "bootstrap" });
+    await controller.dispatch({
+      invitationId: "invitation-pending",
+      schoolId: "school-1",
+      type: "review_staff_invitation_revocation",
+    });
+    emit?.({
+      access: access("owner", {
+        identityGeneration: "identity-owner-2",
+        manageableInvitations: invitations,
+        sessionGeneration: "session-owner-2",
+      }),
+      kind: "access_changed",
+      previousIdentityGeneration: "identity-owner",
+      previousSessionGeneration: "session-owner",
+    });
+    await controller.dispatch({ type: "confirm_staff_invitation_revocation" });
+    expect(perform).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({ kind: "authenticated" });
+  });
+
+  it("rejects an oversized or cross-School manageable invitation list", async () => {
+    const oversized = Array.from({ length: 501 }, (_, index) => ({
+      ...manageableInvitations()[0]!,
+      invitationId: `invitation-${index}`,
+    }));
+    for (const list of [
+      oversized,
+      [{ ...manageableInvitations()[0]!, schoolId: "other-school" }],
+    ]) {
+      const controller = createController(
+        createAdapter(access("owner", { manageableInvitations: list })),
+      );
+      await controller.dispatch({ type: "bootstrap" });
+      expect(controller.getSnapshot()).toMatchObject({
+        code: "invalid_backend_result",
+        kind: "dependency_failure",
+      });
+    }
+  });
+
+  it.each([
+    { invitationId: "", schoolId: "school-1" },
+    { invitationId: "forged-invitation", schoolId: "school-1" },
+    { invitationId: "invitation-pending", schoolId: "forged-school" },
+  ])("rejects forged pending invitation selection %#", async (selection) => {
+    const perform = vi.fn();
+    const adapter = createAdapter(
+      access("owner", { manageableInvitations: manageableInvitations() }),
+    );
+    adapter.perform = perform;
+    const controller = createController(adapter);
+    await controller.dispatch({ type: "bootstrap" });
+    await controller.dispatch({
+      ...selection,
+      type: "review_staff_invitation_revocation",
+    });
+    await controller.dispatch({ type: "confirm_staff_invitation_revocation" });
+    expect(perform).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({ kind: "authenticated" });
+  });
+
+  it.each(["admin", "teacher"] as const)(
+    "lets an AAL2 Owner revoke a %s Membership through the adapter",
+    async (targetRole) => {
+      const requests: StaffAuthMutation[] = [];
+      const controller = createController(
+        createAdapter(access("owner"), async (request) => {
+          requests.push(request);
+          return {
+            actor: access("owner"),
+            kind: "staff_membership_revoked",
+            profileId:
+              request.type === "revoke_staff_membership"
+                ? request.profileId
+                : "wrong",
+            revokedRole: targetRole,
+            schoolId:
+              request.type === "revoke_staff_membership"
+                ? request.schoolId
+                : "wrong",
+          };
+        }),
+      );
+      await controller.dispatch({ type: "bootstrap" });
+      await controller.dispatch({
+        profileId: `profile-target-${targetRole}`,
+        schoolId: "school-1",
         type: "review_staff_membership_revocation",
       });
       expect(controller.getSnapshot()).toMatchObject({
@@ -1274,6 +1519,12 @@ describe("staff auth controller", () => {
         kind: "staff_membership_revoked",
         targetRole: targetRole === "admin" ? "administrator" : "teacher",
       });
+      expect(requests[0]).toMatchObject({
+        profileId: `profile-target-${targetRole}`,
+        schoolId: "school-1",
+        type: "revoke_staff_membership",
+      });
+      expect(JSON.stringify(requests[0])).not.toContain("targetRole");
     },
   );
 
@@ -1287,7 +1538,8 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      membershipId: "target-teacher-membership",
+      profileId: "profile-target-teacher",
+      schoolId: "school-1",
       type: "review_staff_membership_revocation",
     });
     await controller.dispatch({ type: "confirm_staff_membership_revocation" });
@@ -1299,7 +1551,7 @@ describe("staff auth controller", () => {
     });
     expect(requests).toHaveLength(1);
     expect(JSON.stringify(controller.getSnapshot())).not.toContain(
-      "target-teacher-membership",
+      "profile-target-teacher",
     );
   });
 
@@ -1356,13 +1608,13 @@ describe("staff auth controller", () => {
         order.push("inspect");
         return finish.promise;
       }),
-      { invitationHistory: () => order.push("scrub") },
+      { history: () => order.push("scrub") },
     );
     await controller.dispatch({ type: "bootstrap" });
 
     const pending = controller.dispatch({
       callbackUrl:
-        "https://app.example.test/auth/invitation?token=SENTINEL-token",
+        "https://app.example.test/?auth=invite&token_hash=SENTINEL-token",
       type: "inspect_invitation",
     });
     expect(order).toEqual(["scrub", "inspect"]);
@@ -1394,20 +1646,134 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: "https://app.example.test/auth/invitation?token=one-time",
+      callbackUrl: "https://app.example.test/?auth=invite&token_hash=one-time",
       type: "inspect_invitation",
     });
     await controller.dispatch({
       password: "new password",
+      displayName: "Invited Teacher",
       type: "accept_invitation",
     });
 
     expect(requests[1]).toMatchObject({
       acceptanceReceipt: "opaque-acceptance-receipt",
+      displayName: "Invited Teacher",
       inspectionOperationId: requests[0]?.operationId,
       type: "accept_invitation",
     });
     expect(controller.getSnapshot()).toMatchObject({ kind: "authenticated" });
+  });
+
+  it.each([
+    "",
+    " Leading",
+    "Trailing ",
+    "Bad\u0000Name",
+    "a".repeat(161),
+    "😀".repeat(41),
+  ])(
+    "rejects invalid invitation display name %j before mutation",
+    async (displayName) => {
+      const requests: StaffAuthMutation[] = [];
+      const controller = createController(
+        createAdapter({ kind: "signed_out" }, async (request) => {
+          requests.push(request);
+          return invitationReady(request.operationId);
+        }),
+      );
+      await controller.dispatch({ type: "bootstrap" });
+      await controller.dispatch({
+        callbackUrl:
+          "https://app.example.test/?auth=invite&token_hash=one-time",
+        type: "inspect_invitation",
+      });
+      await controller.dispatch({
+        displayName,
+        password: "pw",
+        type: "accept_invitation",
+      });
+
+      expect(requests).toHaveLength(1);
+      expect(controller.getSnapshot()).toMatchObject({
+        kind: "invitation_ready",
+      });
+    },
+  );
+
+  it("accepts an exact 160-byte multibyte display name", async () => {
+    const requests: StaffAuthMutation[] = [];
+    const controller = createController(
+      createAdapter({ kind: "signed_out" }, async (request) => {
+        requests.push(request);
+        return request.type === "inspect_invitation"
+          ? invitationReady(request.operationId)
+          : access("teacher", { email: "invited@example.test" });
+      }),
+    );
+    await controller.dispatch({ type: "bootstrap" });
+    await controller.dispatch({
+      callbackUrl: "https://app.example.test/?auth=invite&token_hash=one-time",
+      type: "inspect_invitation",
+    });
+    await controller.dispatch({
+      displayName: "😀".repeat(40),
+      password: "pw",
+      type: "accept_invitation",
+    });
+    expect(requests[1]).toMatchObject({ displayName: "😀".repeat(40) });
+  });
+
+  it("rejects an accessor-backed invitation display name without invoking it", async () => {
+    let reads = 0;
+    const requests: StaffAuthMutation[] = [];
+    const controller = createController(
+      createAdapter({ kind: "signed_out" }, async (request) => {
+        requests.push(request);
+        return invitationReady(request.operationId);
+      }),
+    );
+    await controller.dispatch({ type: "bootstrap" });
+    await controller.dispatch({
+      callbackUrl: "https://app.example.test/?auth=invite&token_hash=one-time",
+      type: "inspect_invitation",
+    });
+    const action = { password: "pw", type: "accept_invitation" };
+    Object.defineProperty(action, "displayName", {
+      enumerable: true,
+      get() {
+        reads += 1;
+        return "Invited Teacher";
+      },
+    });
+    await controller.dispatch(action as unknown as StaffAuthAction);
+    expect(reads).toBe(0);
+    expect(requests).toHaveLength(1);
+    expect(controller.getSnapshot()).toMatchObject({
+      kind: "invitation_ready",
+    });
+  });
+
+  it("surfaces authoritative invitation step-up as a terminal refresh notice", async () => {
+    const controller = createController(
+      createAdapter({ kind: "signed_out" }, async (request) =>
+        request.type === "inspect_invitation"
+          ? invitationReady(request.operationId)
+          : { kind: "step_up_required" },
+      ),
+    );
+    await controller.dispatch({ type: "bootstrap" });
+    await controller.dispatch({
+      callbackUrl: "https://app.example.test/?auth=invite&token_hash=one-time",
+      type: "inspect_invitation",
+    });
+    await controller.dispatch({
+      displayName: "Invited Teacher",
+      password: "pw",
+      type: "accept_invitation",
+    });
+    expect(controller.getSnapshot()).toMatchObject({
+      kind: "invitation_step_up_required",
+    });
   });
 
   it.each(["account", "email", "school", "role"] as const)(
@@ -1440,10 +1806,15 @@ describe("staff auth controller", () => {
       );
       await controller.dispatch({ type: "bootstrap" });
       await controller.dispatch({
-        callbackUrl: "https://app.example.test/auth/invitation?token=one-time",
+        callbackUrl:
+          "https://app.example.test/?auth=invite&token_hash=one-time",
         type: "inspect_invitation",
       });
-      await controller.dispatch({ password: "pw", type: "accept_invitation" });
+      await controller.dispatch({
+        displayName: "Invited Teacher",
+        password: "pw",
+        type: "accept_invitation",
+      });
 
       expect(controller.getSnapshot()).toMatchObject({
         code: "invalid_backend_result",
@@ -1465,11 +1836,15 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: "https://app.example.test/auth/invitation?token=one-time",
+      callbackUrl: "https://app.example.test/?auth=invite&token_hash=one-time",
       type: "inspect_invitation",
     });
     now = Date.parse("2026-09-05T12:00:00.000Z");
-    await controller.dispatch({ password: "pw", type: "accept_invitation" });
+    await controller.dispatch({
+      displayName: "Invited Teacher",
+      password: "pw",
+      type: "accept_invitation",
+    });
 
     expect(requests).toHaveLength(1);
     expect(controller.getSnapshot()).toMatchObject({
@@ -1658,7 +2033,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: "https://app.example.test/auth/invitation?token=one-time",
+      callbackUrl: "https://app.example.test/?auth=invite&token_hash=one-time",
       type: "inspect_invitation",
     });
 
@@ -1669,16 +2044,21 @@ describe("staff auth controller", () => {
     });
   });
 
-  it.each(["", "forged-membership"])(
-    "does not dispatch a blank or forged Membership selection %j",
-    async (membershipId) => {
+  it.each([
+    { profileId: "", schoolId: "school-1" },
+    { profileId: "forged-profile", schoolId: "school-1" },
+    { profileId: "profile-target-teacher", schoolId: "forged-school" },
+  ])(
+    "does not dispatch a blank or forged Membership selection $profileId/$schoolId",
+    async ({ profileId, schoolId }) => {
       const perform = vi.fn();
       const adapter = createAdapter(access("owner"));
       adapter.perform = perform;
       const controller = createController(adapter);
       await controller.dispatch({ type: "bootstrap" });
       await controller.dispatch({
-        membershipId,
+        profileId,
+        schoolId,
         type: "review_staff_membership_revocation",
       });
       await controller.dispatch({
@@ -1933,16 +2313,16 @@ describe("staff auth controller", () => {
       },
     };
     const controller = createController(adapter, {
-      invitationHistory: history,
+      history,
     });
     const bootstrap = controller.dispatch({ type: "bootstrap" });
 
     const invitation = controller.dispatch({
       callbackUrl:
-        "https://app.example.test/auth/invitation?token=SENTINEL-cold-token",
+        "https://app.example.test/?auth=invite&token_hash=SENTINEL-cold-token",
       type: "inspect_invitation",
     });
-    expect(history).toHaveBeenCalledWith("/auth/invitation");
+    expect(history).toHaveBeenCalledWith("/");
     expect(requests).toHaveLength(1);
     await invitation;
     read.resolve(access("owner"));
@@ -1955,12 +2335,12 @@ describe("staff auth controller", () => {
     expect(JSON.stringify(controller.getSnapshot())).not.toContain("SENTINEL");
   });
 
-  it("clears cold protected data before a PKCE exchange can publish access", async () => {
+  it("clears cold protected data before a recovery exchange can publish readiness", async () => {
     const order: string[] = [];
     const controller = createController(
       createAdapter({ kind: "signed_out" }, async () => {
         order.push("exchange");
-        return access("teacher");
+        return { kind: "password_recovery_ready" };
       }),
       {
         clear: () => order.push("clear"),
@@ -1970,21 +2350,20 @@ describe("staff auth controller", () => {
     controller.subscribe((state) => order.push(`state:${state.kind}`));
 
     await controller.dispatch({
-      callbackUrl:
-        "https://app.example.test/auth/callback?code=code&state=state&flow=sign_in",
-      type: "complete_pkce_callback",
+      callbackUrl: `https://app.example.test/?auth=recovery&code=code&state=${"s".repeat(43)}&flow=${"f".repeat(22)}`,
+      type: "consume_recovery_callback",
     });
 
     expect(order).toEqual([
       "scrub",
-      "state:processing_pkce_callback",
+      "state:processing_recovery_callback",
       "clear",
       "exchange",
-      "state:authenticated",
+      "state:password_recovery_ready",
     ]);
   });
 
-  it("blocks a cold PKCE exchange when protected data cannot be cleared", async () => {
+  it("blocks a cold recovery exchange when protected data cannot be cleared", async () => {
     const perform = vi.fn();
     const history = vi.fn();
     const adapter = createAdapter({ kind: "signed_out" });
@@ -1997,17 +2376,16 @@ describe("staff auth controller", () => {
     });
 
     await controller.dispatch({
-      callbackUrl:
-        "https://app.example.test/auth/callback?code=code&state=state&flow=sign_in",
-      type: "complete_pkce_callback",
+      callbackUrl: `https://app.example.test/?auth=recovery&code=code&state=${"s".repeat(43)}&flow=${"f".repeat(22)}`,
+      type: "consume_recovery_callback",
     });
 
-    expect(history).toHaveBeenCalledWith("/auth/callback");
+    expect(history).toHaveBeenCalledWith("/");
     expect(perform).not.toHaveBeenCalled();
     expect(controller.getSnapshot()).toMatchObject({
       code: "dependency_unavailable",
       kind: "dependency_failure",
-      operation: "pkce_callback",
+      operation: "recovery_callback",
     });
   });
 
@@ -2017,17 +2395,17 @@ describe("staff auth controller", () => {
     const adapter = createAdapter({ kind: "signed_out" });
     adapter.perform = perform;
     const controller = createController(adapter, {
-      invitationHistory: history,
+      history,
       nextOperationId: () => "",
     });
 
     await controller.dispatch({
       callbackUrl:
-        "https://app.example.test/auth/invitation?token=SENTINEL-invalid-id",
+        "https://app.example.test/?auth=invite&token_hash=SENTINEL-invalid-id",
       type: "inspect_invitation",
     });
 
-    expect(history).toHaveBeenCalledWith("/auth/invitation");
+    expect(history).toHaveBeenCalledWith("/");
     expect(perform).not.toHaveBeenCalled();
     expect(controller.getSnapshot()).toMatchObject({
       code: "invalid_backend_result",
@@ -2045,25 +2423,25 @@ describe("staff auth controller", () => {
         return { kind: "invitation_rejected", reason: "invalid" };
       }),
       {
-        invitationHistory: history,
+        history,
         nextOperationId: () => "same-operation",
       },
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
       callbackUrl:
-        "https://app.example.test/auth/invitation?token=first-invitation",
+        "https://app.example.test/?auth=invite&token_hash=first-invitation",
       type: "inspect_invitation",
     });
 
     await controller.dispatch({
       callbackUrl:
-        "https://app.example.test/auth/invitation?token=SENTINEL-duplicate-id",
+        "https://app.example.test/?auth=invite&token_hash=SENTINEL-duplicate-id",
       type: "inspect_invitation",
     });
 
     expect(history).toHaveBeenCalledTimes(2);
-    expect(history).toHaveBeenCalledWith("/auth/invitation");
+    expect(history).toHaveBeenCalledWith("/");
     expect(requests).toHaveLength(1);
     expect(controller.getSnapshot()).toMatchObject({
       code: "invalid_backend_result",

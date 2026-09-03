@@ -1,368 +1,331 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  consumeStaffAuthPkceCallback,
   consumeStaffInvitationCallback,
-  type StaffAuthCallbackFlow,
-  type StaffAuthCallbackStateResult,
+  consumeStaffRecoveryCallback,
+  type StaffRecoveryFlowConsumeResult,
+  type StaffRecoveryFlowStore,
 } from "../src/auth/staff-auth-callback.js";
 
-const route = {
-  origin: "https://app.example.test",
-  pathname: "/auth/callback",
-} as const;
+const origin = "https://app.example.test";
+const route = { origin, pathname: "/" } as const;
+const flowId = "f".repeat(22);
+const state = "s".repeat(43);
+const verifier = "v".repeat(43);
+const tokenHash = "a".repeat(56);
 
-function callbackUrl(
-  flow: StaffAuthCallbackFlow = "sign_in",
-  query = `code=SENTINEL-code&state=SENTINEL-state&flow=${flow}`,
-): string {
-  return `${route.origin}${route.pathname}?${query}`;
-}
-
-function options(
-  input: {
-    exchange?: (input: {
-      authorizationCode: string;
-      flow: StaffAuthCallbackFlow;
-    }) => Promise<void>;
-    history?: { replaceState(data: null, unused: string, url: string): void };
-    stateResult?: StaffAuthCallbackStateResult;
-    states?: {
-      consume(input: {
-        flow: StaffAuthCallbackFlow;
-        state: string;
-      }): Promise<StaffAuthCallbackStateResult>;
-    };
-  } = {},
-) {
+function history(order: string[] = []) {
   return {
-    exchange: input.exchange ?? (async () => undefined),
-    history: input.history ?? { replaceState() {} },
-    route,
-    states: input.states ?? {
-      async consume() {
-        return input.stateResult ?? "accepted";
-      },
+    replaceState(_data: null, _unused: string, url: string) {
+      order.push(`scrub:${url}`);
     },
   };
 }
 
-describe("staff auth PKCE callback", () => {
-  it.each(["sign_in", "email_verification", "password_recovery"] as const)(
-    "accepts a trusted exact-key %s callback",
-    async (flow) => {
-      const exchanged: unknown[] = [];
-
-      const receipt = await consumeStaffAuthPkceCallback(
-        callbackUrl(flow),
-        options({
-          async exchange(input) {
-            exchanged.push(input);
-          },
-        }),
-      );
-
-      expect(receipt).toEqual({ code: "accepted", flow, status: "accepted" });
-      expect(exchanged).toEqual([{ authorizationCode: "SENTINEL-code", flow }]);
-      expect(JSON.stringify(receipt)).not.toContain("SENTINEL");
+function flowStore(
+  result: StaffRecoveryFlowConsumeResult = {
+    expiresAt: 301_000,
+    state,
+    status: "accepted",
+    verifier,
+  },
+): StaffRecoveryFlowStore {
+  return {
+    async consume() {
+      return result;
     },
-  );
-
-  it("scrubs callback credentials synchronously before the first await", async () => {
-    const order: string[] = [];
-    let releaseState:
-      ((value: StaffAuthCallbackStateResult) => void) | undefined;
-    const pendingState = new Promise<StaffAuthCallbackStateResult>(
-      (resolve) => {
-        releaseState = resolve;
-      },
-    );
-
-    const pending = consumeStaffAuthPkceCallback(
-      callbackUrl(),
-      options({
-        async exchange() {
-          order.push("exchange");
-        },
-        history: {
-          replaceState(data, title, url) {
-            expect(data).toBeNull();
-            expect(title).toBe("");
-            expect(url).toBe("/auth/callback");
-            order.push("scrub");
-          },
-        },
-        states: {
-          async consume() {
-            order.push("consume");
-            return pendingState;
-          },
-        },
-      }),
-    );
-
-    expect(order).toEqual(["scrub", "consume"]);
-    releaseState?.("accepted");
-    await expect(pending).resolves.toMatchObject({ status: "accepted" });
-    expect(order).toEqual(["scrub", "consume", "exchange"]);
-  });
-
-  it("passes state and flow only to the one-time state store", async () => {
-    const consumed: unknown[] = [];
-    await consumeStaffAuthPkceCallback(
-      callbackUrl("password_recovery"),
-      options({
-        states: {
-          async consume(input) {
-            consumed.push(input);
-            return "accepted";
-          },
-        },
-      }),
-    );
-
-    expect(consumed).toEqual([
-      { flow: "password_recovery", state: "SENTINEL-state" },
-    ]);
-  });
-
-  it.each([
-    ["invalid", "state_mismatch"],
-    ["replayed", "state_replayed"],
-  ] as const)("rejects a %s one-time state", async (stateResult, code) => {
-    const exchange = vi.fn();
-    const receipt = await consumeStaffAuthPkceCallback(
-      callbackUrl(),
-      options({ exchange, stateResult }),
-    );
-
-    expect(receipt).toEqual({ code, status: "rejected" });
-    expect(exchange).not.toHaveBeenCalled();
-  });
-
-  it("sanitizes a state-store outage", async () => {
-    const receipt = await consumeStaffAuthPkceCallback(
-      callbackUrl(),
-      options({
-        states: {
-          async consume() {
-            throw new Error("SENTINEL-state-store-detail");
-          },
-        },
-      }),
-    );
-
-    expect(receipt).toEqual({ code: "state_unavailable", status: "rejected" });
-    expect(JSON.stringify(receipt)).not.toContain("SENTINEL");
-  });
-
-  it("consumes state and sanitizes a provider rejection", async () => {
-    const consume = vi.fn(async () => "accepted" as const);
-    const exchange = vi.fn();
-    const receipt = await consumeStaffAuthPkceCallback(
-      callbackUrl("sign_in", "error=access_denied&state=opaque&flow=sign_in"),
-      options({ exchange, states: { consume } }),
-    );
-
-    expect(receipt).toEqual({ code: "provider_rejected", status: "rejected" });
-    expect(consume).toHaveBeenCalledWith({ flow: "sign_in", state: "opaque" });
-    expect(exchange).not.toHaveBeenCalled();
-  });
-
-  it("sanitizes an exchange failure", async () => {
-    const receipt = await consumeStaffAuthPkceCallback(
-      callbackUrl(),
-      options({
-        async exchange() {
-          throw new Error("SENTINEL-provider-detail");
-        },
-      }),
-    );
-
-    expect(receipt).toEqual({
-      code: "exchange_unavailable",
-      status: "rejected",
-    });
-    expect(JSON.stringify(receipt)).not.toContain("SENTINEL");
-  });
-
-  it.each([
-    "https://evil.example.test/auth/callback?code=one&state=two&flow=sign_in",
-    "https://app.example.test/wrong?code=one&state=two&flow=sign_in",
-    "https://user@app.example.test/auth/callback?code=one&state=two&flow=sign_in",
-    "https://app.example.test/auth/callback?code=one&state=two&flow=sign_in#token",
-  ])("rejects a callback outside the trusted exact route", async (url) => {
-    const exchange = vi.fn();
-    const receipt = await consumeStaffAuthPkceCallback(
-      url,
-      options({ exchange }),
-    );
-
-    expect(receipt).toEqual({ code: "invalid_callback", status: "rejected" });
-    expect(exchange).not.toHaveBeenCalled();
-  });
-
-  it.each(["code=one&state=two&flow=owner", "code=one&state=two&flow="])(
-    "rejects an untrusted callback flow",
-    async (query) => {
-      const receipt = await consumeStaffAuthPkceCallback(
-        callbackUrl("sign_in", query),
-        options(),
-      );
-      expect(receipt).toEqual({ code: "invalid_flow", status: "rejected" });
+    async create() {
+      return {
+        codeChallenge: "c".repeat(43),
+        flowId,
+        state,
+      };
     },
-  );
-
-  it.each([
-    "code=one&state=two&flow=sign_in&token=SENTINEL",
-    "code=one&code=two&state=three&flow=sign_in",
-    "code=one&state=two&state=three&flow=sign_in",
-    "code=one&state=two&flow=sign_in&flow=password_recovery",
-    "code=&state=two&flow=sign_in",
-    "code=one%00&state=two&flow=sign_in",
-    "code=one&state=two%0A&flow=sign_in",
-    "error=&state=two&flow=sign_in",
-    "code=one&error=denied&state=two&flow=sign_in",
-    "state=two&flow=sign_in",
-  ])("rejects malformed or non-exact callback keys", async (query) => {
-    const receipt = await consumeStaffAuthPkceCallback(
-      callbackUrl("sign_in", query),
-      options(),
-    );
-    expect(receipt).toEqual({
-      code: "malformed_callback",
-      status: "rejected",
-    });
-  });
-
-  it("fails closed when browser history cannot scrub the address", async () => {
-    const states = { consume: vi.fn(async () => "accepted" as const) };
-    const receipt = await consumeStaffAuthPkceCallback(
-      callbackUrl(),
-      options({
-        history: {
-          replaceState() {
-            throw new Error("history unavailable");
-          },
-        },
-        states,
-      }),
-    );
-
-    expect(receipt).toEqual({ code: "invalid_callback", status: "rejected" });
-    expect(states.consume).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    { origin: "http://app.example.test", pathname: "/auth/callback" },
-    { origin: "https://app.example.test/path", pathname: "/auth/callback" },
-    { origin: "https://app.example.test", pathname: "auth/callback" },
-    { origin: "https://app.example.test", pathname: "//evil.example.test" },
-    { origin: "https://app.example.test", pathname: "/auth/callback?bad=1" },
-  ])("rejects unsafe trusted-route configuration", async (unsafeRoute) => {
-    const receipt = await consumeStaffAuthPkceCallback(callbackUrl(), {
-      ...options(),
-      route: unsafeRoute,
-    });
-
-    expect(receipt).toEqual({ code: "invalid_callback", status: "rejected" });
-  });
-});
+  };
+}
 
 describe("staff invitation callback", () => {
-  const invitationRoute = {
-    origin: "https://app.example.test",
-    pathname: "/auth/invitation",
-  } as const;
-
-  it("scrubs the raw invitation credential synchronously before inspection", async () => {
+  it("scrubs synchronously and exposes a valid hash only to inspection", async () => {
     const order: string[] = [];
-    let release: (() => void) | undefined;
-    const inspected = new Promise<void>((resolve) => {
+    let release: () => void = () => undefined;
+    const blocked = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const pending = consumeStaffInvitationCallback(
-      `${invitationRoute.origin}${invitationRoute.pathname}?token=SENTINEL-token`,
+    const work = consumeStaffInvitationCallback(
+      `${origin}/?token_hash=${tokenHash}&auth=invite`,
       {
-        history: {
-          replaceState(data, unused, url) {
-            expect(data).toBeNull();
-            expect(unused).toBe("");
-            expect(url).toBe("/auth/invitation");
-            order.push("scrub");
-          },
+        history: history(order),
+        async inspect(received) {
+          order.push(`inspect:${received}`);
+          await blocked;
         },
-        async inspect(token) {
-          expect(token).toBe("SENTINEL-token");
-          order.push("inspect");
-          await inspected;
-        },
-        route: invitationRoute,
+        route,
       },
     );
 
-    expect(order).toEqual(["scrub", "inspect"]);
-    release?.();
-    await expect(pending).resolves.toEqual({ status: "accepted" });
-    expect(JSON.stringify(await pending)).not.toContain("SENTINEL");
+    expect(order).toEqual(["scrub:/", `inspect:${tokenHash}`]);
+    release();
+    const receipt = await work;
+    expect(receipt).toEqual({
+      code: "accepted",
+      kind: "invite",
+      status: "accepted",
+    });
+    expect(JSON.stringify(receipt)).not.toContain(tokenHash);
   });
 
   it.each([
-    "https://evil.example.test/auth/invitation?token=one",
-    "https://app.example.test/wrong?token=one",
-    "https://app.example.test/auth/invitation?token=one&extra=two",
-    "https://app.example.test/auth/invitation?token=one&token=two",
-    "https://app.example.test/auth/invitation?token=one#credential",
+    ["legacy token", `${origin}/?auth=invite&token=${tokenHash}`],
+    [
+      "legacy provider verify",
+      `${origin}/auth/v1/verify?token_hash=${tokenHash}&type=invite`,
+    ],
+    ["wrong kind", `${origin}/?auth=recovery&token_hash=${tokenHash}`],
+    [
+      "duplicate auth",
+      `${origin}/?auth=invite&auth=invite&token_hash=${tokenHash}`,
+    ],
+    [
+      "duplicate hash",
+      `${origin}/?auth=invite&token_hash=${tokenHash}&token_hash=${tokenHash}`,
+    ],
+    [
+      "extra key",
+      `${origin}/?auth=invite&token_hash=${tokenHash}&next=/school`,
+    ],
+    ["mixed recovery", `${origin}/?auth=invite&token_hash=${tokenHash}&code=x`],
+    ["missing hash", `${origin}/?auth=invite`],
+    ["blank hash", `${origin}/?auth=invite&token_hash=`],
+    [
+      "wrong path",
+      `${origin}/auth/invitation?auth=invite&token_hash=${tokenHash}`,
+    ],
+    [
+      "wrong origin",
+      `https://evil.example/?auth=invite&token_hash=${tokenHash}`,
+    ],
+    ["fragment", `${origin}/?auth=invite&token_hash=${tokenHash}#secret`],
+    ["oversize hash", `${origin}/?auth=invite&token_hash=${"a".repeat(4097)}`],
   ])(
-    "rejects an invitation outside the trusted exact callback shape",
-    async (url) => {
+    "scrubs and rejects %s without inspection",
+    async (_label, callbackUrl) => {
+      const scrubs: string[] = [];
       const inspect = vi.fn(async () => undefined);
-      const receipt = await consumeStaffInvitationCallback(url, {
-        history: { replaceState() {} },
+      const receipt = await consumeStaffInvitationCallback(callbackUrl, {
+        history: history(scrubs),
         inspect,
-        route: invitationRoute,
+        route,
       });
-
+      expect(scrubs).toEqual(["scrub:/"]);
       expect(receipt.status).toBe("rejected");
       expect(inspect).not.toHaveBeenCalled();
     },
   );
 
-  it("returns only a sanitized code when inspection is unavailable", async () => {
-    const receipt = await consumeStaffInvitationCallback(
-      `${invitationRoute.origin}${invitationRoute.pathname}?token=SENTINEL-token`,
-      {
-        history: { replaceState() {} },
-        async inspect() {
-          throw new Error("SENTINEL-provider-detail");
+  it("sanitizes inspection and history failures", async () => {
+    await expect(
+      consumeStaffInvitationCallback(
+        `${origin}/?auth=invite&token_hash=${tokenHash}`,
+        {
+          history: history(),
+          inspect: async () => {
+            throw new Error(`provider leaked ${tokenHash}`);
+          },
+          route,
         },
-        route: invitationRoute,
-      },
-    );
-
-    expect(receipt).toEqual({
-      code: "inspection_unavailable",
+      ),
+    ).resolves.toEqual({
+      code: "token_consumption_unavailable",
       status: "rejected",
     });
-    expect(JSON.stringify(receipt)).not.toContain("SENTINEL");
-  });
 
-  it("never inspects when browser history cannot scrub the credential", async () => {
     const inspect = vi.fn(async () => undefined);
-    const receipt = await consumeStaffInvitationCallback(
-      `${invitationRoute.origin}${invitationRoute.pathname}?token=one`,
-      {
-        history: {
-          replaceState() {
-            throw new Error("unavailable");
+    await expect(
+      consumeStaffInvitationCallback(
+        `${origin}/?auth=invite&token_hash=${tokenHash}`,
+        {
+          history: {
+            replaceState() {
+              throw new Error("history unavailable");
+            },
           },
+          inspect,
+          route,
         },
-        inspect,
-        route: invitationRoute,
+      ),
+    ).resolves.toEqual({ code: "invalid_callback", status: "rejected" });
+    expect(inspect).not.toHaveBeenCalled();
+  });
+});
+
+describe("staff recovery callback", () => {
+  const callbackUrl = `${origin}/?state=${state}&auth=recovery&code=provider-code&flow=${flowId}`;
+
+  it("scrubs before atomically consuming the flow and exchanges transient credentials", async () => {
+    const order: string[] = [];
+    const flows = flowStore();
+    const consume = vi
+      .spyOn(flows, "consume")
+      .mockImplementation(async (received) => {
+        order.push(`consume:${received}`);
+        return { expiresAt: 301_000, state, status: "accepted", verifier };
+      });
+    const exchange = vi.fn(
+      async ({ authorizationCode, verifier: received }) => {
+        order.push(`exchange:${authorizationCode}:${received}`);
       },
     );
 
-    expect(receipt).toEqual({ code: "invalid_callback", status: "rejected" });
-    expect(inspect).not.toHaveBeenCalled();
+    const receipt = await consumeStaffRecoveryCallback(callbackUrl, {
+      clock: { now: () => 1_000 },
+      exchange,
+      flows,
+      history: history(order),
+      route,
+    });
+
+    expect(order).toEqual([
+      "scrub:/",
+      `consume:${flowId}`,
+      `exchange:provider-code:${verifier}`,
+    ]);
+    expect(consume).toHaveBeenCalledOnce();
+    expect(receipt).toEqual({
+      code: "accepted",
+      kind: "recovery",
+      status: "accepted",
+    });
+    expect(JSON.stringify(receipt)).not.toContain("provider-code");
+    expect(JSON.stringify(receipt)).not.toContain(verifier);
+  });
+
+  it.each([
+    ["missing code", `${origin}/?auth=recovery&flow=${flowId}&state=${state}`],
+    ["missing state", `${origin}/?auth=recovery&code=x&flow=${flowId}`],
+    [
+      "duplicate state",
+      `${origin}/?auth=recovery&code=x&flow=${flowId}&state=${state}&state=${state}`,
+    ],
+    [
+      "duplicate flow",
+      `${origin}/?auth=recovery&code=x&flow=${flowId}&flow=${flowId}&state=${state}`,
+    ],
+    [
+      "extra key",
+      `${origin}/?auth=recovery&code=x&flow=${flowId}&state=${state}&next=/`,
+    ],
+    ["legacy PKCE", `${origin}/?code=x&flow=password_recovery&state=${state}`],
+    [
+      "mixed token hash",
+      `${origin}/?auth=recovery&token_hash=${tokenHash}&code=x&flow=${flowId}&state=${state}`,
+    ],
+    [
+      "invite mix",
+      `${origin}/?auth=invite&code=x&flow=${flowId}&state=${state}`,
+    ],
+    [
+      "wrong path",
+      `${origin}/auth/callback?auth=recovery&code=x&flow=${flowId}&state=${state}`,
+    ],
+    ["short flow", `${origin}/?auth=recovery&code=x&flow=short&state=${state}`],
+    [
+      "short state",
+      `${origin}/?auth=recovery&code=x&flow=${flowId}&state=short`,
+    ],
+    [
+      "oversize code",
+      `${origin}/?auth=recovery&code=${"x".repeat(2049)}&flow=${flowId}&state=${state}`,
+    ],
+  ])("scrubs and rejects %s before flow consumption", async (_label, url) => {
+    const scrubs: string[] = [];
+    const flows = flowStore();
+    const consume = vi.spyOn(flows, "consume");
+    const exchange = vi.fn(async () => undefined);
+    const receipt = await consumeStaffRecoveryCallback(url, {
+      clock: { now: () => 1_000 },
+      exchange,
+      flows,
+      history: history(scrubs),
+      route,
+    });
+    expect(scrubs).toEqual(["scrub:/"]);
+    expect(receipt.status).toBe("rejected");
+    expect(consume).not.toHaveBeenCalled();
+    expect(exchange).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["invalid", { status: "invalid" } as const, "recovery_flow_invalid"],
+    ["replayed", { status: "replayed" } as const, "recovery_flow_replayed"],
+    [
+      "expired",
+      { expiresAt: 1_000, state, status: "accepted", verifier } as const,
+      "recovery_flow_expired",
+    ],
+    [
+      "too-long lifetime",
+      { expiresAt: 301_001, state, status: "accepted", verifier } as const,
+      "recovery_flow_expired",
+    ],
+    [
+      "cross-flow state",
+      {
+        expiresAt: 301_000,
+        state: "x".repeat(43),
+        status: "accepted",
+        verifier,
+      } as const,
+      "recovery_state_mismatch",
+    ],
+  ])("rejects a %s one-time flow", async (_label, result, code) => {
+    const exchange = vi.fn(async () => undefined);
+    const receipt = await consumeStaffRecoveryCallback(callbackUrl, {
+      clock: { now: () => 1_000 },
+      exchange,
+      flows: flowStore(result),
+      history: history(),
+      route,
+    });
+    expect(receipt).toEqual({ code, status: "rejected" });
+    expect(exchange).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on inaccessible flow records and sanitized exchange errors", async () => {
+    const proxy = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error("trap");
+        },
+      },
+    );
+    const proxyStore = flowStore();
+    vi.spyOn(proxyStore, "consume").mockResolvedValue(
+      proxy as StaffRecoveryFlowConsumeResult,
+    );
+    await expect(
+      consumeStaffRecoveryCallback(callbackUrl, {
+        clock: { now: () => 1_000 },
+        exchange: async () => undefined,
+        flows: proxyStore,
+        history: history(),
+        route,
+      }),
+    ).resolves.toEqual({ code: "recovery_flow_invalid", status: "rejected" });
+
+    const receipt = await consumeStaffRecoveryCallback(callbackUrl, {
+      clock: { now: () => 1_000 },
+      exchange: async () => {
+        throw new Error(`provider leaked ${verifier}`);
+      },
+      flows: flowStore(),
+      history: history(),
+      route,
+    });
+    expect(receipt).toEqual({
+      code: "token_consumption_unavailable",
+      status: "rejected",
+    });
+    expect(JSON.stringify(receipt)).not.toContain(verifier);
   });
 });

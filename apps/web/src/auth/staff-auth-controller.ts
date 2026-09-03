@@ -1,11 +1,15 @@
+import { parseStaffDisplayName } from "@desmoslock/contracts";
+
 import {
   consumeStaffInvitationCallback,
-  consumeStaffAuthPkceCallback,
+  consumeStaffRecoveryCallback,
   type StaffAuthCallbackHistory,
   type StaffAuthCallbackReceipt,
   type StaffAuthCallbackRoute,
-  type StaffAuthCallbackStateStore,
+  type StaffRecoveryFlowStore,
 } from "./staff-auth-callback.js";
+
+export { parseStaffDisplayName };
 
 export type StorageStaffRole = "owner" | "admin" | "teacher";
 
@@ -52,7 +56,6 @@ export interface StaffAuthIdentity {
 }
 
 export interface StaffAuthBoundaryManagedStaff {
-  readonly membershipId: string;
   readonly profile: {
     readonly displayName: string;
     readonly email: string;
@@ -63,7 +66,6 @@ export interface StaffAuthBoundaryManagedStaff {
 }
 
 export interface StaffAuthManagedStaff {
-  readonly membershipId: string;
   readonly profile: {
     readonly displayName: string;
     readonly email: string;
@@ -73,11 +75,30 @@ export interface StaffAuthManagedStaff {
   readonly schoolId: string;
 }
 
+export interface StaffAuthBoundaryManagedInvitation {
+  readonly email: string;
+  readonly expiresAt: string;
+  readonly invitationId: string;
+  readonly role: StorageManagedStaffRole;
+  readonly schoolId: string;
+  readonly state: "pending";
+}
+
+export interface StaffAuthManagedInvitation {
+  readonly email: string;
+  readonly expiresAt: string;
+  readonly invitationId: string;
+  readonly role: ManagedStaffRole;
+  readonly schoolId: string;
+  readonly state: "pending";
+}
+
 export type StaffAuthAccessGrant = {
   readonly assuranceLevel: "aal1" | "aal2";
   readonly identity: StaffAuthBoundaryIdentity;
   readonly identityGeneration: string;
   readonly kind: "access_granted";
+  readonly manageableInvitations: readonly StaffAuthBoundaryManagedInvitation[];
   readonly manageableStaff: readonly StaffAuthBoundaryManagedStaff[];
   readonly sessionGeneration: string;
 } & (
@@ -126,8 +147,12 @@ export type StaffAuthBoundaryResult =
       readonly presentation: TotpEnrollmentPresentation;
     }
   | { readonly kind: "password_recovery_ready" }
-  | { readonly kind: "password_recovery_complete" }
+  | {
+      readonly kind: "password_recovery_complete";
+      readonly sessionScope: "all";
+    }
   | { readonly kind: "password_recovery_rejected" }
+  | { readonly kind: "step_up_required" }
   | { readonly kind: "session_expired" }
   | { readonly kind: "session_revoked" }
   | { readonly kind: "membership_inactive" }
@@ -147,9 +172,21 @@ export type StaffAuthBoundaryResult =
     }
   | {
       readonly actor: StaffAuthAccessGrant;
-      readonly kind: "staff_membership_revoked";
-      readonly membershipId: string;
+      readonly invitationId: string;
+      readonly kind: "staff_invitation_revoked";
       readonly revokedRole: StorageManagedStaffRole;
+      readonly schoolId: string;
+    }
+  | {
+      readonly actor: StaffAuthAccessGrant;
+      readonly kind: "staff_invitation_revocation_rejected";
+    }
+  | {
+      readonly actor: StaffAuthAccessGrant;
+      readonly kind: "staff_membership_revoked";
+      readonly profileId: string;
+      readonly revokedRole: StorageManagedStaffRole;
+      readonly schoolId: string;
     }
   | {
       readonly actor: StaffAuthAccessGrant;
@@ -179,13 +216,20 @@ export type StaffAuthMutation = MutationWithOperationId &
         readonly type: "verify_totp";
       }
     | { readonly type: "resend_email_verification" }
-    | { readonly email: string; readonly type: "request_password_recovery" }
     | {
-        readonly invitationToken: string;
+        readonly codeChallenge: string;
+        readonly email: string;
+        readonly flowId: string;
+        readonly state: string;
+        readonly type: "request_password_recovery";
+      }
+    | {
+        readonly tokenHash: string;
         readonly type: "inspect_invitation";
       }
     | {
         readonly acceptanceReceipt: string;
+        readonly displayName: string;
         readonly inspectionOperationId: string;
         readonly password: string;
         readonly type: "accept_invitation";
@@ -194,10 +238,15 @@ export type StaffAuthMutation = MutationWithOperationId &
     | { readonly scope: "all" | "local"; readonly type: "sign_out" }
     | {
         readonly authorizationCode: string;
-        readonly flow: "email_verification" | "password_recovery" | "sign_in";
-        readonly type: "exchange_pkce_code";
+        readonly type: "exchange_recovery_code";
+        readonly verifier: string;
       }
     | {
+        /**
+         * Adapter orchestration boundary: DB begin, provider password update,
+         * DB finish, and global sign-out must all be authoritatively complete
+         * before returning password_recovery_complete.
+         */
         readonly password: string;
         readonly type: "complete_password_recovery";
       }
@@ -207,8 +256,13 @@ export type StaffAuthMutation = MutationWithOperationId &
         readonly type: "create_staff_invitation";
       }
     | {
-        readonly membershipId: string;
-        readonly targetRole: StorageManagedStaffRole;
+        readonly invitationId: string;
+        readonly schoolId: string;
+        readonly type: "revoke_staff_invitation";
+      }
+    | {
+        readonly profileId: string;
+        readonly schoolId: string;
         readonly type: "revoke_staff_membership";
       }
   );
@@ -258,10 +312,11 @@ export type StaffAuthOperation =
   | "invitation"
   | "local_logout"
   | "password_recovery"
-  | "pkce_callback"
+  | "recovery_callback"
   | "revoke_all_sessions"
   | "sign_in"
   | "staff_invitation"
+  | "staff_invitation_revocation"
   | "staff_membership"
   | "totp";
 
@@ -294,6 +349,7 @@ export type StaffAuthSnapshot =
       readonly reason: "expired" | "invalid" | "replayed";
       readonly revision: number;
     }
+  | { readonly kind: "invitation_step_up_required"; readonly revision: number }
   | {
       readonly kind: "invitation_ready";
       readonly intendedEmail: string;
@@ -325,7 +381,7 @@ export type StaffAuthSnapshot =
   | { readonly kind: "session_expired"; readonly revision: number }
   | { readonly kind: "session_revoked"; readonly revision: number }
   | { readonly kind: "membership_inactive"; readonly revision: number }
-  | { readonly kind: "processing_pkce_callback"; readonly revision: number }
+  | { readonly kind: "processing_recovery_callback"; readonly revision: number }
   | {
       readonly code: Exclude<StaffAuthCallbackReceipt["code"], "accepted">;
       readonly kind: "callback_rejected";
@@ -347,6 +403,30 @@ export type StaffAuthSnapshot =
       readonly targetRole: ManagedStaffRole;
     }
   | { readonly kind: "staff_invitation_rejected"; readonly revision: number }
+  | {
+      readonly kind: "confirming_staff_invitation_revocation";
+      readonly revision: number;
+      readonly schoolLabel: string;
+      readonly target: {
+        readonly email: string;
+        readonly role: ManagedStaffRole;
+      };
+    }
+  | {
+      readonly kind: "revoking_staff_invitation";
+      readonly revision: number;
+      readonly targetRole: ManagedStaffRole;
+    }
+  | {
+      readonly kind: "staff_invitation_revoked";
+      readonly revision: number;
+      readonly schoolLabel: string;
+      readonly targetRole: ManagedStaffRole;
+    }
+  | {
+      readonly kind: "staff_invitation_revocation_rejected";
+      readonly revision: number;
+    }
   | {
       readonly target: {
         readonly displayName: string;
@@ -384,6 +464,7 @@ export type StaffAuthSnapshot =
       readonly identity: StaffAuthIdentity;
       readonly identityGeneration: string;
       readonly kind: "authenticated";
+      readonly manageableInvitations: readonly StaffAuthManagedInvitation[];
       readonly manageableStaff: readonly StaffAuthManagedStaff[];
       readonly revision: number;
       readonly sessionGeneration: string;
@@ -401,12 +482,16 @@ export type StaffAuthAction =
   | { readonly type: "resend_email_verification" }
   | { readonly email: string; readonly type: "request_password_recovery" }
   | { readonly callbackUrl: string; readonly type: "inspect_invitation" }
-  | { readonly password: string; readonly type: "accept_invitation" }
+  | {
+      readonly displayName: string;
+      readonly password: string;
+      readonly type: "accept_invitation";
+    }
   | { readonly type: "begin_totp_enrollment" }
   | { readonly type: "sign_out_local" }
   | { readonly type: "revoke_all_sessions" }
   | { readonly type: "retry" }
-  | { readonly callbackUrl: string; readonly type: "complete_pkce_callback" }
+  | { readonly callbackUrl: string; readonly type: "consume_recovery_callback" }
   | { readonly password: string; readonly type: "complete_password_recovery" }
   | {
       readonly email: string;
@@ -414,9 +499,17 @@ export type StaffAuthAction =
       readonly type: "create_staff_invitation";
     }
   | {
-      readonly membershipId: string;
+      readonly profileId: string;
+      readonly schoolId: string;
       readonly type: "review_staff_membership_revocation";
     }
+  | {
+      readonly invitationId: string;
+      readonly schoolId: string;
+      readonly type: "review_staff_invitation_revocation";
+    }
+  | { readonly type: "confirm_staff_invitation_revocation" }
+  | { readonly type: "cancel_staff_invitation_revocation" }
   | { readonly type: "confirm_staff_membership_revocation" }
   | { readonly type: "cancel_staff_membership_revocation" };
 
@@ -487,18 +580,19 @@ interface PendingMembershipRevocation {
   readonly target: StaffAuthBoundaryManagedStaff;
 }
 
+interface PendingInvitationRevocation {
+  readonly actor: StaffAuthAccessGrant;
+  readonly target: StaffAuthBoundaryManagedInvitation;
+}
+
 export function createStaffAuthController(dependencies: {
   readonly adapter: StaffAuthAdapter;
   readonly callback: {
+    readonly flows: StaffRecoveryFlowStore;
     readonly history: StaffAuthCallbackHistory;
     readonly route: StaffAuthCallbackRoute;
-    readonly states: StaffAuthCallbackStateStore;
   };
   readonly clock: { readonly now: () => number };
-  readonly invitationCallback: {
-    readonly history: StaffAuthCallbackHistory;
-    readonly route: StaffAuthCallbackRoute;
-  };
   readonly operationIds: StaffAuthOperationIdSource;
   readonly protectedSchoolData: ProtectedSchoolData;
 }): StaffAuthController {
@@ -512,6 +606,7 @@ export function createStaffAuthController(dependencies: {
   let snapshot: StaffAuthSnapshot = { kind: "bootstrapping", revision };
   let activeGrant: StaffAuthAccessGrant | null = null;
   let pendingInvitation: PendingInvitation | null = null;
+  let pendingInvitationRevocation: PendingInvitationRevocation | null = null;
   let pendingMembershipRevocation: PendingMembershipRevocation | null = null;
   let pendingTotp: PendingTotp | null = null;
   let retryPlan: RetryPlan | null = null;
@@ -571,6 +666,10 @@ export function createStaffAuthController(dependencies: {
     pendingMembershipRevocation = null;
   }
 
+  function clearInvitationRevocation(): void {
+    pendingInvitationRevocation = null;
+  }
+
   function resetEnrollment(feedback: "cancelled" | "rejected"): void {
     if (pendingTotp?.kind !== "provisioning") {
       return;
@@ -589,6 +688,7 @@ export function createStaffAuthController(dependencies: {
     activeGrant = null;
     clearTotpCeremony();
     clearInvitation();
+    clearInvitationRevocation();
     clearMembershipRevocation();
     retryPlan = retry;
     transition({
@@ -603,6 +703,7 @@ export function createStaffAuthController(dependencies: {
     next: SnapshotWithoutRevision<StaffAuthSnapshot>,
     options: {
       readonly preserveInvitation?: boolean;
+      readonly preserveInvitationRevocation?: boolean;
       readonly preserveMembershipRevocation?: boolean;
       readonly preserveTotp?: boolean;
     } = {},
@@ -614,6 +715,9 @@ export function createStaffAuthController(dependencies: {
     }
     if (options.preserveInvitation !== true) {
       clearInvitation();
+    }
+    if (options.preserveInvitationRevocation !== true) {
+      clearInvitationRevocation();
     }
     if (options.preserveMembershipRevocation !== true) {
       clearMembershipRevocation();
@@ -787,10 +891,22 @@ export function createStaffAuthController(dependencies: {
     staff: readonly StaffAuthBoundaryManagedStaff[],
   ): readonly StaffAuthManagedStaff[] {
     return staff.map((entry) => ({
-      membershipId: entry.membershipId,
       profile: { ...entry.profile },
       role: managedRole(entry.role),
       schoolId: entry.schoolId,
+    }));
+  }
+
+  function normalizeManagedInvitations(
+    invitations: readonly StaffAuthBoundaryManagedInvitation[],
+  ): readonly StaffAuthManagedInvitation[] {
+    return invitations.map((invitation) => ({
+      email: invitation.email,
+      expiresAt: invitation.expiresAt,
+      invitationId: invitation.invitationId,
+      role: managedRole(invitation.role),
+      schoolId: invitation.schoolId,
+      state: "pending",
     }));
   }
 
@@ -809,12 +925,16 @@ export function createStaffAuthController(dependencies: {
     activeGrant = grant;
     clearTotpCeremony();
     clearInvitation();
+    clearInvitationRevocation();
     clearMembershipRevocation();
     transition({
       assuranceLevel: grant.assuranceLevel,
       identity,
       identityGeneration: grant.identityGeneration,
       kind: "authenticated",
+      manageableInvitations: normalizeManagedInvitations(
+        grant.manageableInvitations,
+      ),
       manageableStaff: normalizeManagedStaff(grant.manageableStaff),
       sessionGeneration: grant.sessionGeneration,
     });
@@ -946,6 +1066,7 @@ export function createStaffAuthController(dependencies: {
     retryPlan = null;
     clearTotpCeremony();
     clearInvitation();
+    clearInvitationRevocation();
     clearMembershipRevocation();
     transition({ kind: result.kind });
     if (clearProtectedData) {
@@ -1065,7 +1186,7 @@ export function createStaffAuthController(dependencies: {
     expectedActor: StaffAuthAccessGrant,
     expectedTarget: StaffAuthBoundaryManagedStaff,
   ): Promise<void> {
-    const targetRole = managedRole(request.targetRole);
+    const targetRole = managedRole(expectedTarget.role);
     const epoch = beginOperation({
       kind: "revoking_staff_membership",
       targetRole,
@@ -1079,9 +1200,11 @@ export function createStaffAuthController(dependencies: {
       const actor = validateOwnerActor(result.actor, expectedActor);
       if (
         actor === null ||
-        result.membershipId !== request.membershipId ||
-        result.membershipId !== expectedTarget.membershipId ||
-        result.revokedRole !== request.targetRole
+        result.profileId !== request.profileId ||
+        result.profileId !== expectedTarget.profile.id ||
+        result.schoolId !== request.schoolId ||
+        result.schoolId !== expectedTarget.schoolId ||
+        result.revokedRole !== expectedTarget.role
       ) {
         rejectBoundaryResult("staff_membership", result);
         return;
@@ -1099,6 +1222,54 @@ export function createStaffAuthController(dependencies: {
       }
     } else if (!applyAccessLoss(result)) {
       rejectBoundaryResult("staff_membership", result);
+    }
+  }
+
+  async function executeRevokeInvitation(
+    request: Extract<StaffAuthMutation, { type: "revoke_staff_invitation" }>,
+    expectedActor: StaffAuthAccessGrant,
+    expectedTarget: StaffAuthBoundaryManagedInvitation,
+  ): Promise<void> {
+    const targetRole = managedRole(expectedTarget.role);
+    const epoch = beginOperation({
+      kind: "revoking_staff_invitation",
+      targetRole,
+    });
+    clearProtectedSchoolData();
+    const result = await performMutation(
+      request,
+      epoch,
+      "staff_invitation_revocation",
+    );
+    if (result === null || !isCurrent(epoch)) {
+      return;
+    }
+    if (result.kind === "staff_invitation_revoked") {
+      const actor = validateOwnerActor(result.actor, expectedActor);
+      if (
+        actor === null ||
+        result.invitationId !== request.invitationId ||
+        result.invitationId !== expectedTarget.invitationId ||
+        result.schoolId !== request.schoolId ||
+        result.schoolId !== expectedTarget.schoolId ||
+        result.revokedRole !== expectedTarget.role
+      ) {
+        rejectBoundaryResult("staff_invitation_revocation", result);
+        return;
+      }
+      transition({
+        kind: "staff_invitation_revoked",
+        schoolLabel: actor.school.label,
+        targetRole,
+      });
+    } else if (result.kind === "staff_invitation_revocation_rejected") {
+      if (validateOwnerActor(result.actor, expectedActor) === null) {
+        rejectBoundaryResult("staff_invitation_revocation", result);
+      } else {
+        transition({ kind: "staff_invitation_revocation_rejected" });
+      }
+    } else if (!applyAccessLoss(result)) {
+      rejectBoundaryResult("staff_invitation_revocation", result);
     }
   }
 
@@ -1159,6 +1330,7 @@ export function createStaffAuthController(dependencies: {
     retryPlan = null;
     clearTotpCeremony();
     clearInvitation();
+    clearInvitationRevocation();
     clearMembershipRevocation();
     if (event.kind === "access_changed") {
       activeGrant = null;
@@ -1260,8 +1432,41 @@ export function createStaffAuthController(dependencies: {
         if (operationId === null || !isCurrent(epoch)) {
           return snapshot;
         }
+        let rawFlow: unknown;
+        try {
+          rawFlow = await dependencies.callback.flows.create();
+        } catch {
+          if (isCurrent(epoch)) {
+            fail("password_recovery", "dependency_unavailable");
+          }
+          return snapshot;
+        }
+        if (!isCurrent(epoch)) {
+          return snapshot;
+        }
+        const flow = snapshotExactRecord(rawFlow, [
+          "codeChallenge",
+          "flowId",
+          "state",
+        ]);
+        if (
+          flow === null ||
+          !isBase64UrlText(flow.codeChallenge, 43) ||
+          !isBase64UrlText(flow.flowId, 22) ||
+          !isBase64UrlText(flow.state, 43)
+        ) {
+          fail("password_recovery", "invalid_backend_result");
+          return snapshot;
+        }
         const result = await performMutation(
-          { ...action, operationId },
+          {
+            codeChallenge: flow.codeChallenge,
+            email: action.email,
+            flowId: flow.flowId,
+            operationId,
+            state: flow.state,
+            type: "request_password_recovery",
+          },
           epoch,
           "password_recovery",
         );
@@ -1287,6 +1492,7 @@ export function createStaffAuthController(dependencies: {
         retryPlan = null;
         clearTotpCeremony();
         clearInvitation();
+        clearInvitationRevocation();
         clearMembershipRevocation();
         const epoch = operationEpoch;
         let operationId: string | null = null;
@@ -1295,8 +1501,8 @@ export function createStaffAuthController(dependencies: {
         const callbackWork = consumeStaffInvitationCallback(
           action.callbackUrl,
           {
-            history: dependencies.invitationCallback.history,
-            inspect: async (invitationToken) => {
+            history: dependencies.callback.history,
+            inspect: async (tokenHash) => {
               const allocated = allocateOperationId("invitation");
               if (allocated === null || !isCurrent(epoch)) {
                 allocationFailed = allocated === null;
@@ -1318,8 +1524,8 @@ export function createStaffAuthController(dependencies: {
                 throw new Error("protected data unavailable");
               }
               response = await dependencies.adapter.perform({
-                invitationToken,
                 operationId: allocated,
+                tokenHash,
                 type: "inspect_invitation",
               });
               if (!isCurrent(epoch)) {
@@ -1327,7 +1533,7 @@ export function createStaffAuthController(dependencies: {
                 throw new Error("stale operation");
               }
             },
-            route: dependencies.invitationCallback.route,
+            route: dependencies.callback.route,
           },
         );
         const receipt = await callbackWork;
@@ -1338,7 +1544,7 @@ export function createStaffAuthController(dependencies: {
           if (allocationFailed) {
             return snapshot;
           }
-          if (receipt.code === "inspection_unavailable") {
+          if (receipt.code === "token_consumption_unavailable") {
             fail("invitation", "dependency_unavailable");
           } else {
             transition({ kind: "invitation_rejected", reason: "invalid" });
@@ -1392,9 +1598,18 @@ export function createStaffAuthController(dependencies: {
         return snapshot;
       }
       case "accept_invitation": {
+        const actionRecord = snapshotExactRecord(action, [
+          "displayName",
+          "password",
+          "type",
+        ]);
+        const displayName = parseStaffDisplayName(actionRecord?.displayName);
         if (
           snapshot.kind !== "invitation_ready" ||
-          pendingInvitation === null
+          pendingInvitation === null ||
+          actionRecord?.type !== "accept_invitation" ||
+          displayName === null ||
+          typeof actionRecord.password !== "string"
         ) {
           return snapshot;
         }
@@ -1418,9 +1633,10 @@ export function createStaffAuthController(dependencies: {
         const result = await performMutation(
           {
             acceptanceReceipt: invitation.acceptanceReceipt,
+            displayName,
             inspectionOperationId: invitation.inspectionOperationId,
             operationId,
-            password: action.password,
+            password: actionRecord.password,
             type: "accept_invitation",
           },
           epoch,
@@ -1446,6 +1662,9 @@ export function createStaffAuthController(dependencies: {
             result.reason === "replayed")
         ) {
           transition({ kind: "invitation_rejected", reason: result.reason });
+        } else if (result.kind === "step_up_required") {
+          clearInvitation();
+          transition({ kind: "invitation_step_up_required" });
         } else if (!applyAccessLoss(result)) {
           rejectBoundaryResult("invitation", result);
         }
@@ -1592,7 +1811,7 @@ export function createStaffAuthController(dependencies: {
         );
         return snapshot;
       }
-      case "complete_pkce_callback": {
+      case "consume_recovery_callback": {
         if (
           snapshot.kind !== "bootstrapping" &&
           snapshot.kind !== "signed_out" &&
@@ -1607,55 +1826,55 @@ export function createStaffAuthController(dependencies: {
         retryPlan = null;
         clearTotpCeremony();
         clearInvitation();
+        clearInvitationRevocation();
         clearMembershipRevocation();
         const epoch = operationEpoch;
         let operationId: string | null = null;
         let operationAllocationFailed = false;
-        let exchangeResponse: StaffAuthMutationResult | null = null;
-        const callbackWork = consumeStaffAuthPkceCallback(action.callbackUrl, {
-          exchange: async ({ authorizationCode, flow }) => {
+        let consumeResponse: StaffAuthMutationResult | null = null;
+        const callbackWork = consumeStaffRecoveryCallback(action.callbackUrl, {
+          clock: dependencies.clock,
+          exchange: async ({ authorizationCode, verifier }) => {
             if (!isCurrent(epoch)) {
               throw new Error("stale operation");
             }
-            const allocatedOperationId = allocateOperationId("pkce_callback");
+            const allocatedOperationId =
+              allocateOperationId("recovery_callback");
             if (allocatedOperationId === null || !isCurrent(epoch)) {
               operationAllocationFailed = allocatedOperationId === null;
               throw new Error("operation unavailable");
             }
             operationId = allocatedOperationId;
+            activeGrant = null;
+            transition({ kind: "processing_recovery_callback" });
+            if (!isCurrent(epoch)) {
+              throw new Error("stale operation");
+            }
+            const cleared = clearProtectedSchoolData();
+            if (!isCurrent(epoch)) {
+              throw new Error("stale operation");
+            }
+            if (!cleared) {
+              operationEpoch += 1;
+              fail("recovery_callback", "dependency_unavailable");
+              throw new Error("protected data unavailable");
+            }
             const response = await dependencies.adapter.perform({
               authorizationCode,
-              flow,
               operationId: allocatedOperationId,
-              type: "exchange_pkce_code",
+              type: "exchange_recovery_code",
+              verifier,
             });
             if (!isCurrent(epoch)) {
               discardMutationResponse(response);
               throw new Error("stale operation");
             }
-            exchangeResponse = response;
+            consumeResponse = response;
           },
           history: dependencies.callback.history,
           route: dependencies.callback.route,
-          states: dependencies.callback.states,
+          flows: dependencies.callback.flows,
         });
-        if (isCurrent(epoch)) {
-          activeGrant = null;
-          transition({ kind: "processing_pkce_callback" });
-          if (!isCurrent(epoch)) {
-            await callbackWork;
-            return snapshot;
-          }
-          const cleared = clearProtectedSchoolData();
-          if (!isCurrent(epoch)) {
-            await callbackWork;
-            return snapshot;
-          }
-          if (!cleared) {
-            operationEpoch += 1;
-            fail("pkce_callback", "dependency_unavailable");
-          }
-        }
         const receipt = await callbackWork;
         if (!isCurrent(epoch)) {
           return snapshot;
@@ -1667,28 +1886,20 @@ export function createStaffAuthController(dependencies: {
           transition({ code: receipt.code, kind: "callback_rejected" });
           return snapshot;
         }
-        const response: unknown = exchangeResponse;
+        const response: unknown = consumeResponse;
         const result =
           operationId === null
             ? null
             : decodeMutationResponse(response, operationId);
         if (result === null) {
           discardMutationResponse(response);
-          fail("pkce_callback", "invalid_backend_result");
+          fail("recovery_callback", "invalid_backend_result");
           return snapshot;
         }
-        if (receipt.flow === "password_recovery") {
-          if (result.kind === "password_recovery_ready") {
-            transition({ kind: "password_recovery_ready" });
-          } else if (!applyAccessLoss(result)) {
-            rejectBoundaryResult("pkce_callback", result);
-          }
-        } else if (result.kind === "access_granted") {
-          if (!acceptEntry(result)) {
-            rejectBoundaryResult("pkce_callback", result);
-          }
+        if (result.kind === "password_recovery_ready") {
+          transition({ kind: "password_recovery_ready" });
         } else if (!applyAccessLoss(result)) {
-          rejectBoundaryResult("pkce_callback", result);
+          rejectBoundaryResult("recovery_callback", result);
         }
         return snapshot;
       }
@@ -1770,18 +1981,116 @@ export function createStaffAuthController(dependencies: {
         }
         return snapshot;
       }
-      case "review_staff_membership_revocation": {
+      case "review_staff_invitation_revocation": {
+        const selectionRecord = snapshotExactRecord(action, [
+          "invitationId",
+          "schoolId",
+          "type",
+        ]);
         if (
           snapshot.kind !== "authenticated" ||
           snapshot.assuranceLevel !== "aal2" ||
           snapshot.identity.membership.role !== "owner" ||
           activeGrant === null ||
-          !validText(action.membershipId, 256)
+          selectionRecord?.type !== "review_staff_invitation_revocation" ||
+          !validText(selectionRecord.invitationId, 256) ||
+          !validText(selectionRecord.schoolId, 256) ||
+          selectionRecord.schoolId !== activeGrant.identity.school.id
+        ) {
+          return snapshot;
+        }
+        const target = activeGrant.manageableInvitations.find(
+          (entry) =>
+            entry.invitationId === selectionRecord.invitationId &&
+            entry.schoolId === selectionRecord.schoolId,
+        );
+        if (target === undefined) {
+          return snapshot;
+        }
+        operationEpoch += 1;
+        retryPlan = null;
+        clearTotpCeremony();
+        clearInvitation();
+        clearMembershipRevocation();
+        pendingInvitationRevocation = { actor: activeGrant, target };
+        transition({
+          kind: "confirming_staff_invitation_revocation",
+          schoolLabel: activeGrant.identity.school.label,
+          target: {
+            email: target.email,
+            role: managedRole(target.role),
+          },
+        });
+        return snapshot;
+      }
+      case "confirm_staff_invitation_revocation": {
+        if (
+          snapshot.kind !== "confirming_staff_invitation_revocation" ||
+          pendingInvitationRevocation === null ||
+          activeGrant === null ||
+          !sameAuthority(activeGrant, pendingInvitationRevocation.actor)
+        ) {
+          return snapshot;
+        }
+        const selection = pendingInvitationRevocation;
+        pendingInvitationRevocation = null;
+        const operationId = allocateOperationId("staff_invitation_revocation");
+        if (operationId === null) {
+          return snapshot;
+        }
+        await executeRevokeInvitation(
+          {
+            invitationId: selection.target.invitationId,
+            operationId,
+            schoolId: selection.target.schoolId,
+            type: "revoke_staff_invitation",
+          },
+          selection.actor,
+          selection.target,
+        );
+        return snapshot;
+      }
+      case "cancel_staff_invitation_revocation": {
+        if (
+          snapshot.kind !== "confirming_staff_invitation_revocation" ||
+          pendingInvitationRevocation === null ||
+          activeGrant === null ||
+          !sameAuthority(activeGrant, pendingInvitationRevocation.actor)
+        ) {
+          return snapshot;
+        }
+        const actor = pendingInvitationRevocation.actor;
+        clearInvitationRevocation();
+        const identity = normalizeIdentity(actor.identity);
+        if (identity === null) {
+          fail("staff_invitation_revocation", "invalid_backend_result");
+        } else {
+          publishAuthenticated(actor, identity);
+        }
+        return snapshot;
+      }
+      case "review_staff_membership_revocation": {
+        const selectionRecord = snapshotExactRecord(action, [
+          "profileId",
+          "schoolId",
+          "type",
+        ]);
+        if (
+          snapshot.kind !== "authenticated" ||
+          snapshot.assuranceLevel !== "aal2" ||
+          snapshot.identity.membership.role !== "owner" ||
+          activeGrant === null ||
+          selectionRecord?.type !== "review_staff_membership_revocation" ||
+          !validText(selectionRecord.profileId, 256) ||
+          !validText(selectionRecord.schoolId, 256) ||
+          selectionRecord.schoolId !== activeGrant.identity.school.id
         ) {
           return snapshot;
         }
         const target = activeGrant.manageableStaff.find(
-          (entry) => entry.membershipId === action.membershipId,
+          (entry) =>
+            entry.profile.id === selectionRecord.profileId &&
+            entry.schoolId === selectionRecord.schoolId,
         );
         if (target === undefined) {
           return snapshot;
@@ -1805,7 +2114,9 @@ export function createStaffAuthController(dependencies: {
       case "confirm_staff_membership_revocation": {
         if (
           snapshot.kind !== "confirming_staff_membership_revocation" ||
-          pendingMembershipRevocation === null
+          pendingMembershipRevocation === null ||
+          activeGrant === null ||
+          !sameAuthority(activeGrant, pendingMembershipRevocation.actor)
         ) {
           return snapshot;
         }
@@ -1817,9 +2128,9 @@ export function createStaffAuthController(dependencies: {
         }
         await executeRevokeMembership(
           {
-            membershipId: selection.target.membershipId,
             operationId,
-            targetRole: selection.target.role,
+            profileId: selection.target.profile.id,
+            schoolId: selection.target.schoolId,
             type: "revoke_staff_membership",
           },
           selection.actor,
@@ -1874,6 +2185,7 @@ export function createStaffAuthController(dependencies: {
       activeGrant = null;
       clearTotpCeremony();
       clearInvitation();
+      clearInvitationRevocation();
       clearMembershipRevocation();
       listeners.clear();
       revision += 1;
@@ -2003,6 +2315,14 @@ function validText(value: unknown, maximumLength: number): value is string {
   );
 }
 
+function isBase64UrlText(value: unknown, length: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.length === length &&
+    /^[A-Za-z0-9_-]+$/.test(value)
+  );
+}
+
 function hasControlText(value: string): boolean {
   return [...value].some((character) => {
     const codePoint = character.codePointAt(0) ?? 0;
@@ -2071,12 +2391,7 @@ function decodeIdentity(value: unknown): StaffAuthBoundaryIdentity | null {
 function decodeManagedStaff(
   value: unknown,
 ): StaffAuthBoundaryManagedStaff | null {
-  const record = snapshotExactRecord(value, [
-    "membershipId",
-    "profile",
-    "role",
-    "schoolId",
-  ]);
+  const record = snapshotExactRecord(value, ["profile", "role", "schoolId"]);
   if (record === null) {
     return null;
   }
@@ -2086,7 +2401,6 @@ function decodeManagedStaff(
     "id",
   ]);
   if (
-    !validText(record.membershipId, 256) ||
     !isManagedRole(record.role) ||
     !validText(record.schoolId, 256) ||
     profile === null ||
@@ -2097,7 +2411,6 @@ function decodeManagedStaff(
     return null;
   }
   return {
-    membershipId: record.membershipId,
     profile: {
       displayName: profile.displayName,
       email: profile.email,
@@ -2105,6 +2418,39 @@ function decodeManagedStaff(
     },
     role: record.role,
     schoolId: record.schoolId,
+  };
+}
+
+function decodeManagedInvitation(
+  value: unknown,
+): StaffAuthBoundaryManagedInvitation | null {
+  const record = snapshotExactRecord(value, [
+    "email",
+    "expiresAt",
+    "invitationId",
+    "role",
+    "schoolId",
+    "state",
+  ]);
+  if (
+    record === null ||
+    !validText(record.email, 320) ||
+    !validText(record.expiresAt, 64) ||
+    !isIsoInstant(record.expiresAt) ||
+    !validText(record.invitationId, 256) ||
+    !isManagedRole(record.role) ||
+    !validText(record.schoolId, 256) ||
+    record.state !== "pending"
+  ) {
+    return null;
+  }
+  return {
+    email: record.email,
+    expiresAt: record.expiresAt,
+    invitationId: record.invitationId,
+    role: record.role,
+    schoolId: record.schoolId,
+    state: "pending",
   };
 }
 
@@ -2120,10 +2466,18 @@ function decodeAccessGrant(value: unknown): StaffAuthAccessGrant | null {
     return null;
   }
   const identity = decodeIdentity(record.identity);
+  const rawManageableInvitations = snapshotArray(record.manageableInvitations);
   const rawManageableStaff = snapshotArray(record.manageableStaff);
-  if (rawManageableStaff === null) {
+  if (
+    rawManageableInvitations === null ||
+    rawManageableInvitations.length > 500 ||
+    rawManageableStaff === null
+  ) {
     return null;
   }
+  const manageableInvitations = rawManageableInvitations.map(
+    decodeManagedInvitation,
+  );
   const manageableStaff = rawManageableStaff.map(decodeManagedStaff);
   const exactKeys =
     record.secondFactor === "challenge_required"
@@ -2133,6 +2487,7 @@ function decodeAccessGrant(value: unknown): StaffAuthAccessGrant | null {
           "identity",
           "identityGeneration",
           "kind",
+          "manageableInvitations",
           "manageableStaff",
           "secondFactor",
           "sessionGeneration",
@@ -2142,6 +2497,7 @@ function decodeAccessGrant(value: unknown): StaffAuthAccessGrant | null {
           "identity",
           "identityGeneration",
           "kind",
+          "manageableInvitations",
           "manageableStaff",
           "secondFactor",
           "sessionGeneration",
@@ -2149,6 +2505,7 @@ function decodeAccessGrant(value: unknown): StaffAuthAccessGrant | null {
   if (
     !hasExactKeys(record, exactKeys) ||
     identity === null ||
+    manageableInvitations.some((entry) => entry === null) ||
     manageableStaff.some((entry) => entry === null) ||
     (record.secondFactor !== "challenge_required" &&
       record.secondFactor !== "enrollment_required" &&
@@ -2162,29 +2519,42 @@ function decodeAccessGrant(value: unknown): StaffAuthAccessGrant | null {
     return null;
   }
   const staff = manageableStaff as StaffAuthBoundaryManagedStaff[];
+  const invitations =
+    manageableInvitations as StaffAuthBoundaryManagedInvitation[];
   const assuranceLevel = record.assuranceLevel as "aal1" | "aal2";
-  const membershipIds = new Set<string>();
   const profileIds = new Set<string>();
-  if (identity.membership.role !== "owner" && staff.length !== 0) {
+  if (
+    identity.membership.role !== "owner" &&
+    (staff.length !== 0 || invitations.length !== 0)
+  ) {
     return null;
   }
   for (const entry of staff) {
     if (
       entry.schoolId !== identity.school.id ||
-      entry.membershipId === identity.membership.id ||
-      membershipIds.has(entry.membershipId) ||
+      entry.profile.id === identity.profile.id ||
       profileIds.has(entry.profile.id)
     ) {
       return null;
     }
-    membershipIds.add(entry.membershipId);
     profileIds.add(entry.profile.id);
+  }
+  const invitationIds = new Set<string>();
+  for (const invitation of invitations) {
+    if (
+      invitation.schoolId !== identity.school.id ||
+      invitationIds.has(invitation.invitationId)
+    ) {
+      return null;
+    }
+    invitationIds.add(invitation.invitationId);
   }
   const base = {
     assuranceLevel,
     identity,
     identityGeneration: record.identityGeneration,
     kind: "access_granted" as const,
+    manageableInvitations: invitations,
     manageableStaff: staff,
     sessionGeneration: record.sessionGeneration,
   };
@@ -2235,7 +2605,6 @@ function decodeBoundaryResult(value: unknown): StaffAuthBoundaryResult | null {
       case "email_verification_required":
       case "email_verification_sent":
       case "membership_inactive":
-      case "password_recovery_complete":
       case "password_recovery_ready":
       case "password_recovery_rejected":
       case "recovery_request_received":
@@ -2243,6 +2612,7 @@ function decodeBoundaryResult(value: unknown): StaffAuthBoundaryResult | null {
       case "session_revoked":
       case "sign_in_rejected":
       case "signed_out":
+      case "step_up_required":
       case "totp_rejected":
         return { kind: record.kind };
     }
@@ -2314,9 +2684,17 @@ function decodeBoundaryResult(value: unknown): StaffAuthBoundaryResult | null {
       ? { kind: "sign_out_complete", scope: record.scope }
       : null;
   }
+  if (record.kind === "password_recovery_complete") {
+    return hasExactKeys(record, ["kind", "sessionScope"]) &&
+      record.sessionScope === "all"
+      ? { kind: "password_recovery_complete", sessionScope: "all" }
+      : null;
+  }
   if (
     record.kind === "staff_invitation_created" ||
     record.kind === "staff_invitation_rejected" ||
+    record.kind === "staff_invitation_revoked" ||
+    record.kind === "staff_invitation_revocation_rejected" ||
     record.kind === "staff_membership_revoked" ||
     record.kind === "staff_membership_revocation_rejected"
   ) {
@@ -2339,20 +2717,48 @@ function decodeBoundaryResult(value: unknown): StaffAuthBoundaryResult | null {
         ? { actor, kind: "staff_invitation_rejected" }
         : null;
     }
+    if (record.kind === "staff_invitation_revoked") {
+      return hasExactKeys(record, [
+        "actor",
+        "invitationId",
+        "kind",
+        "revokedRole",
+        "schoolId",
+      ]) &&
+        validText(record.invitationId, 256) &&
+        isManagedRole(record.revokedRole) &&
+        validText(record.schoolId, 256)
+        ? {
+            actor,
+            invitationId: record.invitationId,
+            kind: "staff_invitation_revoked",
+            revokedRole: record.revokedRole,
+            schoolId: record.schoolId,
+          }
+        : null;
+    }
+    if (record.kind === "staff_invitation_revocation_rejected") {
+      return hasExactKeys(record, ["actor", "kind"])
+        ? { actor, kind: "staff_invitation_revocation_rejected" }
+        : null;
+    }
     if (record.kind === "staff_membership_revoked") {
       return hasExactKeys(record, [
         "actor",
         "kind",
-        "membershipId",
+        "profileId",
         "revokedRole",
+        "schoolId",
       ]) &&
-        validText(record.membershipId, 256) &&
+        validText(record.profileId, 256) &&
+        validText(record.schoolId, 256) &&
         isManagedRole(record.revokedRole)
         ? {
             actor,
             kind: "staff_membership_revoked",
-            membershipId: record.membershipId,
+            profileId: record.profileId,
             revokedRole: record.revokedRole,
+            schoolId: record.schoolId,
           }
         : null;
     }
