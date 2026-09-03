@@ -7,8 +7,8 @@ import {
   parseCanonicalEmail,
   parseCanonicalUuid,
   parseEmail,
-  parseExactCallback,
   parseExactOrigin,
+  parseExactRootCallback,
   parseUuid,
   readStrictJson,
   validateRequestOrigin,
@@ -65,7 +65,7 @@ export interface InvitationAuthorizationResult {
 }
 
 export interface GeneratedInvitationResult {
-  readonly actionLink?: string;
+  readonly callbackUrl?: string;
   readonly code:
     | "dependency_unavailable"
     | "existing_user_conflict"
@@ -75,7 +75,7 @@ export interface GeneratedInvitationResult {
 }
 
 export interface InvitationDeliveryMessage {
-  readonly actionLink: string;
+  readonly callbackUrl: string;
   readonly expiresAt: string;
   readonly recipientEmail: string;
 }
@@ -288,19 +288,26 @@ function isConfirmedExistingUser(
   );
 }
 
-function parseGeneratedActionLink(
+function parseProviderTokenHash(value: unknown): string | null {
+  return typeof value === "string" && /^[0-9a-f]{56}$/u.test(value)
+    ? value
+    : null;
+}
+
+function validateGeneratedActionLink(
   value: unknown,
   backendOrigin: string,
   callback: string,
-): string | null {
+  tokenHash: string,
+): boolean {
   if (typeof value !== "string" || value.length === 0 || value.length > 8_192) {
-    return null;
+    return false;
   }
   let actionLink: URL;
   try {
     actionLink = new URL(value);
   } catch {
-    return null;
+    return false;
   }
   if (
     actionLink.origin !== backendOrigin ||
@@ -309,27 +316,57 @@ function parseGeneratedActionLink(
     actionLink.password !== "" ||
     actionLink.hash !== ""
   ) {
-    return null;
+    return false;
   }
   const queryKeys = [...actionLink.searchParams.keys()];
-  const allowedKeys = new Set(["redirect_to", "token", "token_hash", "type"]);
+  const allowedKeys = new Set(["redirect_to", "token", "type"]);
   if (
+    queryKeys.length !== 3 ||
     queryKeys.some((key) => !allowedKeys.has(key)) ||
     new Set(queryKeys).size !== queryKeys.length ||
     actionLink.searchParams.get("type") !== "invite" ||
-    actionLink.searchParams.get("redirect_to") !== callback
+    actionLink.searchParams.get("redirect_to") !== callback ||
+    actionLink.searchParams.get("token") !== tokenHash
   ) {
+    return false;
+  }
+  return true;
+}
+
+function createInviteCallback(callback: string, tokenHash: string): string {
+  const callbackUrl = new URL(callback);
+  callbackUrl.searchParams.append("auth", "invite");
+  callbackUrl.searchParams.append("token_hash", tokenHash);
+  return callbackUrl.href;
+}
+
+function parseInviteCallback(
+  value: unknown,
+  expectedOrigin: string,
+): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > 8_192) {
     return null;
   }
-  const token = actionLink.searchParams.get("token");
-  const tokenHash = actionLink.searchParams.get("token_hash");
-  const hasToken = token !== null && token.length > 0 && token.length <= 4_096;
-  const hasTokenHash =
-    tokenHash !== null && tokenHash.length > 0 && tokenHash.length <= 4_096;
-  if (hasToken === hasTokenHash || queryKeys.length !== 3) {
+  let callback: URL;
+  try {
+    callback = new URL(value);
+  } catch {
     return null;
   }
-  return actionLink.href;
+  const queryKeys = [...callback.searchParams.keys()];
+  return callback.origin === expectedOrigin &&
+    callback.username === "" &&
+    callback.password === "" &&
+    callback.pathname === "/" &&
+    callback.hash === "" &&
+    callback.href === value &&
+    queryKeys.length === 2 &&
+    new Set(queryKeys).size === queryKeys.length &&
+    queryKeys.every((key) => key === "auth" || key === "token_hash") &&
+    callback.searchParams.get("auth") === "invite" &&
+    parseProviderTokenHash(callback.searchParams.get("token_hash")) !== null
+    ? callback.href
+    : null;
 }
 
 function parseGeneratedInvitation(
@@ -343,21 +380,46 @@ function parseGeneratedInvitation(
     return { code: "dependency_unavailable" };
   }
   const properties = asRecord(response.properties);
+  if (
+    response.properties !== undefined &&
+    (properties === null ||
+      !isExactRecord(properties, [
+        "action_link",
+        "email_otp",
+        "hashed_token",
+        "redirect_to",
+        "verification_type",
+      ]))
+  ) {
+    return { code: "dependency_unavailable" };
+  }
   const wrappedUser = asRecord(response.user);
   const user = wrappedUser ?? response;
   if (isConfirmedExistingUser(user, requestedEmail)) {
     return { code: "existing_user_conflict" };
   }
-  const actionLink = parseGeneratedActionLink(
-    properties?.action_link ?? response.action_link,
-    backendOrigin,
-    callback,
-  );
+  const material = properties ?? response;
+  const tokenHash = parseProviderTokenHash(material.hashed_token);
   const userId = parseUuid(user.id);
-  return actionLink !== null &&
+  return tokenHash !== null &&
+    typeof material.email_otp === "string" &&
+    material.email_otp.length > 0 &&
+    material.email_otp.length <= 64 &&
+    material.verification_type === "invite" &&
+    material.redirect_to === callback &&
+    validateGeneratedActionLink(
+      material.action_link,
+      backendOrigin,
+      callback,
+      tokenHash,
+    ) &&
     userId !== null &&
     isUnconfirmedInvitedUser(user, requestedEmail)
-    ? { actionLink, code: "link_generated", userId }
+    ? {
+        callbackUrl: createInviteCallback(callback, tokenHash),
+        code: "link_generated",
+        userId,
+      }
     : { code: "dependency_unavailable" };
 }
 
@@ -390,7 +452,7 @@ export function createStaffInvitationDependencies(
   const callback =
     allowedOrigin === null
       ? null
-      : parseExactCallback(
+      : parseExactRootCallback(
           configuration.DESMOSLOCK_STAFF_INVITATION_CALLBACK,
           allowedOrigin,
         );
@@ -750,14 +812,12 @@ export async function handleRequest(
   }
   const generatedUserId =
     generated.code === "link_generated" ? parseUuid(generated.userId) : null;
-  const actionLink =
+  const callbackUrl =
     generated.code === "link_generated" &&
-    typeof generated.actionLink === "string" &&
-    generated.actionLink.length > 0 &&
-    generated.actionLink.length <= 8_192
-      ? generated.actionLink
+    typeof generated.callbackUrl === "string"
+      ? parseInviteCallback(generated.callbackUrl, dependencies.allowedOrigin)
       : null;
-  if (generatedUserId === null || actionLink === null) {
+  if (generatedUserId === null || callbackUrl === null) {
     const failure = mapGeneratedInvitationFailure(generated.code);
     const recorded = await recordFailedDelivery(
       dependencies,
@@ -809,7 +869,7 @@ export async function handleRequest(
   let delivery: InvitationDeliveryResult = "dependency_unavailable";
   try {
     delivery = await dependencies.deliverInvitation({
-      actionLink,
+      callbackUrl,
       expiresAt,
       recipientEmail: input.email,
     });

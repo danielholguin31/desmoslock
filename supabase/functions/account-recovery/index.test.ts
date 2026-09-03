@@ -9,6 +9,15 @@ import {
 
 const WEB_ORIGIN = "https://staff.desmoslock.invalid";
 const BACKEND_ORIGIN = "https://abcdefghijklmnopqrst.supabase.co";
+const FLOW_ID = "f".repeat(22);
+const STATE = "s".repeat(43);
+const CODE_CHALLENGE = "c".repeat(43);
+const RECOVERY_INPUT = {
+  codeChallenge: CODE_CHALLENGE,
+  email: "owner@example.com",
+  flowId: FLOW_ID,
+  state: STATE,
+} as const;
 
 function assertEquals(actual: unknown, expected: unknown): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -35,7 +44,7 @@ async function assertRejects(action: () => Promise<unknown>): Promise<void> {
 }
 
 function recoveryRequest(
-  body: unknown = { email: "owner@example.com" },
+  body: unknown = RECOVERY_INPUT,
   overrides: {
     readonly headers?: Record<string, string>;
     readonly method?: string;
@@ -83,15 +92,15 @@ async function publicSnapshot(response: Response): Promise<unknown> {
 }
 
 Deno.test(
-  "account recovery returns the exact public contract while scheduling canonical email",
+  "account recovery returns the exact public contract while scheduling canonical PKCE input",
   async () => {
-    const emails: string[] = [];
+    const inputs: unknown[] = [];
     let background: Promise<void> | undefined;
     const response = await handleRequest(
       recoveryRequest(),
       dependencies({
-        requestRecovery: async (email) => {
-          emails.push(email);
+        requestRecovery: async (input) => {
+          inputs.push(input);
         },
         waitUntil: (task) => {
           background = task();
@@ -107,7 +116,7 @@ Deno.test(
       vary: "Origin",
     });
     await background;
-    assertEquals(emails, ["owner@example.com"]);
+    assertEquals(inputs, [RECOVERY_INPUT]);
   },
 );
 
@@ -209,7 +218,7 @@ Deno.test(
 );
 
 Deno.test(
-  "account recovery rejects content type, oversized body, malformed JSON, and extra keys",
+  "account recovery rejects content type, oversized body, malformed JSON, and invalid PKCE fields",
   async () => {
     const invalidRequests = [
       recoveryRequest(undefined, { headers: { "content-type": "text/plain" } }),
@@ -220,10 +229,29 @@ Deno.test(
       recoveryRequest(undefined, {
         rawBody: JSON.stringify({ padding: "x".repeat(4_096) }),
       }),
-      recoveryRequest({ email: "owner@example.com", extra: true }),
-      recoveryRequest({ email: "not-an-email" }),
-      recoveryRequest({ email: "Owner@Example.com" }),
-      recoveryRequest({ email: "owner`tag@example.com" }),
+      recoveryRequest({ ...RECOVERY_INPUT, extra: true }),
+      recoveryRequest({ email: "owner@example.com" }),
+      recoveryRequest({ ...RECOVERY_INPUT, email: "not-an-email" }),
+      recoveryRequest({ ...RECOVERY_INPUT, email: "Owner@Example.com" }),
+      recoveryRequest({ ...RECOVERY_INPUT, email: "owner`tag@example.com" }),
+      recoveryRequest({ ...RECOVERY_INPUT, flowId: "f".repeat(21) }),
+      recoveryRequest({ ...RECOVERY_INPUT, flowId: "f".repeat(23) }),
+      recoveryRequest({ ...RECOVERY_INPUT, flowId: `${"f".repeat(21)}=` }),
+      recoveryRequest({ ...RECOVERY_INPUT, flowId: `${"f".repeat(21)}+` }),
+      recoveryRequest({ ...RECOVERY_INPUT, state: "s".repeat(42) }),
+      recoveryRequest({ ...RECOVERY_INPUT, state: "s".repeat(44) }),
+      recoveryRequest({ ...RECOVERY_INPUT, state: `${"s".repeat(42)}=` }),
+      recoveryRequest({ ...RECOVERY_INPUT, state: `${"s".repeat(42)}/` }),
+      recoveryRequest({ ...RECOVERY_INPUT, codeChallenge: "c".repeat(42) }),
+      recoveryRequest({ ...RECOVERY_INPUT, codeChallenge: "c".repeat(44) }),
+      recoveryRequest({
+        ...RECOVERY_INPUT,
+        codeChallenge: `${"c".repeat(42)}=`,
+      }),
+      recoveryRequest({
+        ...RECOVERY_INPUT,
+        codeChallenge: `${"c".repeat(42)}+`,
+      }),
     ];
     let schedules = 0;
     for (const request of invalidRequests) {
@@ -322,30 +350,56 @@ Deno.test(
   "account recovery absorbs timeout and provider errors without leakage",
   async () => {
     const sentinel = "credential-shaped-provider-sentinel";
+    const logEntries: unknown[][] = [];
+    const originalConsoleError = console.error;
+    const originalConsoleLog = console.log;
+    const originalConsoleWarn = console.warn;
     let background: Promise<void> | undefined;
-    const response = await handleRequest(
-      recoveryRequest(),
-      dependencies({
-        requestRecovery: () => Promise.reject(new Error(sentinel)),
-        waitUntil: (task) => {
-          background = task();
-        },
-      }),
-    );
-    const snapshot = await publicSnapshot(response);
-    await background;
-    assertEquals(snapshot, {
-      accessControlAllowOrigin: WEB_ORIGIN,
-      body: JSON.stringify({ code: "recovery_requested", ok: true }),
-      cacheControl: "no-store",
-      contentType: "application/json; charset=utf-8",
-      status: 202,
-      vary: "Origin",
-    });
-    assert(
-      !JSON.stringify(snapshot).includes(sentinel),
-      "Provider detail leaked",
-    );
+    try {
+      const capture = (...values: unknown[]) => {
+        logEntries.push(values);
+      };
+      console.error = capture;
+      console.log = capture;
+      console.warn = capture;
+      const response = await handleRequest(
+        recoveryRequest(),
+        dependencies({
+          requestRecovery: () => Promise.reject(new Error(sentinel)),
+          waitUntil: (task) => {
+            background = task();
+          },
+        }),
+      );
+      const snapshot = await publicSnapshot(response);
+      await background;
+      assertEquals(snapshot, {
+        accessControlAllowOrigin: WEB_ORIGIN,
+        body: JSON.stringify({ code: "recovery_requested", ok: true }),
+        cacheControl: "no-store",
+        contentType: "application/json; charset=utf-8",
+        status: 202,
+        vary: "Origin",
+      });
+      const serialized = JSON.stringify(snapshot);
+      for (const privateValue of [
+        sentinel,
+        FLOW_ID,
+        STATE,
+        CODE_CHALLENGE,
+        RECOVERY_INPUT.email,
+      ]) {
+        assert(
+          !serialized.includes(privateValue),
+          "Private recovery data leaked",
+        );
+      }
+      assertEquals(logEntries, []);
+    } finally {
+      console.error = originalConsoleError;
+      console.log = originalConsoleLog;
+      console.warn = originalConsoleWarn;
+    }
   },
 );
 
@@ -373,7 +427,7 @@ Deno.test(
 
 function runtimeConfiguration(): Record<string, string> {
   return {
-    DESMOSLOCK_ACCOUNT_RECOVERY_CALLBACK: `${WEB_ORIGIN}/auth/recovery`,
+    DESMOSLOCK_ACCOUNT_RECOVERY_CALLBACK: `${WEB_ORIGIN}/`,
     DESMOSLOCK_ALLOWED_WEB_ORIGIN: WEB_ORIGIN,
     DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: BACKEND_ORIGIN,
     SUPABASE_ANON_KEY: "synthetic-publishable-sentinel",
@@ -398,11 +452,11 @@ Deno.test(
     const knownService = createService(200);
     const unknownService = createService(400);
     const known = await handleRequest(
-      recoveryRequest({ email: "known@example.com" }),
+      recoveryRequest({ ...RECOVERY_INPUT, email: "known@example.com" }),
       knownService.service,
     );
     const unknown = await handleRequest(
-      recoveryRequest({ email: "unknown@example.com" }),
+      recoveryRequest({ ...RECOVERY_INPUT, email: "unknown@example.com" }),
       unknownService.service,
     );
     const knownSnapshot = await publicSnapshot(known);
@@ -433,7 +487,10 @@ Deno.test(
       (() => undefined) as RequestLifetimeWaitUntil,
     );
     assertEquals(
-      await service.requestRecovery("unknown@example.com"),
+      await service.requestRecovery({
+        ...RECOVERY_INPUT,
+        email: "unknown@example.com",
+      }),
       undefined,
     );
     assertEquals(requests.length, 1);
@@ -443,7 +500,7 @@ Deno.test(
     assertEquals(url.pathname, "/auth/v1/recover");
     assertEquals(
       url.searchParams.get("redirect_to"),
-      `${WEB_ORIGIN}/auth/recovery`,
+      `${WEB_ORIGIN}/?auth=recovery&flow=${FLOW_ID}&state=${STATE}`,
     );
     assert(
       !request.url.includes(publishableSentinel),
@@ -454,7 +511,15 @@ Deno.test(
       request.headers.get("authorization"),
       `Bearer ${publishableSentinel}`,
     );
-    assertEquals(JSON.parse(request.body), { email: "unknown@example.com" });
+    assertEquals(JSON.parse(request.body), {
+      code_challenge: CODE_CHALLENGE,
+      code_challenge_method: "s256",
+      email: "unknown@example.com",
+    });
+    assert(
+      !request.url.includes(CODE_CHALLENGE),
+      "PKCE challenge leaked into the provider URL",
+    );
   },
 );
 
@@ -475,7 +540,10 @@ Deno.test(
       (() => undefined) as RequestLifetimeWaitUntil,
     );
 
-    await service.requestRecovery("unknown@example.com");
+    await service.requestRecovery({
+      ...RECOVERY_INPUT,
+      email: "unknown@example.com",
+    });
     assertEquals(requests.length, 1);
     assertEquals(new URL(requests[0]).origin, "http://kong:8000");
   },
@@ -485,20 +553,28 @@ Deno.test(
   "account recovery runtime rejects mismatched callback before egress",
   async () => {
     let requests = 0;
-    await assertRejects(async () => {
-      createAccountRecoveryDependencies(
-        {
-          ...runtimeConfiguration(),
-          DESMOSLOCK_ACCOUNT_RECOVERY_CALLBACK:
-            "https://attacker.invalid/recovery",
-        },
-        async () => {
-          requests += 1;
-          return new Response(null, { status: 500 });
-        },
-        (() => undefined) as RequestLifetimeWaitUntil,
-      );
-    });
+    for (const callback of [
+      "https://attacker.invalid/",
+      `${WEB_ORIGIN}/auth/recovery`,
+      `${WEB_ORIGIN}/?auth=recovery`,
+      `${WEB_ORIGIN}/#fragment`,
+      WEB_ORIGIN,
+      "https://user@staff.desmoslock.invalid/",
+    ]) {
+      await assertRejects(async () => {
+        createAccountRecoveryDependencies(
+          {
+            ...runtimeConfiguration(),
+            DESMOSLOCK_ACCOUNT_RECOVERY_CALLBACK: callback,
+          },
+          async () => {
+            requests += 1;
+            return new Response(null, { status: 500 });
+          },
+          (() => undefined) as RequestLifetimeWaitUntil,
+        );
+      });
+    }
     assertEquals(requests, 0);
   },
 );

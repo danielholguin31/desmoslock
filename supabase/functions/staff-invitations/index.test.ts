@@ -9,7 +9,7 @@ import {
 
 const WEB_ORIGIN = "https://staff.desmoslock.invalid";
 const BACKEND_ORIGIN = "https://abcdefghijklmnopqrst.supabase.co";
-const CALLBACK = `${WEB_ORIGIN}/auth/invitation`;
+const CALLBACK = `${WEB_ORIGIN}/`;
 const INVITATION_ID = "10000000-0000-0000-0000-000000000001";
 const USER_ID = "20000000-0000-0000-0000-000000000002";
 const WORKSPACE_ID = "30000000-0000-4000-8000-000000000003";
@@ -17,9 +17,10 @@ const REQUEST_KEY = "40000000-0000-4000-8000-000000000004";
 const SECOND_REQUEST_KEY = "50000000-0000-4000-8000-000000000005";
 const THIRD_REQUEST_KEY = "60000000-0000-4000-8000-000000000006";
 const JWT = "synthetic-header.synthetic-payload.synthetic-signature";
-const ACTION_TOKEN_SENTINEL = "synthetic-action-token-sentinel";
+const TOKEN_HASH = "a".repeat(56);
+const INVITE_CALLBACK = `${CALLBACK}?auth=invite&token_hash=${TOKEN_HASH}`;
 const ACTION_LINK =
-  `${BACKEND_ORIGIN}/auth/v1/verify?token=${ACTION_TOKEN_SENTINEL}` +
+  `${BACKEND_ORIGIN}/auth/v1/verify?token=${TOKEN_HASH}` +
   `&type=invite&redirect_to=${encodeURIComponent(CALLBACK)}`;
 
 function assertEquals(actual: unknown, expected: unknown): void {
@@ -85,7 +86,7 @@ function dependencies(
     deliverInvitation: async () => "delivered",
     failInvitation: async () => "invitation_delivery_failed",
     generateInviteLink: async () => ({
-      actionLink: ACTION_LINK,
+      callbackUrl: INVITE_CALLBACK,
       code: "link_generated",
       userId: USER_ID,
     }),
@@ -112,7 +113,7 @@ Deno.test(
         generateInviteLink: async (email) => {
           calls.push(["generate", email]);
           return {
-            actionLink: ACTION_LINK,
+            callbackUrl: INVITE_CALLBACK,
             code: "link_generated",
             userId: USER_ID,
           };
@@ -158,7 +159,7 @@ Deno.test(
       [
         "deliver",
         {
-          actionLink: ACTION_LINK,
+          callbackUrl: INVITE_CALLBACK,
           expiresAt: "2026-08-30T13:00:00.000Z",
           recipientEmail: "teacher@example.com",
         },
@@ -406,7 +407,7 @@ Deno.test(
         generateInviteLink: async () => {
           generatedLinks += 1;
           return {
-            actionLink: ACTION_LINK,
+            callbackUrl: INVITE_CALLBACK,
             code: "link_generated",
             userId: USER_ID,
           };
@@ -476,7 +477,7 @@ Deno.test(
         generateInviteLink: async () => {
           generatedLinks += 1;
           return {
-            actionLink: ACTION_LINK,
+            callbackUrl: INVITE_CALLBACK,
             code: "link_generated",
             userId: USER_ID,
           };
@@ -839,7 +840,7 @@ Deno.test(
         expectedEvents.push(["fail", INVITATION_ID, "dependency_unavailable"]);
       }
       assertEquals(events, expectedEvents);
-      assert(!body.includes(ACTION_TOKEN_SENTINEL), "Action token leaked");
+      assert(!body.includes(TOKEN_HASH), "Action token hash leaked");
       assert(!body.includes("teacher@example.com"), "Recipient email leaked");
       assert(!body.includes(diagnosticSentinel), "Provider error leaked");
     }
@@ -917,7 +918,7 @@ Deno.test(
     assertEquals(deliveries, 1);
     assertEquals(publications, 2);
     assertEquals(failureWrites, 0);
-    assert(!body.includes(ACTION_TOKEN_SENTINEL), "Action token leaked");
+    assert(!body.includes(TOKEN_HASH), "Action token hash leaked");
     assert(!body.includes("teacher@example.com"), "Recipient email leaked");
     assert(!body.includes(diagnosticSentinel), "Publish error leaked");
   },
@@ -956,7 +957,7 @@ Deno.test(
     assertEquals(publications, 1);
     assertEquals(failureWrites, 0);
     assert(!body.includes("invitation_usable"), "Usable state was reported");
-    assert(!body.includes(ACTION_TOKEN_SENTINEL), "Action token leaked");
+    assert(!body.includes(TOKEN_HASH), "Action token hash leaked");
     assert(!body.includes("teacher@example.com"), "Recipient email leaked");
   },
 );
@@ -971,7 +972,7 @@ Deno.test(
       body,
       JSON.stringify({ code: "invitation_created", ok: true }),
     );
-    assert(!body.includes(ACTION_TOKEN_SENTINEL), "Action token leaked");
+    assert(!body.includes(TOKEN_HASH), "Action token hash leaked");
   },
 );
 
@@ -1020,7 +1021,29 @@ function generatedProviderResponse(
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
+    ...generatedProviderProperties(),
+    ...generatedProviderUser(),
+    ...overrides,
+  };
+}
+
+function generatedProviderProperties(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
     action_link: ACTION_LINK,
+    email_otp: "12345678",
+    hashed_token: TOKEN_HASH,
+    redirect_to: CALLBACK,
+    verification_type: "invite",
+    ...overrides,
+  };
+}
+
+function generatedProviderUser(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
     email: "teacher@example.com",
     email_confirmed_at: null,
     id: USER_ID,
@@ -1369,7 +1392,7 @@ Deno.test(
       invitationId: INVITATION_ID,
     });
     assertEquals(generated, {
-      actionLink: ACTION_LINK,
+      callbackUrl: INVITE_CALLBACK,
       code: "link_generated",
       userId: USER_ID,
     });
@@ -1424,11 +1447,140 @@ Deno.test(
     );
 
     await service.deliverInvitation({
-      actionLink: ACTION_LINK,
+      callbackUrl: INVITE_CALLBACK,
       expiresAt: "2026-08-30T13:00:00.000Z",
       recipientEmail: "teacher@example.com",
     });
     assertEquals(deliveryMessages.length, 1);
+  },
+);
+
+Deno.test(
+  "staff invitation constructs only the approved root token-hash callback",
+  async () => {
+    const rawProviderLink =
+      `${BACKEND_ORIGIN}/auth/v1/verify?token=${TOKEN_HASH}` +
+      `&type=invite&redirect_to=${encodeURIComponent(CALLBACK)}`;
+    const providerResponses = [
+      generatedProviderResponse({
+        action_link: rawProviderLink,
+        hashed_token: TOKEN_HASH,
+        redirect_to: CALLBACK,
+        verification_type: "invite",
+      }),
+      {
+        properties: generatedProviderProperties({
+          action_link: rawProviderLink,
+        }),
+        user: generatedProviderUser(),
+      },
+    ];
+
+    for (const providerResponse of providerResponses) {
+      const service = createStaffInvitationDependencies(
+        runtimeConfiguration({
+          DESMOSLOCK_STAFF_INVITATION_CALLBACK: CALLBACK,
+        }),
+        async () => Response.json(providerResponse),
+      );
+
+      assertEquals(await service.generateInviteLink("teacher@example.com"), {
+        callbackUrl: INVITE_CALLBACK,
+        code: "link_generated",
+        userId: USER_ID,
+      });
+    }
+  },
+);
+
+Deno.test(
+  "staff invitation rejects malformed missing or extra provider link material",
+  async () => {
+    const mismatchedHash = "b".repeat(56);
+    const invalidResponses: Record<string, unknown>[] = [
+      generatedProviderResponse({ hashed_token: undefined }),
+      generatedProviderResponse({ hashed_token: "a".repeat(55) }),
+      generatedProviderResponse({ hashed_token: "A".repeat(56) }),
+      generatedProviderResponse({ hashed_token: mismatchedHash }),
+      generatedProviderResponse({ verification_type: undefined }),
+      generatedProviderResponse({ verification_type: "recovery" }),
+      generatedProviderResponse({ redirect_to: undefined }),
+      generatedProviderResponse({
+        redirect_to: `${WEB_ORIGIN}/auth/invitation`,
+      }),
+      generatedProviderResponse({ email_otp: undefined }),
+      generatedProviderResponse({ action_link: undefined }),
+      generatedProviderResponse({ action_link: `${ACTION_LINK}&code=extra` }),
+      generatedProviderResponse({
+        action_link:
+          `${BACKEND_ORIGIN}/auth/v1/verify?token_hash=${TOKEN_HASH}` +
+          `&type=invite&redirect_to=${encodeURIComponent(CALLBACK)}`,
+      }),
+      {
+        properties: generatedProviderProperties({ extra: "unexpected" }),
+        user: generatedProviderUser(),
+      },
+      {
+        properties: generatedProviderProperties({ hashed_token: undefined }),
+        user: generatedProviderUser(),
+      },
+    ];
+
+    for (const providerResponse of invalidResponses) {
+      const service = createStaffInvitationDependencies(
+        runtimeConfiguration(),
+        async () => Response.json(providerResponse),
+      );
+      const result = await service.generateInviteLink("teacher@example.com");
+      assertEquals(result, { code: "dependency_unavailable" });
+      assert(!JSON.stringify(result).includes(TOKEN_HASH), "Token hash leaked");
+      assert(
+        !JSON.stringify(result).includes(BACKEND_ORIGIN),
+        "Raw provider action URL leaked",
+      );
+    }
+  },
+);
+
+Deno.test(
+  "staff invitation refuses raw mixed or extra callbacks before SMTP",
+  async () => {
+    const invalidCallbacks = [
+      ACTION_LINK,
+      `${WEB_ORIGIN}/auth/invitation?auth=invite&token_hash=${TOKEN_HASH}`,
+      `${INVITE_CALLBACK}&code=extra`,
+      `${INVITE_CALLBACK}&token_hash=${TOKEN_HASH}`,
+      `${CALLBACK}?auth=recovery&token_hash=${TOKEN_HASH}`,
+      `${CALLBACK}?auth=invite&token_hash=not-a-provider-hash`,
+      `${INVITE_CALLBACK}#fragment`,
+    ];
+
+    for (const callbackUrl of invalidCallbacks) {
+      let deliveries = 0;
+      const response = await handleRequest(
+        invitationRequest(),
+        dependencies({
+          deliverInvitation: async () => {
+            deliveries += 1;
+            return "delivered";
+          },
+          generateInviteLink: async () => ({
+            callbackUrl,
+            code: "link_generated",
+            userId: USER_ID,
+          }),
+        }),
+      );
+      const body = await response.text();
+      assertEquals(response.status, 503);
+      assertEquals(
+        body,
+        JSON.stringify({ code: "service_unavailable", ok: false }),
+      );
+      assertEquals(deliveries, 0);
+      assert(!body.includes(TOKEN_HASH), "Token hash leaked");
+      assert(!body.includes(BACKEND_ORIGIN), "Raw provider URL leaked");
+    }
   },
 );
 
@@ -1438,7 +1590,7 @@ Deno.test(
     const internalOrigin = "http://kong:8000";
     const publicActionLinkOrigin = "http://127.0.0.1:54321";
     const publicActionLink =
-      `${publicActionLinkOrigin}/auth/v1/verify?token=${ACTION_TOKEN_SENTINEL}` +
+      `${publicActionLinkOrigin}/auth/v1/verify?token=${TOKEN_HASH}` +
       `&type=invite&redirect_to=${encodeURIComponent(CALLBACK)}`;
     const requests: string[] = [];
     const service = createStaffInvitationDependencies(
@@ -1456,16 +1608,13 @@ Deno.test(
     );
 
     assertEquals(await service.generateInviteLink("teacher@example.com"), {
-      actionLink: publicActionLink,
+      callbackUrl: INVITE_CALLBACK,
       code: "link_generated",
       userId: USER_ID,
     });
     assertEquals(requests.length, 1);
     assertEquals(new URL(requests[0]).origin, internalOrigin);
-    assert(
-      !requests[0].includes(ACTION_TOKEN_SENTINEL),
-      "Token entered egress URL",
-    );
+    assert(!requests[0].includes(TOKEN_HASH), "Token entered egress URL");
   },
 );
 
@@ -1475,7 +1624,7 @@ Deno.test(
     const internalOrigin = "http://kong:8000";
     const publicActionLinkOrigin = "http://127.0.0.1:54321";
     const hostileLink =
-      `${internalOrigin}/auth/v1/verify?token=${ACTION_TOKEN_SENTINEL}` +
+      `${internalOrigin}/auth/v1/verify?token=${TOKEN_HASH}` +
       `&type=invite&redirect_to=${encodeURIComponent(CALLBACK)}`;
     const service = createStaffInvitationDependencies(
       runtimeConfiguration({
@@ -1490,7 +1639,7 @@ Deno.test(
     const result = await service.generateInviteLink("teacher@example.com");
     assertEquals(result, { code: "dependency_unavailable" });
     assert(
-      !JSON.stringify(result).includes(ACTION_TOKEN_SENTINEL),
+      !JSON.stringify(result).includes(TOKEN_HASH),
       "Rejected token leaked",
     );
   },
@@ -1573,7 +1722,7 @@ Deno.test(
     const service = createStaffInvitationDependencies(runtimeConfiguration());
     assertEquals(
       await service.deliverInvitation({
-        actionLink: ACTION_LINK,
+        callbackUrl: INVITE_CALLBACK,
         expiresAt: "2026-08-30T13:00:00.000Z",
         recipientEmail: "teacher@example.com",
       }),
@@ -1623,18 +1772,26 @@ Deno.test(
   "staff invitation runtime rejects mismatched callback configuration before egress",
   async () => {
     let requests = 0;
-    await assertRejects(async () => {
-      createStaffInvitationDependencies(
-        runtimeConfiguration({
-          DESMOSLOCK_STAFF_INVITATION_CALLBACK:
-            "https://attacker.invalid/callback",
-        }),
-        async () => {
-          requests += 1;
-          return new Response(null, { status: 500 });
-        },
-      );
-    });
+    for (const callback of [
+      "https://attacker.invalid/",
+      `${WEB_ORIGIN}/auth/invitation`,
+      `${WEB_ORIGIN}/?auth=invite`,
+      `${WEB_ORIGIN}/#fragment`,
+      WEB_ORIGIN,
+      "https://user@staff.desmoslock.invalid/",
+    ]) {
+      await assertRejects(async () => {
+        createStaffInvitationDependencies(
+          runtimeConfiguration({
+            DESMOSLOCK_STAFF_INVITATION_CALLBACK: callback,
+          }),
+          async () => {
+            requests += 1;
+            return new Response(null, { status: 500 });
+          },
+        );
+      });
+    }
     assertEquals(requests, 0);
   },
 );

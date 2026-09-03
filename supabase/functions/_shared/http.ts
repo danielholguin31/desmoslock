@@ -119,6 +119,30 @@ export function parseExactCallback(
   return parsed.href;
 }
 
+export function parseExactRootCallback(
+  value: unknown,
+  expectedOrigin: string,
+): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > 2_048) {
+    return null;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return null;
+  }
+  return parsed.origin === expectedOrigin &&
+    parsed.username === "" &&
+    parsed.password === "" &&
+    parsed.pathname === "/" &&
+    parsed.search === "" &&
+    parsed.hash === "" &&
+    parsed.href === value
+    ? parsed.href
+    : null;
+}
+
 function parseRequestedHeaders(value: string | null): string[] | null {
   if (value === null || value.length === 0 || value.length > 1_024) {
     return null;

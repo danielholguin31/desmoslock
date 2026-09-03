@@ -4,8 +4,8 @@ import {
   isExactRecord,
   methodNotAllowedResponse,
   parseCanonicalEmail,
-  parseExactCallback,
   parseExactOrigin,
+  parseExactRootCallback,
   readStrictJson,
   validateRequestOrigin,
 } from "../_shared/http.ts";
@@ -16,9 +16,16 @@ import {
 
 export type RequestLifetimeWaitUntil = (task: () => Promise<void>) => void;
 
+export interface AccountRecoveryInput {
+  readonly codeChallenge: string;
+  readonly email: string;
+  readonly flowId: string;
+  readonly state: string;
+}
+
 export interface AccountRecoveryDependencies {
   readonly allowedOrigin: string;
-  requestRecovery(email: string): Promise<void>;
+  requestRecovery(input: AccountRecoveryInput): Promise<void>;
   waitUntil: RequestLifetimeWaitUntil;
 }
 
@@ -61,7 +68,7 @@ export function createAccountRecoveryDependencies(
   const callback =
     allowedOrigin === null
       ? null
-      : parseExactCallback(
+      : parseExactRootCallback(
           configuration.DESMOSLOCK_ACCOUNT_RECOVERY_CALLBACK,
           allowedOrigin,
         );
@@ -89,11 +96,21 @@ export function createAccountRecoveryDependencies(
   return {
     allowedOrigin,
     waitUntil,
-    async requestRecovery(email) {
+    async requestRecovery(input) {
+      // Supabase's standard recovery template must retain `{{ .ConfirmationURL }}`:
+      // the provider verifies that URL, then redirects this S256 flow with an auth code.
+      const recoveryCallback = new URL(callback);
+      recoveryCallback.searchParams.append("auth", "recovery");
+      recoveryCallback.searchParams.append("flow", input.flowId);
+      recoveryCallback.searchParams.append("state", input.state);
       const providerUrl = new URL("/auth/v1/recover", `${client.origin}/`);
-      providerUrl.searchParams.set("redirect_to", callback);
+      providerUrl.searchParams.set("redirect_to", recoveryCallback.href);
       await client.request(providerUrl.href, {
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({
+          code_challenge: input.codeChallenge,
+          code_challenge_method: "s256",
+          email: input.email,
+        }),
         headers: {
           apikey: client.publishableKey,
           authorization: `Bearer ${client.publishableKey}`,
@@ -103,6 +120,30 @@ export function createAccountRecoveryDependencies(
       });
     },
   };
+}
+
+function parseExactBase64Url(value: unknown, length: number): string | null {
+  return typeof value === "string" &&
+    value.length === length &&
+    /^[A-Za-z0-9_-]+$/u.test(value)
+    ? value
+    : null;
+}
+
+function parseInput(value: unknown): AccountRecoveryInput | null {
+  if (!isExactRecord(value, ["codeChallenge", "email", "flowId", "state"])) {
+    return null;
+  }
+  const email = parseCanonicalEmail(value.email);
+  const flowId = parseExactBase64Url(value.flowId, 22);
+  const state = parseExactBase64Url(value.state, 43);
+  const codeChallenge = parseExactBase64Url(value.codeChallenge, 43);
+  return email !== null &&
+    flowId !== null &&
+    state !== null &&
+    codeChallenge !== null
+    ? { codeChallenge, email, flowId, state }
+    : null;
 }
 
 function runtimeDependencies(): AccountRecoveryDependencies {
@@ -145,17 +186,14 @@ export async function handleRequest(
     return methodNotAllowedResponse(dependencies.allowedOrigin);
   }
   const body = await readStrictJson(request);
-  if (!isExactRecord(body, ["email"])) {
-    return codeResponse("invalid_request", 400, dependencies.allowedOrigin);
-  }
-  const email = parseCanonicalEmail(body.email);
-  if (email === null) {
+  const input = parseInput(body);
+  if (input === null) {
     return codeResponse("invalid_request", 400, dependencies.allowedOrigin);
   }
 
   const recoveryTask = async (): Promise<void> => {
     try {
-      await dependencies.requestRecovery(email);
+      await dependencies.requestRecovery(input);
     } catch {
       // Provider outcomes are intentionally absorbed to preserve the public
       // non-enumeration contract. This path must never log provider details.
