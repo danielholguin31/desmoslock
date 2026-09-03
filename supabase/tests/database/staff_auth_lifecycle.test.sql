@@ -3,7 +3,7 @@ begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path = extensions, public, pg_catalog;
 
-select plan(160);
+select plan(237);
 
 select has_column(
   'desmoslock_v2',
@@ -50,6 +50,16 @@ select has_table(
   'staff_audit_events',
   'a minimized staff authentication audit exists'
 );
+select has_table(
+  'desmoslock_v2',
+  'staff_password_recovery_operations',
+  'password recovery has a durable caller-and-provider-session-bound operation'
+);
+select has_table(
+  'desmoslock_v2',
+  'application_session_revocation_cutoffs',
+  'completed recovery has an account-wide session-creation cutoff'
+);
 
 select ok(
   (
@@ -60,7 +70,9 @@ select ok(
       and class.relname in (
         'staff_invitations',
         'application_session_revocations',
-        'staff_audit_events'
+        'staff_audit_events',
+        'staff_password_recovery_operations',
+        'application_session_revocation_cutoffs'
       )
   ),
   'every staff lifecycle table enables RLS'
@@ -75,7 +87,9 @@ select is(
       and class.relname in (
         'staff_invitations',
         'application_session_revocations',
-        'staff_audit_events'
+        'staff_audit_events',
+        'staff_password_recovery_operations',
+        'application_session_revocation_cutoffs'
       )
   ),
   0::bigint,
@@ -88,7 +102,9 @@ select ok(
     from unnest(array[
       'staff_invitations',
       'application_session_revocations',
-      'staff_audit_events'
+      'staff_audit_events',
+      'staff_password_recovery_operations',
+      'application_session_revocation_cutoffs'
     ]) as lifecycle_table(table_name)
     cross join unnest(array[
       'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'
@@ -109,6 +125,38 @@ select ok(
     'EXECUTE'
   ),
   'authenticated can request its server-derived staff context'
+);
+select ok(
+  has_function_privilege(
+    'authenticated',
+    'desmoslock_v2.current_manageable_staff()',
+    'EXECUTE'
+  ),
+  'authenticated can request the Owner-scoped manageable staff projection'
+);
+select ok(
+  has_function_privilege(
+    'authenticated',
+    'desmoslock_v2.current_manageable_staff_invitations()',
+    'EXECUTE'
+  ),
+  'authenticated can request the Owner-scoped manageable invitation projection'
+);
+select ok(
+  has_function_privilege(
+    'authenticated',
+    'desmoslock_v2.begin_staff_password_recovery(uuid)',
+    'EXECUTE'
+  ),
+  'authenticated can begin only its provider-verified password recovery operation'
+);
+select ok(
+  has_function_privilege(
+    'authenticated',
+    'desmoslock_v2.finish_staff_password_recovery(uuid)',
+    'EXECUTE'
+  ),
+  'authenticated can finish only its provider-verified password recovery operation'
 );
 select ok(
   has_function_privilege(
@@ -192,6 +240,131 @@ select ok(
   ),
   'anonymous callers cannot enter the staff lifecycle'
 );
+select ok(
+  not has_function_privilege(
+    'anon',
+    'desmoslock_v2.current_manageable_staff()',
+    'EXECUTE'
+  ),
+  'anonymous callers cannot enumerate manageable staff'
+);
+select ok(
+  not has_function_privilege(
+    'anon',
+    'desmoslock_v2.current_manageable_staff_invitations()',
+    'EXECUTE'
+  ),
+  'anonymous callers cannot enumerate manageable invitations'
+);
+select ok(
+  not has_function_privilege(
+    'anon',
+    'desmoslock_v2.begin_staff_password_recovery(uuid)',
+    'EXECUTE'
+  ),
+  'anonymous callers cannot begin a staff password recovery operation'
+);
+select ok(
+  not has_function_privilege(
+    'anon',
+    'desmoslock_v2.finish_staff_password_recovery(uuid)',
+    'EXECUTE'
+  ),
+  'anonymous callers cannot finish a staff password recovery operation'
+);
+select ok(
+  not has_function_privilege(
+    'authenticated',
+    'desmoslock_v2.internal_authenticated_recovery_session()',
+    'EXECUTE'
+  ),
+  'the authoritative provider recovery-session verifier is private'
+);
+
+select is(
+  (
+    select function_info.proargnames
+    from pg_proc as function_info
+    where function_info.oid =
+      to_regprocedure('desmoslock_v2.current_manageable_staff()')
+  ),
+  array[
+    'code',
+    'school_id',
+    'profile_id',
+    'display_name',
+    'email',
+    'membership_role'
+  ]::text[],
+  'the manageable staff projection keeps its exact PostgREST row keys'
+);
+select is(
+  (
+    select function_info.proargnames
+    from pg_proc as function_info
+    where function_info.oid =
+      to_regprocedure('desmoslock_v2.current_manageable_staff_invitations()')
+  ),
+  array[
+    'code',
+    'invitation_id',
+    'school_id',
+    'invited_email',
+    'invited_role',
+    'invitation_status',
+    'expires_at'
+  ]::text[],
+  'the manageable invitation projection keeps its exact PostgREST row keys'
+);
+select is(
+  (
+    select function_info.proargnames
+    from pg_proc as function_info
+    where function_info.oid =
+      to_regprocedure('desmoslock_v2.begin_staff_password_recovery(uuid)')
+  ),
+  array['requested_operation_id', 'code', 'operation_id', 'expires_at']::text[],
+  'the password-recovery begin seam keeps its exact PostgREST input and row keys'
+);
+select is(
+  (
+    select function_info.proargnames
+    from pg_proc as function_info
+    where function_info.oid =
+      to_regprocedure('desmoslock_v2.finish_staff_password_recovery(uuid)')
+  ),
+  array['operation_id', 'code']::text[],
+  'the password-recovery finish seam keeps its exact PostgREST input and row key'
+);
+select ok(
+  (
+    select bool_and(
+      position('recovery_now := clock_timestamp();' in function_info.prosrc) > 0
+      and position('statement_timestamp()' in function_info.prosrc) = 0
+    )
+    from pg_proc as function_info
+    where function_info.oid in (
+      to_regprocedure('desmoslock_v2.begin_staff_password_recovery(uuid)'),
+      to_regprocedure('desmoslock_v2.finish_staff_password_recovery(uuid)')
+    )
+  ),
+  'serialized recovery functions use a fresh wall-clock linearization point rather than RPC-start time'
+);
+select ok(
+  (
+    select bool_and(
+      function_info.prosecdef
+      and function_info.provolatile = 's'
+      and function_info.proconfig @> array['search_path=""']::text[]
+    )
+    from pg_proc as function_info
+    where function_info.oid in (
+      to_regprocedure('desmoslock_v2.current_manageable_staff()'),
+      to_regprocedure('desmoslock_v2.current_manageable_staff_invitations()')
+    )
+  ),
+  'management projections are stable security-definer functions with an empty search path'
+);
 
 select is(
   (
@@ -256,6 +429,40 @@ select ok(
       )
   ),
   'runtime rows do not require synthetic fixture seed keys'
+);
+select is(
+  (
+    select column_info.is_nullable
+    from information_schema.columns as column_info
+    where column_info.table_schema = 'desmoslock_v2'
+      and column_info.table_name = 'application_session_revocations'
+      and column_info.column_name = 'workspace_id'
+  ),
+  'YES',
+  'application-session revocations are account-wide rather than assigned to an arbitrary School'
+);
+select ok(
+  not exists (
+    select 1
+    from information_schema.columns as column_info
+    where column_info.table_schema = 'desmoslock_v2'
+      and column_info.table_name in (
+        'staff_password_recovery_operations',
+        'application_session_revocation_cutoffs'
+      )
+      and column_info.column_name in (
+        'email',
+        'password',
+        'token',
+        'auth_code',
+        'code_verifier',
+        'code_challenge',
+        'provider_error',
+        'request_payload',
+        'workspace_id'
+      )
+  ),
+  'password-recovery operations persist no School guess, contact PII, password, PKCE material, token, or provider error'
 );
 
 insert into auth.users (
@@ -666,6 +873,7 @@ create temporary table staff_auth_test_results (
   code text not null,
   invitation_id uuid,
   request_key uuid,
+  operation_id uuid,
   expires_at timestamp with time zone,
   profile_id uuid,
   school_id uuid,
@@ -725,6 +933,44 @@ select is(
   'invitation_not_found',
   'an uninvited verified Auth user has no discoverable invitation'
 );
+select results_eq(
+  $$
+    select code, school_id, profile_id, display_name, email, membership_role
+    from desmoslock_v2.current_manageable_staff()
+  $$,
+  $$values (
+    'membership_inactive'::text,
+    null::uuid,
+    null::uuid,
+    null::text,
+    null::text,
+    null::text
+  )$$,
+  'an uninvited user cannot enumerate staff through the Owner projection'
+);
+select results_eq(
+  $$
+    select
+      code,
+      invitation_id,
+      school_id,
+      invited_email,
+      invited_role,
+      invitation_status,
+      expires_at
+    from desmoslock_v2.current_manageable_staff_invitations()
+  $$,
+  $$values (
+    'membership_inactive'::text,
+    null::uuid,
+    null::uuid,
+    null::text,
+    null::text,
+    null::text,
+    null::timestamp with time zone
+  )$$,
+  'an uninvited user cannot enumerate invitations through the Owner projection'
+);
 select throws_ok(
   $$select * from desmoslock_v2.tests$$,
   '42501',
@@ -775,6 +1021,44 @@ select is(
   ),
   'step_up_required',
   'a signed AAL1 session cannot initiate an invitation'
+);
+select results_eq(
+  $$
+    select code, school_id, profile_id, display_name, email, membership_role
+    from desmoslock_v2.current_manageable_staff()
+  $$,
+  $$values (
+    'step_up_required'::text,
+    null::uuid,
+    null::uuid,
+    null::text,
+    null::text,
+    null::text
+  )$$,
+  'an Owner cannot enumerate staff without current AAL2 and verified TOTP'
+);
+select results_eq(
+  $$
+    select
+      code,
+      invitation_id,
+      school_id,
+      invited_email,
+      invited_role,
+      invitation_status,
+      expires_at
+    from desmoslock_v2.current_manageable_staff_invitations()
+  $$,
+  $$values (
+    'step_up_required'::text,
+    null::uuid,
+    null::uuid,
+    null::text,
+    null::text,
+    null::text,
+    null::timestamp with time zone
+  )$$,
+  'an Owner cannot enumerate invitations without current AAL2 and verified TOTP'
 );
 reset role;
 
@@ -899,6 +1183,69 @@ select is(
   ),
   'the database owns an exact five-minute pending-delivery lease'
 );
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000005',
+  'c1000000-0000-4000-8000-000000000005',
+  'aal2'
+);
+set local role authenticated;
+insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
+select 'beta-management-invitation', result.code, result.invitation_id
+from desmoslock_v2.begin_staff_invitation(
+  '10000000-0000-4000-8000-000000000002',
+  'beta-pending@staff.invalid',
+  'teacher',
+  'd1000000-0000-4000-8000-000000000015'
+) as result;
+reset role;
+select is(
+  (
+    select code
+    from pg_temp.staff_auth_test_results
+    where label = 'beta-management-invitation'
+  ),
+  'invitation_pending',
+  'the Beta Owner can create a separate same-School management-list fixture'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+select results_eq(
+  $$
+    select
+      code,
+      invitation_id,
+      school_id,
+      invited_email,
+      invited_role,
+      invitation_status,
+      expires_at
+    from desmoslock_v2.current_manageable_staff_invitations()
+  $$,
+  $$
+    select
+      'ok'::text,
+      invitation.id,
+      invitation.workspace_id,
+      invitation.invited_email_normalized,
+      invitation.role,
+      invitation.status,
+      invitation.delivery_lease_expires_at
+    from desmoslock_v2.staff_invitations as invitation
+    where invitation.id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'acceptance'
+    )
+  $$,
+  'an AAL2 Owner can select the exact live pending-delivery invitation without request-key leakage'
+);
+reset role;
 
 set local role authenticated;
 select results_eq(
@@ -1053,6 +1400,44 @@ select is(
   'delivery_ready',
   'recipient binding persists in a non-consumable delivery-ready state'
 );
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+select results_eq(
+  $$
+    select
+      code,
+      invitation_id,
+      school_id,
+      invited_email,
+      invited_role,
+      invitation_status,
+      expires_at
+    from desmoslock_v2.current_manageable_staff_invitations()
+  $$,
+  $$
+    select
+      'ok'::text,
+      invitation.id,
+      invitation.workspace_id,
+      invitation.invited_email_normalized,
+      invitation.role,
+      invitation.status,
+      invitation.expires_at
+    from desmoslock_v2.staff_invitations as invitation
+    where invitation.id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'acceptance'
+    )
+  $$,
+  'the Owner projection exposes a live delivery-ready invitation without making it consumable'
+);
+reset role;
 
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000001',
@@ -1241,6 +1626,36 @@ select pg_temp.set_staff_claims(
   'aal2'
 );
 set local role authenticated;
+select results_eq(
+  $$
+    select
+      code,
+      invitation_id,
+      school_id,
+      invited_email,
+      invited_role,
+      invitation_status,
+      expires_at
+    from desmoslock_v2.current_manageable_staff_invitations()
+  $$,
+  $$
+    select
+      'ok'::text,
+      invitation.id,
+      invitation.workspace_id,
+      invitation.invited_email_normalized,
+      invitation.role,
+      invitation.status,
+      invitation.expires_at
+    from desmoslock_v2.staff_invitations as invitation
+    where invitation.id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'acceptance'
+    )
+  $$,
+  'the Owner projection exposes the exact published invitation needed for revocation selection'
+);
 select is(
   (
     select code
@@ -1356,33 +1771,13 @@ update auth.users
 set email_confirmed_at = now()
 where id = 'a1000000-0000-4000-8000-000000000002';
 
+update auth.sessions
+set aal = 'aal1', factor_id = null
+where id = 'c1000000-0000-4000-8000-000000000002';
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000002',
   'c1000000-0000-4000-8000-000000000002',
   'aal1'
-);
-set local role authenticated;
-select is(
-  (
-    select code
-    from desmoslock_v2.accept_staff_invitation(
-      (
-        select invitation_id
-        from pg_temp.staff_auth_test_results
-        where label = 'acceptance'
-      ),
-      'AAL1 Recipient'
-    )
-  ),
-  'step_up_required',
-  'invitation acceptance requires signed AAL2'
-);
-reset role;
-
-select pg_temp.set_staff_claims(
-  'a1000000-0000-4000-8000-000000000002',
-  'c1000000-0000-4000-8000-000000000002',
-  'aal2'
 );
 set local role authenticated;
 insert into pg_temp.staff_auth_test_results (
@@ -1400,7 +1795,24 @@ from desmoslock_v2.accept_staff_invitation(
   ),
   'Synthetic Accepted Administrator'
 ) as result;
+select is(
+  (
+    select code
+    from desmoslock_v2.revoke_membership(
+      '10000000-0000-4000-8000-000000000001',
+      '20000000-0000-4000-8000-000000000003'
+    )
+  ),
+  'step_up_required',
+  'AAL1 invitation acceptance does not weaken privileged Administrator mutations'
+);
 reset role;
+
+update auth.sessions
+set
+  aal = 'aal2',
+  factor_id = 'b1000000-0000-4000-8000-000000000002'
+where id = 'c1000000-0000-4000-8000-000000000002';
 
 update pg_temp.staff_auth_test_results
 set
@@ -1416,7 +1828,7 @@ where label = 'accepted';
 select is(
   (select code from pg_temp.staff_auth_test_results where label = 'accepted'),
   'invitation_accepted',
-  'the intended stepped-up recipient accepts exactly once'
+  'the intended provider-verified AAL1 recipient accepts exactly once'
 );
 select results_eq(
   $$
@@ -1456,6 +1868,88 @@ select is(
   1::bigint,
   'the accepted invitation has exactly one acceptance audit event'
 );
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+select results_eq(
+  $$
+    select
+      code,
+      school_id::text,
+      profile_id,
+      display_name,
+      email,
+      membership_role
+    from desmoslock_v2.current_manageable_staff()
+  $$,
+  $$
+    select
+      'ok'::text,
+      '10000000-0000-4000-8000-000000000001'::text,
+      profile.id,
+      'Synthetic Accepted Administrator'::text,
+      'invitee@staff.invalid'::text,
+      'admin'::text
+    from desmoslock_v2.profiles as profile
+    where profile.auth_user_id = 'a1000000-0000-4000-8000-000000000002'
+  $$,
+  'an AAL2 Owner receives only the bounded human-readable active staff row for its School'
+);
+select is_empty(
+  $$select * from desmoslock_v2.current_manageable_staff_invitations()$$,
+  'accepted invitations disappear from the Owner revocation selector'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000002',
+  'c1000000-0000-4000-8000-000000000002',
+  'aal2'
+);
+set local role authenticated;
+select results_eq(
+  $$
+    select code, school_id, profile_id, display_name, email, membership_role
+    from desmoslock_v2.current_manageable_staff()
+  $$,
+  $$values (
+    'forbidden'::text,
+    null::uuid,
+    null::uuid,
+    null::text,
+    null::text,
+    null::text
+  )$$,
+  'an Administrator cannot enumerate manageable staff'
+);
+select results_eq(
+  $$
+    select
+      code,
+      invitation_id,
+      school_id,
+      invited_email,
+      invited_role,
+      invitation_status,
+      expires_at
+    from desmoslock_v2.current_manageable_staff_invitations()
+  $$,
+  $$values (
+    'forbidden'::text,
+    null::uuid,
+    null::uuid,
+    null::text,
+    null::text,
+    null::text,
+    null::timestamp with time zone
+  )$$,
+  'an Administrator cannot enumerate manageable invitations'
+);
+reset role;
 
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000003',
@@ -2706,6 +3200,22 @@ select pg_temp.set_staff_claims(
   'aal2'
 );
 set local role authenticated;
+select results_eq(
+  $$
+    select school_id::text, profile_id, email, membership_role
+    from desmoslock_v2.current_manageable_staff()
+  $$,
+  $$
+    select
+      '10000000-0000-4000-8000-000000000001'::text,
+      profile.id,
+      'invitee@staff.invalid'::text,
+      'admin'::text
+    from desmoslock_v2.profiles as profile
+    where profile.auth_user_id = 'a1000000-0000-4000-8000-000000000002'
+  $$,
+  'an Alpha Owner cannot see the same profile membership that belongs to Beta'
+);
 select is(
   (
     select code
@@ -2751,6 +3261,68 @@ select is(
 );
 
 select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+select is_empty(
+  $$select * from desmoslock_v2.current_manageable_staff()$$,
+  'revoked and fixture-only memberships do not appear in the Alpha management projection'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000005',
+  'c1000000-0000-4000-8000-000000000005',
+  'aal2'
+);
+set local role authenticated;
+select results_eq(
+  $$
+    select school_id::text, profile_id, email, membership_role
+    from desmoslock_v2.current_manageable_staff()
+  $$,
+  $$
+    select
+      '10000000-0000-4000-8000-000000000002'::text,
+      profile.id,
+      'invitee@staff.invalid'::text,
+      'teacher'::text
+    from desmoslock_v2.profiles as profile
+    where profile.auth_user_id = 'a1000000-0000-4000-8000-000000000002'
+  $$,
+  'the Beta Owner sees only the remaining live Beta Teacher membership'
+);
+select results_eq(
+  $$
+    select
+      invitation_id,
+      school_id::text,
+      invited_email,
+      invited_role,
+      invitation_status
+    from desmoslock_v2.current_manageable_staff_invitations()
+  $$,
+  $$
+    select
+      invitation.id,
+      invitation.workspace_id::text,
+      invitation.invited_email_normalized,
+      invitation.role,
+      invitation.status
+    from desmoslock_v2.staff_invitations as invitation
+    where invitation.id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'beta-management-invitation'
+    )
+  $$,
+  'the Beta Owner sees its pending invitation without any Alpha invitation leakage'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000002',
   'c1000000-0000-4000-8000-000000000002',
   'aal2',
@@ -2763,7 +3335,7 @@ select results_eq(
     from desmoslock_v2.current_staff_context()
   $$,
   $$values ('ok'::text, '10000000-0000-4000-8000-000000000002'::text, 'teacher'::text)$$,
-  'an already-open session observes only the remaining live School role'
+  'an already-open Teacher session observes only its remaining live School role'
 );
 select is(
   (
@@ -2779,6 +3351,126 @@ select is(
   'forged stale Owner metadata cannot elevate a live Teacher role'
 );
 reset role;
+
+create temporary table management_staff_overflow_fixture (
+  ordinal integer primary key,
+  auth_user_id uuid not null,
+  profile_id uuid not null
+) on commit drop;
+insert into management_staff_overflow_fixture (ordinal, auth_user_id, profile_id)
+select series.ordinal, gen_random_uuid(), gen_random_uuid()
+from generate_series(1, 502) as series(ordinal);
+insert into auth.users (
+  instance_id,
+  id,
+  aud,
+  role,
+  email,
+  encrypted_password,
+  email_confirmed_at,
+  raw_app_meta_data,
+  raw_user_meta_data,
+  created_at,
+  updated_at
+)
+select
+  '00000000-0000-0000-0000-000000000000',
+  fixture.auth_user_id,
+  'authenticated',
+  'authenticated',
+  format('management-overflow-%s@staff.invalid', fixture.ordinal),
+  '',
+  now(),
+  '{"provider":"email","providers":["email"]}',
+  '{}',
+  now(),
+  now()
+from management_staff_overflow_fixture as fixture;
+insert into desmoslock_v2.profiles (id, display_name, auth_user_id)
+select
+  fixture.profile_id,
+  format('Overflow Staff %s', lpad(fixture.ordinal::text, 3, '0')),
+  fixture.auth_user_id
+from management_staff_overflow_fixture as fixture;
+insert into desmoslock_v2.memberships (
+  workspace_id,
+  profile_id,
+  role,
+  status,
+  accepted_at,
+  updated_at
+)
+select
+  '10000000-0000-4000-8000-000000000001',
+  fixture.profile_id,
+  'teacher',
+  'active',
+  now(),
+  now()
+from management_staff_overflow_fixture as fixture;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (select count(*) from desmoslock_v2.current_manageable_staff()),
+  501::bigint,
+  'manageable staff returns one deterministic overflow sentinel row beyond the 500-item product cap'
+);
+reset role;
+
+delete from desmoslock_v2.memberships as membership
+using management_staff_overflow_fixture as fixture
+where membership.workspace_id = '10000000-0000-4000-8000-000000000001'
+  and membership.profile_id = fixture.profile_id;
+delete from desmoslock_v2.profiles as profile
+using management_staff_overflow_fixture as fixture
+where profile.id = fixture.profile_id;
+delete from auth.users as auth_user
+using management_staff_overflow_fixture as fixture
+where auth_user.id = fixture.auth_user_id;
+
+create temporary table management_invitation_overflow_fixture (
+  id uuid primary key
+) on commit drop;
+insert into management_invitation_overflow_fixture (id)
+select gen_random_uuid()
+from generate_series(1, 502);
+insert into desmoslock_v2.staff_invitations (
+  id,
+  workspace_id,
+  requested_by_profile_id,
+  request_key,
+  invited_email_normalized,
+  role,
+  status,
+  delivery_lease_expires_at
+)
+select
+  fixture.id,
+  '10000000-0000-4000-8000-000000000001',
+  '20000000-0000-4000-8000-000000000001',
+  gen_random_uuid(),
+  format('invitation-overflow-%s@staff.invalid', row_number() over (order by fixture.id)),
+  'teacher',
+  'pending_delivery',
+  statement_timestamp() + interval '5 minutes'
+from management_invitation_overflow_fixture as fixture;
+
+set local role authenticated;
+select is(
+  (select count(*) from desmoslock_v2.current_manageable_staff_invitations()),
+  501::bigint,
+  'manageable invitations return one deterministic overflow sentinel row beyond the 500-item product cap'
+);
+reset role;
+
+delete from desmoslock_v2.staff_invitations as invitation
+using management_invitation_overflow_fixture as fixture
+where invitation.id = fixture.id;
 
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000001',
@@ -2796,13 +3488,16 @@ reset role;
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000005',
   'c1000000-0000-4000-8000-000000000005',
-  'aal2'
+  'aal1'
 );
+update auth.sessions
+set aal = 'aal1', factor_id = null
+where id = 'c1000000-0000-4000-8000-000000000005';
 set local role authenticated;
 select is(
   (select code from desmoslock_v2.revoke_current_staff_session()),
   'ok',
-  'staff can revoke the current application session'
+  'provider-authenticated AAL1 staff can revoke the current application session'
 );
 select is(
   (select code from desmoslock_v2.current_staff_context()),
@@ -2814,13 +3509,17 @@ reset role;
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000001',
   'c1000000-0000-4000-8000-000000000001',
-  'aal2'
+  'aal1',
+  '{"user_metadata":{"target_user_id":"a1000000-0000-4000-8000-000000000002"}}'
 );
+update auth.sessions
+set aal = 'aal1', factor_id = null
+where id = 'c1000000-0000-4000-8000-000000000001';
 set local role authenticated;
 select is(
   (select code from desmoslock_v2.revoke_all_current_user_staff_sessions()),
   'ok',
-  'account recovery can revoke every live application session for the current user'
+  'provider-authenticated AAL1 staff can revoke every current-user application session'
 );
 reset role;
 select is(
@@ -2831,6 +3530,15 @@ select is(
   ),
   2::bigint,
   'recovery records both current and other application sessions'
+);
+select is(
+  (
+    select count(*)
+    from desmoslock_v2.application_session_revocations
+    where user_id = 'a1000000-0000-4000-8000-000000000002'
+  ),
+  0::bigint,
+  'forged recovery target metadata cannot revoke another user application session'
 );
 
 select pg_temp.set_staff_claims(
@@ -2846,6 +3554,815 @@ select is(
 );
 reset role;
 
+insert into desmoslock_v2.memberships (
+  workspace_id,
+  profile_id,
+  role,
+  status,
+  accepted_at,
+  updated_at
+)
+values (
+  '10000000-0000-4000-8000-000000000002',
+  '20000000-0000-4000-8000-000000000001',
+  'teacher',
+  'active',
+  now(),
+  now()
+);
+
+insert into auth.mfa_amr_claims (
+  id,
+  session_id,
+  created_at,
+  updated_at,
+  authentication_method
+)
+values
+  (
+    'e1000000-0000-4000-8000-000000000001',
+    'c1000000-0000-4000-8000-000000000001',
+    now(),
+    now(),
+    'otp'
+  ),
+  (
+    'e1000000-0000-4000-8000-000000000002',
+    'c1000000-0000-4000-8000-000000000011',
+    now(),
+    now(),
+    'password'
+  );
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal1',
+  '{"amr":[{"method":"recovery","timestamp":1}],"user_metadata":{"recovery":true}}'
+);
+set local role authenticated;
+select results_eq(
+  $$
+    select code, operation_id, expires_at
+    from desmoslock_v2.begin_staff_password_recovery(
+      'f1000000-0000-4000-8000-000000000001'
+    )
+  $$,
+  $$values ('forbidden'::text, null::uuid, null::timestamp with time zone)$$,
+  'generic OTP plus forged JWT AMR and metadata cannot become provider-verified recovery'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000011',
+  'aal2',
+  '{"amr":[{"method":"recovery","timestamp":1}]}'
+);
+set local role authenticated;
+select results_eq(
+  $$
+    select code, operation_id, expires_at
+    from desmoslock_v2.begin_staff_password_recovery(
+      'f1000000-0000-4000-8000-000000000002'
+    )
+  $$,
+  $$values ('forbidden'::text, null::uuid, null::timestamp with time zone)$$,
+  'a password session cannot become recovery through a forged signed-request payload claim'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.finish_staff_password_recovery(
+      'f1000000-0000-4000-8000-000000000002'
+    )
+  ),
+  'forbidden',
+  'a generic password session cannot finish a password-recovery operation'
+);
+reset role;
+
+insert into auth.sessions (
+  id,
+  user_id,
+  created_at,
+  updated_at,
+  factor_id,
+  aal,
+  not_after
+)
+values (
+  'c1000000-0000-4000-8000-000000000012',
+  'a1000000-0000-4000-8000-000000000001',
+  now(),
+  now(),
+  null,
+  'aal1',
+  now() + interval '2 hours'
+);
+insert into auth.mfa_amr_claims (
+  id,
+  session_id,
+  created_at,
+  updated_at,
+  authentication_method
+)
+values (
+  'e1000000-0000-4000-8000-000000000012',
+  'c1000000-0000-4000-8000-000000000012',
+  now(),
+  now(),
+  'recovery'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000012',
+  'aal1'
+);
+set local role authenticated;
+select is(
+  (select code from desmoslock_v2.current_staff_context()),
+  'forbidden',
+  'a provider recovery session cannot enter protected staff reads'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.begin_staff_invitation(
+      '10000000-0000-4000-8000-000000000001',
+      'recovery-cannot-invite@staff.invalid',
+      'teacher',
+      gen_random_uuid()
+    )
+  ),
+  'forbidden',
+  'a provider recovery session cannot enter protected staff mutations'
+);
+select is(
+  (select code from desmoslock_v2.revoke_current_staff_session()),
+  'forbidden',
+  'ordinary self-session revocation does not admit the privileged recovery session exception'
+);
+insert into pg_temp.staff_auth_test_results (
+  label,
+  code,
+  operation_id,
+  expires_at
+)
+select
+  'password-recovery',
+  result.code,
+  result.operation_id,
+  result.expires_at
+from desmoslock_v2.begin_staff_password_recovery(
+  'f1000000-0000-4000-8000-000000000012'
+) as result;
+reset role;
+
+select is(
+  (
+    select code
+    from pg_temp.staff_auth_test_results
+    where label = 'password-recovery'
+  ),
+  'recovery_sessions_revoked',
+  'provider-verified recovery revokes application sessions before permitting password update'
+);
+select ok(
+  (
+    select operation_id = 'f1000000-0000-4000-8000-000000000012'
+      and expires_at > statement_timestamp()
+      and expires_at <= statement_timestamp() + interval '15 minutes'
+    from pg_temp.staff_auth_test_results
+    where label = 'password-recovery'
+  ),
+  'the recovery operation returns the caller key with a bounded fifteen-minute completion window'
+);
+select results_eq(
+  $$
+    select
+      operation.auth_user_id::text,
+      operation.auth_session_id::text,
+      operation.profile_id::text,
+      operation.status
+    from desmoslock_v2.staff_password_recovery_operations as operation
+    where operation.id = 'f1000000-0000-4000-8000-000000000012'
+  $$,
+  $$values (
+    'a1000000-0000-4000-8000-000000000001'::text,
+    'c1000000-0000-4000-8000-000000000012'::text,
+    '20000000-0000-4000-8000-000000000001'::text,
+    'sessions_revoked'::text
+  )$$,
+  'recovery state is bound only to the exact caller, provider session, and staff profile'
+);
+select results_eq(
+  $$
+    select count(*), bool_and(workspace_id is null)
+    from desmoslock_v2.application_session_revocations
+    where user_id = 'a1000000-0000-4000-8000-000000000001'
+  $$,
+  $$values (3::bigint, true)$$,
+  'recovery covers every Auth session exactly once without assigning an arbitrary School'
+);
+select results_eq(
+  $$
+    select count(*), bool_and(workspace_id is null)
+    from desmoslock_v2.staff_audit_events
+    where event_type = 'password_recovery_sessions_revoked'
+      and session_id = 'c1000000-0000-4000-8000-000000000012'
+  $$,
+  $$values (1::bigint, true)$$,
+  'recovery begin emits one minimized account-wide audit event'
+);
+select results_eq(
+  $$
+    select workspace_id::text, role, status
+    from desmoslock_v2.memberships
+    where profile_id = '20000000-0000-4000-8000-000000000001'
+    order by workspace_id
+  $$,
+  $$values
+    ('10000000-0000-4000-8000-000000000001'::text, 'owner'::text, 'active'::text),
+    ('10000000-0000-4000-8000-000000000002'::text, 'teacher'::text, 'active'::text)
+  $$,
+  'account-wide recovery revokes sessions without changing either active School membership'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000012',
+  'aal1'
+);
+set local role authenticated;
+select results_eq(
+  $$
+    select code, operation_id, expires_at
+    from desmoslock_v2.begin_staff_password_recovery(
+      'f1000000-0000-4000-8000-000000000012'
+    )
+  $$,
+  $$
+    select code, operation_id, expires_at
+    from pg_temp.staff_auth_test_results
+    where label = 'password-recovery'
+  $$,
+  'exact recovery-begin retry returns the same durable operation result'
+);
+select results_eq(
+  $$
+    select code, operation_id, expires_at
+    from desmoslock_v2.begin_staff_password_recovery(
+      'f1000000-0000-4000-8000-000000000099'
+    )
+  $$,
+  $$values ('conflict'::text, null::uuid, null::timestamp with time zone)$$,
+  'one provider recovery session cannot own two operation identities'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.finish_staff_password_recovery(
+      'f1000000-0000-4000-8000-000000000099'
+    )
+  ),
+  'conflict',
+  'the post-lock recovery verifier cannot turn a missing finish operation into a successful lookup'
+);
+reset role;
+select is(
+  (
+    select count(*)
+    from desmoslock_v2.staff_audit_events
+    where event_type = 'password_recovery_sessions_revoked'
+      and session_id = 'c1000000-0000-4000-8000-000000000012'
+  ),
+  1::bigint,
+  'recovery-begin retry does not duplicate its audit event'
+);
+
+insert into auth.sessions (
+  id,
+  user_id,
+  created_at,
+  updated_at,
+  factor_id,
+  aal,
+  not_after
+)
+values (
+  'c1000000-0000-4000-8000-000000000013',
+  'a1000000-0000-4000-8000-000000000001',
+  now(),
+  now(),
+  null,
+  'aal1',
+  now() + interval '2 hours'
+);
+insert into auth.mfa_amr_claims (
+  id,
+  session_id,
+  created_at,
+  updated_at,
+  authentication_method
+)
+values (
+  'e1000000-0000-4000-8000-000000000013',
+  'c1000000-0000-4000-8000-000000000013',
+  now(),
+  now(),
+  'recovery'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000013',
+  'aal1'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.finish_staff_password_recovery(
+      'f1000000-0000-4000-8000-000000000012'
+    )
+  ),
+  'conflict',
+  'another recovery session for the same user cannot finish the bound operation'
+);
+select results_eq(
+  $$
+    select code, operation_id, expires_at
+    from desmoslock_v2.begin_staff_password_recovery(
+      'f1000000-0000-4000-8000-000000000013'
+    )
+  $$,
+  $$values ('conflict'::text, null::uuid, null::timestamp with time zone)$$,
+  'a second recovery session cannot supersede the live operation winner'
+);
+reset role;
+select is(
+  (
+    select count(*)
+    from desmoslock_v2.staff_password_recovery_operations
+    where id = 'f1000000-0000-4000-8000-000000000013'
+  ),
+  0::bigint,
+  'the losing recovery session creates no competing operation state'
+);
+
+insert into auth.sessions (
+  id,
+  user_id,
+  created_at,
+  updated_at,
+  factor_id,
+  aal,
+  not_after
+)
+values (
+  'c1000000-0000-4000-8000-000000000014',
+  'a1000000-0000-4000-8000-000000000001',
+  clock_timestamp(),
+  clock_timestamp(),
+  null,
+  'aal1',
+  clock_timestamp() + interval '2 hours'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000014',
+  'aal1'
+);
+set local role authenticated;
+select is(
+  (select code from desmoslock_v2.current_staff_context()),
+  'session_revoked',
+  'an ordinary session created during active recovery is blacked out before completion'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000012',
+  'aal1'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.finish_staff_password_recovery(
+      'f1000000-0000-4000-8000-000000000012'
+    )
+  ),
+  'recovery_completed',
+  'the exact recovery session can mark its operation complete after user-scoped password update'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.finish_staff_password_recovery(
+      'f1000000-0000-4000-8000-000000000012'
+    )
+  ),
+  'recovery_completed',
+  'recovery completion retry is idempotent'
+);
+select results_eq(
+  $$
+    select code, operation_id, expires_at
+    from desmoslock_v2.begin_staff_password_recovery(
+      'f1000000-0000-4000-8000-000000000012'
+    )
+  $$,
+  $$
+    select
+      'recovery_completed'::text,
+      operation_id,
+      expires_at
+    from pg_temp.staff_auth_test_results
+    where label = 'password-recovery'
+  $$,
+  'begin replay reconciles an already-completed recovery operation'
+);
+reset role;
+select is(
+  (
+    select count(*)
+    from desmoslock_v2.staff_audit_events
+    where event_type = 'password_recovery_completed'
+      and session_id = 'c1000000-0000-4000-8000-000000000012'
+  ),
+  1::bigint,
+  'recovery completion and its retry emit exactly one minimized audit event'
+);
+
+select results_eq(
+  $$
+    select count(*), bool_and(workspace_id is null)
+    from desmoslock_v2.application_session_revocations
+    where user_id = 'a1000000-0000-4000-8000-000000000001'
+  $$,
+  $$values (5::bigint, true)$$,
+  'finish re-sweeps both recovery and ordinary sessions created after begin'
+);
+select results_eq(
+  $$
+    select
+      last_recovery_operation_id::text,
+      invalid_before >= (
+        select max(auth_session.created_at)
+        from auth.sessions as auth_session
+        where auth_session.id in (
+          'c1000000-0000-4000-8000-000000000013',
+          'c1000000-0000-4000-8000-000000000014'
+        )
+      )
+    from desmoslock_v2.application_session_revocation_cutoffs
+    where user_id = 'a1000000-0000-4000-8000-000000000001'
+  $$,
+  $$values ('f1000000-0000-4000-8000-000000000012'::text, true)$$,
+  'finish records one account cutoff at or after every pre-completion session'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000014',
+  'aal1'
+);
+set local role authenticated;
+select is(
+  (select code from desmoslock_v2.current_staff_context()),
+  'session_revoked',
+  'the late ordinary session remains unusable after recovery completion'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000013',
+  'aal1'
+);
+set local role authenticated;
+select results_eq(
+  $$
+    select code, operation_id, expires_at
+    from desmoslock_v2.begin_staff_password_recovery(
+      'f1000000-0000-4000-8000-000000000013'
+    )
+  $$,
+  $$values ('conflict'::text, null::uuid, null::timestamp with time zone)$$,
+  'a recovery session invalidated by the winning completion cannot retry later'
+);
+reset role;
+
+insert into auth.sessions (
+  id,
+  user_id,
+  created_at,
+  updated_at,
+  factor_id,
+  aal,
+  not_after
+)
+select
+  'c1000000-0000-4000-8000-000000000015',
+  'a1000000-0000-4000-8000-000000000001',
+  clock_timestamp(),
+  clock_timestamp(),
+  null,
+  'aal1',
+  clock_timestamp() + interval '2 hours'
+from desmoslock_v2.application_session_revocation_cutoffs as cutoff
+where cutoff.user_id = 'a1000000-0000-4000-8000-000000000001';
+insert into auth.mfa_amr_claims (
+  id,
+  session_id,
+  created_at,
+  updated_at,
+  authentication_method
+)
+values (
+  'e1000000-0000-4000-8000-000000000015',
+  'c1000000-0000-4000-8000-000000000015',
+  clock_timestamp(),
+  clock_timestamp(),
+  'recovery'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000015',
+  'aal1'
+);
+set local role authenticated;
+insert into pg_temp.staff_auth_test_results (
+  label,
+  code,
+  operation_id,
+  expires_at
+)
+select
+  'expired-password-recovery',
+  result.code,
+  result.operation_id,
+  result.expires_at
+from desmoslock_v2.begin_staff_password_recovery(
+  'f1000000-0000-4000-8000-000000000015'
+) as result;
+reset role;
+select is(
+  (
+    select code
+    from pg_temp.staff_auth_test_results
+    where label = 'expired-password-recovery'
+  ),
+  'recovery_sessions_revoked',
+  'a genuinely new provider recovery session may begin after the prior completion cutoff'
+);
+
+update desmoslock_v2.staff_password_recovery_operations
+set
+  started_at = statement_timestamp() - interval '20 minutes',
+  expires_at = statement_timestamp() - interval '5 minutes'
+where id = 'f1000000-0000-4000-8000-000000000015';
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000015',
+  'aal1'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.finish_staff_password_recovery(
+      'f1000000-0000-4000-8000-000000000015'
+    )
+  ),
+  'recovery_expired',
+  'an elapsed recovery operation cannot be completed'
+);
+select results_eq(
+  $$
+    select code, operation_id, expires_at
+    from desmoslock_v2.begin_staff_password_recovery(
+      'f1000000-0000-4000-8000-000000000015'
+    )
+  $$,
+  $$values ('recovery_expired'::text, null::uuid, null::timestamp with time zone)$$,
+  'begin replay returns a null-data failure after the operation window elapses'
+);
+reset role;
+select results_eq(
+  $$
+    select status, completed_at
+    from desmoslock_v2.staff_password_recovery_operations
+    where id = 'f1000000-0000-4000-8000-000000000015'
+  $$,
+  $$values ('sessions_revoked'::text, null::timestamp with time zone)$$,
+  'expiry leaves prior session revocation intact and never fabricates completion'
+);
+
+update desmoslock_v2.staff_password_recovery_operations
+set
+  started_at = clock_timestamp(),
+  expires_at = clock_timestamp() + interval '15 minutes'
+where id = 'f1000000-0000-4000-8000-000000000015';
+update auth.sessions
+set not_after = clock_timestamp() + interval '5 seconds'
+where id = 'c1000000-0000-4000-8000-000000000015';
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000015',
+  'aal1'
+);
+set local role authenticated;
+select results_eq(
+  $$
+    with delayed_call as materialized (
+      select
+        pg_sleep(5.25),
+        'f1000000-0000-4000-8000-000000000015'::uuid as operation_id
+    )
+    select begin_result.code, finish_result.code
+    from delayed_call
+    cross join lateral desmoslock_v2.begin_staff_password_recovery(
+      delayed_call.operation_id
+    ) as begin_result
+    cross join lateral desmoslock_v2.finish_staff_password_recovery(
+      delayed_call.operation_id
+    ) as finish_result
+  $$,
+  $$values ('session_expired'::text, 'session_expired'::text)$$,
+  'begin and finish reject a provider session that expires after RPC start but before serialized recovery work'
+);
+reset role;
+
+update auth.sessions
+set not_after = clock_timestamp() + interval '2 hours'
+where id = 'c1000000-0000-4000-8000-000000000015';
+update desmoslock_v2.staff_password_recovery_operations
+set
+  started_at = clock_timestamp(),
+  expires_at = clock_timestamp() + interval '5 seconds'
+where id = 'f1000000-0000-4000-8000-000000000015';
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000015',
+  'aal1'
+);
+set local role authenticated;
+select results_eq(
+  $$
+    with delayed_call as materialized (
+      select
+        pg_sleep(5.25),
+        'f1000000-0000-4000-8000-000000000015'::uuid as operation_id
+    )
+    select begin_result.code, finish_result.code
+    from delayed_call
+    cross join lateral desmoslock_v2.begin_staff_password_recovery(
+      delayed_call.operation_id
+    ) as begin_result
+    cross join lateral desmoslock_v2.finish_staff_password_recovery(
+      delayed_call.operation_id
+    ) as finish_result
+  $$,
+  $$values ('recovery_expired'::text, 'recovery_expired'::text)$$,
+  'begin and finish reject an operation that expires after RPC start but before serialized recovery work'
+);
+reset role;
+select results_eq(
+  $$
+    select status, completed_at
+    from desmoslock_v2.staff_password_recovery_operations
+    where id = 'f1000000-0000-4000-8000-000000000015'
+  $$,
+  $$values ('sessions_revoked'::text, null::timestamp with time zone)$$,
+  'wait-past-expiry rejection preserves the already-revoked terminal safety boundary without audit mutation'
+);
+
+insert into auth.users (
+  instance_id,
+  id,
+  aud,
+  role,
+  email,
+  encrypted_password,
+  email_confirmed_at,
+  raw_app_meta_data,
+  raw_user_meta_data,
+  created_at,
+  updated_at
+)
+values (
+  '00000000-0000-0000-0000-000000000000',
+  'a1000000-0000-4000-8000-000000000006',
+  'authenticated',
+  'authenticated',
+  'removed-recovery@staff.invalid',
+  '',
+  now(),
+  '{"provider":"email","providers":["email"]}',
+  '{}',
+  now(),
+  now()
+);
+insert into auth.sessions (
+  id,
+  user_id,
+  created_at,
+  updated_at,
+  factor_id,
+  aal,
+  not_after
+)
+values (
+  'c1000000-0000-4000-8000-000000000006',
+  'a1000000-0000-4000-8000-000000000006',
+  now(),
+  now(),
+  null,
+  'aal1',
+  now() + interval '2 hours'
+);
+insert into auth.mfa_amr_claims (
+  id,
+  session_id,
+  created_at,
+  updated_at,
+  authentication_method
+)
+values (
+  'e1000000-0000-4000-8000-000000000006',
+  'c1000000-0000-4000-8000-000000000006',
+  now(),
+  now(),
+  'recovery'
+);
+insert into desmoslock_v2.profiles (id, display_name, auth_user_id)
+values (
+  '20000000-0000-4000-8000-000000000006',
+  'Removed Recovery Staff',
+  'a1000000-0000-4000-8000-000000000006'
+);
+insert into desmoslock_v2.memberships (
+  workspace_id,
+  profile_id,
+  role,
+  status,
+  role_revision,
+  accepted_at,
+  revoked_at,
+  revoked_by_profile_id,
+  revocation_reason_code,
+  updated_at
+)
+values (
+  '10000000-0000-4000-8000-000000000001',
+  '20000000-0000-4000-8000-000000000006',
+  'teacher',
+  'revoked',
+  2,
+  now() - interval '1 day',
+  now(),
+  '20000000-0000-4000-8000-000000000001',
+  'owner_action',
+  now()
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000006',
+  'c1000000-0000-4000-8000-000000000006',
+  'aal1'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.begin_staff_password_recovery(
+      'f1000000-0000-4000-8000-000000000006'
+    )
+  ),
+  'recovery_sessions_revoked',
+  'a bound staff profile with no active membership may still recover credentials'
+);
+reset role;
+select results_eq(
+  $$
+    select membership.status, revocation.workspace_id
+    from desmoslock_v2.memberships as membership
+    join desmoslock_v2.application_session_revocations as revocation
+      on revocation.user_id = 'a1000000-0000-4000-8000-000000000006'
+    where membership.workspace_id = '10000000-0000-4000-8000-000000000001'
+      and membership.profile_id = '20000000-0000-4000-8000-000000000006'
+  $$,
+  $$values ('revoked'::text, null::uuid)$$,
+  'credential recovery remains account-wide and never reactivates removed School authority'
+);
+
 set local role anon;
 select throws_ok(
   $$select * from desmoslock_v2.current_staff_context()$$,
@@ -2858,7 +4375,9 @@ reset role;
 grant select, insert, update, delete on table
   desmoslock_v2.staff_invitations,
   desmoslock_v2.application_session_revocations,
-  desmoslock_v2.staff_audit_events
+  desmoslock_v2.staff_audit_events,
+  desmoslock_v2.staff_password_recovery_operations,
+  desmoslock_v2.application_session_revocation_cutoffs
 to authenticated;
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000003',
@@ -2889,6 +4408,14 @@ select throws_ok(
 select is_empty(
   $$select * from desmoslock_v2.staff_audit_events$$,
   'even an accidental table grant cannot read the staff audit through RLS'
+);
+select is_empty(
+  $$select * from desmoslock_v2.staff_password_recovery_operations$$,
+  'even an accidental table grant cannot read password-recovery operations through RLS'
+);
+select is_empty(
+  $$select * from desmoslock_v2.application_session_revocation_cutoffs$$,
+  'even an accidental table grant cannot read account recovery cutoffs through RLS'
 );
 reset role;
 
