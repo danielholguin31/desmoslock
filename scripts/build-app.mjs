@@ -19,6 +19,7 @@ if (appName !== "desktop" && appName !== "web") {
 const appRoot = path.join(repositoryRoot, "apps", appName);
 const sourceRoot = path.join(appRoot, "src");
 const outputRoot = path.join(appRoot, "dist");
+const productionMode = process.argv.includes("--production");
 const publicBackendConfiguration = parsePublicBackendConfiguration({
   environment: process.env.DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT,
   url: process.env.DESMOSLOCK_PUBLIC_BACKEND_URL,
@@ -44,30 +45,54 @@ if (appName === "desktop") {
   await build({
     bundle: true,
     define: browserDefine,
-    entryPoints: [
-      path.join(sourceRoot, "main.ts"),
-      path.join(sourceRoot, "preload.ts"),
-    ],
+    entryPoints: [path.join(sourceRoot, "main.ts")],
     external: ["electron"],
     format: "esm",
     outdir: outputRoot,
     platform: "node",
-    sourcemap: true,
+    sourcemap: !productionMode,
     target: "node24",
   });
   await build({
     bundle: true,
     define: browserDefine,
-    entryPoints: [path.join(sourceRoot, "renderer.ts")],
+    entryPoints: [path.join(sourceRoot, "preload.ts")],
+    external: ["electron"],
+    format: "cjs",
+    outfile: path.join(outputRoot, "preload.cjs"),
+    platform: "node",
+    sourcemap: !productionMode,
+    target: "node24",
+  });
+  await build({
+    bundle: true,
+    define: browserDefine,
+    entryPoints: {
+      "calculator/host": path.join(sourceRoot, "calculator", "host.ts"),
+      renderer: path.join(sourceRoot, "renderer.ts"),
+    },
     format: "esm",
     outdir: outputRoot,
     platform: "browser",
-    sourcemap: true,
+    sourcemap: !productionMode,
     target: "chrome136",
   });
-  await fs.copyFile(
-    path.join(sourceRoot, "index.html"),
-    path.join(outputRoot, "index.html"),
+  await Promise.all(
+    ["index.html", "styles.css"].map((filename) =>
+      fs.copyFile(
+        path.join(sourceRoot, filename),
+        path.join(outputRoot, filename),
+      ),
+    ),
+  );
+  await fs.mkdir(path.join(outputRoot, "calculator"), { recursive: true });
+  await Promise.all(
+    ["index.html", "styles.css"].map((filename) =>
+      fs.copyFile(
+        path.join(sourceRoot, "calculator", filename),
+        path.join(outputRoot, "calculator", filename),
+      ),
+    ),
   );
 } else {
   await build({
@@ -77,7 +102,7 @@ if (appName === "desktop") {
     format: "esm",
     outdir: outputRoot,
     platform: "browser",
-    sourcemap: true,
+    sourcemap: !productionMode,
     target: "chrome136",
   });
   await Promise.all(
