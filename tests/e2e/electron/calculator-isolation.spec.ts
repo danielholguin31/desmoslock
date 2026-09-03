@@ -51,6 +51,17 @@ function closeUdpSocket(socket: dgram.Socket): Promise<void> {
   });
 }
 
+async function readJsonFileWhenPresent(filePath: string): Promise<unknown> {
+  try {
+    return JSON.parse(await fs.readFile(filePath, "utf8"));
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
 async function callCalculator<Result, Argument>(
   application: ElectronApplication,
   callback: (argument: Argument) => Promise<Result> | Result,
@@ -548,27 +559,64 @@ test.describe.serial("isolated calculator surface", () => {
   });
 
   test("destroys the owned calculator contents when its BrowserWindow closes", async () => {
-    const calculatorId = await application.evaluate(({ webContents }, url) => {
-      const calculator = webContents
-        .getAllWebContents()
-        .find((contents) => contents.getURL() === url);
-      if (calculator === undefined) throw new Error("Calculator is missing");
-      return calculator.id;
-    }, calculatorUrl);
+    const evidenceDirectory = await fs.mkdtemp(
+      path.join(os.tmpdir(), "desmoslock-calculator-teardown-e2e-"),
+    );
+    cleanupTasks.push(() =>
+      fs.rm(evidenceDirectory, { force: true, recursive: true }),
+    );
+    const evidencePath = path.join(evidenceDirectory, "teardown.json");
+    const child = application.process();
+    const calculatorId = await application.evaluate(
+      ({ BrowserWindow, webContents }, input) => {
+        const calculator = webContents
+          .getAllWebContents()
+          .find((contents) => contents.getURL() === input.calculatorUrl);
+        if (calculator === undefined) throw new Error("Calculator is missing");
+        const calculatorId = calculator.id;
+        calculator.once("destroyed", () => {
+          process.getBuiltinModule("node:fs").writeFileSync(
+            input.evidencePath,
+            `${JSON.stringify({
+              calculatorDestroyed: calculator.isDestroyed(),
+              calculatorId,
+              calculatorStillRegistered: webContents
+                .getAllWebContents()
+                .some((contents) => contents.id === calculatorId),
+              windowCount: BrowserWindow.getAllWindows().length,
+            })}\n`,
+            { encoding: "utf8", flag: "wx" },
+          );
+        });
+        return calculatorId;
+      },
+      { calculatorUrl, evidencePath },
+    );
 
     await application.evaluate(({ BrowserWindow }) => {
-      BrowserWindow.getAllWindows()[0]?.close();
+      const window = BrowserWindow.getAllWindows()[0];
+      if (window === undefined) throw new Error("Desktop window is missing");
+      window.close();
     });
     await expect
-      .poll(async () =>
-        application.evaluate(
-          ({ webContents }, id) =>
-            webContents
-              .getAllWebContents()
-              .some((contents) => contents.id === id),
-          calculatorId,
-        ),
-      )
-      .toBe(false);
+      .poll(() => readJsonFileWhenPresent(evidencePath))
+      .toEqual({
+        calculatorDestroyed: true,
+        calculatorId,
+        calculatorStillRegistered: false,
+        windowCount: 0,
+      });
+    if (process.platform === "darwin") {
+      expect(child.exitCode).toBeNull();
+      expect(child.signalCode).toBeNull();
+    } else {
+      await expect
+        .poll(() => ({
+          exitCode: child.exitCode,
+          signalCode: child.signalCode,
+        }))
+        .toEqual({ exitCode: 0, signalCode: null });
+    }
+    await closeElectronApplicationCooperatively(application);
   });
 });
