@@ -45,7 +45,7 @@ export function assertPackagedSwitchRejectionBoundary({
             sandboxWeakeningOrInliningSwitchNames.has(name),
         ),
     ),
-  ];
+  ].sort();
   assert.equal(boundary.isPackaged, true);
   assert.equal(
     boundary.environmentSandboxControlPresent,

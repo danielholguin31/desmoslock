@@ -24,8 +24,8 @@ describe("packaged switch rejection boundary", () => {
       assertPackagedSwitchRejectionBoundary({
         boundary: {
           argumentSwitches: [
-            "no-sandbox",
             "disable-setuid-sandbox",
+            "no-sandbox",
             "remote-debugging-pipe",
           ],
           commandLineSwitches: [
