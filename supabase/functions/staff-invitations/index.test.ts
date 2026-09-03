@@ -634,6 +634,41 @@ Deno.test(
 );
 
 Deno.test(
+  "expired publish is terminal, sanitized, and never resends SMTP",
+  async () => {
+    let deliveries = 0;
+    let failureWrites = 0;
+    let publications = 0;
+    const response = await handleRequest(
+      invitationRequest(),
+      dependencies({
+        deliverInvitation: async () => {
+          deliveries += 1;
+          return "delivered";
+        },
+        failInvitation: async () => {
+          failureWrites += 1;
+          return "invitation_delivery_failed";
+        },
+        publishInvitation: async () => {
+          publications += 1;
+          return "invitation_expired";
+        },
+      }),
+    );
+    const body = await response.text();
+    assertEquals(response.status, 503);
+    assertEquals(body, JSON.stringify({ code: "dependency_unavailable" }));
+    assertEquals(deliveries, 1);
+    assertEquals(publications, 1);
+    assertEquals(failureWrites, 0);
+    assert(!body.includes("invitation_usable"), "Usable state was reported");
+    assert(!body.includes(ACTION_TOKEN_SENTINEL), "Action token leaked");
+    assert(!body.includes("teacher@example.com"), "Recipient email leaked");
+  },
+);
+
+Deno.test(
   "staff invitation never leaks the generated action token",
   async () => {
     const response = await handleRequest(invitationRequest(), dependencies());
