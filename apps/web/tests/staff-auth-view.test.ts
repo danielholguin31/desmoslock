@@ -840,6 +840,7 @@ describe("staff auth view", () => {
     expect(intents).toEqual([
       {
         email: "teacher@example.test",
+        schoolId: "school-1",
         targetRole: "teacher",
         type: "create_staff_invitation",
       },

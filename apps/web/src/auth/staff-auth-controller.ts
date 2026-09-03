@@ -98,7 +98,9 @@ export type StaffAuthAccessGrant = {
   readonly identity: StaffAuthBoundaryIdentity;
   readonly identityGeneration: string;
   readonly kind: "access_granted";
+  /** Adapter-filtered to the exact active identity School before this boundary. */
   readonly manageableInvitations: readonly StaffAuthBoundaryManagedInvitation[];
+  /** Adapter-filtered to the exact active identity School before this boundary. */
   readonly manageableStaff: readonly StaffAuthBoundaryManagedStaff[];
   readonly sessionGeneration: string;
 } & (
@@ -252,6 +254,7 @@ export type StaffAuthMutation = MutationWithOperationId &
       }
     | {
         readonly email: string;
+        readonly schoolId: string;
         readonly targetRole: StorageManagedStaffRole;
         readonly type: "create_staff_invitation";
       }
@@ -495,6 +498,7 @@ export type StaffAuthAction =
   | { readonly password: string; readonly type: "complete_password_recovery" }
   | {
       readonly email: string;
+      readonly schoolId: string;
       readonly targetRole: StorageManagedStaffRole;
       readonly type: "create_staff_invitation";
     }
@@ -1930,18 +1934,28 @@ export function createStaffAuthController(dependencies: {
         return snapshot;
       }
       case "create_staff_invitation": {
+        const actionRecord = snapshotExactRecord(action, [
+          "email",
+          "schoolId",
+          "targetRole",
+          "type",
+        ]);
         if (
           snapshot.kind !== "authenticated" ||
           snapshot.assuranceLevel !== "aal2" ||
           snapshot.identity.membership.role !== "owner" ||
           activeGrant === null ||
-          !validText(action.email, 320) ||
-          (action.targetRole !== "admin" && action.targetRole !== "teacher")
+          actionRecord?.type !== "create_staff_invitation" ||
+          !validText(actionRecord.email, 320) ||
+          !validText(actionRecord.schoolId, 256) ||
+          actionRecord.schoolId !== activeGrant.identity.school.id ||
+          (actionRecord.targetRole !== "admin" &&
+            actionRecord.targetRole !== "teacher")
         ) {
           return snapshot;
         }
         const initiatingActor = activeGrant;
-        const targetRole = managedRole(action.targetRole);
+        const targetRole = managedRole(actionRecord.targetRole);
         const epoch = beginOperation({
           kind: "creating_staff_invitation",
           targetRole,
@@ -1952,7 +1966,13 @@ export function createStaffAuthController(dependencies: {
           return snapshot;
         }
         const result = await performMutation(
-          { ...action, operationId },
+          {
+            email: actionRecord.email,
+            operationId,
+            schoolId: actionRecord.schoolId,
+            targetRole: actionRecord.targetRole,
+            type: "create_staff_invitation",
+          },
           epoch,
           "staff_invitation",
         );
@@ -1961,7 +1981,11 @@ export function createStaffAuthController(dependencies: {
         }
         if (result.kind === "staff_invitation_created") {
           const actor = validateOwnerActor(result.actor, initiatingActor);
-          if (actor === null || result.invitedRole !== action.targetRole) {
+          if (
+            actor === null ||
+            actor.school.id !== actionRecord.schoolId ||
+            result.invitedRole !== actionRecord.targetRole
+          ) {
             rejectBoundaryResult("staff_invitation", result);
           } else {
             transition({
@@ -2315,6 +2339,14 @@ function validText(value: unknown, maximumLength: number): value is string {
   );
 }
 
+function isCanonicalManagementEmail(value: unknown): value is string {
+  return (
+    validText(value, 254) &&
+    value === value.trim() &&
+    value === value.toLowerCase()
+  );
+}
+
 function isBase64UrlText(value: unknown, length: number): value is string {
   return (
     typeof value === "string" &&
@@ -2405,7 +2437,7 @@ function decodeManagedStaff(
     !validText(record.schoolId, 256) ||
     profile === null ||
     !validText(profile.displayName, 200) ||
-    !validText(profile.email, 320) ||
+    !isCanonicalManagementEmail(profile.email) ||
     !validText(profile.id, 256)
   ) {
     return null;
@@ -2434,7 +2466,7 @@ function decodeManagedInvitation(
   ]);
   if (
     record === null ||
-    !validText(record.email, 320) ||
+    !isCanonicalManagementEmail(record.email) ||
     !validText(record.expiresAt, 64) ||
     !isIsoInstant(record.expiresAt) ||
     !validText(record.invitationId, 256) ||
@@ -2471,7 +2503,8 @@ function decodeAccessGrant(value: unknown): StaffAuthAccessGrant | null {
   if (
     rawManageableInvitations === null ||
     rawManageableInvitations.length > 500 ||
-    rawManageableStaff === null
+    rawManageableStaff === null ||
+    rawManageableStaff.length > 500
   ) {
     return null;
   }
@@ -2523,6 +2556,7 @@ function decodeAccessGrant(value: unknown): StaffAuthAccessGrant | null {
     manageableInvitations as StaffAuthBoundaryManagedInvitation[];
   const assuranceLevel = record.assuranceLevel as "aal1" | "aal2";
   const profileIds = new Set<string>();
+  const profileByEmail = new Map<string, string>();
   if (
     identity.membership.role !== "owner" &&
     (staff.length !== 0 || invitations.length !== 0)
@@ -2533,21 +2567,37 @@ function decodeAccessGrant(value: unknown): StaffAuthAccessGrant | null {
     if (
       entry.schoolId !== identity.school.id ||
       entry.profile.id === identity.profile.id ||
-      profileIds.has(entry.profile.id)
+      profileIds.has(entry.profile.id) ||
+      (profileByEmail.has(entry.profile.email) &&
+        profileByEmail.get(entry.profile.email) !== entry.profile.id)
     ) {
       return null;
     }
     profileIds.add(entry.profile.id);
+    profileByEmail.set(entry.profile.email, entry.profile.id);
   }
   const invitationIds = new Set<string>();
+  const invitationEmails: Array<{
+    readonly email: string;
+    readonly schoolId: string;
+  }> = [];
   for (const invitation of invitations) {
     if (
       invitation.schoolId !== identity.school.id ||
-      invitationIds.has(invitation.invitationId)
+      invitationIds.has(invitation.invitationId) ||
+      invitationEmails.some(
+        (known) =>
+          known.schoolId === invitation.schoolId &&
+          known.email === invitation.email,
+      )
     ) {
       return null;
     }
     invitationIds.add(invitation.invitationId);
+    invitationEmails.push({
+      email: invitation.email,
+      schoolId: invitation.schoolId,
+    });
   }
   const base = {
     assuranceLevel,

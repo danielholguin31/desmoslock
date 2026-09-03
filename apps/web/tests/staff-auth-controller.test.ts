@@ -1259,12 +1259,14 @@ describe("staff auth controller", () => {
       await controller.dispatch({ type: "bootstrap" });
       await controller.dispatch({
         email: "SENTINEL-target@example.test",
+        schoolId: "school-1",
         targetRole,
         type: "create_staff_invitation",
       });
 
       expect(requests[0]).toMatchObject({
         email: "SENTINEL-target@example.test",
+        schoolId: "school-1",
         targetRole,
         type: "create_staff_invitation",
       });
@@ -1288,6 +1290,7 @@ describe("staff auth controller", () => {
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
       email: "target@example.test",
+      schoolId: "school-1",
       targetRole: "teacher",
       type: "create_staff_invitation",
     });
@@ -1295,6 +1298,26 @@ describe("staff auth controller", () => {
       kind: "staff_invitation_rejected",
     });
   });
+
+  it.each(["", "other-school"])(
+    "rejects a forged invitation School selector %j before mutation",
+    async (schoolId) => {
+      const perform = vi.fn();
+      const adapter = createAdapter(access("owner"));
+      adapter.perform = perform;
+      const controller = createController(adapter);
+      await controller.dispatch({ type: "bootstrap" });
+      await controller.dispatch({
+        email: "target@example.test",
+        schoolId,
+        targetRole: "teacher",
+        type: "create_staff_invitation",
+      });
+
+      expect(perform).not.toHaveBeenCalled();
+      expect(controller.getSnapshot()).toMatchObject({ kind: "authenticated" });
+    },
+  );
 
   it("does not give an Administrator client-side invitation authority", async () => {
     const perform = vi.fn();
@@ -1304,6 +1327,7 @@ describe("staff auth controller", () => {
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
       email: "target@example.test",
+      schoolId: "school-1",
       targetRole: "teacher",
       type: "create_staff_invitation",
     });
@@ -1320,6 +1344,7 @@ describe("staff auth controller", () => {
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
       email: "target@example.test",
+      schoolId: "school-1",
       targetRole: "owner",
       type: "create_staff_invitation",
     } as unknown as StaffAuthAction);
@@ -1461,6 +1486,129 @@ describe("staff auth controller", () => {
     }
   });
 
+  it("accepts five hundred manageable staff rows and rejects row five hundred one", async () => {
+    const rows = Array.from({ length: 501 }, (_, index) => ({
+      profile: {
+        displayName: `Staff ${index}`,
+        email: `staff-${index}@example.test`,
+        id: `profile-${index}`,
+      },
+      role: "teacher" as const,
+      schoolId: "school-1",
+    }));
+    const atLimit = createController(
+      createAdapter(access("owner", { manageableStaff: rows.slice(0, 500) })),
+    );
+    await atLimit.dispatch({ type: "bootstrap" });
+    expect(atLimit.getSnapshot()).toMatchObject({
+      kind: "authenticated",
+      manageableStaff: { length: 500 },
+    });
+
+    const overflow = createController(
+      createAdapter(access("owner", { manageableStaff: rows })),
+    );
+    await overflow.dispatch({ type: "bootstrap" });
+    expect(overflow.getSnapshot()).toMatchObject({
+      code: "invalid_backend_result",
+      kind: "dependency_failure",
+    });
+  });
+
+  it("rejects distinct manageable profiles sharing one canonical email", async () => {
+    const sharedEmail = "shared@example.test";
+    const controller = createController(
+      createAdapter(
+        access("owner", {
+          manageableStaff: [
+            {
+              ...manageableStaff()[0]!,
+              profile: {
+                ...manageableStaff()[0]!.profile,
+                email: sharedEmail,
+                id: "profile-first",
+              },
+            },
+            {
+              ...manageableStaff()[1]!,
+              profile: {
+                ...manageableStaff()[1]!.profile,
+                email: sharedEmail,
+                id: "profile-second",
+              },
+            },
+          ],
+        }),
+      ),
+    );
+    await controller.dispatch({ type: "bootstrap" });
+    expect(controller.getSnapshot()).toMatchObject({
+      code: "invalid_backend_result",
+      kind: "dependency_failure",
+    });
+    expect(JSON.stringify(controller.getSnapshot())).not.toContain(sharedEmail);
+  });
+
+  it.each([" SHARED@example.test", "SHARED@example.test"])(
+    "rejects noncanonical manageable email %j",
+    async (email) => {
+      const controller = createController(
+        createAdapter(
+          access("owner", {
+            manageableStaff: [
+              {
+                ...manageableStaff()[0]!,
+                profile: { ...manageableStaff()[0]!.profile, email },
+              },
+            ],
+          }),
+        ),
+      );
+      await controller.dispatch({ type: "bootstrap" });
+      expect(controller.getSnapshot()).toMatchObject({
+        code: "invalid_backend_result",
+        kind: "dependency_failure",
+      });
+    },
+  );
+
+  it("rejects duplicate pending invitation email identity with different IDs", async () => {
+    const original = manageableInvitations()[0]!;
+    const controller = createController(
+      createAdapter(
+        access("owner", {
+          manageableInvitations: [
+            original,
+            { ...original, invitationId: "invitation-pending-second" },
+          ],
+        }),
+      ),
+    );
+    await controller.dispatch({ type: "bootstrap" });
+    expect(controller.getSnapshot()).toMatchObject({
+      code: "invalid_backend_result",
+      kind: "dependency_failure",
+    });
+  });
+
+  it.each([" pending@example.test", "PENDING@example.test"])(
+    "rejects noncanonical pending invitation email %j",
+    async (email) => {
+      const controller = createController(
+        createAdapter(
+          access("owner", {
+            manageableInvitations: [{ ...manageableInvitations()[0]!, email }],
+          }),
+        ),
+      );
+      await controller.dispatch({ type: "bootstrap" });
+      expect(controller.getSnapshot()).toMatchObject({
+        code: "invalid_backend_result",
+        kind: "dependency_failure",
+      });
+    },
+  );
+
   it.each([
     { invitationId: "", schoolId: "school-1" },
     { invitationId: "forged-invitation", schoolId: "school-1" },
@@ -1569,6 +1717,7 @@ describe("staff auth controller", () => {
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
       email: "target@example.test",
+      schoolId: "school-1",
       targetRole: "teacher",
       type: "create_staff_invitation",
     });
@@ -1926,6 +2075,7 @@ describe("staff auth controller", () => {
       await controller.dispatch({ type: "bootstrap" });
       await controller.dispatch({
         email: "target@example.test",
+        schoolId: "school-1",
         targetRole: "teacher",
         type: "create_staff_invitation",
       });

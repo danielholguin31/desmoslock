@@ -111,6 +111,7 @@ export type StaffAuthViewIntent =
   | { readonly password: string; readonly type: "complete_password_recovery" }
   | {
       readonly email: string;
+      readonly schoolId: string;
       readonly targetRole: "admin" | "teacher";
       readonly type: "create_staff_invitation";
     }
@@ -722,7 +723,7 @@ export function renderStaffAuthView(
       return;
     }
     inputs.display_name?.removeAttribute("aria-invalid");
-    const intent = createIntent(action, inputs, selects, view);
+    const intent = createIntent(action, inputs, selects, view, snapshot);
     if (intent === null) {
       const pendingInvitation = action === "review_staff_invitation_revocation";
       message.setAttribute("aria-live", "assertive");
@@ -869,6 +870,7 @@ function createIntent(
   inputs: Partial<Record<StaffAuthViewField["id"], HTMLInputElement>>,
   selects: Partial<Record<StaffAuthViewSelect["id"], HTMLSelectElement>>,
   view: StaffAuthViewModel,
+  snapshot: StaffAuthSnapshot,
 ): StaffAuthViewIntent | null {
   switch (action) {
     case "sign_in":
@@ -910,13 +912,21 @@ function createIntent(
         type: "complete_password_recovery",
       };
     case "create_administrator_invitation":
-    case "create_teacher_invitation":
+    case "create_teacher_invitation": {
+      if (
+        snapshot.kind !== "authenticated" ||
+        snapshot.identity.membership.role !== "owner"
+      ) {
+        return null;
+      }
       return {
         email: inputs.target_email?.value ?? "",
+        schoolId: snapshot.identity.school.id,
         targetRole:
           action === "create_administrator_invitation" ? "admin" : "teacher",
         type: "create_staff_invitation",
       };
+    }
     case "review_staff_membership_revocation": {
       const selectedValue = selects.staff_membership?.value ?? "";
       const selected = view.selects
