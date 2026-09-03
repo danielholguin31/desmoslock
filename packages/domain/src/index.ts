@@ -1,6 +1,8 @@
+import type { ProductStaffRole } from "./staff-auth.js";
+
 export type WorkspaceKind = "personal" | "school";
 
-export type MembershipRole = "owner" | "administrator" | "teacher";
+export type MembershipRole = ProductStaffRole;
 
 export type MembershipStatus = "active" | "suspended" | "removed";
 
@@ -41,3 +43,45 @@ export type {
   RestoredStudentSession,
   StudentSessionLookup,
 } from "./student-session.js";
+export {
+  acceptStaffInvitation,
+  authorizeStaffInvitation,
+  closeStaffInvitation,
+  completeStaffPasswordRecovery,
+  endStaffApplicationSession,
+  isSupportedStaffAuthClientSurface,
+  persistedStaffRoles,
+  productStaffRoles,
+  revokeAllStaffApplicationSessions,
+  revokeStaffMembershipInSchool,
+  requestStaffPasswordRecovery,
+  staffAuthClientSurfaces,
+  staffAuthErrorCodes,
+  staffAuthSuccessCodes,
+  toPersistedStaffRole,
+  toProductStaffRole,
+  verifyStaffMutationStepUp,
+} from "./staff-auth.js";
+export type {
+  InvitableStaffRole,
+  PersistedStaffRole,
+  ProductStaffRole,
+  StaffApplicationSession,
+  StaffApplicationSessionState,
+  StaffAuthClientSurface,
+  StaffAuthErrorCode,
+  StaffAuthFailure,
+  StaffAuthSuccess,
+  StaffAuthSuccessCode,
+  StaffInvitationAcceptanceResult,
+  StaffInvitationAccountLinkage,
+  StaffInvitationMembershipState,
+  StaffInvitationState,
+  StaffMembershipReference,
+  StaffMembershipRevocationResult,
+  StaffMutationStepUp,
+  StaffPasswordRecoveryResult,
+  StaffPasswordRecoveryState,
+  StaffSessionEndReason,
+  StaffSessionTransitionResult,
+} from "./staff-auth.js";

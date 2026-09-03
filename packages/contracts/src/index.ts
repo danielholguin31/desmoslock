@@ -61,3 +61,25 @@ export {
   verifyReleaseProvenance,
 } from "./release-provenance.js";
 export type { ReleaseProvenanceInput } from "./release-provenance.js";
+export {
+  parseAcceptStaffInvitationRequest,
+  parseCreateStaffInvitationRequest,
+  parseRequestStaffPasswordRecoveryRequest,
+  parseRevokeStaffInvitationRequest,
+  parseRevokeStaffMembershipRequest,
+  parseSelectStaffSchoolRequest,
+  parseStaffAuthResponse,
+  staffAuthErrorCodes,
+  staffAuthSuccessCodes,
+} from "./staff-auth.js";
+export type {
+  AcceptStaffInvitationRequest,
+  CreateStaffInvitationRequest,
+  RequestStaffPasswordRecoveryRequest,
+  RevokeStaffInvitationRequest,
+  RevokeStaffMembershipRequest,
+  SelectStaffSchoolRequest,
+  StaffAuthErrorCode,
+  StaffAuthResponse,
+  StaffAuthSuccessCode,
+} from "./staff-auth.js";
