@@ -1,0 +1,756 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
+import { describe, expect, it, vi } from "vitest";
+
+import { spawnIsolatedProcessTree } from "../../scripts/isolated-process-tree.mjs";
+import {
+  findProcessIdentity,
+  parseProcessIdentityTable,
+  parseRetirementIdentityTable,
+  readProcessIdentityTable,
+  selectDescendantProcessIdentities,
+  selectProcessGroupIdentities,
+  waitForProcessIdentitiesToDisappear,
+} from "../../scripts/process-identity-table.mjs";
+
+const onlyPosix = process.platform === "win32" ? it.skip : it;
+const escapedChildWatchdogMilliseconds = 5_000;
+
+type RecordedProcessIdentity = Readonly<{
+  processId: number;
+  startedAt: string;
+}>;
+
+async function runIsolatedDriver(source: string): Promise<{
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stderr: string;
+  stdout: string;
+}> {
+  const tree = await spawnIsolatedProcessTree({
+    arguments: ["--input-type=module", "--eval", source],
+    command: process.execPath,
+    cwd: process.cwd(),
+    environment: {},
+  });
+  let close;
+  let operationFailure: unknown = null;
+  try {
+    close = await tree.waitForClose(2_000);
+    if (close === null) {
+      throw new Error("Isolated spawn-failure driver timed out");
+    }
+  } catch (error) {
+    operationFailure = error;
+  }
+  let cleanupFailure: unknown = null;
+  try {
+    await tree.terminate();
+  } catch (error) {
+    cleanupFailure = error;
+  }
+  throwCombinedErrors(
+    [operationFailure, cleanupFailure].filter((error) => error !== null),
+    "Isolated spawn-failure driver and cooperative cleanup both failed",
+  );
+  if (close === null || close === undefined) {
+    throw new Error("Isolated spawn-failure driver produced no close receipt");
+  }
+  return {
+    code: close.exitCode,
+    signal: close.signal,
+    stderr: close.stderr,
+    stdout: close.stdout,
+  };
+}
+
+async function waitForOutput(
+  tree: Awaited<ReturnType<typeof spawnIsolatedProcessTree>>,
+  marker: string,
+): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!tree.output().includes(marker) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(tree.output()).toContain(marker);
+}
+
+async function waitForLeaderStop(
+  tree: Awaited<ReturnType<typeof spawnIsolatedProcessTree>>,
+): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (tree.targetIsRunning() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(tree.targetIsRunning()).toBe(false);
+}
+
+async function recordProcessIdentity(
+  processId: number,
+): Promise<RecordedProcessIdentity> {
+  const identity = findProcessIdentity(
+    await readProcessIdentityTable(),
+    processId,
+  ) as RecordedProcessIdentity | null;
+  if (identity === null) {
+    throw new Error(`Could not record process identity for pid ${processId}`);
+  }
+  return Object.freeze({
+    processId: identity.processId,
+    startedAt: identity.startedAt,
+  });
+}
+
+async function processIdentityIsPresent(
+  recordedIdentity: RecordedProcessIdentity,
+): Promise<boolean> {
+  const currentIdentity = findProcessIdentity(
+    await readProcessIdentityTable(),
+    recordedIdentity.processId,
+  ) as RecordedProcessIdentity | null;
+  return currentIdentity?.startedAt === recordedIdentity.startedAt;
+}
+
+async function waitForProcessIdentityToDisappear(
+  recordedIdentity: RecordedProcessIdentity,
+): Promise<void> {
+  const remainingIdentities = (await waitForProcessIdentitiesToDisappear(
+    [recordedIdentity],
+    1_000,
+  )) as readonly RecordedProcessIdentity[];
+  if (remainingIdentities.length !== 0) {
+    throw new Error(
+      `Process identity ${recordedIdentity.processId}:${recordedIdentity.startedAt} did not disappear after cooperative cleanup`,
+    );
+  }
+}
+
+function throwCombinedErrors(
+  errors: readonly unknown[],
+  message: string,
+): void {
+  const uniqueErrors = [...new Set(errors)];
+  if (uniqueErrors.length === 1) {
+    throw uniqueErrors[0];
+  }
+  if (uniqueErrors.length > 1) {
+    throw new AggregateError(uniqueErrors, message, {
+      cause: uniqueErrors[0],
+    });
+  }
+}
+
+describe("process identity table", () => {
+  const gnuLinuxPsFixture = [
+    "      1       0       1 Thu Sep  3 17:42:01 2026",
+    "      2       0       0 Thu Sep  3 17:42:01 2026",
+    "    143       1     143 Thu Sep  3 17:42:04 2026",
+  ].join("\n");
+  const macOsPsFixture = [
+    "    1     0     1 Sun Aug 23 14:45:22 2026    ",
+    "  100     1   100 Sun Aug 23 14:45:30 2026    ",
+    "  102     1   102 Sun Aug 23 14:45:30 2026    ",
+  ].join("\n");
+  const root = Object.freeze({
+    parentPid: 2,
+    processGroupId: 42,
+    processId: 42,
+    startedAt: "Mon Sep 1 12:34:56 2026",
+  });
+  const child = Object.freeze({
+    parentPid: 42,
+    processGroupId: 42,
+    processId: 43,
+    startedAt: "Mon Sep 1 12:34:57 2026",
+  });
+
+  it("parses GNU/Linux and macOS trusted-ps output shapes", () => {
+    expect(parseProcessIdentityTable(macOsPsFixture)).toEqual([
+      {
+        parentPid: 0,
+        processGroupId: 1,
+        processId: 1,
+        startedAt: "Sun Aug 23 14:45:22 2026",
+      },
+      {
+        parentPid: 1,
+        processGroupId: 100,
+        processId: 100,
+        startedAt: "Sun Aug 23 14:45:30 2026",
+      },
+      {
+        parentPid: 1,
+        processGroupId: 102,
+        processId: 102,
+        startedAt: "Sun Aug 23 14:45:30 2026",
+      },
+    ]);
+    expect(parseProcessIdentityTable(gnuLinuxPsFixture)).toEqual([
+      {
+        parentPid: 0,
+        processGroupId: 1,
+        processId: 1,
+        startedAt: "Thu Sep  3 17:42:01 2026",
+      },
+      {
+        parentPid: 0,
+        processGroupId: 0,
+        processId: 2,
+        startedAt: "Thu Sep  3 17:42:01 2026",
+      },
+      {
+        parentPid: 1,
+        processGroupId: 143,
+        processId: 143,
+        startedAt: "Thu Sep  3 17:42:04 2026",
+      },
+    ]);
+  });
+
+  it("keeps parsed kernel and init groups outside the signaling selector", () => {
+    const identities = parseProcessIdentityTable(gnuLinuxPsFixture);
+
+    for (const unsafeProcessGroupId of [0, 1]) {
+      expect(() =>
+        selectProcessGroupIdentities(identities, unsafeProcessGroupId),
+      ).toThrow(
+        "Process group identity lookup must be a safe positive pid greater than one",
+      );
+    }
+  });
+
+  it("does not walk descendants from a stale reused root pid", () => {
+    expect(
+      selectDescendantProcessIdentities([root, child], {
+        processId: root.processId,
+        startedAt: "Mon Sep 1 11:00:00 2026",
+      }),
+    ).toEqual([]);
+    expect(selectDescendantProcessIdentities([root, child], root)).toEqual([
+      root,
+      child,
+    ]);
+  });
+
+  it("fails closed on malformed or unsafe trusted-ps rows", () => {
+    expect(() =>
+      parseProcessIdentityTable(
+        "42 2 42 Mon Sep 1 12:34:56 2026\nmalformed row\n",
+      ),
+    ).toThrow("malformed process identity row");
+    expect(() =>
+      parseProcessIdentityTable(
+        "999999999999999999999 2 42 Mon Sep 1 12:34:56 2026\n",
+      ),
+    ).toThrow("Process identity is malformed");
+    expect(() =>
+      parseRetirementIdentityTable("42 definitely-not-a-start-time\n"),
+    ).toThrow("malformed retirement identity row");
+  });
+});
+
+describe("isolated process tree", () => {
+  onlyPosix(
+    "returns bounded spawn failures without signaling its parent session group",
+    async () => {
+      const temporaryDirectory = await fs.mkdtemp(
+        path.join(os.tmpdir(), "desmoslock-spawn-failure-"),
+      );
+      const missingExecutable = path.join(temporaryDirectory, "never-existed");
+      const vanishedExecutable = path.join(
+        temporaryDirectory,
+        "vanished-after-access",
+      );
+      await fs.writeFile(vanishedExecutable, "#!/bin/sh\nexit 0\n", {
+        mode: 0o700,
+      });
+      await fs.access(vanishedExecutable, fs.constants.X_OK);
+
+      try {
+        const moduleUrl = new URL(
+          "../../scripts/isolated-process-tree.mjs",
+          import.meta.url,
+        ).href;
+        const source = [
+          'import fs from "node:fs/promises";',
+          `import { spawnIsolatedProcessTree } from ${JSON.stringify(moduleUrl)};`,
+          `const paths = ${JSON.stringify([missingExecutable, vanishedExecutable])};`,
+          "const failures = [];",
+          "for (const [index, command] of paths.entries()) {",
+          "  if (index === 1) {",
+          "    await fs.access(command, fs.constants.X_OK);",
+          "    await fs.rm(command);",
+          "  }",
+          "  try {",
+          "    const tree = await spawnIsolatedProcessTree({",
+          '      arguments: [], cwd: "/", environment: {}, command,',
+          "    });",
+          "    await tree.terminate();",
+          '    failures.push({ code: "UNEXPECTED_SUCCESS" });',
+          "  } catch (error) {",
+          "    failures.push({",
+          "      code: error?.code ?? error?.cause?.code ?? null,",
+          "      message: String(error?.message ?? error),",
+          "    });",
+          "  }",
+          "}",
+          "process.stdout.write(JSON.stringify(failures));",
+        ].join("\n");
+
+        const driver = await runIsolatedDriver(source);
+
+        expect(driver).toMatchObject({ code: 0, signal: null, stderr: "" });
+        expect(JSON.parse(driver.stdout)).toEqual([
+          expect.objectContaining({ code: "ENOENT" }),
+          expect.objectContaining({ code: "ENOENT" }),
+        ]);
+      } finally {
+        await fs.rm(temporaryDirectory, { force: true, recursive: true });
+      }
+    },
+  );
+
+  onlyPosix(
+    "waits for both output pipes to reach EOF after the leader exits",
+    async () => {
+      const marker = "Debugger listening after leader exit";
+      const delayedWriter = [
+        "setTimeout(() => {",
+        `  process.stderr.write(${JSON.stringify(`${marker}\n`)});`,
+        "}, 150);",
+      ].join("\n");
+      const leader = [
+        'const { spawn } = require("node:child_process");',
+        'spawn(process.execPath, ["-e", ' +
+          `${JSON.stringify(delayedWriter)}], {` +
+          ' stdio: ["ignore", "ignore", "inherit"] });',
+        "process.exit(78);",
+      ].join("\n");
+      const tree = await spawnIsolatedProcessTree({
+        arguments: ["-e", leader],
+        command: process.execPath,
+        cwd: process.cwd(),
+        environment: {},
+      });
+
+      try {
+        const receipt = await tree.waitForClose(3_000);
+
+        expect(receipt).toMatchObject({
+          exitCode: 78,
+          signal: null,
+          stderrEof: true,
+          stdoutEof: true,
+        });
+        expect(receipt?.output).toContain(marker);
+        expect(Object.isFrozen(receipt)).toBe(true);
+        expect(tree.targetIsRunning()).toBe(false);
+        expect(tree.isRetired()).toBe(false);
+      } finally {
+        await tree.terminate({
+          forceMilliseconds: 3_000,
+          graceMilliseconds: 50,
+        });
+      }
+    },
+  );
+
+  onlyPosix(
+    "force-terminates a surviving descendant and retires recorded identities",
+    async () => {
+      const helper = [
+        "process.stdout.write(`helper-ready:${process.pid}\\n`);",
+        'process.on("SIGTERM", () => {',
+        '  process.stdout.write("helper-ignored-term\\n");',
+        "});",
+        "setTimeout(() => process.exit(70), 10_000);",
+        "setInterval(() => {}, 1_000);",
+      ].join("\n");
+      const leader = [
+        'const { spawn } = require("node:child_process");',
+        'spawn(process.execPath, ["-e", ' +
+          `${JSON.stringify(helper)}], {` +
+          ' stdio: ["ignore", "inherit", "inherit"] });',
+        'process.stdout.write("leader-ready\\n");',
+        "process.exit(0);",
+      ].join("\n");
+      const tree = await spawnIsolatedProcessTree({
+        arguments: ["-e", leader],
+        command: process.execPath,
+        cwd: process.cwd(),
+        environment: {},
+      });
+
+      try {
+        await waitForOutput(tree, "leader-ready");
+        await waitForOutput(tree, "helper-ready");
+        await waitForLeaderStop(tree);
+        const helperPid = Number(
+          tree.output().match(/helper-ready:(\d+)/)?.[1],
+        );
+        expect(Number.isSafeInteger(helperPid)).toBe(true);
+        expect(helperPid).toBeGreaterThan(1);
+        expect(() => process.kill(helperPid, 0)).not.toThrow();
+        expect(tree.isRetired()).toBe(false);
+        expect(await tree.waitForClose(25)).toBeNull();
+
+        const receipt = await tree.terminate({
+          forceMilliseconds: 3_000,
+          graceMilliseconds: 50,
+        });
+
+        expect(receipt).toMatchObject({
+          forceSignalSent: true,
+          gracefulSignalSent: true,
+          recordedProcessIdentitiesGone: true,
+        });
+        expect(receipt.close).toMatchObject({
+          exitCode: 0,
+          signal: null,
+          stderrEof: true,
+          stdoutEof: true,
+        });
+        expect(receipt.close?.output).toContain("helper-ignored-term");
+        expect(tree.isRetired()).toBe(true);
+        expect(() => process.kill(helperPid, 0)).toThrow(
+          expect.objectContaining({ code: "ESRCH" }),
+        );
+      } finally {
+        await tree
+          .terminate({ forceMilliseconds: 3_000, graceMilliseconds: 50 })
+          .catch(() => undefined);
+      }
+    },
+  );
+
+  onlyPosix(
+    "retires containment before later calls can reach a reused group id",
+    async () => {
+      const tree = await spawnIsolatedProcessTree({
+        arguments: ["-e", "setInterval(() => {}, 1_000)"],
+        command: process.execPath,
+        cwd: process.cwd(),
+        environment: {},
+      });
+      const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+        throw new Error("retired containment touched a reused process group");
+      });
+
+      try {
+        const firstTermination = tree.terminate({
+          forceMilliseconds: 3_000,
+          graceMilliseconds: 50,
+        });
+        const secondTermination = tree.terminate();
+        expect(secondTermination).toBe(firstTermination);
+        const termination = await firstTermination;
+        expect(tree.isRetired()).toBe(true);
+        expect(await tree.terminate()).toBe(termination);
+        expect(kill).not.toHaveBeenCalled();
+      } finally {
+        kill.mockRestore();
+      }
+    },
+  );
+
+  onlyPosix(
+    "reports an unobserved target close only after forced identity cleanup",
+    async () => {
+      const target = [
+        'process.on("SIGTERM", () => {});',
+        'process.stdout.write("force-only-target-ready\\n");',
+        "setInterval(() => {}, 1_000);",
+      ].join("\n");
+      const tree = await spawnIsolatedProcessTree({
+        arguments: ["-e", target],
+        command: process.execPath,
+        cwd: process.cwd(),
+        environment: {},
+      });
+      await waitForOutput(tree, "force-only-target-ready");
+
+      const receipt = await tree.terminate({
+        forceMilliseconds: 3_000,
+        graceMilliseconds: 50,
+      });
+
+      expect(receipt.close).toBeNull();
+      expect(receipt.targetOutcome).toEqual({
+        kind: "unobserved-before-final-kill",
+      });
+      expect(receipt.output).toMatchObject({
+        stderrEof: true,
+        stdoutEof: true,
+      });
+      expect(receipt.output.output).toContain("force-only-target-ready");
+      expect(tree.targetIsRunning()).toBe(false);
+      expect(tree.isRetired()).toBe(true);
+    },
+  );
+
+  onlyPosix(
+    "delivers graceful-signal evidence before a zero-grace final kill",
+    async () => {
+      const tree = await spawnIsolatedProcessTree({
+        arguments: ["-e", "setInterval(() => {}, 1_000)"],
+        command: process.execPath,
+        cwd: process.cwd(),
+        environment: {},
+      });
+
+      await expect(
+        tree.terminate({ forceMilliseconds: 3_000, graceMilliseconds: 0 }),
+      ).resolves.toMatchObject({
+        forceSignalSent: true,
+        gracefulSignalSent: true,
+        recordedProcessIdentitiesGone: true,
+      });
+      expect(tree.isRetired()).toBe(true);
+      expect(tree.targetIsRunning()).toBe(false);
+    },
+  );
+
+  onlyPosix(
+    "kills TERM-resistant same-group descendants forked after the termination snapshot",
+    async () => {
+      const grandchild = [
+        'process.on("SIGTERM", () => {});',
+        'process.stdout.write("late-grandchild-ready\\n");',
+        "setInterval(() => {}, 1_000);",
+      ].join("\n");
+      const helper = [
+        'const { spawn } = require("node:child_process");',
+        'process.on("SIGTERM", () => {});',
+        'process.stdout.write("late-helper-ready\\n");',
+        "setTimeout(() => {",
+        '  spawn(process.execPath, ["-e", ' +
+          `${JSON.stringify(grandchild)}], {` +
+          ' stdio: ["ignore", "inherit", "inherit"] });',
+        "}, 100);",
+        "setInterval(() => {}, 1_000);",
+      ].join("\n");
+      const target = [
+        'const { spawn } = require("node:child_process");',
+        'process.stdout.write("fork-target-ready\\n");',
+        'process.on("SIGTERM", () => {',
+        "  setTimeout(() => {",
+        '    spawn(process.execPath, ["-e", ' +
+          `${JSON.stringify(helper)}], {` +
+          ' stdio: ["ignore", "inherit", "inherit"] });',
+        "    setTimeout(() => process.exit(0), 20);",
+        "  }, 10);",
+        "});",
+        "setInterval(() => {}, 1_000);",
+      ].join("\n");
+      const tree = await spawnIsolatedProcessTree({
+        arguments: ["-e", target],
+        command: process.execPath,
+        cwd: process.cwd(),
+        environment: {},
+      });
+
+      await waitForOutput(tree, "fork-target-ready");
+      const receipt = await tree.terminate({
+        forceMilliseconds: 3_000,
+        graceMilliseconds: 750,
+      });
+
+      expect(receipt).toMatchObject({
+        recordedProcessIdentitiesGone: true,
+        targetOutcome: { exitCode: 0, kind: "observed", signal: null },
+      });
+      expect(receipt.output.output).toContain("late-helper-ready");
+      expect(receipt.output.output).toContain("late-grandchild-ready");
+      expect(tree.isRetired()).toBe(true);
+    },
+  );
+
+  onlyPosix(
+    "marks an unexpected sentinel crash LOST without signaling from the parent",
+    async () => {
+      const target = [
+        "const sentinel = process.ppid;",
+        'process.stdout.write("sentinel-crash-armed\\n");',
+        'setTimeout(() => process.kill(sentinel, "SIGKILL"), 20);',
+        'setTimeout(() => process.kill(0, "SIGKILL"), 400);',
+        "setInterval(() => {}, 1_000);",
+      ].join("\n");
+      const tree = await spawnIsolatedProcessTree({
+        arguments: ["-e", target],
+        command: process.execPath,
+        cwd: process.cwd(),
+        environment: {},
+      });
+      const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+        throw new Error("LOST containment reached the parent signal boundary");
+      });
+
+      try {
+        await waitForOutput(tree, "sentinel-crash-armed");
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        await expect(
+          tree.terminate({
+            forceMilliseconds: 500,
+            graceMilliseconds: 50,
+          }),
+        ).rejects.toThrow(/containment was lost.*sentinel closed/i);
+        expect(tree.isRetired()).toBe(false);
+        expect(kill).not.toHaveBeenCalled();
+      } finally {
+        kill.mockRestore();
+        await new Promise((resolve) => setTimeout(resolve, 400));
+      }
+    },
+  );
+
+  onlyPosix(
+    "retains an escaped descendant identity after its direct parent exits",
+    async () => {
+      const escapedChild = [
+        "setTimeout(() => process.exit(0), 800);",
+        "setInterval(() => {}, 1_000);",
+      ].join("\n");
+      const target = [
+        'const { spawn } = require("node:child_process");',
+        'const escaped = spawn(process.execPath, ["-e", ' +
+          `${JSON.stringify(escapedChild)}], {` +
+          ' detached: true, stdio: ["ignore", "ignore", "ignore"] });',
+        "process.stdout.write(`escaped-ready:${escaped.pid}\\n`);",
+        "setTimeout(() => process.exit(0), 150);",
+      ].join("\n");
+      const tree = await spawnIsolatedProcessTree({
+        arguments: ["-e", target],
+        command: process.execPath,
+        cwd: process.cwd(),
+        environment: {},
+      });
+      await waitForOutput(tree, "escaped-ready:");
+      const escapedPid = Number(
+        tree.output().match(/escaped-ready:(\d+)/)?.[1],
+      );
+      expect(Number.isSafeInteger(escapedPid)).toBe(true);
+      expect(escapedPid).toBeGreaterThan(1);
+      await expect(tree.waitForClose(1_000)).resolves.toMatchObject({
+        exitCode: 0,
+        signal: null,
+      });
+      expect(tree.targetIsRunning()).toBe(false);
+
+      await expect(
+        tree.terminate({ forceMilliseconds: 150, graceMilliseconds: 50 }),
+      ).rejects.toThrow(/recorded process identities survived/i);
+      expect(tree.isRetired()).toBe(false);
+      expect(() => process.kill(escapedPid, 0)).not.toThrow();
+
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      expect(() => process.kill(escapedPid, 0)).toThrow(
+        expect.objectContaining({ code: "ESRCH" }),
+      );
+    },
+  );
+
+  onlyPosix(
+    "does not claim an empty tree after an immediate leader exit hides a setsid child",
+    async () => {
+      const cleanupDirectory = await fs.mkdtemp(
+        path.join(os.tmpdir(), "desmoslock-immediate-exit-"),
+      );
+      const cleanupPath = path.join(cleanupDirectory, "stop");
+      const escapedChild = [
+        'const fs = require("node:fs");',
+        `const cleanupPath = ${JSON.stringify(cleanupPath)};`,
+        "fs.closeSync(1);",
+        "fs.closeSync(2);",
+        'process.on("SIGTERM", () => {});',
+        "setInterval(() => {",
+        "  if (fs.existsSync(cleanupPath)) process.exit(0);",
+        "}, 10);",
+        `setTimeout(() => process.kill(-process.pid, "SIGKILL"), ${escapedChildWatchdogMilliseconds});`,
+        "setInterval(() => {}, 1_000);",
+      ].join("\n");
+      const target = [
+        'const { spawn } = require("node:child_process");',
+        'const fs = require("node:fs");',
+        'const escaped = spawn(process.execPath, ["-e", ' +
+          `${JSON.stringify(escapedChild)}], {` +
+          ' detached: true, stdio: ["ignore", "inherit", "inherit"] });',
+        "escaped.unref();",
+        "fs.writeSync(1, `escaped-ready:${escaped.pid}\\n`);",
+        "process.exit(0);",
+      ].join("\n");
+      let tree: Awaited<ReturnType<typeof spawnIsolatedProcessTree>> | null =
+        null;
+      let escapedIdentity: RecordedProcessIdentity | null = null;
+      let testFailure: unknown = null;
+
+      try {
+        tree = await spawnIsolatedProcessTree({
+          arguments: ["-e", target],
+          command: process.execPath,
+          cwd: process.cwd(),
+          environment: {},
+        });
+        await waitForOutput(tree, "escaped-ready:");
+        const escapedPid = Number(
+          tree.output().match(/escaped-ready:(\d+)/)?.[1],
+        );
+        expect(Number.isSafeInteger(escapedPid)).toBe(true);
+        expect(escapedPid).toBeGreaterThan(1);
+        escapedIdentity = await recordProcessIdentity(escapedPid);
+        await expect(tree.waitForClose(1_000)).resolves.toMatchObject({
+          exitCode: 0,
+          signal: null,
+          stderrEof: true,
+          stdoutEof: true,
+        });
+
+        const receipt = await tree.terminate({
+          forceMilliseconds: 150,
+          graceMilliseconds: 50,
+        });
+
+        expect(await processIdentityIsPresent(escapedIdentity)).toBe(true);
+        expect(receipt).toMatchObject({
+          recordedProcessIdentitiesGone: true,
+        });
+        expect(receipt).not.toHaveProperty("treeEmpty");
+        expect(tree.isRetired()).toBe(true);
+      } catch (error) {
+        testFailure = error;
+      }
+
+      const cleanupFailures: unknown[] = [];
+      await fs.writeFile(cleanupPath, "stop\n").catch((error) => {
+        cleanupFailures.push(error);
+      });
+      if (escapedIdentity !== null) {
+        await waitForProcessIdentityToDisappear(escapedIdentity).catch(
+          (error) => {
+            cleanupFailures.push(error);
+          },
+        );
+      }
+      if (tree !== null) {
+        await tree
+          .terminate({ forceMilliseconds: 150, graceMilliseconds: 50 })
+          .catch((error) => {
+            cleanupFailures.push(error);
+          });
+      }
+      await fs
+        .rm(cleanupDirectory, { force: true, recursive: true })
+        .catch((error) => {
+          cleanupFailures.push(error);
+        });
+
+      throwCombinedErrors(
+        testFailure === null
+          ? cleanupFailures
+          : [testFailure, ...cleanupFailures],
+        "Immediate-exit containment regression failed and cleanup also failed",
+      );
+    },
+  );
+});

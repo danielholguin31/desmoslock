@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DesmosLock Calculator</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="calculator-shell">
+      <aside class="expression-panel">
+        <div>
+          <p class="eyebrow">Assessment calculator</p>
+          <h2>Graphing calculator</h2>
+          <p class="boundary-note">
+            Expressions reset when this session closes
+          </p>
+        </div>
+        <form data-expression-form>
+          <label for="expression">Expression</label>
+          <div class="expression-entry">
+            <input
+              id="expression"
+              data-expression-input
+              autocomplete="off"
+              placeholder="y=x^2"
+              spellcheck="false"
+            />
+            <button type="submit">Add</button>
+          </div>
+          <p data-expression-error class="error" role="status"></p>
+        </form>
+        <ol data-expression-list aria-label="Expressions"></ol>
+      </aside>
+      <section class="graph-panel" aria-label="Graphing area">
+        <div class="graph-toolbar">
+          <button type="button" data-zoom-out aria-label="Zoom out">−</button>
+          <output data-zoom-label>100%</output>
+          <button type="button" data-zoom-in aria-label="Zoom in">+</button>
+        </div>
+        <svg
+          data-graph
+          aria-label="Graph"
+          role="img"
+          viewBox="0 0 720 460"
+          preserveAspectRatio="none"
+        ></svg>
+      </section>
+    </main>
+    <script type="module" src="./host.js"></script>
+  </body>
+</html>

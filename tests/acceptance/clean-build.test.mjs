@@ -14,9 +14,14 @@ const generatedDirectories = [
   "packages/test-support/dist",
 ];
 const expectedOutputs = [
+  "apps/desktop/dist/calculator/host.js",
+  "apps/desktop/dist/calculator/index.html",
+  "apps/desktop/dist/calculator/styles.css",
+  "apps/desktop/dist/index.html",
   "apps/desktop/dist/main.js",
-  "apps/desktop/dist/preload.js",
+  "apps/desktop/dist/preload.cjs",
   "apps/desktop/dist/renderer.js",
+  "apps/desktop/dist/styles.css",
   "apps/web/dist/main.js",
   "packages/contracts/dist/index.js",
   "packages/domain/dist/index.js",
