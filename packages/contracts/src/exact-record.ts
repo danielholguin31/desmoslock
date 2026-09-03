@@ -2,11 +2,11 @@ export function parseExactRecord(
   value: unknown,
   expectedKeys: readonly string[],
 ): Record<string, unknown> | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return null;
-  }
-
   try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return null;
+    }
+
     const prototype = Object.getPrototypeOf(value) as unknown;
     if (prototype !== Object.prototype && prototype !== null) return null;
 
@@ -44,9 +44,9 @@ export function parseExactArray(
   value: unknown,
   maximumLength: number,
 ): readonly unknown[] | null {
-  if (!Array.isArray(value)) return null;
-
   try {
+    if (!Array.isArray(value)) return null;
+
     const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
     if (
       lengthDescriptor === undefined ||

@@ -651,6 +651,7 @@ function parseManageableStaffItems(
 
   const items: ManageableStaffMember[] = [];
   const seenMemberships = new Set<string>();
+  const profileByEmail = new Map<string, string>();
   const profileFacts = new Map<
     string,
     { readonly displayName: string; readonly email: string }
@@ -682,6 +683,11 @@ function parseManageableStaffItems(
     ) {
       return null;
     }
+    const knownProfileId = profileByEmail.get(email);
+    if (knownProfileId !== undefined && knownProfileId !== profileId) {
+      return null;
+    }
+    profileByEmail.set(email, profileId);
     profileFacts.set(profileId, { displayName, email });
     items.push({ displayName, email, profileId, role: row.role, schoolId });
   }
@@ -782,6 +788,7 @@ export function mapCurrentManageableStaffRpcRows(
 
   const items: ManageableStaffMember[] = [];
   const seenMemberships = new Set<string>();
+  const profileByEmail = new Map<string, string>();
   const profileFacts = new Map<
     string,
     { readonly displayName: string; readonly email: string }
@@ -819,6 +826,11 @@ export function mapCurrentManageableStaffRpcRows(
     ) {
       return invalidManagementList();
     }
+    const knownProfileId = profileByEmail.get(email);
+    if (knownProfileId !== undefined && knownProfileId !== profileId) {
+      return invalidManagementList();
+    }
+    profileByEmail.set(email, profileId);
     profileFacts.set(profileId, { displayName, email });
     items.push({ displayName, email, profileId, role, schoolId });
   }

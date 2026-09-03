@@ -777,6 +777,21 @@ describe("Owner management-list contracts", () => {
       [
         manageableStaffRpcRow(),
         manageableStaffRpcRow({
+          display_name: "Morgan Lee",
+          profile_id: secondProfileId,
+        }),
+      ],
+      [
+        manageableStaffRpcRow(),
+        manageableStaffRpcRow({
+          display_name: "Morgan Lee",
+          profile_id: secondProfileId,
+          school_id: betaSchoolId,
+        }),
+      ],
+      [
+        manageableStaffRpcRow(),
+        manageableStaffRpcRow({
           email: "different@example.invalid",
           school_id: betaSchoolId,
         }),
@@ -911,6 +926,20 @@ describe("Owner management-list contracts", () => {
     });
     expect(
       parseManageableStaffListResponse({
+        code: "manageable_staff_listed",
+        items: [
+          staffItem,
+          {
+            ...staffItem,
+            displayName: "Morgan Lee",
+            profileId: secondProfileId,
+          },
+        ],
+        ok: true,
+      }),
+    ).toBeNull();
+    expect(
+      parseManageableStaffListResponse({
         code: "authorization_denied",
         ok: false,
       }),
@@ -1031,6 +1060,59 @@ describe("Owner management-list contracts", () => {
       ok: true,
     });
     expect(propertyReads).toBe(0);
+  });
+
+  it("fails closed on revoked array and object Proxies", () => {
+    const revokedStaffRows = Proxy.revocable([manageableStaffRpcRow()], {});
+    const revokedInvitationRows = Proxy.revocable(
+      [manageableInvitationRpcRow()],
+      {},
+    );
+    const revokedStaffRow = Proxy.revocable(manageableStaffRpcRow(), {});
+    const revokedInvitationRow = Proxy.revocable(
+      manageableInvitationRpcRow(),
+      {},
+    );
+    const revokedProductResponse = Proxy.revocable(
+      {
+        code: "manageable_staff_listed",
+        items: [],
+        ok: true,
+      },
+      {},
+    );
+    const revokedProductItems = Proxy.revocable<unknown[]>([], {});
+    revokedStaffRows.revoke();
+    revokedInvitationRows.revoke();
+    revokedStaffRow.revoke();
+    revokedInvitationRow.revoke();
+    revokedProductResponse.revoke();
+    revokedProductItems.revoke();
+
+    expect(mapCurrentManageableStaffRpcRows(revokedStaffRows.proxy)).toEqual({
+      code: "service_unavailable",
+      ok: false,
+    });
+    expect(
+      mapCurrentManageableStaffInvitationsRpcRows(revokedInvitationRows.proxy),
+    ).toEqual({ code: "service_unavailable", ok: false });
+    expect(mapCurrentManageableStaffRpcRows([revokedStaffRow.proxy])).toEqual({
+      code: "service_unavailable",
+      ok: false,
+    });
+    expect(
+      mapCurrentManageableStaffInvitationsRpcRows([revokedInvitationRow.proxy]),
+    ).toEqual({ code: "service_unavailable", ok: false });
+    expect(
+      parseManageableStaffListResponse(revokedProductResponse.proxy),
+    ).toBeNull();
+    expect(
+      parseManageableStaffListResponse({
+        code: "manageable_staff_listed",
+        items: revokedProductItems.proxy,
+        ok: true,
+      }),
+    ).toBeNull();
   });
 });
 
