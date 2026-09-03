@@ -1146,17 +1146,9 @@ begin
     return;
   end if;
 
-  if invitation_row.status = 'pending_acceptance' then
-    return query select 'invitation_usable'::text;
-    return;
-  end if;
-
-  if invitation_row.status <> 'delivery_ready' then
-    return query select 'invitation_consumed'::text;
-    return;
-  end if;
-
-  if invitation_row.expires_at <= statement_timestamp() then
+  if invitation_row.status in ('delivery_ready', 'pending_acceptance')
+    and invitation_row.expires_at <= statement_timestamp()
+  then
     update desmoslock_v2.staff_invitations as invitation
     set
       status = 'expired',
@@ -1164,7 +1156,7 @@ begin
       updated_at = statement_timestamp()
     where invitation.id = invitation_row.id
       and invitation.revision = invitation_row.revision
-      and invitation.status = 'delivery_ready';
+      and invitation.status = invitation_row.status;
 
     if not found then
       return query select 'conflict'::text;
@@ -1182,6 +1174,16 @@ begin
     );
 
     return query select 'invitation_expired'::text;
+    return;
+  end if;
+
+  if invitation_row.status = 'pending_acceptance' then
+    return query select 'invitation_usable'::text;
+    return;
+  end if;
+
+  if invitation_row.status <> 'delivery_ready' then
+    return query select 'invitation_consumed'::text;
     return;
   end if;
 

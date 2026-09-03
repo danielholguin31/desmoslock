@@ -3,7 +3,7 @@ begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path = extensions, public, pg_catalog;
 
-select plan(136);
+select plan(137);
 
 select has_column(
   'desmoslock_v2',
@@ -1570,6 +1570,23 @@ select is(
   'a non-recipient expiration probe creates no audit event'
 );
 
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_publish_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'rollback'
+      )
+    )
+  ),
+  'invitation_expired',
+  'a publish replay terminalizes an elapsed published invitation instead of reporting it usable'
+);
+reset role;
+
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000004',
   'c1000000-0000-4000-8000-000000000004',
@@ -1589,7 +1606,7 @@ select is(
     )
   ),
   'invitation_expired',
-  'an expired invitation fails closed'
+  'the intended recipient observes the terminal expiry created by publish reconciliation'
 );
 reset role;
 select is(
@@ -1618,9 +1635,9 @@ select results_eq(
   $$,
   $$values (
     null::uuid,
-    'c1000000-0000-4000-8000-000000000004'::uuid
+    null::uuid
   )$$,
-  'recipient-driven expiry records the actual session without impersonating the requester'
+  'service publish reconciliation audits expiry once without impersonating any staff actor or session'
 );
 
 select pg_temp.set_staff_claims(
