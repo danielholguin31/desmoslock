@@ -974,6 +974,7 @@ create function desmoslock_v2.current_staff_context()
 returns table (
   code text,
   profile_id uuid,
+  display_name text,
   school_id uuid,
   school_slug text,
   school_name text,
@@ -997,6 +998,7 @@ begin
     return query select
       session_result.code,
       null::uuid,
+      null::text,
       null::uuid,
       null::text,
       null::text,
@@ -1010,6 +1012,7 @@ begin
     return query select
       'membership_inactive'::text,
       null::uuid,
+      null::text,
       null::uuid,
       null::text,
       null::text,
@@ -1022,12 +1025,15 @@ begin
   select
     'ok'::text,
     current_profile_id,
+    profile.display_name,
     workspace.id,
     workspace.slug,
     workspace.display_name,
     membership.role,
     membership.role_revision
   from desmoslock_v2.memberships as membership
+  join desmoslock_v2.profiles as profile
+    on profile.id = membership.profile_id
   join desmoslock_v2.workspaces as workspace
     on workspace.id = membership.workspace_id
   where membership.profile_id = current_profile_id
@@ -1038,6 +1044,7 @@ begin
     return query select
       'membership_inactive'::text,
       current_profile_id,
+      null::text,
       null::uuid,
       null::text,
       null::text,
@@ -3200,7 +3207,7 @@ comment on table desmoslock_v2.application_session_revocation_cutoffs is
 comment on table desmoslock_v2.staff_audit_events is
   'Append-only minimized auth audit with typed codes and no PII, secrets, payloads, or provider errors.';
 comment on function desmoslock_v2.current_staff_context() is
-  'Caller-scoped rows: code, profile_id, school_id, school_slug, school_name, membership_role, role_revision; failures are one code row with null context.';
+  'Caller-scoped rows: code, profile_id, display_name, school_id, school_slug, school_name, membership_role, role_revision; display_name is the canonical bound profile value, and failures are one code row with null context.';
 comment on function desmoslock_v2.current_manageable_staff() is
   'Owner-only AAL2/TOTP projection of active Administrator and Teacher identities across Schools the caller currently owns; deterministic LIMIT 501 lets the adapter fail closed above the 500-item product cap.';
 comment on function desmoslock_v2.current_manageable_staff_invitations() is

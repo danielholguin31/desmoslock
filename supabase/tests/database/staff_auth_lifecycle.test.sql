@@ -3,7 +3,7 @@ begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path = extensions, public, pg_catalog;
 
-select plan(237);
+select plan(238);
 
 select has_column(
   'desmoslock_v2',
@@ -281,6 +281,25 @@ select ok(
   'the authoritative provider recovery-session verifier is private'
 );
 
+select is(
+  (
+    select function_info.proargnames
+    from pg_proc as function_info
+    where function_info.oid =
+      to_regprocedure('desmoslock_v2.current_staff_context()')
+  ),
+  array[
+    'code',
+    'profile_id',
+    'display_name',
+    'school_id',
+    'school_slug',
+    'school_name',
+    'membership_role',
+    'role_revision'
+  ]::text[],
+  'the current staff context keeps its exact canonical-profile PostgREST row keys'
+);
 select is(
   (
     select function_info.proargnames
@@ -987,11 +1006,16 @@ select pg_temp.set_staff_claims(
 set local role authenticated;
 select results_eq(
   $$
-    select code, school_id::text, membership_role
+    select code, display_name, school_id::text, membership_role
     from desmoslock_v2.current_staff_context()
   $$,
-  $$values ('ok'::text, '10000000-0000-4000-8000-000000000001'::text, 'owner'::text)$$,
-  'live database identity, session, membership, and role produce Alpha context'
+  $$values (
+    'ok'::text,
+    'Synthetic Alpha Owner'::text,
+    '10000000-0000-4000-8000-000000000001'::text,
+    'owner'::text
+  )$$,
+  'live database identity, canonical display name, membership, and role produce Alpha context'
 );
 select results_eq(
   $$
