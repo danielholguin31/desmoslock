@@ -7,6 +7,7 @@ import {
   type StaffAuthAction,
   type StaffAuthAdapter,
   type StaffAuthBoundaryIdentity,
+  type StaffAuthBoundaryManagedStaff,
   type StaffAuthBoundaryResult,
   type StaffAuthController,
   type StaffAuthMutation,
@@ -20,6 +21,10 @@ function identity(
   return {
     accountId: `account-${role}`,
     email,
+    profile: {
+      displayName: `${role} Staff`,
+      id: `profile-${role}`,
+    },
     membership: {
       id: `membership-${role}`,
       role,
@@ -29,13 +34,41 @@ function identity(
   };
 }
 
+function manageableStaff(): StaffAuthBoundaryManagedStaff[] {
+  return [
+    {
+      membershipId: "target-admin-membership",
+      profile: {
+        displayName: "Ada Administrator",
+        email: "ada@example.test",
+        id: "profile-target-admin",
+      },
+      role: "admin",
+      schoolId: "school-1",
+    },
+    {
+      membershipId: "target-teacher-membership",
+      profile: {
+        displayName: "Theo Teacher",
+        email: "theo@example.test",
+        id: "profile-target-teacher",
+      },
+      role: "teacher",
+      schoolId: "school-1",
+    },
+  ];
+}
+
 function access(
   role: "admin" | "owner" | "teacher",
   options: {
     assuranceLevel?: "aal1" | "aal2";
     email?: string;
     identity?: StaffAuthBoundaryIdentity;
+    identityGeneration?: string;
+    manageableStaff?: readonly StaffAuthBoundaryManagedStaff[];
     secondFactor?: "challenge_required" | "enrollment_required" | "satisfied";
+    sessionGeneration?: string;
   } = {},
 ): StaffAuthAccessGrant {
   const assuranceLevel =
@@ -44,7 +77,11 @@ function access(
   const base = {
     assuranceLevel,
     identity: options.identity ?? identity(role, options.email),
+    identityGeneration: options.identityGeneration ?? `identity-${role}`,
     kind: "access_granted" as const,
+    manageableStaff:
+      options.manageableStaff ?? (role === "owner" ? manageableStaff() : []),
+    sessionGeneration: options.sessionGeneration ?? `session-${role}`,
   };
   if (secondFactor === "challenge_required") {
     return {
@@ -54,6 +91,19 @@ function access(
     };
   }
   return { ...base, secondFactor };
+}
+
+function invitationReady(operationId: string): StaffAuthBoundaryResult {
+  return {
+    acceptanceReceipt: "opaque-acceptance-receipt",
+    expiresAt: "2026-09-04T12:00:00.000Z",
+    inspectionOperationId: operationId,
+    intendedAccountId: "account-teacher",
+    intendedEmail: "invited@example.test",
+    kind: "invitation_ready",
+    role: "teacher",
+    school: { id: "school-1", label: "Synthetic High School" },
+  };
 }
 
 function createAdapter(
@@ -85,7 +135,9 @@ function createController(
   options: {
     clear?: () => void;
     history?: (url: string) => void;
+    invitationHistory?: (url: string) => void;
     nextOperationId?: () => string;
+    now?: () => number;
     stateResult?: "accepted" | "invalid" | "replayed";
   } = {},
 ): StaffAuthController {
@@ -106,6 +158,20 @@ function createController(
         async consume() {
           return options.stateResult ?? "accepted";
         },
+      },
+    },
+    clock: {
+      now: () => options.now?.() ?? Date.parse("2026-09-03T12:00:00.000Z"),
+    },
+    invitationCallback: {
+      history: {
+        replaceState(_data, _unused, url) {
+          options.invitationHistory?.(url);
+        },
+      },
+      route: {
+        origin: "https://app.example.test",
+        pathname: "/auth/invitation",
       },
     },
     operationIds: {
@@ -321,7 +387,7 @@ describe("staff auth controller", () => {
       );
       await controller.dispatch({ type: "bootstrap" });
       await controller.dispatch({
-        invitationToken: `SENTINEL-${reason}`,
+        callbackUrl: `https://app.example.test/auth/invitation?token=SENTINEL-${reason}`,
         type: "inspect_invitation",
       });
 
@@ -341,16 +407,21 @@ describe("staff auth controller", () => {
       requests.push(request);
       return request.type === "inspect_invitation"
         ? {
+            acceptanceReceipt: "opaque-invitation-receipt",
+            expiresAt: "2026-09-04T12:00:00.000Z",
+            inspectionOperationId: request.operationId,
+            intendedAccountId: "account-teacher",
+            intendedEmail: "invited@example.test",
             kind: "invitation_ready",
             role: "teacher",
-            schoolLabel: "Synthetic High School",
+            school: { id: "school-1", label: "Synthetic High School" },
           }
         : access("teacher", { email: "invited@example.test" });
     });
     const controller = createController(adapter);
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      invitationToken: "one-time",
+      callbackUrl: "https://app.example.test/auth/invitation?token=one-time",
       type: "inspect_invitation",
     });
     await controller.dispatch({
@@ -375,15 +446,20 @@ describe("staff auth controller", () => {
         { kind: "signed_out" },
         async () =>
           ({
+            acceptanceReceipt: "receipt",
+            expiresAt: "2026-09-04T12:00:00.000Z",
+            inspectionOperationId: "operation-1",
+            intendedAccountId: "account-owner",
+            intendedEmail: "owner@example.test",
             kind: "invitation_ready",
             role: "owner",
-            schoolLabel: "Synthetic High School",
+            school: { id: "school-1", label: "Synthetic High School" },
           }) as unknown as StaffAuthBoundaryResult,
       ),
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      invitationToken: "one-time",
+      callbackUrl: "https://app.example.test/auth/invitation?token=one-time",
       type: "inspect_invitation",
     });
 
@@ -440,7 +516,7 @@ describe("staff auth controller", () => {
       kind: "dependency_failure",
       operation: "revoke_all_sessions",
     });
-    expect(clear).not.toHaveBeenCalled();
+    expect(clear).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -467,7 +543,11 @@ describe("staff auth controller", () => {
     await controller.dispatch({ type: "bootstrap" });
     clear.mockClear();
 
-    emit?.({ kind });
+    emit?.({
+      identityGeneration: "identity-teacher",
+      kind,
+      sessionGeneration: "session-teacher",
+    });
 
     expect(controller.getSnapshot().kind).toBe(kind);
     expect(clear).toHaveBeenCalledOnce();
@@ -491,7 +571,12 @@ describe("staff auth controller", () => {
     const controller = createController(adapter, { clear });
     await controller.dispatch({ type: "bootstrap" });
     clear.mockClear();
-    emit?.({ access: access("owner"), kind: "access_changed" });
+    emit?.({
+      access: access("owner"),
+      kind: "access_changed",
+      previousIdentityGeneration: "identity-teacher",
+      previousSessionGeneration: "session-teacher",
+    });
 
     expect(controller.getSnapshot()).toMatchObject({
       identity: { membership: { role: "owner" } },
@@ -649,7 +734,7 @@ describe("staff auth controller", () => {
     const finish = deferred<StaffAuthMutationResult>();
     const adapter: StaffAuthAdapter = {
       async read() {
-        return { kind: "signed_out" };
+        return access("teacher");
       },
       perform(input) {
         request = input;
@@ -662,15 +747,15 @@ describe("staff auth controller", () => {
     };
     const controller = createController(adapter);
     await controller.dispatch({ type: "bootstrap" });
-    const pending = controller.dispatch({
-      email: "t@example.test",
-      password: "pw",
-      type: "sign_in",
+    const pending = controller.dispatch({ type: "sign_out_local" });
+    emit?.({
+      identityGeneration: "identity-teacher",
+      kind: "session_revoked",
+      sessionGeneration: "session-teacher",
     });
-    emit?.({ kind: "session_revoked" });
     finish.resolve({
       operationId: request?.operationId ?? "",
-      result: access("teacher"),
+      result: { kind: "sign_out_complete", scope: "local" },
     });
     await pending;
 
@@ -733,7 +818,11 @@ describe("staff auth controller", () => {
     await controller.dispatch({ type: "bootstrap" });
     clear.mockClear();
     controller.dispose();
-    queued?.({ kind: "session_revoked" });
+    queued?.({
+      identityGeneration: "identity-teacher",
+      kind: "session_revoked",
+      sessionGeneration: "session-teacher",
+    });
 
     expect(controller.getSnapshot()).toMatchObject({ kind: "disposed" });
     expect(clear).not.toHaveBeenCalled();
@@ -1108,6 +1197,7 @@ describe("staff auth controller", () => {
   it("shows an authoritative Owner invitation rejection", async () => {
     const controller = createController(
       createAdapter(access("owner"), async () => ({
+        actor: access("owner"),
         kind: "staff_invitation_rejected",
       })),
     );
@@ -1169,9 +1259,15 @@ describe("staff auth controller", () => {
       );
       await controller.dispatch({ type: "bootstrap" });
       await controller.dispatch({
-        membershipId: "target-membership",
-        targetRole,
-        type: "revoke_staff_membership",
+        membershipId: `target-${targetRole}-membership`,
+        type: "review_staff_membership_revocation",
+      });
+      expect(controller.getSnapshot()).toMatchObject({
+        kind: "confirming_staff_membership_revocation",
+        target: { role: targetRole === "admin" ? "administrator" : "teacher" },
+      });
+      await controller.dispatch({
+        type: "confirm_staff_membership_revocation",
       });
 
       expect(controller.getSnapshot()).toMatchObject({
@@ -1181,36 +1277,30 @@ describe("staff auth controller", () => {
     },
   );
 
-  it("retries uncertain Membership revocation with one idempotency ID", async () => {
+  it("does not retry an uncertain Membership revocation or retain its target", async () => {
     const requests: StaffAuthMutation[] = [];
-    let attempt = 0;
     const controller = createController(
       createAdapter(access("owner"), async (request) => {
         requests.push(request);
-        attempt += 1;
-        if (attempt === 1) {
-          throw new Error("uncertain");
-        }
-        return {
-          actor: access("owner"),
-          kind: "staff_membership_revoked",
-          membershipId: "target-membership",
-          revokedRole: "teacher",
-        };
+        throw new Error("uncertain");
       }),
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      membershipId: "target-membership",
-      targetRole: "teacher",
-      type: "revoke_staff_membership",
+      membershipId: "target-teacher-membership",
+      type: "review_staff_membership_revocation",
     });
+    await controller.dispatch({ type: "confirm_staff_membership_revocation" });
     await controller.dispatch({ type: "retry" });
 
-    expect(requests[0]?.operationId).toBe(requests[1]?.operationId);
     expect(controller.getSnapshot()).toMatchObject({
-      kind: "staff_membership_revoked",
+      kind: "dependency_failure",
+      retryable: false,
     });
+    expect(requests).toHaveLength(1);
+    expect(JSON.stringify(controller.getSnapshot())).not.toContain(
+      "target-teacher-membership",
+    );
   });
 
   it("rejects an Owner command success authorized by an Administrator actor", async () => {
@@ -1232,6 +1322,417 @@ describe("staff auth controller", () => {
       code: "invalid_backend_result",
       kind: "dependency_failure",
       operation: "staff_invitation",
+    });
+  });
+
+  it.each([
+    { kind: "unknown_success" },
+    { kind: "signed_out", extra: "not-allowed" },
+    { ...access("teacher"), assuranceLevel: "aal3" },
+    {
+      ...access("teacher"),
+      identity: { ...identity("teacher"), accountId: "account\u0000teacher" },
+    },
+  ])("rejects an adversarial non-exact boundary result %#", async (result) => {
+    const adapter = createAdapter(result as unknown as StaffAuthBoundaryResult);
+    const controller = createController(adapter);
+
+    await controller.dispatch({ type: "bootstrap" });
+
+    expect(controller.getSnapshot()).toMatchObject({
+      code: "invalid_backend_result",
+      kind: "dependency_failure",
+      operation: "bootstrap",
+    });
+  });
+
+  it("scrubs an invitation callback before its inspection boundary and stores only a receipt", async () => {
+    const order: string[] = [];
+    const requests: StaffAuthMutation[] = [];
+    const finish = deferred<StaffAuthBoundaryResult>();
+    const controller = createController(
+      createAdapter({ kind: "signed_out" }, async (request) => {
+        requests.push(request);
+        order.push("inspect");
+        return finish.promise;
+      }),
+      { invitationHistory: () => order.push("scrub") },
+    );
+    await controller.dispatch({ type: "bootstrap" });
+
+    const pending = controller.dispatch({
+      callbackUrl:
+        "https://app.example.test/auth/invitation?token=SENTINEL-token",
+      type: "inspect_invitation",
+    });
+    expect(order).toEqual(["scrub", "inspect"]);
+    const inspection = requests[0];
+    if (inspection?.type !== "inspect_invitation") {
+      throw new Error("expected invitation inspection");
+    }
+    finish.resolve(invitationReady(inspection.operationId));
+    await pending;
+
+    expect(controller.getSnapshot()).toMatchObject({
+      intendedEmail: "invited@example.test",
+      kind: "invitation_ready",
+    });
+    expect(JSON.stringify(controller.getSnapshot())).not.toMatch(
+      /SENTINEL|acceptance-receipt/,
+    );
+  });
+
+  it("accepts an invitation with the exact one-time receipt and inspection operation", async () => {
+    const requests: StaffAuthMutation[] = [];
+    const controller = createController(
+      createAdapter({ kind: "signed_out" }, async (request) => {
+        requests.push(request);
+        return request.type === "inspect_invitation"
+          ? invitationReady(request.operationId)
+          : access("teacher", { email: "invited@example.test" });
+      }),
+    );
+    await controller.dispatch({ type: "bootstrap" });
+    await controller.dispatch({
+      callbackUrl: "https://app.example.test/auth/invitation?token=one-time",
+      type: "inspect_invitation",
+    });
+    await controller.dispatch({
+      password: "new password",
+      type: "accept_invitation",
+    });
+
+    expect(requests[1]).toMatchObject({
+      acceptanceReceipt: "opaque-acceptance-receipt",
+      inspectionOperationId: requests[0]?.operationId,
+      type: "accept_invitation",
+    });
+    expect(controller.getSnapshot()).toMatchObject({ kind: "authenticated" });
+  });
+
+  it.each(["account", "email", "school", "role"] as const)(
+    "rejects invitation acceptance when authoritative %s continuity changes",
+    async (field) => {
+      const controller = createController(
+        createAdapter({ kind: "signed_out" }, async (request) => {
+          if (request.type === "inspect_invitation") {
+            return invitationReady(request.operationId);
+          }
+          const invited = identity(
+            field === "role" ? "admin" : "teacher",
+            "invited@example.test",
+          );
+          const changed: StaffAuthBoundaryIdentity = {
+            ...invited,
+            ...(field === "account" ? { accountId: "different-account" } : {}),
+            ...(field === "email" ? { email: "different@example.test" } : {}),
+            ...(field === "school"
+              ? {
+                  school: { id: "different-school", label: "Different School" },
+                }
+              : {}),
+          };
+          return access(field === "role" ? "admin" : "teacher", {
+            email: "invited@example.test",
+            identity: changed,
+          });
+        }),
+      );
+      await controller.dispatch({ type: "bootstrap" });
+      await controller.dispatch({
+        callbackUrl: "https://app.example.test/auth/invitation?token=one-time",
+        type: "inspect_invitation",
+      });
+      await controller.dispatch({ password: "pw", type: "accept_invitation" });
+
+      expect(controller.getSnapshot()).toMatchObject({
+        code: "invalid_backend_result",
+        kind: "dependency_failure",
+        operation: "invitation",
+      });
+    },
+  );
+
+  it("rejects an expired invitation receipt before sending acceptance", async () => {
+    const requests: StaffAuthMutation[] = [];
+    let now = Date.parse("2026-09-03T12:00:00.000Z");
+    const controller = createController(
+      createAdapter({ kind: "signed_out" }, async (request) => {
+        requests.push(request);
+        return invitationReady(request.operationId);
+      }),
+      { now: () => now },
+    );
+    await controller.dispatch({ type: "bootstrap" });
+    await controller.dispatch({
+      callbackUrl: "https://app.example.test/auth/invitation?token=one-time",
+      type: "inspect_invitation",
+    });
+    now = Date.parse("2026-09-05T12:00:00.000Z");
+    await controller.dispatch({ password: "pw", type: "accept_invitation" });
+
+    expect(requests).toHaveLength(1);
+    expect(controller.getSnapshot()).toMatchObject({
+      kind: "invitation_rejected",
+      reason: "expired",
+    });
+  });
+
+  it.each([
+    "account",
+    "email",
+    "profile",
+    "profile-name",
+    "membership",
+    "school",
+    "school-label",
+    "generation",
+    "session",
+    "aal",
+  ] as const)(
+    "fails closed when an Owner command result changes initiating %s authority",
+    async (field) => {
+      const initiating = access("owner");
+      const actorIdentity: StaffAuthBoundaryIdentity = {
+        ...initiating.identity,
+        ...(field === "account" ? { accountId: "other-account" } : {}),
+        ...(field === "email" ? { email: "other-owner@example.test" } : {}),
+        ...(field === "profile"
+          ? {
+              profile: {
+                ...initiating.identity.profile,
+                id: "other-profile",
+              },
+            }
+          : {}),
+        ...(field === "profile-name"
+          ? {
+              profile: {
+                ...initiating.identity.profile,
+                displayName: "Other Owner",
+              },
+            }
+          : {}),
+        ...(field === "membership"
+          ? {
+              membership: {
+                ...initiating.identity.membership,
+                id: "other-membership",
+              },
+            }
+          : {}),
+        ...(field === "school"
+          ? { school: { id: "other-school", label: "Other School" } }
+          : {}),
+        ...(field === "school-label"
+          ? {
+              school: {
+                ...initiating.identity.school,
+                label: "Other School",
+              },
+            }
+          : {}),
+      };
+      const actor = access("owner", {
+        assuranceLevel: field === "aal" ? "aal1" : "aal2",
+        identity: actorIdentity,
+        identityGeneration:
+          field === "generation" ? "other-generation" : "identity-owner",
+        sessionGeneration:
+          field === "session" ? "other-session" : "session-owner",
+      });
+      const controller = createController(
+        createAdapter(initiating, async () => ({
+          actor,
+          invitedRole: "teacher",
+          kind: "staff_invitation_created",
+        })),
+      );
+      await controller.dispatch({ type: "bootstrap" });
+      await controller.dispatch({
+        email: "target@example.test",
+        targetRole: "teacher",
+        type: "create_staff_invitation",
+      });
+
+      expect(controller.getSnapshot()).toMatchObject({
+        code: "invalid_backend_result",
+        kind: "dependency_failure",
+      });
+    },
+  );
+
+  it("ignores access events from a stale prior session generation", async () => {
+    const clear = vi.fn();
+    let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
+    const adapter = createAdapter(access("teacher"));
+    adapter.subscribe = (listener) => {
+      emit = listener;
+      return () => undefined;
+    };
+    const controller = createController(adapter, { clear });
+    await controller.dispatch({ type: "bootstrap" });
+    clear.mockClear();
+
+    emit?.({
+      identityGeneration: "old-identity",
+      kind: "session_revoked",
+      sessionGeneration: "old-session",
+    });
+
+    expect(controller.getSnapshot()).toMatchObject({ kind: "authenticated" });
+    expect(clear).not.toHaveBeenCalled();
+  });
+
+  it("publishes revocation before best-effort School-data clearing", async () => {
+    const order: string[] = [];
+    let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
+    const adapter = createAdapter(access("teacher"));
+    adapter.subscribe = (listener) => {
+      emit = listener;
+      return () => undefined;
+    };
+    const controller = createController(adapter, {
+      clear: () => order.push("clear"),
+    });
+    await controller.dispatch({ type: "bootstrap" });
+    order.splice(0);
+    controller.subscribe((state) => order.push(`state:${state.kind}`));
+
+    emit?.({
+      identityGeneration: "identity-teacher",
+      kind: "session_revoked",
+      sessionGeneration: "session-teacher",
+    });
+
+    expect(order).toEqual(["state:session_revoked", "clear"]);
+  });
+
+  it("stays revoked when protected-data clearing throws", async () => {
+    let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
+    let clears = 0;
+    const adapter = createAdapter(access("teacher"));
+    adapter.subscribe = (listener) => {
+      emit = listener;
+      return () => undefined;
+    };
+    const controller = createController(adapter, {
+      clear() {
+        clears += 1;
+        if (clears > 1) {
+          throw new Error("storage unavailable");
+        }
+      },
+    });
+    await controller.dispatch({ type: "bootstrap" });
+    emit?.({
+      identityGeneration: "identity-teacher",
+      kind: "session_revoked",
+      sessionGeneration: "session-teacher",
+    });
+
+    expect(controller.getSnapshot()).toMatchObject({ kind: "session_revoked" });
+  });
+
+  it("does not restore authenticated UI when bootstrap data clearing fails", async () => {
+    const controller = createController(createAdapter(access("teacher")), {
+      clear() {
+        throw new Error("storage unavailable");
+      },
+    });
+
+    await controller.dispatch({ type: "bootstrap" });
+
+    expect(controller.getSnapshot()).toMatchObject({
+      kind: "dependency_failure",
+      operation: "bootstrap",
+      retryable: true,
+    });
+  });
+
+  it("rejects an invitation receipt bound to a different inspection operation", async () => {
+    const controller = createController(
+      createAdapter({ kind: "signed_out" }, async () =>
+        invitationReady("different-operation"),
+      ),
+    );
+    await controller.dispatch({ type: "bootstrap" });
+    await controller.dispatch({
+      callbackUrl: "https://app.example.test/auth/invitation?token=one-time",
+      type: "inspect_invitation",
+    });
+
+    expect(controller.getSnapshot()).toMatchObject({
+      code: "invalid_backend_result",
+      kind: "dependency_failure",
+      operation: "invitation",
+    });
+  });
+
+  it.each(["", "forged-membership"])(
+    "does not dispatch a blank or forged Membership selection %j",
+    async (membershipId) => {
+      const perform = vi.fn();
+      const adapter = createAdapter(access("owner"));
+      adapter.perform = perform;
+      const controller = createController(adapter);
+      await controller.dispatch({ type: "bootstrap" });
+      await controller.dispatch({
+        membershipId,
+        type: "review_staff_membership_revocation",
+      });
+      await controller.dispatch({
+        type: "confirm_staff_membership_revocation",
+      });
+
+      expect(perform).not.toHaveBeenCalled();
+      expect(controller.getSnapshot()).toMatchObject({ kind: "authenticated" });
+    },
+  );
+
+  it("ignores an access-change event from a stale identity generation", async () => {
+    let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
+    const adapter = createAdapter(access("teacher"));
+    adapter.subscribe = (listener) => {
+      emit = listener;
+      return () => undefined;
+    };
+    const controller = createController(adapter);
+    await controller.dispatch({ type: "bootstrap" });
+
+    emit?.({
+      access: access("owner"),
+      kind: "access_changed",
+      previousIdentityGeneration: "stale-identity",
+      previousSessionGeneration: "session-teacher",
+    });
+
+    expect(controller.getSnapshot()).toMatchObject({
+      identity: { membership: { role: "teacher" } },
+      kind: "authenticated",
+    });
+  });
+
+  it("fails closed on a malformed event that names the current generations", async () => {
+    let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
+    const adapter = createAdapter(access("teacher"));
+    adapter.subscribe = (listener) => {
+      emit = listener;
+      return () => undefined;
+    };
+    const controller = createController(adapter);
+    await controller.dispatch({ type: "bootstrap" });
+
+    emit?.({
+      extra: "not-allowed",
+      identityGeneration: "identity-teacher",
+      kind: "session_revoked",
+      sessionGeneration: "session-teacher",
+    } as unknown as StaffAuthAccessEvent);
+
+    expect(controller.getSnapshot()).toMatchObject({
+      code: "invalid_backend_result",
+      kind: "dependency_failure",
     });
   });
 });

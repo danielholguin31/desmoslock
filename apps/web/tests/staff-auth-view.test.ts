@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   bindStaffAuthView,
@@ -18,9 +18,12 @@ class FakeElement {
   readonly listeners = new Map<string, (event: Event) => void>();
   autocomplete = "";
   alt = "";
+  className = "";
+  disabled = false;
   name = "";
   noValidate = false;
   required = false;
+  selected = false;
   src = "";
   tabIndex = 0;
   textContent: string | null = null;
@@ -66,20 +69,42 @@ function descendants(root: FakeElement): FakeElement[] {
 }
 
 function authenticatedSnapshot(role: "administrator" | "owner" | "teacher") {
+  const roleId = role === "administrator" ? "admin" : role;
   return {
     assuranceLevel: "aal2" as const,
     identity: {
-      accountId: `account-${role}`,
-      email: `${role}@example.test`,
+      accountId: `account-${roleId}`,
+      email: `${roleId}@example.test`,
+      profile: {
+        displayName: `${role} Staff`,
+        id: `profile-${roleId}`,
+      },
       membership: {
-        id: `membership-${role}`,
+        id: `membership-${roleId}`,
         role,
         status: "active" as const,
       },
       school: { id: "school-1", label: "Synthetic High School" },
     },
+    identityGeneration: `identity-${role}`,
     kind: "authenticated" as const,
+    manageableStaff:
+      role === "owner"
+        ? [
+            {
+              membershipId: "membership-target",
+              profile: {
+                displayName: "Ada Administrator",
+                email: "ada@example.test",
+                id: "profile-target",
+              },
+              role: "administrator" as const,
+              schoolId: "school-1",
+            },
+          ]
+        : [],
     revision: 1,
+    sessionGeneration: `session-${role}`,
   };
 }
 
@@ -139,6 +164,7 @@ describe("staff auth view", () => {
 
   it("labels storage role admin as Administrator on invitation acceptance", () => {
     const view = createStaffAuthViewModel({
+      intendedEmail: "admin@example.test",
       kind: "invitation_ready",
       revision: 1,
       role: "administrator",
@@ -156,10 +182,10 @@ describe("staff auth view", () => {
         },
       ],
       heading: "Join Synthetic High School",
-      message: "You were invited as an Administrator.",
+      message: "admin@example.test was invited as an Administrator.",
       status: "invitation_ready",
     });
-    expect(view.message).not.toContain("admin");
+    expect(view.message).not.toContain("as an admin");
   });
 
   it("renders password-recovery request and callback failures without identity or provider detail", () => {
@@ -277,21 +303,9 @@ describe("staff auth view", () => {
   });
 
   it("renders authenticated Administrator controls with local and all-session logout", () => {
-    const view = createStaffAuthViewModel({
-      assuranceLevel: "aal2",
-      identity: {
-        accountId: "account-admin",
-        email: "admin@example.test",
-        membership: {
-          id: "membership-admin",
-          role: "administrator",
-          status: "active",
-        },
-        school: { id: "school-1", label: "Synthetic High School" },
-      },
-      kind: "authenticated",
-      revision: 1,
-    });
+    const view = createStaffAuthViewModel(
+      authenticatedSnapshot("administrator"),
+    );
 
     expect(view).toMatchObject({
       actions: [
@@ -511,15 +525,20 @@ describe("staff auth view", () => {
     expect(owner.actions.map(({ id }) => id)).toEqual([
       "create_administrator_invitation",
       "create_teacher_invitation",
-      "revoke_administrator_membership",
-      "revoke_teacher_membership",
+      "review_staff_membership_revocation",
       "sign_out_local",
       "revoke_all_sessions",
     ]);
-    expect(owner.fields.map(({ id }) => id)).toEqual([
-      "target_email",
-      "membership_id",
-    ]);
+    expect(owner.fields.map(({ id }) => id)).toEqual(["target_email"]);
+    expect(owner.selects?.[0]).toMatchObject({
+      id: "staff_membership",
+      options: [
+        {
+          label: "Ada Administrator — ada@example.test — Administrator",
+          value: "membership-target",
+        },
+      ],
+    });
     expect(owner.actions.map(({ id }) => id)).not.toContain("invite_owner");
     expect(administrator.actions.map(({ id }) => id)).toEqual([
       "sign_out_local",
@@ -607,7 +626,7 @@ describe("staff auth view", () => {
     });
   });
 
-  it("maps Owner invite and revoke controls without an Owner target", () => {
+  it("maps Owner invite and authoritative staff-selection controls without exposing an ID", () => {
     const document = new FakeDocument();
     const root = new FakeElement(document, "main");
     const intents: StaffAuthViewIntent[] = [];
@@ -620,36 +639,37 @@ describe("staff auth view", () => {
     );
     const nodes = descendants(root);
     const email = nodes.find(({ name }) => name === "target_email");
-    const membership = nodes.find(({ name }) => name === "membership_id");
+    const membership = nodes.find(({ name }) => name === "staff_membership");
     const inviteTeacher = nodes.find(
       ({ dataset }) => dataset.authAction === "create_teacher_invitation",
     );
-    const revokeAdministrator = nodes.find(
-      ({ dataset }) => dataset.authAction === "revoke_administrator_membership",
+    const reviewRevocation = nodes.find(
+      ({ dataset }) =>
+        dataset.authAction === "review_staff_membership_revocation",
     );
     if (
       email === undefined ||
       membership === undefined ||
       inviteTeacher === undefined ||
-      revokeAdministrator === undefined
+      reviewRevocation === undefined
     ) {
       throw new Error("expected Owner staff-management controls");
     }
     email.value = "teacher@example.test";
-    membership.value = "membership-target";
 
-    const ambiguousMembershipForm = nodes.find(
+    const membershipForm = nodes.find(
       (node) =>
         node.tagName === "form" &&
-        descendants(node).some(({ name }) => name === "membership_id"),
+        descendants(node).some(({ name }) => name === "staff_membership"),
     );
-    ambiguousMembershipForm?.listeners.get("submit")?.({
+    membershipForm?.listeners.get("submit")?.({
       preventDefault() {},
     } as Event);
     expect(intents).toEqual([]);
 
+    membership.value = "membership-target";
     inviteTeacher.listeners.get("click")?.({ preventDefault() {} } as Event);
-    revokeAdministrator.listeners.get("click")?.({
+    membershipForm?.listeners.get("submit")?.({
       preventDefault() {},
     } as Event);
 
@@ -661,11 +681,81 @@ describe("staff auth view", () => {
       },
       {
         membershipId: "membership-target",
-        targetRole: "admin",
-        type: "revoke_staff_membership",
+        type: "review_staff_membership_revocation",
       },
     ]);
     expect(JSON.stringify(intents)).not.toContain('"targetRole":"owner"');
+    expect(
+      nodes
+        .map(({ textContent }) => textContent)
+        .filter(Boolean)
+        .join(" "),
+    ).not.toContain("membership-target");
+    expect(reviewRevocation.dataset.authActionTone).toBe("danger");
+  });
+
+  it("requires an identity-and-School confirmation before destructive revocation", () => {
+    const view = createStaffAuthViewModel({
+      kind: "confirming_staff_membership_revocation",
+      revision: 2,
+      schoolLabel: "Synthetic High School",
+      target: {
+        displayName: "Ada Administrator",
+        email: "ada@example.test",
+        role: "administrator",
+      },
+    });
+
+    expect(view).toMatchObject({
+      actions: [
+        {
+          id: "confirm_staff_membership_revocation",
+          label: "Revoke staff access",
+          tone: "danger",
+        },
+        { id: "cancel_staff_membership_revocation", label: "Cancel" },
+      ],
+      heading: "Confirm staff access revocation",
+      message:
+        "Revoke Administrator access for Ada Administrator (ada@example.test) at Synthetic High School?",
+    });
+    expect(JSON.stringify(view)).not.toContain("membership-target");
+  });
+
+  it("makes the binding disposer idempotently own controller and DOM teardown", () => {
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    const dispose = vi.fn();
+    const unsubscribe = vi.fn();
+    const initial: StaffAuthSnapshot = {
+      kind: "signed_out",
+      notice: null,
+      revision: 1,
+    };
+    const controller: StaffAuthController = {
+      async dispatch() {
+        return initial;
+      },
+      dispose,
+      getSnapshot() {
+        return initial;
+      },
+      subscribe() {
+        return unsubscribe;
+      },
+    };
+
+    const unbind = bindStaffAuthView(
+      root as unknown as HTMLElement,
+      controller,
+    );
+    expect(root.children).toHaveLength(1);
+    unbind();
+    unbind();
+
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(root.children).toEqual([]);
   });
 
   it("catches a rejected intent and announces a sanitized failure", async () => {

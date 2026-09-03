@@ -12,12 +12,13 @@ export type StaffAuthViewActionId =
   | "complete_password_recovery"
   | "create_administrator_invitation"
   | "create_teacher_invitation"
+  | "confirm_staff_membership_revocation"
+  | "cancel_staff_membership_revocation"
   | "request_recovery"
+  | "review_staff_membership_revocation"
   | "resend_email_verification"
   | "retry"
-  | "revoke_administrator_membership"
   | "revoke_all_sessions"
-  | "revoke_teacher_membership"
   | "sign_in"
   | "sign_out_local"
   | "verify_totp";
@@ -26,20 +27,25 @@ export interface StaffAuthViewAction {
   readonly group?: "invitation" | "membership" | "session";
   readonly id: StaffAuthViewActionId;
   readonly label: string;
+  readonly tone?: "danger";
 }
 
 export interface StaffAuthViewField {
   readonly autocomplete: HTMLInputElement["autocomplete"];
-  readonly id:
-    | "email"
-    | "membership_id"
-    | "new_password"
-    | "password"
-    | "target_email"
-    | "totp";
+  readonly id: "email" | "new_password" | "password" | "target_email" | "totp";
   readonly group?: "invitation" | "membership";
   readonly label: string;
   readonly type: "email" | "password" | "text";
+}
+
+export interface StaffAuthViewSelect {
+  readonly group: "membership";
+  readonly id: "staff_membership";
+  readonly label: string;
+  readonly options: readonly {
+    readonly label: string;
+    readonly value: string;
+  }[];
 }
 
 export interface StaffAuthViewImage {
@@ -53,6 +59,7 @@ export interface StaffAuthViewModel {
   readonly heading: string;
   readonly image?: StaffAuthViewImage;
   readonly message: string;
+  readonly selects?: readonly StaffAuthViewSelect[];
   readonly status: StaffAuthSnapshot["kind"];
   readonly tone: "danger" | "info" | "success" | "warning";
 }
@@ -81,9 +88,10 @@ export type StaffAuthViewIntent =
     }
   | {
       readonly membershipId: string;
-      readonly targetRole: "admin" | "teacher";
-      readonly type: "revoke_staff_membership";
-    };
+      readonly type: "review_staff_membership_revocation";
+    }
+  | { readonly type: "confirm_staff_membership_revocation" }
+  | { readonly type: "cancel_staff_membership_revocation" };
 
 const emailField: StaffAuthViewField = {
   autocomplete: "email",
@@ -119,14 +127,6 @@ const targetEmailField: StaffAuthViewField = {
   id: "target_email",
   label: "Staff email",
   type: "email",
-};
-
-const membershipIdField: StaffAuthViewField = {
-  autocomplete: "off",
-  group: "membership",
-  id: "membership_id",
-  label: "Membership ID",
-  type: "text",
 };
 
 export function createStaffAuthViewModel(
@@ -172,7 +172,7 @@ export function createStaffAuthViewModel(
       actions: [{ id: "accept_invitation", label: "Accept invitation" }],
       fields: [newPasswordField],
       heading: `Join ${snapshot.schoolLabel}`,
-      message: `You were invited as ${roleWithArticle(snapshot.role)}.`,
+      message: `${snapshot.intendedEmail} was invited as ${roleWithArticle(snapshot.role)}.`,
       status: snapshot.kind,
       tone: "info",
     };
@@ -346,13 +346,9 @@ export function createStaffAuthViewModel(
             },
             {
               group: "membership",
-              id: "revoke_administrator_membership",
-              label: "Revoke Administrator",
-            },
-            {
-              group: "membership",
-              id: "revoke_teacher_membership",
-              label: "Revoke Teacher",
+              id: "review_staff_membership_revocation",
+              label: "Review staff access revocation",
+              tone: "danger",
             },
           ]
         : [];
@@ -368,15 +364,49 @@ export function createStaffAuthViewModel(
           ...(role === "owner" ? { group: "session" as const } : {}),
           id: "revoke_all_sessions",
           label: "Sign out everywhere",
+          tone: "danger",
         },
       ],
-      fields: role === "owner" ? [targetEmailField, membershipIdField] : [],
+      fields: role === "owner" ? [targetEmailField] : [],
       heading: `${roleLabel(role)} access`,
       message: `Signed in as ${snapshot.identity.email} at ${snapshot.identity.school.label}${
         snapshot.assuranceLevel === "aal2" ? " with step-up verification" : ""
       }.`,
       status: snapshot.kind,
+      ...(role === "owner"
+        ? {
+            selects: [
+              {
+                group: "membership" as const,
+                id: "staff_membership" as const,
+                label: "Administrator or Teacher",
+                options: snapshot.manageableStaff.map((entry) => ({
+                  label: `${entry.profile.displayName} — ${entry.profile.email} — ${roleLabel(entry.role)}`,
+                  value: entry.membershipId,
+                })),
+              },
+            ],
+          }
+        : {}),
       tone: "success",
+    };
+  }
+
+  if (snapshot.kind === "confirming_staff_membership_revocation") {
+    return {
+      actions: [
+        {
+          id: "confirm_staff_membership_revocation",
+          label: "Revoke staff access",
+          tone: "danger",
+        },
+        { id: "cancel_staff_membership_revocation", label: "Cancel" },
+      ],
+      fields: [],
+      heading: "Confirm staff access revocation",
+      message: `Revoke ${roleLabel(snapshot.target.role)} access for ${snapshot.target.displayName} (${snapshot.target.email}) at ${snapshot.schoolLabel}?`,
+      status: snapshot.kind,
+      tone: "warning",
     };
   }
 
@@ -531,6 +561,7 @@ export function renderStaffAuthView(
   const document = root.ownerDocument;
   const view = createStaffAuthViewModel(snapshot);
   const section = document.createElement("section");
+  section.className = "staff-auth";
   section.dataset.authStatus = view.status;
   section.dataset.authTone = view.tone;
 
@@ -547,12 +578,15 @@ export function renderStaffAuthView(
 
   if (view.image !== undefined) {
     const image = document.createElement("img");
+    image.className = "staff-auth__qr";
     image.alt = view.image.alt;
     image.src = view.image.src;
     section.append(image);
   }
 
   const inputs: Partial<Record<StaffAuthViewField["id"], HTMLInputElement>> =
+    {};
+  const selects: Partial<Record<StaffAuthViewSelect["id"], HTMLSelectElement>> =
     {};
   const reportIntentFailure = () => {
     section.dataset.authTone = "danger";
@@ -563,7 +597,13 @@ export function renderStaffAuthView(
     message.focus();
   };
   const emit = (action: StaffAuthViewActionId) => {
-    const intent = createIntent(action, inputs);
+    const intent = createIntent(action, inputs, selects);
+    if (intent === null) {
+      message.setAttribute("aria-live", "assertive");
+      message.textContent = "Select an Administrator or Teacher to continue.";
+      selects.staff_membership?.focus();
+      return;
+    }
     let outcome: Promise<void> | void;
     try {
       outcome = onIntent(intent);
@@ -584,18 +624,27 @@ export function renderStaffAuthView(
     const actions = view.actions.filter(
       (action) => (action.group ?? "primary") === group,
     );
-    if (fields.length === 0 && actions.length === 0) {
+    const groupSelects = (view.selects ?? []).filter(
+      (select) => select.group === group,
+    );
+    if (
+      fields.length === 0 &&
+      actions.length === 0 &&
+      groupSelects.length === 0
+    ) {
       continue;
     }
     const controls = document.createElement("form");
+    controls.className = "staff-auth__form";
     controls.noValidate = true;
     let container: HTMLElement = controls;
     if (group !== "primary") {
       const fieldset = document.createElement("fieldset");
+      fieldset.className = "staff-auth__group";
       const legend = document.createElement("legend");
       legend.textContent = {
         invitation: "Invite staff",
-        membership: "Revoke staff Membership",
+        membership: "Revoke staff access",
         session: "Session controls",
       }[group];
       fieldset.append(legend);
@@ -604,6 +653,7 @@ export function renderStaffAuthView(
     }
     for (const field of fields) {
       const label = document.createElement("label");
+      label.className = "staff-auth__field";
       const labelText = document.createElement("span");
       labelText.textContent = field.label;
       const input = document.createElement("input");
@@ -615,9 +665,32 @@ export function renderStaffAuthView(
       label.append(labelText, input);
       container.append(label);
     }
+    for (const field of groupSelects) {
+      const label = document.createElement("label");
+      label.className = "staff-auth__field";
+      const labelText = document.createElement("span");
+      labelText.textContent = field.label;
+      const select = document.createElement("select");
+      select.name = field.id;
+      select.required = true;
+      const placeholder = document.createElement("option");
+      placeholder.disabled = true;
+      placeholder.selected = true;
+      placeholder.textContent = "Select staff member";
+      placeholder.value = "";
+      select.append(placeholder);
+      for (const optionModel of field.options) {
+        const option = document.createElement("option");
+        option.textContent = optionModel.label;
+        option.value = optionModel.value;
+        select.append(option);
+      }
+      selects[field.id] = select;
+      label.append(labelText, select);
+      container.append(label);
+    }
 
-    const primaryAction =
-      group === "primary" || actions.length === 1 ? actions[0] : undefined;
+    const primaryAction = actions[0];
     controls.addEventListener("submit", (event) => {
       event.preventDefault();
       if (primaryAction !== undefined) {
@@ -628,6 +701,9 @@ export function renderStaffAuthView(
       const button = document.createElement("button");
       const isPrimary = action === primaryAction;
       button.dataset.authAction = action.id;
+      if (action.tone !== undefined) {
+        button.dataset.authActionTone = action.tone;
+      }
       button.textContent = action.label;
       button.type = isPrimary ? "submit" : "button";
       if (!isPrimary) {
@@ -642,8 +718,9 @@ export function renderStaffAuthView(
   }
   root.replaceChildren(section);
   const firstInput = Object.values(inputs)[0];
-  if (firstInput !== undefined) {
-    firstInput.focus();
+  const firstControl = firstInput ?? Object.values(selects)[0];
+  if (firstControl !== undefined) {
+    firstControl.focus();
   } else {
     heading.tabIndex = -1;
     heading.focus();
@@ -653,7 +730,8 @@ export function renderStaffAuthView(
 function createIntent(
   action: StaffAuthViewActionId,
   inputs: Partial<Record<StaffAuthViewField["id"], HTMLInputElement>>,
-): StaffAuthViewIntent {
+  selects: Partial<Record<StaffAuthViewSelect["id"], HTMLSelectElement>>,
+): StaffAuthViewIntent | null {
   switch (action) {
     case "sign_in":
       return {
@@ -700,25 +778,36 @@ function createIntent(
           action === "create_administrator_invitation" ? "admin" : "teacher",
         type: "create_staff_invitation",
       };
-    case "revoke_administrator_membership":
-    case "revoke_teacher_membership":
-      return {
-        membershipId: inputs.membership_id?.value ?? "",
-        targetRole:
-          action === "revoke_administrator_membership" ? "admin" : "teacher",
-        type: "revoke_staff_membership",
-      };
+    case "review_staff_membership_revocation":
+      return selects.staff_membership?.value
+        ? {
+            membershipId: selects.staff_membership.value,
+            type: "review_staff_membership_revocation",
+          }
+        : null;
+    case "confirm_staff_membership_revocation":
+      return { type: "confirm_staff_membership_revocation" };
+    case "cancel_staff_membership_revocation":
+      return { type: "cancel_staff_membership_revocation" };
   }
 }
 
+/**
+ * Binds one controller to one component root. The returned idempotent disposer
+ * owns controller teardown, including revoking any ephemeral TOTP presentation.
+ */
 export function bindStaffAuthView(
   root: HTMLElement,
   controller: StaffAuthController,
 ): () => void {
+  let bound = true;
   const handleIntent = async (intent: StaffAuthViewIntent): Promise<void> => {
     try {
       await controller.dispatch(intent);
     } catch {
+      if (!bound) {
+        return;
+      }
       const current = controller.getSnapshot();
       renderStaffAuthView(
         root,
@@ -734,10 +823,21 @@ export function bindStaffAuthView(
     }
   };
   const render = (snapshot: StaffAuthSnapshot) => {
-    renderStaffAuthView(root, snapshot, handleIntent);
+    if (bound) {
+      renderStaffAuthView(root, snapshot, handleIntent);
+    }
   };
   render(controller.getSnapshot());
-  return controller.subscribe(render);
+  const unsubscribe = controller.subscribe(render);
+  return () => {
+    if (!bound) {
+      return;
+    }
+    bound = false;
+    unsubscribe();
+    controller.dispose();
+    root.replaceChildren();
+  };
 }
 
 function clearTransientInputs(

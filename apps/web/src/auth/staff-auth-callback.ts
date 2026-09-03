@@ -3,6 +3,14 @@ export type StaffAuthCallbackFlow =
 
 export type StaffAuthCallbackStateResult = "accepted" | "invalid" | "replayed";
 
+export type StaffInvitationCallbackReceipt =
+  | { readonly status: "accepted" }
+  | {
+      readonly code:
+        "invalid_callback" | "inspection_unavailable" | "malformed_callback";
+      readonly status: "rejected";
+    };
+
 export interface StaffAuthCallbackStateStore {
   /** Atomically consumes a state value bound to one exact callback flow. */
   consume(input: {
@@ -102,7 +110,12 @@ export async function consumeStaffAuthPkceCallback(
     return rejected("invalid_flow");
   }
   const state = url.searchParams.get("state");
-  if (state === null || state.length === 0 || state.length > 512) {
+  if (
+    state === null ||
+    state.length === 0 ||
+    state.length > 512 ||
+    hasControlText(state)
+  ) {
     return rejected("malformed_callback");
   }
 
@@ -113,11 +126,14 @@ export async function consumeStaffAuthPkceCallback(
     entries.length !== 3 ||
     exactKeys.size !== 3 ||
     (isProviderRejection &&
-      (providerError === "" || authorizationCode !== null)) ||
+      (providerError === "" ||
+        hasControlText(providerError) ||
+        authorizationCode !== null)) ||
     (!isProviderRejection &&
       (authorizationCode === null ||
         authorizationCode.length === 0 ||
-        authorizationCode.length > 2048))
+        authorizationCode.length > 2048 ||
+        hasControlText(authorizationCode)))
   ) {
     return rejected("malformed_callback");
   }
@@ -149,6 +165,67 @@ export async function consumeStaffAuthPkceCallback(
   return { code: "accepted", flow, status: "accepted" };
 }
 
+/**
+ * Removes an invitation credential from browser history before any async work,
+ * then exposes it only to the injected one-shot inspection boundary.
+ */
+export async function consumeStaffInvitationCallback(
+  callbackUrl: string,
+  options: {
+    readonly history: StaffAuthCallbackHistory;
+    readonly inspect: (invitationToken: string) => Promise<void>;
+    readonly route: StaffAuthCallbackRoute;
+  },
+): Promise<StaffInvitationCallbackReceipt> {
+  const trustedRoute = parseTrustedRoute(options.route);
+
+  try {
+    options.history.replaceState(null, "", trustedRoute?.pathname ?? "/");
+  } catch {
+    return { code: "invalid_callback", status: "rejected" };
+  }
+
+  if (trustedRoute === null || callbackUrl.length > 4096) {
+    return { code: "invalid_callback", status: "rejected" };
+  }
+
+  let url: URL;
+  try {
+    url = new URL(callbackUrl);
+  } catch {
+    return { code: "invalid_callback", status: "rejected" };
+  }
+
+  if (
+    url.origin !== trustedRoute.origin ||
+    url.pathname !== trustedRoute.pathname ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.hash !== "" ||
+    [...url.searchParams.keys()].some((key) => key !== "token") ||
+    url.searchParams.getAll("token").length !== 1
+  ) {
+    return { code: "invalid_callback", status: "rejected" };
+  }
+
+  const invitationToken = url.searchParams.get("token");
+  if (
+    invitationToken === null ||
+    invitationToken.length === 0 ||
+    invitationToken.length > 2048 ||
+    hasControlText(invitationToken)
+  ) {
+    return { code: "malformed_callback", status: "rejected" };
+  }
+
+  try {
+    await options.inspect(invitationToken);
+  } catch {
+    return { code: "inspection_unavailable", status: "rejected" };
+  }
+  return { status: "accepted" };
+}
+
 function parseTrustedRoute(
   route: StaffAuthCallbackRoute,
 ): StaffAuthCallbackRoute | null {
@@ -158,7 +235,9 @@ function parseTrustedRoute(
     route.pathname.startsWith("//") ||
     route.pathname.includes("?") ||
     route.pathname.includes("#") ||
-    route.pathname.includes("\\")
+    route.pathname.includes("\\") ||
+    hasControlText(route.pathname) ||
+    hasControlText(route.origin)
   ) {
     return null;
   }
@@ -202,4 +281,11 @@ function rejected(
   code: Exclude<StaffAuthCallbackReceipt["code"], "accepted">,
 ): StaffAuthCallbackReceipt {
   return { code, status: "rejected" };
+}
+
+function hasControlText(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
+  });
 }

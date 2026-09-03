@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   consumeStaffAuthPkceCallback,
+  consumeStaffInvitationCallback,
   type StaffAuthCallbackFlow,
   type StaffAuthCallbackStateResult,
 } from "../src/auth/staff-auth-callback.js";
@@ -218,6 +219,8 @@ describe("staff auth PKCE callback", () => {
     "code=one&state=two&state=three&flow=sign_in",
     "code=one&state=two&flow=sign_in&flow=password_recovery",
     "code=&state=two&flow=sign_in",
+    "code=one%00&state=two&flow=sign_in",
+    "code=one&state=two%0A&flow=sign_in",
     "error=&state=two&flow=sign_in",
     "code=one&error=denied&state=two&flow=sign_in",
     "state=two&flow=sign_in",
@@ -263,5 +266,103 @@ describe("staff auth PKCE callback", () => {
     });
 
     expect(receipt).toEqual({ code: "invalid_callback", status: "rejected" });
+  });
+});
+
+describe("staff invitation callback", () => {
+  const invitationRoute = {
+    origin: "https://app.example.test",
+    pathname: "/auth/invitation",
+  } as const;
+
+  it("scrubs the raw invitation credential synchronously before inspection", async () => {
+    const order: string[] = [];
+    let release: (() => void) | undefined;
+    const inspected = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pending = consumeStaffInvitationCallback(
+      `${invitationRoute.origin}${invitationRoute.pathname}?token=SENTINEL-token`,
+      {
+        history: {
+          replaceState(data, unused, url) {
+            expect(data).toBeNull();
+            expect(unused).toBe("");
+            expect(url).toBe("/auth/invitation");
+            order.push("scrub");
+          },
+        },
+        async inspect(token) {
+          expect(token).toBe("SENTINEL-token");
+          order.push("inspect");
+          await inspected;
+        },
+        route: invitationRoute,
+      },
+    );
+
+    expect(order).toEqual(["scrub", "inspect"]);
+    release?.();
+    await expect(pending).resolves.toEqual({ status: "accepted" });
+    expect(JSON.stringify(await pending)).not.toContain("SENTINEL");
+  });
+
+  it.each([
+    "https://evil.example.test/auth/invitation?token=one",
+    "https://app.example.test/wrong?token=one",
+    "https://app.example.test/auth/invitation?token=one&extra=two",
+    "https://app.example.test/auth/invitation?token=one&token=two",
+    "https://app.example.test/auth/invitation?token=one#credential",
+  ])(
+    "rejects an invitation outside the trusted exact callback shape",
+    async (url) => {
+      const inspect = vi.fn(async () => undefined);
+      const receipt = await consumeStaffInvitationCallback(url, {
+        history: { replaceState() {} },
+        inspect,
+        route: invitationRoute,
+      });
+
+      expect(receipt.status).toBe("rejected");
+      expect(inspect).not.toHaveBeenCalled();
+    },
+  );
+
+  it("returns only a sanitized code when inspection is unavailable", async () => {
+    const receipt = await consumeStaffInvitationCallback(
+      `${invitationRoute.origin}${invitationRoute.pathname}?token=SENTINEL-token`,
+      {
+        history: { replaceState() {} },
+        async inspect() {
+          throw new Error("SENTINEL-provider-detail");
+        },
+        route: invitationRoute,
+      },
+    );
+
+    expect(receipt).toEqual({
+      code: "inspection_unavailable",
+      status: "rejected",
+    });
+    expect(JSON.stringify(receipt)).not.toContain("SENTINEL");
+  });
+
+  it("never inspects when browser history cannot scrub the credential", async () => {
+    const inspect = vi.fn(async () => undefined);
+    const receipt = await consumeStaffInvitationCallback(
+      `${invitationRoute.origin}${invitationRoute.pathname}?token=one`,
+      {
+        history: {
+          replaceState() {
+            throw new Error("unavailable");
+          },
+        },
+        inspect,
+        route: invitationRoute,
+      },
+    );
+
+    expect(receipt).toEqual({ code: "invalid_callback", status: "rejected" });
+    expect(inspect).not.toHaveBeenCalled();
   });
 });
