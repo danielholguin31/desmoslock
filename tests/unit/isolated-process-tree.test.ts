@@ -11,6 +11,7 @@ import {
   parseRetirementIdentityTable,
   readProcessIdentityTable,
   selectDescendantProcessIdentities,
+  selectProcessGroupIdentities,
   waitForProcessIdentitiesToDisappear,
 } from "../../scripts/process-identity-table.mjs";
 
@@ -142,6 +143,16 @@ function throwCombinedErrors(
 }
 
 describe("process identity table", () => {
+  const gnuLinuxPsFixture = [
+    "      1       0       1 Thu Sep  3 17:42:01 2026",
+    "      2       0       0 Thu Sep  3 17:42:01 2026",
+    "    143       1     143 Thu Sep  3 17:42:04 2026",
+  ].join("\n");
+  const macOsPsFixture = [
+    "    1     0     1 Sun Aug 23 14:45:22 2026    ",
+    "  100     1   100 Sun Aug 23 14:45:30 2026    ",
+    "  102     1   102 Sun Aug 23 14:45:30 2026    ",
+  ].join("\n");
   const root = Object.freeze({
     parentPid: 2,
     processGroupId: 42,
@@ -153,6 +164,61 @@ describe("process identity table", () => {
     processGroupId: 42,
     processId: 43,
     startedAt: "Mon Sep 1 12:34:57 2026",
+  });
+
+  it("parses GNU/Linux and macOS trusted-ps output shapes", () => {
+    expect(parseProcessIdentityTable(macOsPsFixture)).toEqual([
+      {
+        parentPid: 0,
+        processGroupId: 1,
+        processId: 1,
+        startedAt: "Sun Aug 23 14:45:22 2026",
+      },
+      {
+        parentPid: 1,
+        processGroupId: 100,
+        processId: 100,
+        startedAt: "Sun Aug 23 14:45:30 2026",
+      },
+      {
+        parentPid: 1,
+        processGroupId: 102,
+        processId: 102,
+        startedAt: "Sun Aug 23 14:45:30 2026",
+      },
+    ]);
+    expect(parseProcessIdentityTable(gnuLinuxPsFixture)).toEqual([
+      {
+        parentPid: 0,
+        processGroupId: 1,
+        processId: 1,
+        startedAt: "Thu Sep  3 17:42:01 2026",
+      },
+      {
+        parentPid: 0,
+        processGroupId: 0,
+        processId: 2,
+        startedAt: "Thu Sep  3 17:42:01 2026",
+      },
+      {
+        parentPid: 1,
+        processGroupId: 143,
+        processId: 143,
+        startedAt: "Thu Sep  3 17:42:04 2026",
+      },
+    ]);
+  });
+
+  it("keeps parsed kernel and init groups outside the signaling selector", () => {
+    const identities = parseProcessIdentityTable(gnuLinuxPsFixture);
+
+    for (const unsafeProcessGroupId of [0, 1]) {
+      expect(() =>
+        selectProcessGroupIdentities(identities, unsafeProcessGroupId),
+      ).toThrow(
+        "Process group identity lookup must be a safe positive pid greater than one",
+      );
+    }
   });
 
   it("does not walk descendants from a stale reused root pid", () => {

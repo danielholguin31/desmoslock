@@ -40,7 +40,7 @@ export function parseProcessIdentityTable(stdout) {
     identities.push(
       Object.freeze({
         parentPid: parseSafeInteger(match[2], "Process parent pid", 0),
-        processGroupId: parseSafeInteger(match[3], "Process group identity", 1),
+        processGroupId: parseSafeInteger(match[3], "Process group identity", 0),
         processId: parseSafeInteger(match[1], "Process identity", 1),
         startedAt: match[4],
       }),
