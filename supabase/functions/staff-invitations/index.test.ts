@@ -705,6 +705,52 @@ Deno.test(
 );
 
 Deno.test(
+  "expired preparation replay is terminal before SMTP delivery",
+  async () => {
+    for (const terminalCode of [
+      "invitation_delivery_failed",
+      "invitation_expired",
+    ]) {
+      let preparations = 0;
+      let deliveries = 0;
+      let failures = 0;
+      let publications = 0;
+      const response = await handleRequest(
+        invitationRequest(),
+        dependencies({
+          prepareInvitation: async () => {
+            preparations += 1;
+            return terminalCode;
+          },
+          deliverInvitation: async () => {
+            deliveries += 1;
+            return "delivered";
+          },
+          failInvitation: async () => {
+            failures += 1;
+            return "invitation_consumed";
+          },
+          publishInvitation: async () => {
+            publications += 1;
+            return "invitation_usable";
+          },
+        }),
+      );
+
+      assertEquals(response.status, 503);
+      assertEquals(await response.json(), {
+        code: "service_unavailable",
+        ok: false,
+      });
+      assertEquals(preparations, 1);
+      assertEquals(deliveries, 0);
+      assertEquals(failures, 0);
+      assertEquals(publications, 0);
+    }
+  },
+);
+
+Deno.test(
   "staff invitation leaves delivery-ready non-consumable after delivery failure",
   async () => {
     const calls: unknown[] = [];

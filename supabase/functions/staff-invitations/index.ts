@@ -604,7 +604,7 @@ async function confirmInvitationDeliveryReady(
   invitationId: string,
   userId: string,
   expiresAt: string,
-): Promise<boolean> {
+): Promise<"failed" | "ready" | "terminal"> {
   for (let attempt = 0; attempt < PREPARE_ATTEMPTS; attempt += 1) {
     try {
       const code = await dependencies.prepareInvitation(
@@ -613,17 +613,23 @@ async function confirmInvitationDeliveryReady(
         expiresAt,
       );
       if (code === "invitation_delivery_ready") {
-        return true;
+        return "ready";
+      }
+      if (
+        code === "invitation_expired" ||
+        code === "invitation_delivery_failed"
+      ) {
+        return "terminal";
       }
       if (code !== "dependency_unavailable") {
-        return false;
+        return "failed";
       }
     } catch {
       // A lost response is ambiguous. Retry the same idempotency tuple once;
       // delivery remains forbidden until an exact ready result is observed.
     }
   }
-  return false;
+  return "failed";
 }
 
 async function confirmInvitationPublished(
@@ -781,18 +787,22 @@ export async function handleRequest(
     );
     return codeResponse("service_unavailable", 503, dependencies.allowedOrigin);
   }
-  const ready = await confirmInvitationDeliveryReady(
+  const preparation = await confirmInvitationDeliveryReady(
     dependencies,
     invitationId,
     generatedUserId,
     expiresAt,
   );
-  if (!ready) {
-    await recordFailedDelivery(
-      dependencies,
-      invitationId,
-      "dependency_unavailable",
-    );
+  if (preparation !== "ready") {
+    // Expiry terminalization is already audited by the database. Do not issue
+    // a second lifecycle mutation after an exact terminal prepare result.
+    if (preparation !== "terminal") {
+      await recordFailedDelivery(
+        dependencies,
+        invitationId,
+        "dependency_unavailable",
+      );
+    }
     return codeResponse("service_unavailable", 503, dependencies.allowedOrigin);
   }
 
