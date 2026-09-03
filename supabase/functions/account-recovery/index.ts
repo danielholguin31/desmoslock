@@ -3,7 +3,7 @@ import {
   handlePreflight,
   isExactRecord,
   methodNotAllowedResponse,
-  parseEmail,
+  parseCanonicalEmail,
   parseExactCallback,
   parseExactOrigin,
   readStrictJson,
@@ -129,7 +129,7 @@ export async function handleRequest(
   try {
     dependencies = injectedDependencies ?? runtimeDependencies();
   } catch {
-    return codeResponse("dependency_unavailable", 503);
+    return codeResponse("service_unavailable", 503);
   }
   const corsPolicy = {
     allowedHeaders: ["content-type"],
@@ -139,7 +139,7 @@ export async function handleRequest(
     return handlePreflight(request, corsPolicy);
   }
   if (!validateRequestOrigin(request, dependencies.allowedOrigin)) {
-    return codeResponse("forbidden", 403);
+    return codeResponse("authorization_denied", 403);
   }
   if (request.method !== "POST") {
     return methodNotAllowedResponse(dependencies.allowedOrigin);
@@ -148,7 +148,7 @@ export async function handleRequest(
   if (!isExactRecord(body, ["email"])) {
     return codeResponse("invalid_request", 400, dependencies.allowedOrigin);
   }
-  const email = parseEmail(body.email);
+  const email = parseCanonicalEmail(body.email);
   if (email === null) {
     return codeResponse("invalid_request", 400, dependencies.allowedOrigin);
   }

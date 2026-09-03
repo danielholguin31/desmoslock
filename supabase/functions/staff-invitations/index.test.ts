@@ -12,7 +12,7 @@ const BACKEND_ORIGIN = "https://abcdefghijklmnopqrst.supabase.co";
 const CALLBACK = `${WEB_ORIGIN}/auth/invitation`;
 const INVITATION_ID = "10000000-0000-0000-0000-000000000001";
 const USER_ID = "20000000-0000-0000-0000-000000000002";
-const WORKSPACE_ID = "30000000-0000-0000-0000-000000000003";
+const WORKSPACE_ID = "30000000-0000-4000-8000-000000000003";
 const JWT = "synthetic-header.synthetic-payload.synthetic-signature";
 const ACTION_TOKEN_SENTINEL = "synthetic-action-token-sentinel";
 const ACTION_LINK =
@@ -45,9 +45,9 @@ async function assertRejects(action: () => Promise<unknown>): Promise<void> {
 
 function invitationRequest(
   body: unknown = {
-    email: "Teacher@Example.com",
-    role: "teacher",
-    workspaceId: WORKSPACE_ID,
+    email: "teacher@example.com",
+    role: "administrator",
+    schoolId: WORKSPACE_ID,
   },
   overrides: {
     readonly headers?: Record<string, string>;
@@ -134,15 +134,18 @@ Deno.test(
       response.headers.get("access-control-allow-origin"),
       WEB_ORIGIN,
     );
-    assertEquals(await response.json(), { code: "invitation_created" });
+    assertEquals(await response.json(), {
+      code: "invitation_created",
+      ok: true,
+    });
     assertEquals(calls, [
       [
         "authorize",
         JWT,
         {
           email: "teacher@example.com",
-          role: "teacher",
-          workspaceId: WORKSPACE_ID,
+          role: "administrator",
+          schoolId: WORKSPACE_ID,
         },
       ],
       ["generate", "teacher@example.com"],
@@ -189,7 +192,41 @@ Deno.test("staff invitation validates exact CORS preflight", async () => {
     dependencies(),
   );
   assertEquals(extraHeader.status, 400);
-  assertEquals(await extraHeader.json(), { code: "invalid_request" });
+  assertEquals(await extraHeader.json(), {
+    code: "invalid_request",
+    ok: false,
+  });
+
+  const wrongOrigin = await handleRequest(
+    invitationRequest(undefined, {
+      headers: {
+        "access-control-request-headers": "authorization, content-type",
+        "access-control-request-method": "POST",
+        origin: "https://attacker.invalid",
+      },
+      method: "OPTIONS",
+    }),
+    dependencies(),
+  );
+  assertEquals(wrongOrigin.status, 403);
+  assertEquals(wrongOrigin.headers.get("access-control-allow-origin"), null);
+  assertEquals(await wrongOrigin.json(), {
+    code: "authorization_denied",
+    ok: false,
+  });
+});
+
+Deno.test({
+  name: "staff invitation config failure returns the exact product response",
+  permissions: { env: false },
+  fn: async () => {
+    const response = await handleRequest(invitationRequest());
+    assertEquals(response.status, 503);
+    assertEquals(await response.json(), {
+      code: "service_unavailable",
+      ok: false,
+    });
+  },
 });
 
 Deno.test(
@@ -201,6 +238,10 @@ Deno.test(
     );
     assertEquals(methodResponse.status, 405);
     assertEquals(methodResponse.headers.get("allow"), "POST, OPTIONS");
+    assertEquals(await methodResponse.json(), {
+      code: "invalid_request",
+      ok: false,
+    });
 
     const originResponse = await handleRequest(
       invitationRequest(undefined, {
@@ -213,7 +254,10 @@ Deno.test(
       originResponse.headers.get("access-control-allow-origin"),
       null,
     );
-    assertEquals(await originResponse.json(), { code: "forbidden" });
+    assertEquals(await originResponse.json(), {
+      code: "authorization_denied",
+      ok: false,
+    });
   },
 );
 
@@ -237,7 +281,10 @@ Deno.test(
         }),
       );
       assertEquals(response.status, 401);
-      assertEquals(await response.json(), { code: "unauthenticated" });
+      assertEquals(await response.json(), {
+        code: "authentication_required",
+        ok: false,
+      });
     }
     assertEquals(calls, 0);
   },
@@ -261,37 +308,70 @@ Deno.test(
     for (const request of invalidRequests) {
       const response = await handleRequest(request, dependencies());
       assertEquals(response.status, 400);
-      assertEquals(await response.json(), { code: "invalid_request" });
+      assertEquals(await response.json(), {
+        code: "invalid_request",
+        ok: false,
+      });
     }
   },
 );
 
 Deno.test(
-  "staff invitation accepts only the exact schema and admin or teacher roles",
+  "staff invitation accepts only exact School schema and product roles",
   async () => {
     let calls = 0;
     const invalidBodies = [
       {
         email: "teacher@example.com",
         role: "owner",
-        workspaceId: WORKSPACE_ID,
+        schoolId: WORKSPACE_ID,
       },
       {
         email: "teacher@example.com",
         role: "student",
-        workspaceId: WORKSPACE_ID,
+        schoolId: WORKSPACE_ID,
       },
-      { email: "not-an-email", role: "teacher", workspaceId: WORKSPACE_ID },
+      {
+        email: "teacher@example.com",
+        role: "admin",
+        schoolId: WORKSPACE_ID,
+      },
+      {
+        email: "Teacher@Example.com",
+        role: "teacher",
+        schoolId: WORKSPACE_ID,
+      },
+      {
+        email: "teacher`tag@example.com",
+        role: "teacher",
+        schoolId: WORKSPACE_ID,
+      },
+      { email: "not-an-email", role: "teacher", schoolId: WORKSPACE_ID },
       {
         email: "teacher@example.com",
         extra: true,
         role: "teacher",
-        workspaceId: WORKSPACE_ID,
+        schoolId: WORKSPACE_ID,
       },
       {
         email: "teacher@example.com",
         role: "teacher",
-        workspaceId: "not-a-uuid",
+        schoolId: "not-a-uuid",
+      },
+      {
+        email: "teacher@example.com",
+        role: "teacher",
+        schoolId: "30000000-0000-0000-8000-000000000003",
+      },
+      {
+        email: "teacher@example.com",
+        role: "teacher",
+        schoolId: "30000000-0000-4000-A000-000000000003",
+      },
+      {
+        email: "teacher@example.com",
+        role: "teacher",
+        workspaceId: WORKSPACE_ID,
       },
     ];
     for (const body of invalidBodies) {
@@ -329,41 +409,64 @@ Deno.test(
       }),
     );
     assertEquals(response.status, 403);
-    assertEquals(await response.json(), { code: "forbidden" });
+    assertEquals(await response.json(), {
+      code: "authorization_denied",
+      ok: false,
+    });
     assertEquals(generatedLinks, 0);
   },
 );
 
 Deno.test(
-  "staff invitation maps stable caller authorization failures",
+  "staff invitation maps internal authorization results to product codes",
   async () => {
     const cases = [
-      ["email_unverified", 403],
-      ["membership_inactive", 403],
-      ["step_up_required", 403],
-      ["session_expired", 401],
-      ["session_revoked", 401],
-      ["rate_limited", 429],
-      ["conflict", 409],
+      ["invalid_request", "invalid_request", 400],
+      ["unauthenticated", "authentication_required", 401],
+      ["email_unverified", "authorization_denied", 403],
+      ["forbidden", "authorization_denied", 403],
+      ["membership_inactive", "authorization_denied", 403],
+      ["invitation_not_found", "invitation_not_found", 404],
+      ["invitation_expired", "invitation_expired", 409],
+      ["invitation_consumed", "invitation_not_found", 404],
+      ["session_expired", "session_expired", 401],
+      ["session_revoked", "session_revoked", 401],
+      ["step_up_required", "step_up_required", 403],
+      ["rate_limited", "rate_limited", 429],
+      ["conflict", "service_unavailable", 503],
+      ["dependency_unavailable", "service_unavailable", 503],
+      ["provider_diagnostic_sentinel", "service_unavailable", 503],
     ] as const;
-    for (const [code, status] of cases) {
+    for (const [internalCode, publicCode, status] of cases) {
       const response = await handleRequest(
         invitationRequest(),
-        dependencies({ authorizeInvitation: async () => ({ code }) }),
+        dependencies({
+          authorizeInvitation: async () => ({ code: internalCode }),
+        }),
       );
       assertEquals(response.status, status);
-      assertEquals(await response.json(), { code });
+      assertEquals(await response.json(), { code: publicCode, ok: false });
     }
   },
 );
 
 Deno.test(
-  "staff invitation records generated-link failures before returning",
+  "staff invitation records accepted cleanup reasons before returning product failures",
   async () => {
-    for (const [generatorCode, expectedStatus] of [
-      ["conflict", 409],
-      ["rate_limited", 429],
-      ["dependency_unavailable", 503],
+    for (const [generatorCode, cleanupReason, publicCode, expectedStatus] of [
+      [
+        "conflict",
+        "invalid_request",
+        "existing_confirmed_user_unsupported",
+        409,
+      ],
+      ["rate_limited", "dependency_unavailable", "rate_limited", 429],
+      [
+        "dependency_unavailable",
+        "dependency_unavailable",
+        "service_unavailable",
+        503,
+      ],
     ] as const) {
       const failures: unknown[] = [];
       const response = await handleRequest(
@@ -377,8 +480,8 @@ Deno.test(
         }),
       );
       assertEquals(response.status, expectedStatus);
-      assertEquals(await response.json(), { code: generatorCode });
-      assertEquals(failures, [[INVITATION_ID, generatorCode]]);
+      assertEquals(await response.json(), { code: publicCode, ok: false });
+      assertEquals(failures, [[INVITATION_ID, cleanupReason]]);
     }
   },
 );
@@ -438,7 +541,10 @@ Deno.test(
       }),
     );
     assertEquals(response.status, 503);
-    assertEquals(await response.json(), { code: "dependency_unavailable" });
+    assertEquals(await response.json(), {
+      code: "service_unavailable",
+      ok: false,
+    });
     assertEquals(preparations, 2);
     assertEquals(deliveries, 0);
     assertEquals(failures, [[INVITATION_ID, "dependency_unavailable"]]);
@@ -469,7 +575,10 @@ Deno.test(
       }),
     );
     assertEquals(response.status, 503);
-    assertEquals(await response.json(), { code: "dependency_unavailable" });
+    assertEquals(await response.json(), {
+      code: "service_unavailable",
+      ok: false,
+    });
     assertEquals(preparations, 1);
     assertEquals(deliveries, 0);
     assertEquals(failures, [[INVITATION_ID, "dependency_unavailable"]]);
@@ -502,7 +611,10 @@ Deno.test(
       }),
     );
     assertEquals(response.status, 503);
-    assertEquals(await response.json(), { code: "dependency_unavailable" });
+    assertEquals(await response.json(), {
+      code: "service_unavailable",
+      ok: false,
+    });
     assertEquals(calls, [
       "prepare",
       "deliver",
@@ -547,7 +659,10 @@ Deno.test(
       );
       const body = await response.text();
       assertEquals(response.status, 503);
-      assertEquals(body, JSON.stringify({ code: "dependency_unavailable" }));
+      assertEquals(
+        body,
+        JSON.stringify({ code: "service_unavailable", ok: false }),
+      );
       assertEquals(deliveries, 1);
       assertEquals(publications, 0);
       assertEquals(events, [
@@ -589,7 +704,10 @@ Deno.test(
       }),
     );
     assertEquals(response.status, 201);
-    assertEquals(await response.json(), { code: "invitation_created" });
+    assertEquals(await response.json(), {
+      code: "invitation_created",
+      ok: true,
+    });
     assertEquals(calls, ["ready", "deliver", "publish-1", "publish-2"]);
   },
 );
@@ -623,7 +741,10 @@ Deno.test(
     );
     const body = await response.text();
     assertEquals(response.status, 503);
-    assertEquals(body, JSON.stringify({ code: "dependency_unavailable" }));
+    assertEquals(
+      body,
+      JSON.stringify({ code: "service_unavailable", ok: false }),
+    );
     assertEquals(deliveries, 1);
     assertEquals(publications, 2);
     assertEquals(failureWrites, 0);
@@ -658,7 +779,10 @@ Deno.test(
     );
     const body = await response.text();
     assertEquals(response.status, 503);
-    assertEquals(body, JSON.stringify({ code: "dependency_unavailable" }));
+    assertEquals(
+      body,
+      JSON.stringify({ code: "service_unavailable", ok: false }),
+    );
     assertEquals(deliveries, 1);
     assertEquals(publications, 1);
     assertEquals(failureWrites, 0);
@@ -674,7 +798,10 @@ Deno.test(
     const response = await handleRequest(invitationRequest(), dependencies());
     const body = await response.text();
     assertEquals(response.status, 201);
-    assertEquals(body, JSON.stringify({ code: "invitation_created" }));
+    assertEquals(
+      body,
+      JSON.stringify({ code: "invitation_created", ok: true }),
+    );
     assert(!body.includes(ACTION_TOKEN_SENTINEL), "Action token leaked");
   },
 );
@@ -741,6 +868,79 @@ function generatedProviderResponse(
 }
 
 Deno.test(
+  "generated-link cleanup closes pending delivery so provider failures are retryable",
+  async () => {
+    for (const [providerStatus, cleanupReason, publicCode, publicStatus] of [
+      [409, "invalid_request", "existing_confirmed_user_unsupported", 409],
+      [429, "dependency_unavailable", "rate_limited", 429],
+      [500, "dependency_unavailable", "service_unavailable", 503],
+    ] as const) {
+      let pendingDelivery = false;
+      let beginCalls = 0;
+      const cleanupReasons: string[] = [];
+      const providerSentinel = "auth-admin-provider-diagnostic-sentinel";
+      const service = createStaffInvitationDependencies(
+        runtimeConfiguration(),
+        async (input, init) => {
+          const url = new URL(String(input));
+          if (url.pathname.endsWith("/begin_staff_invitation")) {
+            beginCalls += 1;
+            if (pendingDelivery) {
+              return Response.json([{ code: "conflict", invitation_id: null }]);
+            }
+            pendingDelivery = true;
+            return Response.json([
+              { code: "invitation_pending", invitation_id: INVITATION_ID },
+            ]);
+          }
+          if (url.pathname === "/auth/v1/admin/generate_link") {
+            return Response.json(
+              { message: providerSentinel },
+              { status: providerStatus },
+            );
+          }
+          if (url.pathname.endsWith("/internal_fail_staff_invitation")) {
+            const requestBody = JSON.parse(String(init?.body)) as {
+              readonly reason_code?: unknown;
+            };
+            if (requestBody.reason_code !== cleanupReason) {
+              return Response.json([{ code: "invalid_request" }]);
+            }
+            cleanupReasons.push(cleanupReason);
+            pendingDelivery = false;
+            return Response.json([{ code: "invitation_delivery_failed" }]);
+          }
+          throw new Error("Unexpected service request");
+        },
+      );
+
+      const publicBodies: string[] = [];
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const response = await handleRequest(invitationRequest(), service);
+        assertEquals(response.status, publicStatus);
+        publicBodies.push(await response.text());
+      }
+
+      assertEquals(beginCalls, 2);
+      assertEquals(cleanupReasons, [cleanupReason, cleanupReason]);
+      assertEquals(pendingDelivery, false);
+      assertEquals(publicBodies, [
+        JSON.stringify({ code: publicCode, ok: false }),
+        JSON.stringify({ code: publicCode, ok: false }),
+      ]);
+      assert(
+        publicBodies.every(
+          (body) =>
+            !body.includes("teacher@example.com") &&
+            !body.includes(providerSentinel),
+        ),
+        "Provider or recipient detail leaked",
+      );
+    }
+  },
+);
+
+Deno.test(
   "staff invitation runtime pins Auth Admin generation and callback origins",
   async () => {
     const serviceRoleSentinel = "synthetic-service-role-sentinel";
@@ -784,8 +984,8 @@ Deno.test(
 
     const authorization = await service.authorizeInvitation(JWT, {
       email: "teacher@example.com",
-      role: "teacher",
-      workspaceId: WORKSPACE_ID,
+      role: "administrator",
+      schoolId: WORKSPACE_ID,
     });
     const generated = await service.generateInviteLink("teacher@example.com");
     const prepared = await service.prepareInvitation(
@@ -811,7 +1011,7 @@ Deno.test(
     assert(requests.every(({ url }) => !url.includes(publishableSentinel)));
     assertEquals(JSON.parse(requests[0].body), {
       email: "teacher@example.com",
-      role: "teacher",
+      role: "admin",
       workspace_id: WORKSPACE_ID,
     });
     assertEquals(requests[0].headers.get("authorization"), `Bearer ${JWT}`);

@@ -35,7 +35,7 @@ async function assertRejects(action: () => Promise<unknown>): Promise<void> {
 }
 
 function recoveryRequest(
-  body: unknown = { email: "Owner@Example.com" },
+  body: unknown = { email: "owner@example.com" },
   overrides: {
     readonly headers?: Record<string, string>;
     readonly method?: string;
@@ -83,7 +83,7 @@ async function publicSnapshot(response: Response): Promise<unknown> {
 }
 
 Deno.test(
-  "account recovery returns the exact public contract while scheduling normalized email",
+  "account recovery returns the exact public contract while scheduling canonical email",
   async () => {
     const emails: string[] = [];
     let background: Promise<void> | undefined;
@@ -100,7 +100,7 @@ Deno.test(
     );
     assertEquals(await publicSnapshot(response), {
       accessControlAllowOrigin: WEB_ORIGIN,
-      body: JSON.stringify({ code: "recovery_requested" }),
+      body: JSON.stringify({ code: "recovery_requested", ok: true }),
       cacheControl: "no-store",
       contentType: "application/json; charset=utf-8",
       status: 202,
@@ -139,7 +139,41 @@ Deno.test("account recovery validates exact CORS preflight", async () => {
     dependencies(),
   );
   assertEquals(wrongMethod.status, 400);
-  assertEquals(await wrongMethod.json(), { code: "invalid_request" });
+  assertEquals(await wrongMethod.json(), {
+    code: "invalid_request",
+    ok: false,
+  });
+
+  const wrongOrigin = await handleRequest(
+    recoveryRequest(undefined, {
+      headers: {
+        "access-control-request-headers": "content-type",
+        "access-control-request-method": "POST",
+        origin: "https://attacker.invalid",
+      },
+      method: "OPTIONS",
+    }),
+    dependencies(),
+  );
+  assertEquals(wrongOrigin.status, 403);
+  assertEquals(wrongOrigin.headers.get("access-control-allow-origin"), null);
+  assertEquals(await wrongOrigin.json(), {
+    code: "authorization_denied",
+    ok: false,
+  });
+});
+
+Deno.test({
+  name: "account recovery config failure returns the exact product response",
+  permissions: { env: false },
+  fn: async () => {
+    const response = await handleRequest(recoveryRequest());
+    assertEquals(response.status, 503);
+    assertEquals(await response.json(), {
+      code: "service_unavailable",
+      ok: false,
+    });
+  },
 });
 
 Deno.test(
@@ -151,6 +185,10 @@ Deno.test(
     );
     assertEquals(methodResponse.status, 405);
     assertEquals(methodResponse.headers.get("allow"), "POST, OPTIONS");
+    assertEquals(await methodResponse.json(), {
+      code: "invalid_request",
+      ok: false,
+    });
 
     const originResponse = await handleRequest(
       recoveryRequest(undefined, {
@@ -163,7 +201,10 @@ Deno.test(
       originResponse.headers.get("access-control-allow-origin"),
       null,
     );
-    assertEquals(await originResponse.json(), { code: "forbidden" });
+    assertEquals(await originResponse.json(), {
+      code: "authorization_denied",
+      ok: false,
+    });
   },
 );
 
@@ -181,6 +222,8 @@ Deno.test(
       }),
       recoveryRequest({ email: "owner@example.com", extra: true }),
       recoveryRequest({ email: "not-an-email" }),
+      recoveryRequest({ email: "Owner@Example.com" }),
+      recoveryRequest({ email: "owner`tag@example.com" }),
     ];
     let schedules = 0;
     for (const request of invalidRequests) {
@@ -193,7 +236,10 @@ Deno.test(
         }),
       );
       assertEquals(response.status, 400);
-      assertEquals(await response.json(), { code: "invalid_request" });
+      assertEquals(await response.json(), {
+        code: "invalid_request",
+        ok: false,
+      });
     }
     assertEquals(schedules, 0);
   },
@@ -206,7 +252,7 @@ Deno.test(
     await request.text();
     const response = await handleRequest(request, dependencies());
     assertEquals(response.status, 400);
-    assertEquals(await response.json(), { code: "invalid_request" });
+    assertEquals(await response.json(), { code: "invalid_request", ok: false });
   },
 );
 
@@ -233,7 +279,7 @@ Deno.test(
     );
     assertEquals(snapshots[0], {
       accessControlAllowOrigin: WEB_ORIGIN,
-      body: JSON.stringify({ code: "recovery_requested" }),
+      body: JSON.stringify({ code: "recovery_requested", ok: true }),
       cacheControl: "no-store",
       contentType: "application/json; charset=utf-8",
       status: 202,
@@ -290,7 +336,7 @@ Deno.test(
     await background;
     assertEquals(snapshot, {
       accessControlAllowOrigin: WEB_ORIGIN,
-      body: JSON.stringify({ code: "recovery_requested" }),
+      body: JSON.stringify({ code: "recovery_requested", ok: true }),
       cacheControl: "no-store",
       contentType: "application/json; charset=utf-8",
       status: 202,
@@ -316,7 +362,7 @@ Deno.test(
     );
     assertEquals(await publicSnapshot(response), {
       accessControlAllowOrigin: WEB_ORIGIN,
-      body: JSON.stringify({ code: "recovery_requested" }),
+      body: JSON.stringify({ code: "recovery_requested", ok: true }),
       cacheControl: "no-store",
       contentType: "application/json; charset=utf-8",
       status: 202,

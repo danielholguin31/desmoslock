@@ -4,6 +4,8 @@ import {
   isExactRecord,
   methodNotAllowedResponse,
   parseBearerJwt,
+  parseCanonicalEmail,
+  parseCanonicalUuid,
   parseEmail,
   parseExactCallback,
   parseExactOrigin,
@@ -25,28 +27,34 @@ const MINIMUM_INVITATION_LIFETIME_SECONDS = 60;
 const PREPARE_ATTEMPTS = 2;
 const PUBLISH_ATTEMPTS = 2;
 
-const publicFailureCodes = new Set([
-  "conflict",
-  "email_unverified",
-  "forbidden",
-  "invalid_request",
-  "invitation_consumed",
-  "invitation_expired",
-  "invitation_not_found",
-  "membership_inactive",
-  "rate_limited",
-  "session_expired",
-  "session_revoked",
-  "step_up_required",
-  "unauthenticated",
-]);
+type StaffRole = "administrator" | "teacher";
 
-type StaffRole = "admin" | "teacher";
+type PublicInvitationErrorCode =
+  | "authentication_required"
+  | "authorization_denied"
+  | "existing_confirmed_user_unsupported"
+  | "invalid_request"
+  | "invitation_expired"
+  | "invitation_not_found"
+  | "rate_limited"
+  | "service_unavailable"
+  | "session_expired"
+  | "session_revoked"
+  | "step_up_required";
+
+interface PublicInvitationFailure {
+  readonly code: PublicInvitationErrorCode;
+  readonly status: number;
+}
+
+interface GeneratedInvitationFailure extends PublicInvitationFailure {
+  readonly cleanupReason: "dependency_unavailable" | "invalid_request";
+}
 
 interface StaffInvitationInput {
   readonly email: string;
   readonly role: StaffRole;
-  readonly workspaceId: string;
+  readonly schoolId: string;
 }
 
 export interface InvitationAuthorizationResult {
@@ -97,15 +105,17 @@ export interface StaffInvitationDependencies {
 }
 
 function parseInput(value: unknown): StaffInvitationInput | null {
-  if (!isExactRecord(value, ["email", "role", "workspaceId"])) {
+  if (!isExactRecord(value, ["email", "role", "schoolId"])) {
     return null;
   }
-  const email = parseEmail(value.email);
-  const workspaceId = parseUuid(value.workspaceId);
+  const email = parseCanonicalEmail(value.email);
+  const schoolId = parseCanonicalUuid(value.schoolId);
   const role =
-    value.role === "admin" || value.role === "teacher" ? value.role : null;
-  return email !== null && workspaceId !== null && role !== null
-    ? { email, role, workspaceId }
+    value.role === "administrator" || value.role === "teacher"
+      ? value.role
+      : null;
+  return email !== null && schoolId !== null && role !== null
+    ? { email, role, schoolId }
     : null;
 }
 
@@ -121,26 +131,55 @@ function parseInvitationLifetimeSeconds(value: unknown): number | null {
     : null;
 }
 
-function invitationFailureStatus(code: string): number {
+function mapAuthorizationFailure(code: string): PublicInvitationFailure {
   switch (code) {
     case "invalid_request":
-      return 400;
+      return { code, status: 400 };
     case "unauthenticated":
+      return { code: "authentication_required", status: 401 };
     case "session_expired":
     case "session_revoked":
-      return 401;
+      return { code, status: 401 };
     case "email_unverified":
     case "forbidden":
     case "membership_inactive":
+      return { code: "authorization_denied", status: 403 };
     case "step_up_required":
-      return 403;
+      return { code, status: 403 };
     case "invitation_not_found":
-      return 404;
+    case "invitation_consumed":
+      return { code: "invitation_not_found", status: 404 };
+    case "invitation_expired":
+      return { code, status: 409 };
     case "rate_limited":
-      return 429;
+      return { code, status: 429 };
     default:
-      return 409;
+      return { code: "service_unavailable", status: 503 };
   }
+}
+
+function mapGeneratedInvitationFailure(
+  code: GeneratedInvitationResult["code"],
+): GeneratedInvitationFailure {
+  if (code === "conflict") {
+    return {
+      cleanupReason: "invalid_request",
+      code: "existing_confirmed_user_unsupported",
+      status: 409,
+    };
+  }
+  if (code === "rate_limited") {
+    return {
+      cleanupReason: "dependency_unavailable",
+      code: "rate_limited",
+      status: 429,
+    };
+  }
+  return {
+    cleanupReason: "dependency_unavailable",
+    code: "service_unavailable",
+    status: 503,
+  };
 }
 
 function mapHttpFailure(status: number): string {
@@ -392,8 +431,8 @@ export function createStaffInvitationDependencies(
         "begin_staff_invitation",
         {
           email: input.email,
-          role: input.role,
-          workspace_id: input.workspaceId,
+          role: input.role === "administrator" ? "admin" : "teacher",
+          workspace_id: input.schoolId,
         },
         `Bearer ${jwt}`,
         client.publishableKey,
@@ -603,7 +642,7 @@ export async function handleRequest(
   try {
     dependencies = injectedDependencies ?? runtimeDependencies();
   } catch {
-    return codeResponse("dependency_unavailable", 503);
+    return codeResponse("service_unavailable", 503);
   }
   const corsPolicy = {
     allowedHeaders: ["authorization", "content-type"],
@@ -613,14 +652,18 @@ export async function handleRequest(
     return handlePreflight(request, corsPolicy);
   }
   if (!validateRequestOrigin(request, dependencies.allowedOrigin)) {
-    return codeResponse("forbidden", 403);
+    return codeResponse("authorization_denied", 403);
   }
   if (request.method !== "POST") {
     return methodNotAllowedResponse(dependencies.allowedOrigin);
   }
   const jwt = parseBearerJwt(request.headers.get("authorization"));
   if (jwt === null) {
-    return codeResponse("unauthenticated", 401, dependencies.allowedOrigin);
+    return codeResponse(
+      "authentication_required",
+      401,
+      dependencies.allowedOrigin,
+    );
   }
   const input = parseInput(await readStrictJson(request));
   if (input === null) {
@@ -631,33 +674,19 @@ export async function handleRequest(
   try {
     authorization = await dependencies.authorizeInvitation(jwt, input);
   } catch {
-    return codeResponse(
-      "dependency_unavailable",
-      503,
-      dependencies.allowedOrigin,
-    );
+    return codeResponse("service_unavailable", 503, dependencies.allowedOrigin);
   }
   if (authorization.code !== "invitation_pending") {
-    if (!publicFailureCodes.has(authorization.code)) {
-      return codeResponse(
-        "dependency_unavailable",
-        503,
-        dependencies.allowedOrigin,
-      );
-    }
+    const failure = mapAuthorizationFailure(authorization.code);
     return codeResponse(
-      authorization.code,
-      invitationFailureStatus(authorization.code),
+      failure.code,
+      failure.status,
       dependencies.allowedOrigin,
     );
   }
   const invitationId = parseUuid(authorization.invitationId);
   if (invitationId === null) {
-    return codeResponse(
-      "dependency_unavailable",
-      503,
-      dependencies.allowedOrigin,
-    );
+    return codeResponse("service_unavailable", 503, dependencies.allowedOrigin);
   }
 
   let generated: GeneratedInvitationResult;
@@ -676,29 +705,22 @@ export async function handleRequest(
       ? generated.actionLink
       : null;
   if (generatedUserId === null || actionLink === null) {
-    const publicCode =
-      generated.code === "conflict" || generated.code === "rate_limited"
-        ? generated.code
-        : "dependency_unavailable";
+    const failure = mapGeneratedInvitationFailure(generated.code);
     const recorded = await recordFailedDelivery(
       dependencies,
       invitationId,
-      publicCode,
+      failure.cleanupReason,
     );
     if (!recorded) {
       return codeResponse(
-        "dependency_unavailable",
+        "service_unavailable",
         503,
         dependencies.allowedOrigin,
       );
     }
     return codeResponse(
-      publicCode,
-      publicCode === "rate_limited"
-        ? 429
-        : publicCode === "conflict"
-          ? 409
-          : 503,
+      failure.code,
+      failure.status,
       dependencies.allowedOrigin,
     );
   }
@@ -710,11 +732,7 @@ export async function handleRequest(
       invitationId,
       "dependency_unavailable",
     );
-    return codeResponse(
-      "dependency_unavailable",
-      503,
-      dependencies.allowedOrigin,
-    );
+    return codeResponse("service_unavailable", 503, dependencies.allowedOrigin);
   }
   const ready = await confirmInvitationDeliveryReady(
     dependencies,
@@ -728,11 +746,7 @@ export async function handleRequest(
       invitationId,
       "dependency_unavailable",
     );
-    return codeResponse(
-      "dependency_unavailable",
-      503,
-      dependencies.allowedOrigin,
-    );
+    return codeResponse("service_unavailable", 503, dependencies.allowedOrigin);
   }
 
   let delivery: InvitationDeliveryResult = "dependency_unavailable";
@@ -752,22 +766,14 @@ export async function handleRequest(
       invitationId,
       "dependency_unavailable",
     );
-    return codeResponse(
-      "dependency_unavailable",
-      503,
-      dependencies.allowedOrigin,
-    );
+    return codeResponse("service_unavailable", 503, dependencies.allowedOrigin);
   }
   const published = await confirmInvitationPublished(
     dependencies,
     invitationId,
   );
   if (!published) {
-    return codeResponse(
-      "dependency_unavailable",
-      503,
-      dependencies.allowedOrigin,
-    );
+    return codeResponse("service_unavailable", 503, dependencies.allowedOrigin);
   }
   return codeResponse("invitation_created", 201, dependencies.allowedOrigin);
 }

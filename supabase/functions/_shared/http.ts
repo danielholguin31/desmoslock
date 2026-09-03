@@ -8,6 +8,8 @@ export interface CorsPolicy {
 export type JsonRecord = Record<string, unknown>;
 
 const jsonContentType = "application/json; charset=utf-8";
+const canonicalEmailPattern =
+  /^[a-z0-9!#$%&'*+/=?^_{}|~-]+(?:\.[a-z0-9!#$%&'*+/=?^_{}|~-]+)*@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/u;
 
 function baseHeaders(allowedOrigin?: string): Headers {
   const headers = new Headers({
@@ -27,7 +29,7 @@ export function codeResponse(
   allowedOrigin?: string,
 ): Response {
   return Response.json(
-    { code },
+    { code, ok: status >= 200 && status < 300 },
     {
       headers: baseHeaders(allowedOrigin),
       status,
@@ -38,7 +40,7 @@ export function codeResponse(
 export function methodNotAllowedResponse(allowedOrigin: string): Response {
   const headers = baseHeaders(allowedOrigin);
   headers.set("allow", "POST, OPTIONS");
-  return new Response(JSON.stringify({ code: "invalid_request" }), {
+  return new Response(JSON.stringify({ code: "invalid_request", ok: false }), {
     headers,
     status: 405,
   });
@@ -143,7 +145,7 @@ export function handlePreflight(
   policy: CorsPolicy,
 ): Response {
   if (!validateRequestOrigin(request, policy.allowedOrigin)) {
-    return codeResponse("forbidden", 403);
+    return codeResponse("authorization_denied", 403);
   }
   if (request.headers.get("access-control-request-method") !== "POST") {
     return codeResponse("invalid_request", 400, policy.allowedOrigin);
@@ -311,6 +313,16 @@ export function parseEmail(value: unknown): string | null {
   return `${local.toLowerCase()}@${domain.toLowerCase()}`;
 }
 
+export function parseCanonicalEmail(value: unknown): string | null {
+  return typeof value === "string" &&
+    value.length <= 254 &&
+    value === value.trim() &&
+    value === value.toLowerCase() &&
+    canonicalEmailPattern.test(value)
+    ? value
+    : null;
+}
+
 export function parseUuid(value: unknown): string | null {
   if (
     typeof value !== "string" ||
@@ -321,6 +333,15 @@ export function parseUuid(value: unknown): string | null {
     return null;
   }
   return value.toLowerCase();
+}
+
+export function parseCanonicalUuid(value: unknown): string | null {
+  return typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+      value,
+    )
+    ? value
+    : null;
 }
 
 export function parseBearerJwt(value: string | null): string | null {
