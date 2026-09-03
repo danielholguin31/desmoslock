@@ -45,7 +45,7 @@ the available controls; they are not represented as server-side protection.
 
 ## Develop and verify v2
 
-Use Node.js 24 or newer and npm 11.12.1 from the repository root.
+Use exactly Node.js 24.20.0 and npm 11.12.1 from the repository root.
 
 ```bash
 npm ci
@@ -55,11 +55,15 @@ npm run typecheck
 npm test
 DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=local \
 DESMOSLOCK_PUBLIC_BACKEND_URL=http://127.0.0.1:54321 \
+DESMOSLOCK_PUBLIC_WEB_ORIGIN=http://localhost:43174 \
+DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc \
   npm run build
 ```
 
-Both public backend values are mandatory. An absent or partial configuration
-fails before bundling; there is no implicit loopback or staging default.
+All four public web values are mandatory. An absent or partial configuration
+fails before bundling; there is no implicit loopback, staging target, or
+publishable key. The synthetic key above is test-only and is never a hosted
+credential.
 
 The disposable v2 database starts from `supabase/migrations/` and
 `supabase/seed.sql`. It does not import legacy users or product rows. The

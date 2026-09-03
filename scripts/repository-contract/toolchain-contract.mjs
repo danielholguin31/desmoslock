@@ -5,6 +5,8 @@ import { fail, readJson, readText } from "./shared.mjs";
 export const expectedToolchain = Object.freeze({
   node: "24.20.0",
   npm: "11.12.1",
+  npmIntegrity:
+    "sha512.cdca14b85d647b3192028d02aadbe82d75f79a446aceea9874be98e6d768f20ebd3555770a48d0e9906106007877bbc690f715e9372f2e2dc644a3c3157fb14c",
   nodeTypes: "24.13.3",
   supabaseClient: "2.115.0",
 });
@@ -43,8 +45,13 @@ export function assertToolchainManifestContract({
   if (rootPackage.engines?.node !== expectedToolchain.node) {
     fail(`Root Node.js engine must pin ${expectedToolchain.node}`);
   }
-  if (rootPackage.packageManager !== `npm@${expectedToolchain.npm}`) {
-    fail(`Root packageManager must pin npm ${expectedToolchain.npm}`);
+  if (
+    rootPackage.packageManager !==
+    `npm@${expectedToolchain.npm}+${expectedToolchain.npmIntegrity}`
+  ) {
+    fail(
+      `Root packageManager must pin npm ${expectedToolchain.npm} with its verified Corepack integrity`,
+    );
   }
   if (
     rootPackage.devDependencies?.["@types/node"] !== expectedToolchain.nodeTypes
@@ -123,22 +130,82 @@ export function assertWorkflowToolchain(workflow, label, expectedJobCount) {
     ].join("\n"),
     "gmu",
   );
-  const exactSetupCount = [...workflow.matchAll(exactSetup)].length;
-  if (exactSetupCount !== expectedJobCount) {
+  const jobs = readWorkflowJobs(workflow);
+  const nodeJobs = jobs.filter((job) => jobUsesNodeToolchain(job.body));
+  if (nodeJobs.length !== expectedJobCount) {
     fail(
-      `${label} must contain ${expectedJobCount} exact Node.js/npm setup and assertion sequence(s); found ${exactSetupCount}`,
+      `${label} must contain exactly ${expectedJobCount} Node.js/npm job(s); found ${nodeJobs.length}`,
     );
   }
-
-  const allNodePins = [
-    ...workflow.matchAll(/^\s+node-version:\s*([^\s#]+).*$/gmu),
-  ].map(([, version]) => version);
-  if (
-    allNodePins.length !== expectedJobCount ||
-    allNodePins.some((version) => version !== expectedToolchain.node)
-  ) {
-    fail(`${label} contains a non-exact Node.js toolchain pin`);
+  for (const job of nodeJobs) {
+    const setupMatches = [...job.body.matchAll(exactSetup)];
+    if (setupMatches.length !== 1) {
+      fail(
+        `${label} job ${job.name} must contain exactly one exact Node.js/npm setup and assertion sequence`,
+      );
+    }
+    const nodePins = [
+      ...job.body.matchAll(/^\s+node-version:\s*([^\s#]+).*$/gmu),
+    ].map(([, version]) => version);
+    if (nodePins.length !== 1 || nodePins[0] !== expectedToolchain.node) {
+      fail(`${label} job ${job.name} contains a non-exact Node.js pin`);
+    }
+    const firstCommand = firstNodeToolchainCommandIndex(job.body);
+    if (
+      firstCommand === null ||
+      setupMatches[0]?.index === undefined ||
+      setupMatches[0].index > firstCommand
+    ) {
+      fail(
+        `${label} job ${job.name} must activate the exact toolchain before Node.js/npm use`,
+      );
+    }
   }
+}
+
+function readWorkflowJobs(workflow) {
+  const jobsMarker = /^jobs:\s*$/mu.exec(workflow);
+  if (jobsMarker === null) {
+    fail("Workflow jobs section is missing");
+  }
+  const jobsStart = jobsMarker.index + jobsMarker[0].length;
+  const remainder = workflow.slice(jobsStart);
+  const nextTopLevel = /^\S[^:\n]*:\s*$/mu.exec(remainder);
+  const jobsSection = remainder.slice(0, nextTopLevel?.index);
+  const matches = [...jobsSection.matchAll(/^ {2}([a-zA-Z0-9_-]+):\s*$/gmu)];
+  return matches.map((match, index) => {
+    const bodyStart = (match.index ?? 0) + match[0].length;
+    const bodyEnd = matches[index + 1]?.index ?? jobsSection.length;
+    return {
+      body: jobsSection.slice(bodyStart, bodyEnd),
+      name: match[1],
+    };
+  });
+}
+
+function nodeToolchainCommandLine(line) {
+  return (
+    /\b(?:node|npm|npx|corepack)\b/u.test(line) &&
+    !/uses: actions\/setup-node@/u.test(line) &&
+    !/^\s*node-version:/u.test(line) &&
+    !/^\s*cache: npm\s*$/u.test(line) &&
+    !/name: Activate and verify exact toolchain/u.test(line)
+  );
+}
+
+function firstNodeToolchainCommandIndex(job) {
+  let offset = 0;
+  for (const line of job.split("\n")) {
+    if (nodeToolchainCommandLine(line)) {
+      return offset;
+    }
+    offset += line.length + 1;
+  }
+  return null;
+}
+
+function jobUsesNodeToolchain(job) {
+  return firstNodeToolchainCommandIndex(job) !== null;
 }
 
 export function verifyToolchainContract(repositoryRoot) {

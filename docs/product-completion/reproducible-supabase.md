@@ -72,7 +72,8 @@ rows with null seed keys do not change health attestation.
 
 ## Local bootstrap and verification
 
-Use Node.js 24, npm 11.12.1, Docker, and the repository-pinned Supabase CLI.
+Use exactly Node.js 24.20.0, npm 11.12.1, Docker, and the repository-pinned
+Supabase CLI.
 
 ```bash
 npm ci
@@ -119,25 +120,33 @@ Completing issue 31 on hosted staging still requires replacing the placeholder
 only through the separately reviewed identity, callback, and session rollout.
 The local generation-4 contract does not authorize that hosted change.
 
-The public build configuration has exactly two fields:
+The web build configuration has exactly four public fields:
 
 - `DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT`: `local` or `staging`
 - `DESMOSLOCK_PUBLIC_BACKEND_URL`: a numeric-loopback HTTP origin for local, or
   a root-path HTTPS DNS origin for staging
+- `DESMOSLOCK_PUBLIC_WEB_ORIGIN`: the exact browser origin allowed to run the
+  web application
+- `DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY`: the browser-safe Supabase
+  publishable key for the selected backend
 
-Both fields are mandatory. The build rejects absent or partial configuration,
+All four fields are mandatory. The build rejects absent or partial configuration,
 unknown fields, URL credentials, paths, query strings, fragments, numeric
 hosts, the entire special-use `.localhost` namespace (including subdomains and
 trailing-dot forms), local staging hosts, and non-TLS staging origins before
-bundling. No API key, database URL, service-role key, or operator credential is
-a public build input. The desktop renderer observes health directly; no
-backend IPC channel or new privileged bridge authority is added.
+bundling. The publishable key is intentionally browser-public; no database URL,
+service-role key, secret key, or operator credential is a public build input.
+The desktop renderer never receives the web origin or publishable key and
+observes health directly; no backend IPC channel or new privileged bridge
+authority is added.
 
 Example local build:
 
 ```bash
 DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=local \
 DESMOSLOCK_PUBLIC_BACKEND_URL=http://127.0.0.1:54321 \
+DESMOSLOCK_PUBLIC_WEB_ORIGIN=http://localhost:43174 \
+DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc \
 npm run build
 ```
 
@@ -146,10 +155,13 @@ Example staging build after the remote gate has been approved:
 ```bash
 DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=staging \
 DESMOSLOCK_PUBLIC_BACKEND_URL=https://PROJECT_REF.supabase.co \
+DESMOSLOCK_PUBLIC_WEB_ORIGIN=https://APP_ORIGIN.example \
+DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY=PUBLISHABLE_KEY \
 npm run build
 ```
 
-`PROJECT_REF` is a placeholder, not a repository value.
+`PROJECT_REF`, `APP_ORIGIN`, and `PUBLISHABLE_KEY` are placeholders, not
+repository values. Hosted values remain a separately approved rollout gate.
 
 ## Health contract
 

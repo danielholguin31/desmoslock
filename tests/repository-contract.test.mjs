@@ -24,6 +24,7 @@ import {
 import {
   assertToolchainManifestContract,
   assertWorkflowToolchain,
+  expectedToolchain,
 } from "../scripts/repository-contract/toolchain-contract.mjs";
 
 const repositoryRoot = path.resolve(
@@ -77,7 +78,10 @@ test("v2 uses one typed npm workspace beside legacy v1", () => {
     rootPackage.version,
     /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/,
   );
-  assert.match(rootPackage.packageManager, /^npm@\d+\.\d+\.\d+/);
+  assert.equal(
+    rootPackage.packageManager,
+    `npm@${expectedToolchain.npm}+${expectedToolchain.npmIntegrity}`,
+  );
   assert.equal(lockfile.packages[""].version, rootPackage.version);
   for (const dependencySection of [
     "dependencies",
@@ -216,6 +220,17 @@ test("repository pins the exact Node.js, npm, type, and web client toolchain", (
     () =>
       assertToolchainManifestContract({
         ...manifestContract,
+        rootPackage: {
+          ...manifestContract.rootPackage,
+          packageManager: `npm@${expectedToolchain.npm}`,
+        },
+      }),
+    /verified Corepack integrity/u,
+  );
+  assert.throws(
+    () =>
+      assertToolchainManifestContract({
+        ...manifestContract,
         workspacePackages: {
           ...workspacePackages,
           "apps/web": {
@@ -259,7 +274,49 @@ test("repository pins the exact Node.js, npm, type, and web client toolchain", (
         ),
       /exact Node\.js\/npm setup/u,
     );
+    assert.throws(
+      () =>
+        assertWorkflowToolchain(
+          [
+            workflow,
+            "  added-node-job:",
+            "    runs-on: ubuntu-latest",
+            "    steps:",
+            "      - run: npm --version",
+          ].join("\n"),
+          workflowPath,
+          expectedJobCount,
+        ),
+      /Node\.js\/npm job/u,
+    );
   }
+});
+
+test("operator docs enumerate the exact toolchain and all public web build inputs", () => {
+  const documents = [
+    readText("README.md"),
+    readText("docs/product-completion/reproducible-supabase.md"),
+    readText("docs/product-completion/v2-foundation.md"),
+  ];
+  for (const document of documents) {
+    assert.match(document, /Node(?:\.js)? 24\.20\.0/u);
+    assert.match(document, /npm 11\.12\.1/u);
+    for (const field of [
+      "DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT",
+      "DESMOSLOCK_PUBLIC_BACKEND_URL",
+      "DESMOSLOCK_PUBLIC_WEB_ORIGIN",
+      "DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
+    ]) {
+      assert.equal(document.includes(field), true, `${field} is undocumented`);
+    }
+    assert.doesNotMatch(document, /exactly two fields|two public backend/u);
+  }
+  assert.match(
+    documents[1],
+    /publishable key is intentionally browser-public/u,
+  );
+  assert.match(documents[1], /no database URL,[\s\S]*service-role key/u);
+  assert.match(documents[1], /desktop renderer never receives/u);
 });
 
 test("v2 data plane is migration-owned and clean-start only", () => {
