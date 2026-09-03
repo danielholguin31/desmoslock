@@ -55,6 +55,7 @@ create table desmoslock_v2.staff_invitations (
   id uuid primary key default gen_random_uuid(),
   workspace_id uuid not null,
   requested_by_profile_id uuid not null,
+  request_key uuid not null,
   invited_email_normalized text not null,
   invited_user_id uuid references auth.users (id) on delete restrict,
   role text not null,
@@ -62,6 +63,7 @@ create table desmoslock_v2.staff_invitations (
   revision bigint not null default 1,
   requested_at timestamp with time zone not null default now(),
   updated_at timestamp with time zone not null default now(),
+  delivery_lease_expires_at timestamp with time zone not null,
   expires_at timestamp with time zone,
   accepted_at timestamp with time zone,
   accepted_profile_id uuid unique references desmoslock_v2.profiles (id) on delete restrict,
@@ -72,6 +74,8 @@ create table desmoslock_v2.staff_invitations (
     foreign key (workspace_id, requested_by_profile_id)
     references desmoslock_v2.memberships (workspace_id, profile_id)
     on delete restrict,
+  constraint staff_invitations_request_key_unique
+    unique (workspace_id, request_key),
   constraint staff_invitations_role_check
     check (role in ('admin', 'teacher')),
   constraint staff_invitations_status_check
@@ -87,6 +91,8 @@ create table desmoslock_v2.staff_invitations (
       )
     ),
   constraint staff_invitations_revision_check check (revision > 0),
+  constraint staff_invitations_delivery_lease_check
+    check (delivery_lease_expires_at > requested_at),
   constraint staff_invitations_email_check
     check (
       invited_email_normalized = lower(btrim(invited_email_normalized))
@@ -97,7 +103,11 @@ create table desmoslock_v2.staff_invitations (
   constraint staff_invitations_failure_reason_check
     check (
       failure_reason_code is null
-      or failure_reason_code in ('dependency_unavailable', 'invalid_request')
+      or failure_reason_code in (
+        'dependency_unavailable',
+        'invalid_request',
+        'delivery_lease_expired'
+      )
     ),
   constraint staff_invitations_lifecycle_check
     check (
@@ -892,7 +902,8 @@ grant execute on function desmoslock_v2.current_staff_invitations() to authentic
 create function desmoslock_v2.begin_staff_invitation(
   workspace_id uuid,
   email text,
-  role text
+  role text,
+  request_key uuid
 )
 returns table (
   code text,
@@ -906,7 +917,9 @@ declare
   authorization_result record;
   normalized_email text;
   new_invitation_id uuid;
+  request_invitation desmoslock_v2.staff_invitations%rowtype;
   expired_invitation desmoslock_v2.staff_invitations%rowtype;
+  request_started_at timestamp with time zone := statement_timestamp();
 begin
   select *
   into authorization_result
@@ -925,8 +938,62 @@ begin
   if normalized_email is null
     or $3 is null
     or $3 not in ('admin', 'teacher')
+    or $4 is null
   then
     return query select 'invalid_request'::text, null::uuid;
+    return;
+  end if;
+
+  select invitation.*
+  into request_invitation
+  from desmoslock_v2.staff_invitations as invitation
+  where invitation.workspace_id = $1
+    and invitation.request_key = $4
+  for update;
+
+  if found then
+    if request_invitation.requested_by_profile_id = authorization_result.profile_id
+      and request_invitation.invited_email_normalized = normalized_email
+      and request_invitation.role = $3
+      and request_invitation.status = 'pending_delivery'
+      and request_invitation.delivery_lease_expires_at > request_started_at
+    then
+      return query select
+        'invitation_pending'::text,
+        request_invitation.id;
+      return;
+    end if;
+
+    if request_invitation.requested_by_profile_id = authorization_result.profile_id
+      and request_invitation.invited_email_normalized = normalized_email
+      and request_invitation.role = $3
+      and request_invitation.status = 'pending_delivery'
+      and request_invitation.delivery_lease_expires_at <= request_started_at
+    then
+      update desmoslock_v2.staff_invitations as invitation
+      set
+        status = 'delivery_failed',
+        failure_reason_code = 'delivery_lease_expired',
+        revision = invitation.revision + 1,
+        updated_at = request_started_at
+      where invitation.id = request_invitation.id
+        and invitation.revision = request_invitation.revision
+        and invitation.status = 'pending_delivery';
+
+      if found then
+        perform desmoslock_v2.internal_append_auth_event(
+          'invitation_delivery_failed',
+          'invitation_delivery_failed',
+          request_invitation.workspace_id,
+          null,
+          null,
+          request_invitation.id,
+          null
+        );
+      end if;
+    end if;
+
+    return query select 'conflict'::text, null::uuid;
     return;
   end if;
 
@@ -935,8 +1002,41 @@ begin
     from desmoslock_v2.staff_invitations as invitation
     where invitation.workspace_id = $1
       and invitation.invited_email_normalized = normalized_email
+      and invitation.status = 'pending_delivery'
+      and invitation.delivery_lease_expires_at <= request_started_at
+    order by invitation.id
+    for update
+  loop
+    update desmoslock_v2.staff_invitations as invitation
+    set
+      status = 'delivery_failed',
+      failure_reason_code = 'delivery_lease_expired',
+      revision = invitation.revision + 1,
+      updated_at = request_started_at
+    where invitation.id = expired_invitation.id
+      and invitation.revision = expired_invitation.revision
+      and invitation.status = 'pending_delivery';
+
+    if found then
+      perform desmoslock_v2.internal_append_auth_event(
+        'invitation_delivery_failed',
+        'invitation_delivery_failed',
+        expired_invitation.workspace_id,
+        null,
+        null,
+        expired_invitation.id,
+        null
+      );
+    end if;
+  end loop;
+
+  for expired_invitation in
+    select invitation.*
+    from desmoslock_v2.staff_invitations as invitation
+    where invitation.workspace_id = $1
+      and invitation.invited_email_normalized = normalized_email
       and invitation.status in ('delivery_ready', 'pending_acceptance')
-      and invitation.expires_at <= statement_timestamp()
+      and invitation.expires_at <= request_started_at
     order by invitation.id
     for update
   loop
@@ -944,7 +1044,7 @@ begin
     set
       status = 'expired',
       revision = invitation.revision + 1,
-      updated_at = statement_timestamp()
+      updated_at = request_started_at
     where invitation.id = expired_invitation.id
       and invitation.revision = expired_invitation.revision
       and invitation.status = expired_invitation.status;
@@ -966,19 +1066,47 @@ begin
     insert into desmoslock_v2.staff_invitations (
       workspace_id,
       requested_by_profile_id,
+      request_key,
       invited_email_normalized,
       role,
-      status
+      status,
+      requested_at,
+      updated_at,
+      delivery_lease_expires_at
     ) values (
       $1,
       authorization_result.profile_id,
+      $4,
       normalized_email,
       $3,
-      'pending_delivery'
+      'pending_delivery',
+      request_started_at,
+      request_started_at,
+      request_started_at + interval '5 minutes'
     )
     returning id into new_invitation_id;
   exception
     when unique_violation then
+      select invitation.*
+      into request_invitation
+      from desmoslock_v2.staff_invitations as invitation
+      where invitation.workspace_id = $1
+        and invitation.request_key = $4
+      for update;
+
+      if found
+        and request_invitation.requested_by_profile_id = authorization_result.profile_id
+        and request_invitation.invited_email_normalized = normalized_email
+        and request_invitation.role = $3
+        and request_invitation.status = 'pending_delivery'
+        and request_invitation.delivery_lease_expires_at > request_started_at
+      then
+        return query select
+          'invitation_pending'::text,
+          request_invitation.id;
+        return;
+      end if;
+
       return query select 'conflict'::text, null::uuid;
       return;
   end;
@@ -997,9 +1125,13 @@ begin
 end;
 $$;
 
-revoke all on function desmoslock_v2.begin_staff_invitation(uuid, text, text)
+revoke all on function desmoslock_v2.begin_staff_invitation(
+  uuid, text, text, uuid
+)
   from public, anon, authenticated, service_role;
-grant execute on function desmoslock_v2.begin_staff_invitation(uuid, text, text)
+grant execute on function desmoslock_v2.begin_staff_invitation(
+  uuid, text, text, uuid
+)
   to authenticated;
 
 create function desmoslock_v2.internal_prepare_staff_invitation(
@@ -1019,7 +1151,6 @@ begin
   if $1 is null
     or $2 is null
     or $3 is null
-    or $3 <= statement_timestamp()
   then
     return query select 'invalid_request'::text;
     return;
@@ -1033,6 +1164,79 @@ begin
 
   if not found then
     return query select 'invitation_not_found'::text;
+    return;
+  end if;
+
+  if invitation_row.status = 'pending_delivery'
+    and invitation_row.delivery_lease_expires_at <= statement_timestamp()
+  then
+    update desmoslock_v2.staff_invitations as invitation
+    set
+      status = 'delivery_failed',
+      failure_reason_code = 'delivery_lease_expired',
+      revision = invitation.revision + 1,
+      updated_at = statement_timestamp()
+    where invitation.id = invitation_row.id
+      and invitation.revision = invitation_row.revision
+      and invitation.status = 'pending_delivery';
+
+    if not found then
+      return query select 'conflict'::text;
+      return;
+    end if;
+
+    perform desmoslock_v2.internal_append_auth_event(
+      'invitation_delivery_failed',
+      'invitation_delivery_failed',
+      invitation_row.workspace_id,
+      null,
+      null,
+      invitation_row.id,
+      null
+    );
+
+    return query select 'invitation_delivery_failed'::text;
+    return;
+  end if;
+
+  if invitation_row.status = 'delivery_ready'
+    and invitation_row.expires_at <= statement_timestamp()
+  then
+    update desmoslock_v2.staff_invitations as invitation
+    set
+      status = 'expired',
+      revision = invitation.revision + 1,
+      updated_at = statement_timestamp()
+    where invitation.id = invitation_row.id
+      and invitation.revision = invitation_row.revision
+      and invitation.status = 'delivery_ready';
+
+    if not found then
+      return query select 'conflict'::text;
+      return;
+    end if;
+
+    perform desmoslock_v2.internal_append_auth_event(
+      'invitation_expired',
+      'invitation_expired',
+      invitation_row.workspace_id,
+      null,
+      null,
+      invitation_row.id,
+      null
+    );
+
+    return query select 'invitation_expired'::text;
+    return;
+  end if;
+
+  if invitation_row.status = 'expired' then
+    return query select 'invitation_expired'::text;
+    return;
+  end if;
+
+  if $3 <= statement_timestamp() then
+    return query select 'invalid_request'::text;
     return;
   end if;
 
@@ -1143,6 +1347,11 @@ begin
 
   if not found then
     return query select 'invitation_not_found'::text;
+    return;
+  end if;
+
+  if invitation_row.status = 'expired' then
+    return query select 'invitation_expired'::text;
     return;
   end if;
 
@@ -2067,8 +2276,12 @@ comment on column desmoslock_v2.profiles.auth_user_id is
   'Nullable for deterministic fixtures; runtime staff profiles bind one Auth user exactly once.';
 comment on column desmoslock_v2.memberships.status is
   'Live backend authorization state. JWT membership or role metadata is ignored.';
+comment on column desmoslock_v2.staff_invitations.request_key is
+  'Opaque server-generated idempotency key scoped to one School; never returned or audited.';
+comment on column desmoslock_v2.staff_invitations.delivery_lease_expires_at is
+  'Fixed five-minute deadline for the non-consumable pending_delivery orchestration attempt.';
 comment on table desmoslock_v2.staff_invitations is
-  'Default-deny, server-owned invitation lifecycle; normalized target email is never audited.';
+  'Default-deny, server-owned invitation lifecycle with opaque request-key replay and a bounded pending-delivery lease; normalized target email and request key are never audited.';
 comment on table desmoslock_v2.application_session_revocations is
   'Application-layer session tombstones checked in addition to live Auth session state.';
 comment on table desmoslock_v2.staff_audit_events is
@@ -2081,14 +2294,16 @@ comment on function desmoslock_v2.internal_baseline_status() is
   'Service-only deterministic verification of synthetic rows; runtime rows have null seed keys and are excluded.';
 comment on function desmoslock_v2.internal_bind_initial_owner(uuid, uuid, uuid) is
   'Service-only, idempotent binding of one confirmed Auth user to an active seeded initial Owner; returns code only.';
-comment on function desmoslock_v2.begin_staff_invitation(uuid, text, text) is
-  'Owner-only AAL2/TOTP seam. Expired matching invitations are terminalized before reissue; invitation_pending requires service preparation and explicit delivery acknowledgment.';
+comment on function desmoslock_v2.begin_staff_invitation(
+  uuid, text, text, uuid
+) is
+  'Owner-only AAL2/TOTP seam. Exact live pending replay returns the same invitation for serial transport reconciliation; stale leases are terminalized before a new request key may reissue.';
 comment on function desmoslock_v2.internal_prepare_staff_invitation(
   uuid, uuid, timestamp with time zone
 ) is
-  'Service-only recipient binding into non-consumable delivery_ready. Exact replay returns invitation_delivery_ready and exposes no recipient data.';
+  'Service-only recipient binding into non-consumable delivery_ready. Expired pending leases fail closed; elapsed prepared rows terminalize before SMTP and replay invitation_expired without another audit.';
 comment on function desmoslock_v2.internal_publish_staff_invitation(uuid) is
-  'Service-only exact delivery_ready-to-pending_acceptance acknowledgment. Exact replay returns invitation_usable without another mail side effect.';
+  'Service-only exact delivery_ready-to-pending_acceptance acknowledgment. Live replay returns invitation_usable; terminal expired replay returns invitation_expired without another mutation or audit.';
 comment on function desmoslock_v2.internal_fail_staff_invitation(uuid, text) is
   'Service-only terminal failure for pending_delivery or delivery_ready. Success code invitation_delivery_failed records only a stable code.';
 comment on function desmoslock_v2.accept_staff_invitation(uuid, text) is

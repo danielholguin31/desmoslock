@@ -3,7 +3,7 @@ begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path = extensions, public, pg_catalog;
 
-select plan(137);
+select plan(160);
 
 select has_column(
   'desmoslock_v2',
@@ -27,6 +27,18 @@ select has_table(
   'desmoslock_v2',
   'staff_invitations',
   'controlled staff invitations exist'
+);
+select has_column(
+  'desmoslock_v2',
+  'staff_invitations',
+  'request_key',
+  'invitation orchestration has a durable server-generated idempotency key'
+);
+select has_column(
+  'desmoslock_v2',
+  'staff_invitations',
+  'delivery_lease_expires_at',
+  'pending delivery attempts have a bounded database-owned lease'
 );
 select has_table(
   'desmoslock_v2',
@@ -101,10 +113,14 @@ select ok(
 select ok(
   has_function_privilege(
     'authenticated',
-    'desmoslock_v2.begin_staff_invitation(uuid,text,text)',
+    'desmoslock_v2.begin_staff_invitation(uuid,text,text,uuid)',
     'EXECUTE'
   ),
   'authenticated can invoke the controlled invitation seam'
+);
+select ok(
+  to_regprocedure('desmoslock_v2.begin_staff_invitation(uuid,text,text)') is null,
+  'the invitation seam cannot omit its server-generated request key'
 );
 select ok(
   not has_function_privilege(
@@ -182,9 +198,9 @@ select is(
     select function_info.proargnames[1:function_info.pronargs]
     from pg_proc as function_info
     where function_info.oid =
-      to_regprocedure('desmoslock_v2.begin_staff_invitation(uuid,text,text)')
+      to_regprocedure('desmoslock_v2.begin_staff_invitation(uuid,text,text,uuid)')
   ),
-  array['workspace_id', 'email', 'role']::text[],
+  array['workspace_id', 'email', 'role', 'request_key']::text[],
   'the public invitation RPC keeps its exact PostgREST parameter names'
 );
 select is(
@@ -649,6 +665,7 @@ create temporary table staff_auth_test_results (
   label text primary key,
   code text not null,
   invitation_id uuid,
+  request_key uuid,
   expires_at timestamp with time zone,
   profile_id uuid,
   school_id uuid,
@@ -670,11 +687,25 @@ select is(
     from desmoslock_v2.begin_staff_invitation(
       '10000000-0000-4000-8000-000000000001',
       'parser-regression@staff.invalid',
-      'owner'
+      'owner',
+      gen_random_uuid()
     )
   ),
   'invalid_request',
   'Postgres can execute the compiled staff-authorization record path'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.begin_staff_invitation(
+      '10000000-0000-4000-8000-000000000001',
+      'missing-request-key@staff.invalid',
+      'teacher',
+      null
+    )
+  ),
+  'invalid_request',
+  'the public invitation seam rejects a missing server-generated request key'
 );
 reset role;
 
@@ -738,7 +769,8 @@ select is(
     from desmoslock_v2.begin_staff_invitation(
       '10000000-0000-4000-8000-000000000001',
       'aal1-recipient@staff.invalid',
-      'teacher'
+      'teacher',
+      gen_random_uuid()
     )
   ),
   'step_up_required',
@@ -761,7 +793,8 @@ select is(
     from desmoslock_v2.begin_staff_invitation(
       '10000000-0000-4000-8000-000000000001',
       'removed-factor-recipient@staff.invalid',
-      'teacher'
+      'teacher',
+      gen_random_uuid()
     )
   ),
   'step_up_required',
@@ -785,7 +818,8 @@ select is(
     from desmoslock_v2.begin_staff_invitation(
       '10000000-0000-4000-8000-000000000002',
       'cross-school-recipient@staff.invalid',
-      'admin'
+      'admin',
+      gen_random_uuid()
     )
   ),
   'membership_inactive',
@@ -797,7 +831,8 @@ select is(
     from desmoslock_v2.begin_staff_invitation(
       '10000000-0000-4000-8000-000000000001',
       'owner-role-recipient@staff.invalid',
-      'owner'
+      'owner',
+      gen_random_uuid()
     )
   ),
   'invalid_request',
@@ -811,12 +846,17 @@ select pg_temp.set_staff_claims(
   'aal2'
 );
 set local role authenticated;
-insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
-select 'acceptance', result.code, result.invitation_id
+insert into pg_temp.staff_auth_test_results (label, code, invitation_id, request_key)
+select
+  'acceptance',
+  result.code,
+  result.invitation_id,
+  'd1000000-0000-4000-8000-000000000001'::uuid
 from desmoslock_v2.begin_staff_invitation(
   '10000000-0000-4000-8000-000000000001',
   'invitee@staff.invalid',
-  'admin'
+  'admin',
+  'd1000000-0000-4000-8000-000000000001'
 ) as result;
 reset role;
 
@@ -837,6 +877,100 @@ select is(
   ),
   'pending_delivery',
   'an initiated invitation is not usable before service-side recipient binding'
+);
+select is(
+  (
+    select delivery_lease_expires_at
+    from desmoslock_v2.staff_invitations
+    where id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'acceptance'
+    )
+  ),
+  (
+    select requested_at + interval '5 minutes'
+    from desmoslock_v2.staff_invitations
+    where id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'acceptance'
+    )
+  ),
+  'the database owns an exact five-minute pending-delivery lease'
+);
+
+set local role authenticated;
+select results_eq(
+  $$
+    select result.code, result.invitation_id
+    from desmoslock_v2.begin_staff_invitation(
+      '10000000-0000-4000-8000-000000000001',
+      ' INVITEE@staff.invalid ',
+      'admin',
+      'd1000000-0000-4000-8000-000000000001'
+    ) as result
+  $$,
+  $$
+    select 'invitation_pending'::text, invitation_id
+    from pg_temp.staff_auth_test_results
+    where label = 'acceptance'
+  $$,
+  'an exact serial begin replay recovers the committed invitation after a lost response'
+);
+select results_eq(
+  $$
+    select result.code, result.invitation_id
+    from desmoslock_v2.begin_staff_invitation(
+      '10000000-0000-4000-8000-000000000001',
+      'invitee@staff.invalid',
+      'teacher',
+      'd1000000-0000-4000-8000-000000000001'
+    ) as result
+  $$,
+  $$values ('conflict'::text, null::uuid)$$,
+  'a request-key replay cannot change server-owned invitation intent'
+);
+select results_eq(
+  $$
+    select result.code, result.invitation_id
+    from desmoslock_v2.begin_staff_invitation(
+      '10000000-0000-4000-8000-000000000001',
+      'different-recipient@staff.invalid',
+      'admin',
+      'd1000000-0000-4000-8000-000000000001'
+    ) as result
+  $$,
+  $$values ('conflict'::text, null::uuid)$$,
+  'a request key cannot disclose or retarget a different normalized email'
+);
+select results_eq(
+  $$
+    select result.code, result.invitation_id
+    from desmoslock_v2.begin_staff_invitation(
+      '10000000-0000-4000-8000-000000000001',
+      'invitee@staff.invalid',
+      'admin',
+      'd1000000-0000-4000-8000-000000000002'
+    ) as result
+  $$,
+  $$values ('conflict'::text, null::uuid)$$,
+  'a concurrent invocation with a different request key cannot share a pending delivery'
+);
+reset role;
+select is(
+  (
+    select count(*)
+    from desmoslock_v2.staff_audit_events
+    where invitation_id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'acceptance'
+    )
+      and event_type = 'invitation_requested'
+  ),
+  1::bigint,
+  'an exact begin replay does not duplicate the invitation-requested audit event'
 );
 
 update pg_temp.staff_auth_test_results
@@ -932,11 +1066,12 @@ select is(
     from desmoslock_v2.begin_staff_invitation(
       '10000000-0000-4000-8000-000000000001',
       'invitee@staff.invalid',
-      'admin'
+      'admin',
+      'd1000000-0000-4000-8000-000000000001'
     )
   ),
   'conflict',
-  'a repeated begin cannot generate another delivery while preparation is ambiguous'
+  'the original request key cannot restart delivery after recipient preparation'
 );
 reset role;
 
@@ -1112,7 +1247,8 @@ select is(
     from desmoslock_v2.begin_staff_invitation(
       '10000000-0000-4000-8000-000000000001',
       'invitee@staff.invalid',
-      'admin'
+      'admin',
+      gen_random_uuid()
     )
   ),
   'conflict',
@@ -1400,7 +1536,8 @@ select is(
     from desmoslock_v2.begin_staff_invitation(
       '10000000-0000-4000-8000-000000000001',
       'admin-cannot-invite@staff.invalid',
-      'teacher'
+      'teacher',
+      gen_random_uuid()
     )
   ),
   'forbidden',
@@ -1419,7 +1556,8 @@ select 'rollback', result.code, result.invitation_id
 from desmoslock_v2.begin_staff_invitation(
   '10000000-0000-4000-8000-000000000001',
   'rollback-recipient@staff.invalid',
-  'teacher'
+  'teacher',
+  gen_random_uuid()
 ) as result;
 reset role;
 set local role service_role;
@@ -1585,6 +1723,20 @@ select is(
   'invitation_expired',
   'a publish replay terminalizes an elapsed published invitation instead of reporting it usable'
 );
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_publish_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'rollback'
+      )
+    )
+  ),
+  'invitation_expired',
+  'repeated publish reconciliation preserves the exact terminal expiry result'
+);
 reset role;
 
 select pg_temp.set_staff_claims(
@@ -1674,7 +1826,8 @@ select 'elapsed', result.code, result.invitation_id
 from desmoslock_v2.begin_staff_invitation(
   '10000000-0000-4000-8000-000000000001',
   'wrong-recipient@staff.invalid',
-  'teacher'
+  'teacher',
+  gen_random_uuid()
 ) as result;
 reset role;
 
@@ -1705,6 +1858,49 @@ where id = (
   where label = 'elapsed'
 );
 
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_prepare_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'elapsed'
+      ),
+      'a1000000-0000-4000-8000-000000000003',
+      (
+        select invitation.expires_at
+        from desmoslock_v2.staff_invitations as invitation
+        where invitation.id = (
+          select invitation_id
+          from pg_temp.staff_auth_test_results
+          where label = 'elapsed'
+        )
+      )
+    )
+  ),
+  'invitation_expired',
+  'prepare reconciliation terminalizes an elapsed delivery-ready invitation before SMTP'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_prepare_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'elapsed'
+      ),
+      'a1000000-0000-4000-8000-000000000003',
+      now() - interval '1 minute'
+    )
+  ),
+  'invitation_expired',
+  'expired prepare reconciliation is idempotent and cannot authorize a dead-link send'
+);
+reset role;
+
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000001',
   'c1000000-0000-4000-8000-000000000001',
@@ -1716,7 +1912,8 @@ select 'reissued', result.code, result.invitation_id
 from desmoslock_v2.begin_staff_invitation(
   '10000000-0000-4000-8000-000000000001',
   ' WRONG-RECIPIENT@staff.invalid ',
-  'admin'
+  'admin',
+  gen_random_uuid()
 ) as result;
 reset role;
 
@@ -1762,10 +1959,10 @@ select results_eq(
       and event_type = 'invitation_expired'
   $$,
   $$values (
-    '20000000-0000-4000-8000-000000000001'::uuid,
-    'c1000000-0000-4000-8000-000000000001'::uuid
+    null::uuid,
+    null::uuid
   )$$,
-  'Owner-driven reissue expiry is attributed to the actual Owner session'
+  'prepare-side expiry is audited once as a minimized system transition'
 );
 
 select pg_temp.set_staff_claims(
@@ -1780,7 +1977,8 @@ select is(
     from desmoslock_v2.begin_staff_invitation(
       '10000000-0000-4000-8000-000000000001',
       'wrong-recipient@staff.invalid',
-      'teacher'
+      'teacher',
+      gen_random_uuid()
     )
   ),
   'conflict',
@@ -1869,7 +2067,8 @@ select 'revoke', result.code, result.invitation_id
 from desmoslock_v2.begin_staff_invitation(
   '10000000-0000-4000-8000-000000000001',
   'wrong-recipient@staff.invalid',
-  'teacher'
+  'teacher',
+  gen_random_uuid()
 ) as result;
 reset role;
 
@@ -1993,7 +2192,8 @@ select 'delivery-failure', result.code, result.invitation_id
 from desmoslock_v2.begin_staff_invitation(
   '10000000-0000-4000-8000-000000000001',
   'wrong-recipient@staff.invalid',
-  'teacher'
+  'teacher',
+  gen_random_uuid()
 ) as result;
 reset role;
 set local role service_role;
@@ -2102,7 +2302,8 @@ select 'failure-unavailable', result.code, result.invitation_id
 from desmoslock_v2.begin_staff_invitation(
   '10000000-0000-4000-8000-000000000001',
   'rollback-recipient@staff.invalid',
-  'teacher'
+  'teacher',
+  gen_random_uuid()
 ) as result;
 reset role;
 
@@ -2206,12 +2407,258 @@ select pg_temp.set_staff_claims(
   'aal2'
 );
 set local role authenticated;
+insert into pg_temp.staff_auth_test_results (
+  label,
+  code,
+  invitation_id,
+  request_key
+)
+select
+  'lease-lost',
+  result.code,
+  result.invitation_id,
+  'd1000000-0000-4000-8000-000000000010'::uuid
+from desmoslock_v2.begin_staff_invitation(
+  '10000000-0000-4000-8000-000000000001',
+  'wrong-recipient@staff.invalid',
+  'teacher',
+  'd1000000-0000-4000-8000-000000000010'
+) as result;
+reset role;
+
+revoke execute on function desmoslock_v2.internal_fail_staff_invitation(uuid, text)
+  from service_role;
+set local role service_role;
+select throws_ok(
+  format(
+    'select * from desmoslock_v2.internal_fail_staff_invitation(%L::uuid, %L::text)',
+    (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'lease-lost'
+    ),
+    'dependency_unavailable'
+  ),
+  '42501',
+  null,
+  'an unavailable failure RPC can leave only a bounded pending-delivery lease'
+);
+reset role;
+grant execute on function desmoslock_v2.internal_fail_staff_invitation(uuid, text)
+  to service_role;
+
+select is(
+  (
+    select status
+    from desmoslock_v2.staff_invitations
+    where id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'lease-lost'
+    )
+  ),
+  'pending_delivery',
+  'cleanup unavailability initially preserves the non-consumable pending row'
+);
+update desmoslock_v2.staff_invitations
+set
+  requested_at = statement_timestamp() - interval '6 minutes',
+  delivery_lease_expires_at = statement_timestamp() - interval '1 minute'
+where id = (
+  select invitation_id
+  from pg_temp.staff_auth_test_results
+  where label = 'lease-lost'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+insert into pg_temp.staff_auth_test_results (
+  label,
+  code,
+  invitation_id,
+  request_key
+)
+select
+  'lease-replacement',
+  result.code,
+  result.invitation_id,
+  'd1000000-0000-4000-8000-000000000011'::uuid
+from desmoslock_v2.begin_staff_invitation(
+  '10000000-0000-4000-8000-000000000001',
+  'wrong-recipient@staff.invalid',
+  'teacher',
+  'd1000000-0000-4000-8000-000000000011'
+) as result;
+select results_eq(
+  $$
+    select result.code, result.invitation_id
+    from desmoslock_v2.begin_staff_invitation(
+      '10000000-0000-4000-8000-000000000001',
+      'wrong-recipient@staff.invalid',
+      'teacher',
+      'd1000000-0000-4000-8000-000000000010'
+    ) as result
+  $$,
+  $$values ('conflict'::text, null::uuid)$$,
+  'a terminalized lease key cannot replay into a new delivery attempt'
+);
+reset role;
+
+select is(
+  (select code from pg_temp.staff_auth_test_results where label = 'lease-replacement'),
+  'invitation_pending',
+  'a new request key atomically recovers after the stale pending lease'
+);
+select results_eq(
+  $$
+    select result.label, invitation.status, invitation.failure_reason_code
+    from pg_temp.staff_auth_test_results as result
+    join desmoslock_v2.staff_invitations as invitation
+      on invitation.id = result.invitation_id
+    where result.label in ('lease-lost', 'lease-replacement')
+    order by result.label
+  $$,
+  $$values
+    ('lease-lost'::text, 'delivery_failed'::text, 'delivery_lease_expired'::text),
+    ('lease-replacement'::text, 'pending_delivery'::text, null::text)
+  $$,
+  'lease recovery terminalizes only the stale attempt and preserves one live replacement'
+);
+select results_eq(
+  $$
+    select actor_profile_id, session_id
+    from desmoslock_v2.staff_audit_events
+    where invitation_id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'lease-lost'
+    )
+      and event_type = 'invitation_delivery_failed'
+  $$,
+  $$values (null::uuid, null::uuid)$$,
+  'automatic lease recovery records one minimized system audit without impersonating staff'
+);
+
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_fail_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'lease-replacement'
+      ),
+      'dependency_unavailable'
+    )
+  ),
+  'invitation_delivery_failed',
+  'the recovery replacement can still be closed through ordinary idempotent cleanup'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+insert into pg_temp.staff_auth_test_results (
+  label,
+  code,
+  invitation_id,
+  request_key
+)
+select
+  'lease-prepare',
+  result.code,
+  result.invitation_id,
+  'd1000000-0000-4000-8000-000000000012'::uuid
+from desmoslock_v2.begin_staff_invitation(
+  '10000000-0000-4000-8000-000000000001',
+  'rollback-recipient@staff.invalid',
+  'teacher',
+  'd1000000-0000-4000-8000-000000000012'
+) as result;
+reset role;
+update desmoslock_v2.staff_invitations
+set
+  requested_at = statement_timestamp() - interval '6 minutes',
+  delivery_lease_expires_at = statement_timestamp() - interval '1 minute'
+where id = (
+  select invitation_id
+  from pg_temp.staff_auth_test_results
+  where label = 'lease-prepare'
+);
+
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_prepare_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'lease-prepare'
+      ),
+      'a1000000-0000-4000-8000-000000000004',
+      statement_timestamp() + interval '1 hour'
+    )
+  ),
+  'invitation_delivery_failed',
+  'recipient preparation cannot revive an elapsed pending-delivery lease'
+);
+reset role;
+select results_eq(
+  $$
+    select status, invited_user_id, expires_at, failure_reason_code
+    from desmoslock_v2.staff_invitations
+    where id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'lease-prepare'
+    )
+  $$,
+  $$values (
+    'delivery_failed'::text,
+    null::uuid,
+    null::timestamp with time zone,
+    'delivery_lease_expired'::text
+  )$$,
+  'elapsed preparation stays non-consumable and never binds its Auth recipient'
+);
+select results_eq(
+  $$
+    select actor_profile_id, session_id
+    from desmoslock_v2.staff_audit_events
+    where invitation_id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'lease-prepare'
+    )
+      and event_type = 'invitation_delivery_failed'
+  $$,
+  $$values (null::uuid, null::uuid)$$,
+  'prepare-side lease expiry produces one minimized system audit'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
 insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
 select 'existing-user', result.code, result.invitation_id
 from desmoslock_v2.begin_staff_invitation(
   '10000000-0000-4000-8000-000000000001',
   'owner-alpha@staff.invalid',
-  'teacher'
+  'teacher',
+  gen_random_uuid()
 ) as result;
 reset role;
 set local role service_role;
@@ -2324,7 +2771,8 @@ select is(
     from desmoslock_v2.begin_staff_invitation(
       '10000000-0000-4000-8000-000000000002',
       'forged-role-recipient@staff.invalid',
-      'teacher'
+      'teacher',
+      gen_random_uuid()
     )
   ),
   'forbidden',
@@ -2468,10 +2916,18 @@ select ok(
     where column_info.table_schema = 'desmoslock_v2'
       and column_info.table_name = 'staff_audit_events'
       and column_info.column_name in (
-        'email', 'ip', 'user_agent', 'metadata', 'payload', 'provider_error', 'secret'
+        'email',
+        'ip',
+        'user_agent',
+        'metadata',
+        'payload',
+        'provider_error',
+        'request_key',
+        'secret',
+        'token'
       )
   ),
-  'the append-only audit has no PII, arbitrary payload, secret, or provider-error column'
+  'the append-only audit has no PII, request key, token, arbitrary payload, secret, or provider-error column'
 );
 
 select results_eq(
