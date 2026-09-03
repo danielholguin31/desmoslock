@@ -2,6 +2,7 @@ import {
   findProcessIdentity,
   readProcessIdentityTable,
   selectDescendantProcessIdentities,
+  selectProcessGroupIdentities,
   waitForProcessIdentitiesToDisappear,
 } from "./process-identity-table.mjs";
 
@@ -11,6 +12,51 @@ function retirementIdentity(identity) {
   return Object.freeze({
     processId: identity.processId,
     startedAt: identity.startedAt,
+  });
+}
+
+function processIdentityKey(identity) {
+  return `${identity.processId}:${identity.startedAt}`;
+}
+
+function captureLiveElectronProcessIdentities(state, identities) {
+  if (state.rootIdentity === null) {
+    throw new Error("Electron application exited before identity refresh");
+  }
+  const liveRoot = findProcessIdentity(
+    identities,
+    state.rootIdentity.processId,
+  );
+  if (
+    liveRoot === null ||
+    liveRoot.startedAt !== state.rootIdentity.startedAt ||
+    liveRoot.processGroupId !== state.rootIdentity.processGroupId
+  ) {
+    throw new Error("Electron application root identity changed before close");
+  }
+  if (liveRoot.processGroupId !== liveRoot.processId) {
+    throw new Error(
+      "Electron application is not the leader of an isolated process group",
+    );
+  }
+
+  const snapshotIdentities = new Map();
+  for (const identity of [
+    ...selectDescendantProcessIdentities(identities, liveRoot),
+    ...selectProcessGroupIdentities(identities, liveRoot.processGroupId),
+  ]) {
+    snapshotIdentities.set(processIdentityKey(identity), identity);
+    state.recordedIdentities.set(
+      processIdentityKey(identity),
+      retirementIdentity(identity),
+    );
+  }
+  return Object.freeze({
+    processGroupId: liveRoot.processGroupId,
+    processIdentities: Object.freeze(
+      [...snapshotIdentities.values()].map(retirementIdentity),
+    ),
+    rootIdentity: retirementIdentity(liveRoot),
   });
 }
 
@@ -36,22 +82,27 @@ export async function trackElectronApplicationForCooperativeCleanup(
     }
     throw new Error("Electron application process identity is unavailable");
   }
-  const recordedIdentities = new Map();
-  for (const identity of selectDescendantProcessIdentities(
-    identities,
-    rootIdentity,
-  )) {
-    recordedIdentities.set(
-      `${identity.processId}:${identity.startedAt}`,
-      retirementIdentity(identity),
-    );
-  }
-  electronApplicationCleanupStates.set(application, {
+  const state = {
     child,
     cleanupPromise: null,
-    recordedIdentities,
-    rootIdentity: retirementIdentity(rootIdentity),
-  });
+    recordedIdentities: new Map(),
+    rootIdentity: Object.freeze({
+      processGroupId: rootIdentity.processGroupId,
+      processId: rootIdentity.processId,
+      startedAt: rootIdentity.startedAt,
+    }),
+  };
+  captureLiveElectronProcessIdentities(state, identities);
+  electronApplicationCleanupStates.set(application, state);
+}
+
+export async function refreshElectronApplicationProcessIdentities(application) {
+  await trackElectronApplicationForCooperativeCleanup(application);
+  const state = electronApplicationCleanupStates.get(application);
+  return captureLiveElectronProcessIdentities(
+    state,
+    await readProcessIdentityTable(),
+  );
 }
 
 export async function closeElectronApplicationCooperatively(application) {
@@ -60,18 +111,13 @@ export async function closeElectronApplicationCooperatively(application) {
   if (state.cleanupPromise !== null) return state.cleanupPromise;
   state.cleanupPromise = (async () => {
     const failures = [];
-    if (state.rootIdentity !== null) {
+    if (
+      state.rootIdentity !== null &&
+      state.child.exitCode === null &&
+      state.child.signalCode === null
+    ) {
       try {
-        const identities = await readProcessIdentityTable();
-        for (const identity of selectDescendantProcessIdentities(
-          identities,
-          state.rootIdentity,
-        )) {
-          state.recordedIdentities.set(
-            `${identity.processId}:${identity.startedAt}`,
-            retirementIdentity(identity),
-          );
-        }
+        await refreshElectronApplicationProcessIdentities(application);
       } catch (error) {
         failures.push(error);
       }

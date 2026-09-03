@@ -3,10 +3,26 @@ import type { EventEmitter } from "node:events";
 
 export type CleanupTask = () => Promise<unknown> | unknown;
 
+export type ProcessRetirementIdentity = Readonly<{
+  processId: number;
+  startedAt: string;
+}>;
+
+export type ElectronProcessIdentitySnapshot = Readonly<{
+  processGroupId: number;
+  processIdentities: readonly ProcessRetirementIdentity[];
+  rootIdentity: ProcessRetirementIdentity;
+}>;
+
 export function closeElectronApplicationCooperatively(application: {
   close(): Promise<unknown> | unknown;
   process(): ChildProcess;
 }): Promise<void>;
+
+export function refreshElectronApplicationProcessIdentities(application: {
+  close(): Promise<unknown> | unknown;
+  process(): ChildProcess;
+}): Promise<ElectronProcessIdentitySnapshot>;
 
 export function trackElectronApplicationForCooperativeCleanup(application: {
   close(): Promise<unknown> | unknown;

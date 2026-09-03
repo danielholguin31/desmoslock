@@ -6,6 +6,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   acquireReadyElectronApplication,
   acquireWithLocalCleanup,
+  closeElectronApplicationCooperatively,
+  refreshElectronApplicationProcessIdentities,
   runIndependentCleanupTasks,
   runWithFinalizer,
   runWithIndependentCleanup,
@@ -15,6 +17,8 @@ import {
   findProcessIdentity,
   readProcessIdentityTable,
 } from "../../scripts/process-identity-table.mjs";
+
+const onlyPosix = process.platform === "win32" ? it.skip : it;
 
 describe("production desktop verifier resource safety", () => {
   it("retires a descendant that outlives its leader when readiness fails", async () => {
@@ -41,6 +45,7 @@ describe("production desktop verifier resource safety", () => {
       "setInterval(() => {}, 1_000);",
     ].join("\n");
     const child = spawn(process.execPath, ["-e", applicationSource], {
+      detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
     try {
@@ -112,6 +117,119 @@ describe("production desktop verifier resource safety", () => {
     expect(application.close).toHaveBeenCalledOnce();
     expect(ready).not.toHaveBeenCalled();
   });
+
+  onlyPosix(
+    "retains a late same-group descendant after its intermediate parent exits",
+    async () => {
+      const descendantSource = [
+        "setTimeout(() => process.exit(0), 1_000);",
+      ].join("\n");
+      const intermediateSource = [
+        'const { spawn } = require("node:child_process");',
+        'const descendant = spawn(process.execPath, ["-e", ' +
+          `${JSON.stringify(descendantSource)}], {` +
+          ' stdio: ["ignore", "ignore", "ignore"] });',
+        'descendant.once("spawn", () => {',
+        "  process.stdout.write(String(descendant.pid));",
+        "  descendant.unref();",
+        "});",
+      ].join("\n");
+      const applicationSource = [
+        'const { spawn } = require("node:child_process");',
+        'process.on("message", (message) => {',
+        '  if (message === "spawn-late-descendant") {',
+        '    const intermediate = spawn(process.execPath, ["-e", ' +
+          `${JSON.stringify(intermediateSource)}], {` +
+          ' stdio: ["ignore", "pipe", "ignore"] });',
+        '    let descendantPid = "";',
+        '    intermediate.stdout.on("data", (chunk) => { descendantPid += chunk; });',
+        '    intermediate.once("close", () => {',
+        '      process.send?.({ processId: Number(descendantPid), type: "late-descendant-ready" });',
+        "    });",
+        "    return;",
+        "  }",
+        '  if (message === "exit-root") process.exit(0);',
+        "});",
+        'process.send?.({ type: "root-ready" });',
+        "setInterval(() => {}, 1_000);",
+      ].join("\n");
+      const child = spawn(process.execPath, ["-e", applicationSource], {
+        detached: true,
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+      });
+      let lateIdentity:
+        | Awaited<
+            ReturnType<typeof refreshElectronApplicationProcessIdentities>
+          >["processIdentities"][number]
+        | null = null;
+
+      try {
+        const [ready] = await once(child, "message");
+        expect(ready).toEqual({ type: "root-ready" });
+        const application = {
+          close: vi
+            .fn()
+            .mockRejectedValue(
+              new Error("Natural application exit must not require RPC close"),
+            ),
+          process: () => child,
+        };
+        await refreshElectronApplicationProcessIdentities(application);
+
+        child.send("spawn-late-descendant");
+        const [lateReady] = (await once(child, "message")) as [
+          { processId: number; type: string },
+        ];
+        expect(lateReady.type).toBe("late-descendant-ready");
+        const liveLateIdentity = findProcessIdentity(
+          await readProcessIdentityTable(),
+          lateReady.processId,
+        );
+        expect(liveLateIdentity).toMatchObject({
+          processGroupId: child.pid,
+          processId: lateReady.processId,
+        });
+        expect(liveLateIdentity?.parentPid).not.toBe(child.pid);
+        const snapshot =
+          await refreshElectronApplicationProcessIdentities(application);
+        lateIdentity =
+          snapshot.processIdentities.find(
+            (identity) => identity.processId === lateReady.processId,
+          ) ?? null;
+        expect(snapshot.processGroupId).toBe(child.pid);
+        expect(snapshot.rootIdentity.processId).toBe(child.pid);
+        expect(lateIdentity).not.toBeNull();
+
+        const rootExit = once(child, "exit");
+        child.send("exit-root");
+        await rootExit;
+        await expect(
+          closeElectronApplicationCooperatively(application),
+        ).resolves.toBeUndefined();
+        expect(application.close).not.toHaveBeenCalled();
+        expect(
+          findProcessIdentity(
+            await readProcessIdentityTable(),
+            lateReady.processId,
+          ),
+        ).not.toEqual(lateIdentity);
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) {
+          const rootExit = once(child, "exit");
+          process.kill(-(child.pid as number), "SIGKILL");
+          await rootExit;
+        } else if (lateIdentity !== null) {
+          const current = findProcessIdentity(
+            await readProcessIdentityTable(),
+            lateIdentity.processId,
+          );
+          if (current?.startedAt === lateIdentity.startedAt) {
+            process.kill(-(child.pid as number), "SIGKILL");
+          }
+        }
+      }
+    },
+  );
 
   it("cleans earlier resources when a later acquisition fails before the caller can retain them", async () => {
     const acquisitionFailure = new Error("TCP sink failed to listen");
@@ -210,5 +328,31 @@ describe("production desktop verifier resource safety", () => {
       expect.objectContaining({ errors: [operationFailure, finalizerFailure] }),
     );
     expect(finalizer).toHaveBeenCalledOnce();
+  });
+
+  it("preserves teardown evidence when process cleanup cannot finish after an earlier failure", async () => {
+    const verificationFailure = new Error("teardown receipt assertion failed");
+    const processCleanupFailure = new Error("process tree remained live");
+    const closeApplication = vi.fn().mockRejectedValue(processCleanupFailure);
+    const removeReceiptDirectory = vi.fn().mockResolvedValue(undefined);
+
+    const verification = runWithFinalizer(
+      async () => {
+        throw verificationFailure;
+      },
+      async () => {
+        await closeApplication();
+        await removeReceiptDirectory();
+      },
+      "Teardown receipt verification and process-first cleanup both failed",
+    );
+
+    await expect(verification).rejects.toEqual(
+      expect.objectContaining({
+        errors: [verificationFailure, processCleanupFailure],
+      }),
+    );
+    expect(closeApplication).toHaveBeenCalledOnce();
+    expect(removeReceiptDirectory).not.toHaveBeenCalled();
   });
 });

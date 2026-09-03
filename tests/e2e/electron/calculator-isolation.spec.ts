@@ -17,8 +17,10 @@ import { createElectronLaunchProfile } from "../../../scripts/electron-launch-pr
 import {
   acquireWithLocalCleanup,
   closeElectronApplicationCooperatively,
+  refreshElectronApplicationProcessIdentities,
   type CleanupTask,
   runIndependentCleanupTasks,
+  runWithFinalizer,
   trackElectronApplicationForCooperativeCleanup,
   waitForResourceAcquisition,
 } from "../../../scripts/production-desktop-resource-safety.mjs";
@@ -51,12 +53,13 @@ function closeUdpSocket(socket: dgram.Socket): Promise<void> {
   });
 }
 
-async function readJsonFileWhenPresent(filePath: string): Promise<unknown> {
+async function pathExists(filePath: string): Promise<boolean> {
   try {
-    return JSON.parse(await fs.readFile(filePath, "utf8"));
+    await fs.access(filePath);
+    return true;
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      return null;
+      return false;
     }
     throw error;
   }
@@ -562,61 +565,128 @@ test.describe.serial("isolated calculator surface", () => {
     const evidenceDirectory = await fs.mkdtemp(
       path.join(os.tmpdir(), "desmoslock-calculator-teardown-e2e-"),
     );
-    cleanupTasks.push(() =>
-      fs.rm(evidenceDirectory, { force: true, recursive: true }),
-    );
     const evidencePath = path.join(evidenceDirectory, "teardown.json");
     const child = application.process();
-    const calculatorId = await application.evaluate(
-      ({ BrowserWindow, webContents }, input) => {
-        const calculator = webContents
-          .getAllWebContents()
-          .find((contents) => contents.getURL() === input.calculatorUrl);
-        if (calculator === undefined) throw new Error("Calculator is missing");
-        const calculatorId = calculator.id;
-        calculator.once("destroyed", () => {
-          process.getBuiltinModule("node:fs").writeFileSync(
-            input.evidencePath,
-            `${JSON.stringify({
-              calculatorDestroyed: calculator.isDestroyed(),
-              calculatorId,
-              calculatorStillRegistered: webContents
-                .getAllWebContents()
-                .some((contents) => contents.id === calculatorId),
-              windowCount: BrowserWindow.getAllWindows().length,
-            })}\n`,
-            { encoding: "utf8", flag: "wx" },
-          );
-        });
-        return calculatorId;
-      },
-      { calculatorUrl, evidencePath },
-    );
 
-    await application.evaluate(({ BrowserWindow }) => {
-      const window = BrowserWindow.getAllWindows()[0];
-      if (window === undefined) throw new Error("Desktop window is missing");
-      window.close();
-    });
-    await expect
-      .poll(() => readJsonFileWhenPresent(evidencePath))
-      .toEqual({
-        calculatorDestroyed: true,
-        calculatorId,
-        calculatorStillRegistered: false,
-        windowCount: 0,
-      });
-    if (process.platform === "darwin") {
-      expect(child.exitCode).toBeNull();
-      expect(child.signalCode).toBeNull();
-    } else {
-      await expect
-        .poll(() => ({
-          exitCode: child.exitCode,
-          signalCode: child.signalCode,
-        }))
-        .toEqual({ exitCode: 0, signalCode: null });
-    }
-    await closeElectronApplicationCooperatively(application);
+    await runWithFinalizer(
+      async () => {
+        const { calculatorId, evidenceStagingPath } =
+          await application.evaluate(
+            ({ BrowserWindow, webContents }, input) => {
+              const calculator = webContents
+                .getAllWebContents()
+                .find((contents) => contents.getURL() === input.calculatorUrl);
+              if (calculator === undefined) {
+                throw new Error("Calculator is missing");
+              }
+              const calculatorId = calculator.id;
+              const evidenceStagingPath = `${input.evidencePath}.${process.pid}.${calculatorId}.pending`;
+              calculator.once("destroyed", () => {
+                const fileSystem = process.getBuiltinModule("node:fs");
+                const useDescriptor = (
+                  descriptor: number,
+                  operation: () => void,
+                ): void => {
+                  let operationFailed = false;
+                  let operationFailure: unknown;
+                  try {
+                    operation();
+                  } catch (error) {
+                    operationFailed = true;
+                    operationFailure = error;
+                  }
+                  try {
+                    fileSystem.closeSync(descriptor);
+                  } catch (closeError) {
+                    if (!operationFailed) throw closeError;
+                    throw new AggregateError(
+                      [operationFailure, closeError],
+                      "Calculator teardown receipt operation and descriptor close both failed",
+                      { cause: closeError },
+                    );
+                  }
+                  if (operationFailed) throw operationFailure;
+                };
+                const receipt = `${JSON.stringify({
+                  calculatorDestroyed: calculator.isDestroyed(),
+                  calculatorId,
+                  calculatorStillRegistered: webContents
+                    .getAllWebContents()
+                    .some((contents) => contents.id === calculatorId),
+                  windowCount: BrowserWindow.getAllWindows().length,
+                })}\n`;
+                const receiptDescriptor = fileSystem.openSync(
+                  evidenceStagingPath,
+                  fileSystem.constants.O_CREAT |
+                    fileSystem.constants.O_EXCL |
+                    fileSystem.constants.O_WRONLY,
+                  0o600,
+                );
+                useDescriptor(receiptDescriptor, () => {
+                  fileSystem.writeFileSync(receiptDescriptor, receipt, {
+                    encoding: "utf8",
+                  });
+                  fileSystem.fsyncSync(receiptDescriptor);
+                });
+                fileSystem.linkSync(evidenceStagingPath, input.evidencePath);
+                fileSystem.unlinkSync(evidenceStagingPath);
+                if (process.platform !== "win32") {
+                  const directoryDescriptor = fileSystem.openSync(
+                    input.evidenceDirectory,
+                    fileSystem.constants.O_RDONLY,
+                  );
+                  useDescriptor(directoryDescriptor, () =>
+                    fileSystem.fsyncSync(directoryDescriptor),
+                  );
+                }
+              });
+              return { calculatorId, evidenceStagingPath };
+            },
+            { calculatorUrl, evidenceDirectory, evidencePath },
+          );
+
+        const processSnapshot =
+          await refreshElectronApplicationProcessIdentities(application);
+        expect(
+          processSnapshot.processIdentities.some(
+            (identity) => identity.processId === child.pid,
+          ),
+        ).toBe(true);
+        await application.evaluate(({ BrowserWindow }) => {
+          const window = BrowserWindow.getAllWindows()[0];
+          if (window === undefined)
+            throw new Error("Desktop window is missing");
+          window.close();
+        });
+        await expect.poll(() => pathExists(evidencePath)).toBe(true);
+        expect(await pathExists(evidenceStagingPath)).toBe(false);
+        const evidenceStats = await fs.stat(evidencePath);
+        if (process.platform !== "win32") {
+          expect(evidenceStats.mode & 0o777).toBe(0o600);
+        }
+        expect(JSON.parse(await fs.readFile(evidencePath, "utf8"))).toEqual({
+          calculatorDestroyed: true,
+          calculatorId,
+          calculatorStillRegistered: false,
+          windowCount: 0,
+        });
+        if (process.platform === "darwin") {
+          expect(child.exitCode).toBeNull();
+          expect(child.signalCode).toBeNull();
+        } else {
+          await expect
+            .poll(() => ({
+              exitCode: child.exitCode,
+              signalCode: child.signalCode,
+            }))
+            .toEqual({ exitCode: 0, signalCode: null });
+        }
+      },
+      async () => {
+        await closeElectronApplicationCooperatively(application);
+        await fs.rm(evidenceDirectory, { force: true, recursive: true });
+      },
+      "Calculator teardown verification and process-first cleanup both failed",
+    );
   });
 });
