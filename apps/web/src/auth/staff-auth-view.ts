@@ -1,4 +1,5 @@
 import type {
+  ManagedStaffRole,
   StaffAuthController,
   StaffAuthSnapshot,
 } from "./staff-auth-controller.js";
@@ -9,30 +10,48 @@ export type StaffAuthViewActionId =
   | "begin_totp_enrollment"
   | "cancel_totp"
   | "complete_password_recovery"
+  | "create_administrator_invitation"
+  | "create_teacher_invitation"
   | "request_recovery"
   | "resend_email_verification"
   | "retry"
+  | "revoke_administrator_membership"
   | "revoke_all_sessions"
+  | "revoke_teacher_membership"
   | "sign_in"
   | "sign_out_local"
   | "verify_totp";
 
 export interface StaffAuthViewAction {
+  readonly group?: "invitation" | "membership" | "session";
   readonly id: StaffAuthViewActionId;
   readonly label: string;
 }
 
 export interface StaffAuthViewField {
   readonly autocomplete: HTMLInputElement["autocomplete"];
-  readonly id: "email" | "new_password" | "password" | "totp";
+  readonly id:
+    | "email"
+    | "membership_id"
+    | "new_password"
+    | "password"
+    | "target_email"
+    | "totp";
+  readonly group?: "invitation" | "membership";
   readonly label: string;
   readonly type: "email" | "password" | "text";
+}
+
+export interface StaffAuthViewImage {
+  readonly alt: string;
+  readonly src: string;
 }
 
 export interface StaffAuthViewModel {
   readonly actions: readonly StaffAuthViewAction[];
   readonly fields: readonly StaffAuthViewField[];
   readonly heading: string;
+  readonly image?: StaffAuthViewImage;
   readonly message: string;
   readonly status: StaffAuthSnapshot["kind"];
   readonly tone: "danger" | "info" | "success" | "warning";
@@ -54,7 +73,17 @@ export type StaffAuthViewIntent =
   | { readonly type: "revoke_all_sessions" }
   | { readonly type: "retry" }
   | { readonly type: "bootstrap" }
-  | { readonly password: string; readonly type: "complete_password_recovery" };
+  | { readonly password: string; readonly type: "complete_password_recovery" }
+  | {
+      readonly email: string;
+      readonly targetRole: "admin" | "teacher";
+      readonly type: "create_staff_invitation";
+    }
+  | {
+      readonly membershipId: string;
+      readonly targetRole: "admin" | "teacher";
+      readonly type: "revoke_staff_membership";
+    };
 
 const emailField: StaffAuthViewField = {
   autocomplete: "email",
@@ -81,6 +110,22 @@ const totpField: StaffAuthViewField = {
   autocomplete: "one-time-code",
   id: "totp",
   label: "Authenticator code",
+  type: "text",
+};
+
+const targetEmailField: StaffAuthViewField = {
+  autocomplete: "email",
+  group: "invitation",
+  id: "target_email",
+  label: "Staff email",
+  type: "email",
+};
+
+const membershipIdField: StaffAuthViewField = {
+  autocomplete: "off",
+  group: "membership",
+  id: "membership_id",
+  label: "Membership ID",
   type: "text",
 };
 
@@ -196,12 +241,7 @@ export function createStaffAuthViewModel(
 
   if (snapshot.kind === "password_recovery_ready") {
     return {
-      actions: [
-        {
-          id: "complete_password_recovery",
-          label: "Update password",
-        },
-      ],
+      actions: [{ id: "complete_password_recovery", label: "Update password" }],
       fields: [{ ...newPasswordField, label: "New password" }],
       heading: "Set a new password",
       message: "Choose a new password for this staff account.",
@@ -234,12 +274,36 @@ export function createStaffAuthViewModel(
   }
 
   if (snapshot.kind === "totp_enrollment_required") {
+    const message =
+      snapshot.feedback === "rejected"
+        ? "That setup code was not accepted. Start a new authenticator setup."
+        : snapshot.feedback === "cancelled"
+          ? "Authenticator setup was cancelled and its QR code was revoked."
+          : "Privileged staff must set up authenticator verification before School access.";
     return {
       actions: [{ id: "begin_totp_enrollment", label: "Set up authenticator" }],
       fields: [],
       heading: `Secure ${roleLabel(snapshot.role)} access`,
+      message,
+      status: snapshot.kind,
+      tone: snapshot.feedback === "none" ? "warning" : "danger",
+    };
+  }
+
+  if (snapshot.kind === "totp_provisioning") {
+    return {
+      actions: [
+        { id: "verify_totp", label: "Verify setup" },
+        { id: "cancel_totp", label: "Cancel" },
+      ],
+      fields: [totpField],
+      heading: "Scan and confirm authenticator",
+      image: {
+        alt: "Authenticator enrollment QR code",
+        src: snapshot.qrBlobUrl,
+      },
       message:
-        "Privileged staff must set up authenticator verification before School access.",
+        "Scan this one-time QR code, then enter the code from your authenticator.",
       status: snapshot.kind,
       tone: "warning",
     };
@@ -251,19 +315,14 @@ export function createStaffAuthViewModel(
         ? "That authenticator code was not accepted. Try again."
         : snapshot.feedback === "cancelled"
           ? "Verification was cancelled. No access change was made."
-          : snapshot.purpose === "enrollment"
-            ? "Enter a code from the authenticator you just configured."
-            : "Enter your authenticator code to continue.";
+          : "Enter your authenticator code to continue.";
     return {
       actions: [
         { id: "verify_totp", label: "Verify" },
         { id: "cancel_totp", label: "Cancel" },
       ],
       fields: [totpField],
-      heading:
-        snapshot.purpose === "enrollment"
-          ? "Confirm authenticator setup"
-          : `Verify ${roleLabel(snapshot.role)} access`,
+      heading: `Verify ${roleLabel(snapshot.role)} access`,
       message,
       status: snapshot.kind,
       tone: snapshot.feedback === "rejected" ? "danger" : "warning",
@@ -271,18 +330,87 @@ export function createStaffAuthViewModel(
   }
 
   if (snapshot.kind === "authenticated") {
+    const role = snapshot.identity.membership.role;
+    const ownerActions: StaffAuthViewAction[] =
+      role === "owner"
+        ? [
+            {
+              group: "invitation",
+              id: "create_administrator_invitation",
+              label: "Invite Administrator",
+            },
+            {
+              group: "invitation",
+              id: "create_teacher_invitation",
+              label: "Invite Teacher",
+            },
+            {
+              group: "membership",
+              id: "revoke_administrator_membership",
+              label: "Revoke Administrator",
+            },
+            {
+              group: "membership",
+              id: "revoke_teacher_membership",
+              label: "Revoke Teacher",
+            },
+          ]
+        : [];
     return {
       actions: [
-        { id: "sign_out_local", label: "Sign out here" },
-        { id: "revoke_all_sessions", label: "Sign out everywhere" },
+        ...ownerActions,
+        {
+          ...(role === "owner" ? { group: "session" as const } : {}),
+          id: "sign_out_local",
+          label: "Sign out here",
+        },
+        {
+          ...(role === "owner" ? { group: "session" as const } : {}),
+          id: "revoke_all_sessions",
+          label: "Sign out everywhere",
+        },
       ],
-      fields: [],
-      heading: `${roleLabel(snapshot.role)} access`,
-      message: `Signed in as ${snapshot.email}${
+      fields: role === "owner" ? [targetEmailField, membershipIdField] : [],
+      heading: `${roleLabel(role)} access`,
+      message: `Signed in as ${snapshot.identity.email} at ${snapshot.identity.school.label}${
         snapshot.assuranceLevel === "aal2" ? " with step-up verification" : ""
       }.`,
       status: snapshot.kind,
       tone: "success",
+    };
+  }
+
+  if (
+    snapshot.kind === "staff_invitation_created" ||
+    snapshot.kind === "staff_membership_revoked"
+  ) {
+    const invited = snapshot.kind === "staff_invitation_created";
+    return {
+      actions: [{ id: "back_to_sign_in", label: "Continue" }],
+      fields: [],
+      heading: invited ? "Invitation created" : "Membership revoked",
+      message: invited
+        ? `${roleLabel(snapshot.targetRole)} invitation created for ${snapshot.schoolLabel}.`
+        : `${roleLabel(snapshot.targetRole)} membership revoked for ${snapshot.schoolLabel}.`,
+      status: snapshot.kind,
+      tone: "success",
+    };
+  }
+
+  if (
+    snapshot.kind === "staff_invitation_rejected" ||
+    snapshot.kind === "staff_membership_revocation_rejected"
+  ) {
+    const invitation = snapshot.kind === "staff_invitation_rejected";
+    return {
+      actions: [{ id: "back_to_sign_in", label: "Continue" }],
+      fields: [],
+      heading: invitation ? "Invitation not created" : "Membership not revoked",
+      message: invitation
+        ? "The staff invitation was not authorized or could not be created."
+        : "The staff membership revocation was not authorized or could not be completed.",
+      status: snapshot.kind,
+      tone: "danger",
     };
   }
 
@@ -322,9 +450,9 @@ export function createStaffAuthViewModel(
       actions: snapshot.retryable
         ? [
             { id: "retry", label: "Retry" },
-            { id: "back_to_sign_in", label: "Back to sign in" },
+            { id: "back_to_sign_in", label: "Start again" },
           ]
-        : [{ id: "back_to_sign_in", label: "Back to sign in" }],
+        : [{ id: "back_to_sign_in", label: "Start again" }],
       fields: [],
       heading: "Authentication temporarily unavailable",
       message: snapshot.retryable
@@ -335,34 +463,53 @@ export function createStaffAuthViewModel(
     };
   }
 
+  if (snapshot.kind === "disposed") {
+    return {
+      actions: [],
+      fields: [],
+      heading: "Authentication view closed",
+      message: "This authentication view is no longer active.",
+      status: snapshot.kind,
+      tone: "info",
+    };
+  }
+
   if (
     snapshot.kind === "bootstrapping" ||
     snapshot.kind === "signing_in" ||
     snapshot.kind === "signing_out" ||
+    snapshot.kind === "sending_email_verification" ||
     snapshot.kind === "requesting_recovery" ||
     snapshot.kind === "inspecting_invitation" ||
     snapshot.kind === "accepting_invitation" ||
     snapshot.kind === "enrolling_totp" ||
     snapshot.kind === "verifying_totp" ||
     snapshot.kind === "processing_pkce_callback" ||
-    snapshot.kind === "updating_password"
+    snapshot.kind === "updating_password" ||
+    snapshot.kind === "creating_staff_invitation" ||
+    snapshot.kind === "revoking_staff_membership"
   ) {
     const heading =
       snapshot.kind === "signing_out"
         ? snapshot.scope === "all"
           ? "Revoking all sessions"
           : "Signing out"
-        : {
-            accepting_invitation: "Accepting invitation",
-            bootstrapping: "Checking staff access",
-            enrolling_totp: "Preparing authenticator",
-            inspecting_invitation: "Checking invitation",
-            processing_pkce_callback: "Checking recovery link",
-            requesting_recovery: "Requesting recovery",
-            signing_in: "Signing in",
-            updating_password: "Updating password",
-            verifying_totp: "Verifying authenticator",
-          }[snapshot.kind];
+        : snapshot.kind === "creating_staff_invitation"
+          ? `Creating ${roleLabel(snapshot.targetRole)} invitation`
+          : snapshot.kind === "revoking_staff_membership"
+            ? `Revoking ${roleLabel(snapshot.targetRole)} membership`
+            : {
+                accepting_invitation: "Accepting invitation",
+                bootstrapping: "Checking staff access",
+                enrolling_totp: "Preparing authenticator",
+                inspecting_invitation: "Checking invitation",
+                processing_pkce_callback: "Checking authentication link",
+                requesting_recovery: "Requesting recovery",
+                sending_email_verification: "Sending verification email",
+                signing_in: "Signing in",
+                updating_password: "Updating password",
+                verifying_totp: "Verifying authenticator",
+              }[snapshot.kind];
     return {
       actions: [],
       fields: [],
@@ -391,43 +538,116 @@ export function renderStaffAuthView(
   heading.textContent = view.heading;
   const message = document.createElement("p");
   message.textContent = view.message;
+  message.setAttribute(
+    "aria-live",
+    view.tone === "danger" ? "assertive" : "polite",
+  );
+  message.setAttribute("role", "status");
   section.append(heading, message);
 
-  const controls = document.createElement("div");
+  if (view.image !== undefined) {
+    const image = document.createElement("img");
+    image.alt = view.image.alt;
+    image.src = view.image.src;
+    section.append(image);
+  }
+
   const inputs: Partial<Record<StaffAuthViewField["id"], HTMLInputElement>> =
     {};
-  for (const field of view.fields) {
-    const label = document.createElement("label");
-    const labelText = document.createElement("span");
-    labelText.textContent = field.label;
-    const input = document.createElement("input");
-    input.autocomplete = field.autocomplete;
-    input.name = field.id;
-    input.type = field.type;
-    inputs[field.id] = input;
-    label.append(labelText, input);
-    controls.append(label);
-  }
+  const reportIntentFailure = () => {
+    section.dataset.authTone = "danger";
+    message.setAttribute("aria-live", "assertive");
+    message.textContent =
+      "Authentication could not be completed. No access change was confirmed.";
+    message.tabIndex = -1;
+    message.focus();
+  };
+  const emit = (action: StaffAuthViewActionId) => {
+    const intent = createIntent(action, inputs);
+    let outcome: Promise<void> | void;
+    try {
+      outcome = onIntent(intent);
+    } catch {
+      reportIntentFailure();
+      return;
+    } finally {
+      clearTransientInputs(inputs);
+    }
+    void Promise.resolve(outcome).catch(reportIntentFailure);
+  };
 
-  for (const action of view.actions) {
-    const button = document.createElement("button");
-    button.dataset.authAction = action.id;
-    button.textContent = action.label;
-    button.type = "button";
-    button.addEventListener("click", (event) => {
+  const groups = ["primary", "invitation", "membership", "session"] as const;
+  for (const group of groups) {
+    const fields = view.fields.filter(
+      (field) => (field.group ?? "primary") === group,
+    );
+    const actions = view.actions.filter(
+      (action) => (action.group ?? "primary") === group,
+    );
+    if (fields.length === 0 && actions.length === 0) {
+      continue;
+    }
+    const controls = document.createElement("form");
+    controls.noValidate = true;
+    let container: HTMLElement = controls;
+    if (group !== "primary") {
+      const fieldset = document.createElement("fieldset");
+      const legend = document.createElement("legend");
+      legend.textContent = {
+        invitation: "Invite staff",
+        membership: "Revoke staff Membership",
+        session: "Session controls",
+      }[group];
+      fieldset.append(legend);
+      controls.append(fieldset);
+      container = fieldset;
+    }
+    for (const field of fields) {
+      const label = document.createElement("label");
+      const labelText = document.createElement("span");
+      labelText.textContent = field.label;
+      const input = document.createElement("input");
+      input.autocomplete = field.autocomplete;
+      input.name = field.id;
+      input.required = true;
+      input.type = field.type;
+      inputs[field.id] = input;
+      label.append(labelText, input);
+      container.append(label);
+    }
+
+    const primaryAction =
+      group === "primary" || actions.length === 1 ? actions[0] : undefined;
+    controls.addEventListener("submit", (event) => {
       event.preventDefault();
-      const intent = createIntent(action.id, inputs);
-      try {
-        void onIntent(intent);
-      } finally {
-        clearTransientInputs(inputs);
+      if (primaryAction !== undefined) {
+        emit(primaryAction.id);
       }
     });
-    controls.append(button);
+    for (const action of actions) {
+      const button = document.createElement("button");
+      const isPrimary = action === primaryAction;
+      button.dataset.authAction = action.id;
+      button.textContent = action.label;
+      button.type = isPrimary ? "submit" : "button";
+      if (!isPrimary) {
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
+          emit(action.id);
+        });
+      }
+      container.append(button);
+    }
+    section.append(controls);
   }
-
-  section.append(controls);
   root.replaceChildren(section);
+  const firstInput = Object.values(inputs)[0];
+  if (firstInput !== undefined) {
+    firstInput.focus();
+  } else {
+    heading.tabIndex = -1;
+    heading.focus();
+  }
 }
 
 function createIntent(
@@ -472,6 +692,22 @@ function createIntent(
         password: inputs.new_password?.value ?? "",
         type: "complete_password_recovery",
       };
+    case "create_administrator_invitation":
+    case "create_teacher_invitation":
+      return {
+        email: inputs.target_email?.value ?? "",
+        targetRole:
+          action === "create_administrator_invitation" ? "admin" : "teacher",
+        type: "create_staff_invitation",
+      };
+    case "revoke_administrator_membership":
+    case "revoke_teacher_membership":
+      return {
+        membershipId: inputs.membership_id?.value ?? "",
+        targetRole:
+          action === "revoke_administrator_membership" ? "admin" : "teacher",
+        type: "revoke_staff_membership",
+      };
   }
 }
 
@@ -479,10 +715,26 @@ export function bindStaffAuthView(
   root: HTMLElement,
   controller: StaffAuthController,
 ): () => void {
-  const render = (snapshot: StaffAuthSnapshot) => {
-    renderStaffAuthView(root, snapshot, async (intent) => {
+  const handleIntent = async (intent: StaffAuthViewIntent): Promise<void> => {
+    try {
       await controller.dispatch(intent);
-    });
+    } catch {
+      const current = controller.getSnapshot();
+      renderStaffAuthView(
+        root,
+        {
+          code: "dependency_unavailable",
+          kind: "dependency_failure",
+          operation: "bootstrap",
+          retryable: false,
+          revision: current.revision,
+        },
+        handleIntent,
+      );
+    }
+  };
+  const render = (snapshot: StaffAuthSnapshot) => {
+    renderStaffAuthView(root, snapshot, handleIntent);
   };
   render(controller.getSnapshot());
   return controller.subscribe(render);
@@ -502,7 +754,7 @@ function clearTransientInputs(
   }
 }
 
-function roleLabel(role: "administrator" | "owner" | "teacher"): string {
+function roleLabel(role: ManagedStaffRole | "owner"): string {
   if (role === "administrator") {
     return "Administrator";
   }
@@ -512,7 +764,7 @@ function roleLabel(role: "administrator" | "owner" | "teacher"): string {
   return "Teacher";
 }
 
-function roleWithArticle(role: "administrator" | "owner" | "teacher"): string {
+function roleWithArticle(role: ManagedStaffRole): string {
   const label = roleLabel(role);
   return `${role === "teacher" ? "a" : "an"} ${label}`;
 }

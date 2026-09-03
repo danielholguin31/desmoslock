@@ -1,17 +1,28 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  bindStaffAuthView,
   createStaffAuthViewModel,
   renderStaffAuthView,
   type StaffAuthViewIntent,
 } from "../src/auth/staff-auth-view.js";
+import type {
+  StaffAuthController,
+  StaffAuthSnapshot,
+} from "../src/auth/staff-auth-controller.js";
 
 class FakeElement {
+  readonly attributes: Record<string, string> = {};
   readonly children: FakeElement[] = [];
   readonly dataset: Record<string, string> = {};
   readonly listeners = new Map<string, (event: Event) => void>();
   autocomplete = "";
+  alt = "";
   name = "";
+  noValidate = false;
+  required = false;
+  src = "";
+  tabIndex = 0;
   textContent: string | null = null;
   type = "";
   value = "";
@@ -32,9 +43,19 @@ class FakeElement {
   replaceChildren(...children: FakeElement[]) {
     this.children.splice(0, this.children.length, ...children);
   }
+
+  focus() {
+    this.ownerDocument.activeElement = this;
+  }
+
+  setAttribute(name: string, value: string) {
+    this.attributes[name] = value;
+  }
 }
 
 class FakeDocument {
+  activeElement: FakeElement | null = null;
+
   createElement(tagName: string) {
     return new FakeElement(this, tagName);
   }
@@ -42,6 +63,24 @@ class FakeDocument {
 
 function descendants(root: FakeElement): FakeElement[] {
   return root.children.flatMap((child) => [child, ...descendants(child)]);
+}
+
+function authenticatedSnapshot(role: "administrator" | "owner" | "teacher") {
+  return {
+    assuranceLevel: "aal2" as const,
+    identity: {
+      accountId: `account-${role}`,
+      email: `${role}@example.test`,
+      membership: {
+        id: `membership-${role}`,
+        role,
+        status: "active" as const,
+      },
+      school: { id: "school-1", label: "Synthetic High School" },
+    },
+    kind: "authenticated" as const,
+    revision: 1,
+  };
 }
 
 describe("staff auth view", () => {
@@ -199,6 +238,7 @@ describe("staff auth view", () => {
 
   it("renders enrollment and challenge states without exposing a TOTP seed", () => {
     const enrollment = createStaffAuthViewModel({
+      feedback: "none",
       kind: "totp_enrollment_required",
       revision: 1,
       role: "administrator",
@@ -206,7 +246,6 @@ describe("staff auth view", () => {
     const challenge = createStaffAuthViewModel({
       feedback: "rejected",
       kind: "totp_challenge",
-      purpose: "step_up",
       revision: 2,
       role: "administrator",
     });
@@ -240,10 +279,18 @@ describe("staff auth view", () => {
   it("renders authenticated Administrator controls with local and all-session logout", () => {
     const view = createStaffAuthViewModel({
       assuranceLevel: "aal2",
-      email: "admin@example.test",
+      identity: {
+        accountId: "account-admin",
+        email: "admin@example.test",
+        membership: {
+          id: "membership-admin",
+          role: "administrator",
+          status: "active",
+        },
+        school: { id: "school-1", label: "Synthetic High School" },
+      },
       kind: "authenticated",
       revision: 1,
-      role: "administrator",
     });
 
     expect(view).toMatchObject({
@@ -253,7 +300,8 @@ describe("staff auth view", () => {
       ],
       fields: [],
       heading: "Administrator access",
-      message: "Signed in as admin@example.test with step-up verification.",
+      message:
+        "Signed in as admin@example.test at Synthetic High School with step-up verification.",
       tone: "success",
     });
   });
@@ -308,14 +356,14 @@ describe("staff auth view", () => {
     expect(retryable).toMatchObject({
       actions: [
         { id: "retry", label: "Retry" },
-        { id: "back_to_sign_in", label: "Back to sign in" },
+        { id: "back_to_sign_in", label: "Start again" },
       ],
       heading: "Authentication temporarily unavailable",
       message: "No access change was confirmed. Try again.",
       tone: "danger",
     });
     expect(terminal.actions).toEqual([
-      { id: "back_to_sign_in", label: "Back to sign in" },
+      { id: "back_to_sign_in", label: "Start again" },
     ]);
     expect(JSON.stringify([retryable, terminal])).not.toMatch(
       /dependency_unavailable|invalid_backend_result|revoke_all_sessions/i,
@@ -355,7 +403,27 @@ describe("staff auth view", () => {
     ],
     [
       { kind: "processing_pkce_callback", revision: 1 } as const,
-      "Checking recovery link",
+      "Checking authentication link",
+    ],
+    [
+      { kind: "sending_email_verification", revision: 1 } as const,
+      "Sending verification email",
+    ],
+    [
+      {
+        kind: "creating_staff_invitation",
+        revision: 1,
+        targetRole: "administrator",
+      } as const,
+      "Creating Administrator invitation",
+    ],
+    [
+      {
+        kind: "revoking_staff_membership",
+        revision: 1,
+        targetRole: "teacher",
+      } as const,
+      "Revoking Teacher membership",
     ],
     [{ kind: "updating_password", revision: 1 } as const, "Updating password"],
   ])("renders pending state %s", (snapshot, heading) => {
@@ -385,14 +453,14 @@ describe("staff auth view", () => {
     const nodes = descendants(root);
     const email = nodes.find((node) => node.name === "email");
     const password = nodes.find((node) => node.name === "password");
-    const signIn = nodes.find((node) => node.dataset.authAction === "sign_in");
-    if (email === undefined || password === undefined || signIn === undefined) {
+    const form = nodes.find((node) => node.tagName === "form");
+    if (email === undefined || password === undefined || form === undefined) {
       throw new Error("expected rendered login controls");
     }
     email.value = "teacher@example.test";
     password.value = "SENTINEL-password";
 
-    signIn.listeners.get("click")?.({
+    form.listeners.get("submit")?.({
       preventDefault() {},
     } as unknown as Event);
 
@@ -409,5 +477,251 @@ describe("staff auth view", () => {
         .map(({ textContent }) => textContent)
         .join(" "),
     ).not.toContain("SENTINEL");
+  });
+
+  it("renders an ephemeral TOTP provisioning QR without a seed or enrollment receipt", () => {
+    const view = createStaffAuthViewModel({
+      kind: "totp_provisioning",
+      qrBlobUrl: "blob:https://app.example.test/opaque-presentation",
+      revision: 1,
+      role: "administrator",
+    });
+
+    expect(view).toMatchObject({
+      actions: [
+        { id: "verify_totp", label: "Verify setup" },
+        { id: "cancel_totp", label: "Cancel" },
+      ],
+      image: {
+        alt: "Authenticator enrollment QR code",
+        src: "blob:https://app.example.test/opaque-presentation",
+      },
+    });
+    expect(JSON.stringify(view)).not.toMatch(
+      /otpauth|enrollment.?receipt|shared.?secret/i,
+    );
+  });
+
+  it("shows invitation and revocation commands only to an Owner", () => {
+    const owner = createStaffAuthViewModel(authenticatedSnapshot("owner"));
+    const administrator = createStaffAuthViewModel(
+      authenticatedSnapshot("administrator"),
+    );
+
+    expect(owner.actions.map(({ id }) => id)).toEqual([
+      "create_administrator_invitation",
+      "create_teacher_invitation",
+      "revoke_administrator_membership",
+      "revoke_teacher_membership",
+      "sign_out_local",
+      "revoke_all_sessions",
+    ]);
+    expect(owner.fields.map(({ id }) => id)).toEqual([
+      "target_email",
+      "membership_id",
+    ]);
+    expect(owner.actions.map(({ id }) => id)).not.toContain("invite_owner");
+    expect(administrator.actions.map(({ id }) => id)).toEqual([
+      "sign_out_local",
+      "revoke_all_sessions",
+    ]);
+  });
+
+  it.each([
+    [
+      {
+        kind: "staff_invitation_created",
+        revision: 1,
+        schoolLabel: "Synthetic High School",
+        targetRole: "administrator",
+      } as const,
+      "Invitation created",
+      "Administrator invitation created for Synthetic High School.",
+    ],
+    [
+      {
+        kind: "staff_membership_revoked",
+        revision: 1,
+        schoolLabel: "Synthetic High School",
+        targetRole: "teacher",
+      } as const,
+      "Membership revoked",
+      "Teacher membership revoked for Synthetic High School.",
+    ],
+    [
+      { kind: "staff_invitation_rejected", revision: 1 } as const,
+      "Invitation not created",
+      "The staff invitation was not authorized or could not be created.",
+    ],
+    [
+      { kind: "staff_membership_revocation_rejected", revision: 1 } as const,
+      "Membership not revoked",
+      "The staff membership revocation was not authorized or could not be completed.",
+    ],
+  ])("renders the Owner command result %s", (snapshot, heading, message) => {
+    expect(createStaffAuthViewModel(snapshot)).toMatchObject({
+      heading,
+      message,
+    });
+  });
+
+  it("renders a form with status semantics and focuses the first input", () => {
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+
+    renderStaffAuthView(
+      root as unknown as HTMLElement,
+      { kind: "signed_out", notice: null, revision: 1 },
+      () => undefined,
+    );
+
+    const nodes = descendants(root);
+    const form = nodes.find(({ tagName }) => tagName === "form");
+    const status = nodes.find(({ attributes }) => attributes.role === "status");
+    const email = nodes.find(({ name }) => name === "email");
+    expect(form).toBeDefined();
+    expect(status?.attributes["aria-live"]).toBe("polite");
+    expect(document.activeElement).toBe(email);
+  });
+
+  it("focuses a heading when a state has no input", () => {
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    renderStaffAuthView(
+      root as unknown as HTMLElement,
+      { kind: "session_expired", revision: 1 },
+      () => undefined,
+    );
+
+    expect(document.activeElement?.tagName).toBe("h1");
+    expect(document.activeElement?.tabIndex).toBe(-1);
+  });
+
+  it("renders a closed authentication view without actions", () => {
+    expect(
+      createStaffAuthViewModel({ kind: "disposed", revision: 2 }),
+    ).toMatchObject({
+      actions: [],
+      heading: "Authentication view closed",
+      status: "disposed",
+    });
+  });
+
+  it("maps Owner invite and revoke controls without an Owner target", () => {
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    const intents: StaffAuthViewIntent[] = [];
+    renderStaffAuthView(
+      root as unknown as HTMLElement,
+      authenticatedSnapshot("owner"),
+      (intent) => {
+        intents.push(intent);
+      },
+    );
+    const nodes = descendants(root);
+    const email = nodes.find(({ name }) => name === "target_email");
+    const membership = nodes.find(({ name }) => name === "membership_id");
+    const inviteTeacher = nodes.find(
+      ({ dataset }) => dataset.authAction === "create_teacher_invitation",
+    );
+    const revokeAdministrator = nodes.find(
+      ({ dataset }) => dataset.authAction === "revoke_administrator_membership",
+    );
+    if (
+      email === undefined ||
+      membership === undefined ||
+      inviteTeacher === undefined ||
+      revokeAdministrator === undefined
+    ) {
+      throw new Error("expected Owner staff-management controls");
+    }
+    email.value = "teacher@example.test";
+    membership.value = "membership-target";
+
+    const ambiguousMembershipForm = nodes.find(
+      (node) =>
+        node.tagName === "form" &&
+        descendants(node).some(({ name }) => name === "membership_id"),
+    );
+    ambiguousMembershipForm?.listeners.get("submit")?.({
+      preventDefault() {},
+    } as Event);
+    expect(intents).toEqual([]);
+
+    inviteTeacher.listeners.get("click")?.({ preventDefault() {} } as Event);
+    revokeAdministrator.listeners.get("click")?.({
+      preventDefault() {},
+    } as Event);
+
+    expect(intents).toEqual([
+      {
+        email: "teacher@example.test",
+        targetRole: "teacher",
+        type: "create_staff_invitation",
+      },
+      {
+        membershipId: "membership-target",
+        targetRole: "admin",
+        type: "revoke_staff_membership",
+      },
+    ]);
+    expect(JSON.stringify(intents)).not.toContain('"targetRole":"owner"');
+  });
+
+  it("catches a rejected intent and announces a sanitized failure", async () => {
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    renderStaffAuthView(
+      root as unknown as HTMLElement,
+      { kind: "signed_out", notice: null, revision: 1 },
+      async () => {
+        throw new Error("SENTINEL-renderer-detail");
+      },
+    );
+    const form = descendants(root).find(({ tagName }) => tagName === "form");
+    form?.listeners.get("submit")?.({ preventDefault() {} } as Event);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const nodes = descendants(root);
+    const status = nodes.find(({ attributes }) => attributes.role === "status");
+    expect(status?.textContent).toBe(
+      "Authentication could not be completed. No access change was confirmed.",
+    );
+    expect(status?.textContent).not.toContain("SENTINEL");
+    expect(status?.attributes["aria-live"]).toBe("assertive");
+  });
+
+  it("has the DOM binder catch a rejected controller dispatch", async () => {
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    const initial: StaffAuthSnapshot = {
+      kind: "signed_out",
+      notice: null,
+      revision: 1,
+    };
+    const controller: StaffAuthController = {
+      async dispatch() {
+        throw new Error("SENTINEL-controller-detail");
+      },
+      dispose() {},
+      getSnapshot() {
+        return initial;
+      },
+      subscribe() {
+        return () => undefined;
+      },
+    };
+    bindStaffAuthView(root as unknown as HTMLElement, controller);
+    const form = descendants(root).find(({ tagName }) => tagName === "form");
+    form?.listeners.get("submit")?.({ preventDefault() {} } as Event);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const text = descendants(root)
+      .map(({ textContent }) => textContent)
+      .join(" ");
+    expect(text).toContain("Authentication temporarily unavailable");
+    expect(text).not.toContain("SENTINEL");
   });
 });
