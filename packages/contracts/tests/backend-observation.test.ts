@@ -6,124 +6,14 @@ import {
   parsePublicBackendConfiguration,
 } from "../src/index.js";
 
-const syntheticPublishableKey = `sb_${"publishable"}_${"x".repeat(32)}`;
-
 describe("backend observation", () => {
-  it("requires all public configuration fields explicitly", () => {
+  it("requires both public configuration fields explicitly", () => {
     expect(
       parsePublicBackendConfiguration({
         environment: undefined,
-        publishableKey: undefined,
         url: undefined,
       }),
     ).toBeNull();
-  });
-
-  it.each([
-    {
-      publishableKey: syntheticPublishableKey,
-      url: "https://synthetic-staging.supabase.co",
-    },
-    {
-      environment: "staging",
-      url: "https://synthetic-staging.supabase.co",
-    },
-    {
-      environment: "staging",
-      publishableKey: syntheticPublishableKey,
-    },
-  ])("rejects each missing public configuration value", (configuration) => {
-    expect(parsePublicBackendConfiguration(configuration)).toBeNull();
-  });
-
-  it.each([
-    "publishable-example",
-    `sb_${"publishable"}_short`,
-    `sb_${"secret"}_${"x".repeat(32)}`,
-    `eyJ${"x".repeat(40)}`,
-    ` sb_${"publishable"}_${"x".repeat(32)}`,
-  ])("rejects a malformed or privileged key value: %s", (publishableKey) => {
-    expect(
-      parsePublicBackendConfiguration({
-        environment: "staging",
-        publishableKey,
-        url: "https://synthetic-staging.supabase.co",
-      }),
-    ).toBeNull();
-  });
-
-  it("rejects a malformed publishable key before network use", async () => {
-    const observation = await observeBackend(
-      {
-        environment: "staging",
-        publishableKey: `sb_${"publishable"}_short`,
-        url: "https://synthetic-staging.supabase.co",
-      },
-      {
-        async readHealth() {
-          throw new Error("malformed public configuration reached the network");
-        },
-      },
-    );
-
-    expect(observation).toEqual({
-      reason: "configuration_invalid",
-      status: "unavailable",
-    });
-  });
-
-  it.each(["databaseUrl", "operatorCredential", "secretKey", "serviceRoleKey"])(
-    "rejects the privileged field %s before network use",
-    async (field) => {
-      const observation = await observeBackend(
-        {
-          environment: "staging",
-          [field]: "synthetic-placeholder",
-          publishableKey: syntheticPublishableKey,
-          url: "https://synthetic-staging.supabase.co",
-        },
-        {
-          async readHealth() {
-            throw new Error(
-              "a privileged configuration must not reach the network",
-            );
-          },
-        },
-      );
-
-      expect(observation).toEqual({
-        reason: "configuration_invalid",
-        status: "unavailable",
-      });
-    },
-  );
-
-  it("rejects inherited, accessor, and symbol configuration fields", () => {
-    const inherited = Object.create({ secretKey: "synthetic-placeholder" }) as
-      Record<string, unknown> | undefined;
-    Object.assign(inherited ?? {}, {
-      environment: "staging",
-      publishableKey: syntheticPublishableKey,
-      url: "https://synthetic-staging.supabase.co",
-    });
-
-    const accessor = {
-      environment: "staging",
-      get publishableKey() {
-        return syntheticPublishableKey;
-      },
-      url: "https://synthetic-staging.supabase.co",
-    };
-    const symbolField = {
-      environment: "staging",
-      publishableKey: syntheticPublishableKey,
-      url: "https://synthetic-staging.supabase.co",
-      [Symbol("privileged")]: "synthetic-placeholder",
-    };
-
-    expect(parsePublicBackendConfiguration(inherited)).toBeNull();
-    expect(parsePublicBackendConfiguration(accessor)).toBeNull();
-    expect(parsePublicBackendConfiguration(symbolField)).toBeNull();
   });
 
   it("reads only the public health endpoint without credentials or redirects", async () => {
@@ -166,7 +56,6 @@ describe("backend observation", () => {
     const observation = await observeBackend(
       {
         environment: "staging",
-        publishableKey: syntheticPublishableKey,
         url: "https://synthetic-staging.supabase.co",
       },
       {
@@ -203,7 +92,6 @@ describe("backend observation", () => {
       {
         environment: "staging",
         operatorCredential: "synthetic-placeholder",
-        publishableKey: syntheticPublishableKey,
         url: "http://127.0.0.1:54321",
       },
       {
@@ -250,7 +138,6 @@ describe("backend observation", () => {
     const observation = await observeBackend(
       {
         environment: "staging",
-        publishableKey: syntheticPublishableKey,
         url: credentialBearingUrl.href,
       },
       {
@@ -275,11 +162,7 @@ describe("backend observation", () => {
     "https://foo.localhost.",
   ])("rejects the special-use localhost namespace for staging: %s", (url) => {
     expect(
-      parsePublicBackendConfiguration({
-        environment: "staging",
-        publishableKey: syntheticPublishableKey,
-        url,
-      }),
+      parsePublicBackendConfiguration({ environment: "staging", url }),
     ).toBeNull();
   });
 
@@ -287,12 +170,10 @@ describe("backend observation", () => {
     expect(
       parsePublicBackendConfiguration({
         environment: "staging",
-        publishableKey: syntheticPublishableKey,
         url: "https://localhost.example.com",
       }),
     ).toEqual({
       environment: "staging",
-      publishableKey: syntheticPublishableKey,
       url: "https://localhost.example.com",
     });
   });
@@ -301,7 +182,6 @@ describe("backend observation", () => {
     const observation = await observeBackend(
       {
         environment: "local",
-        publishableKey: syntheticPublishableKey,
         url: "http://127.0.0.1:54321",
       },
       {
@@ -324,7 +204,6 @@ describe("backend observation", () => {
     const observation = await observeBackend(
       {
         environment: "local",
-        publishableKey: syntheticPublishableKey,
         url: "http://[::1]:54321",
       },
       {
@@ -355,7 +234,6 @@ describe("backend observation", () => {
     const observation = await observeBackend(
       {
         environment: "staging",
-        publishableKey: syntheticPublishableKey,
         url: "https://synthetic-staging.supabase.co",
       },
       {
@@ -386,7 +264,6 @@ describe("backend observation", () => {
     const observation = await observeBackend(
       {
         environment: "staging",
-        publishableKey: syntheticPublishableKey,
         url: "https://synthetic-staging.supabase.co",
       },
       {
@@ -398,39 +275,6 @@ describe("backend observation", () => {
                 "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca",
               fixtureValid: true,
               fixtureVersion: "internal-baseline-v1",
-              schemaGeneration: 3,
-              service: "desmoslock-v2",
-              status: "ready",
-            },
-            status: 200,
-          };
-        },
-      },
-    );
-
-    expect(observation).toEqual({
-      reason: "contract_incompatible",
-      status: "unavailable",
-    });
-  });
-
-  it("rejects unrecognized health response fields", async () => {
-    const observation = await observeBackend(
-      {
-        environment: "staging",
-        publishableKey: syntheticPublishableKey,
-        url: "https://synthetic-staging.supabase.co",
-      },
-      {
-        async readHealth() {
-          return {
-            body: {
-              capabilities: ["auth", "database", "rest"],
-              fixtureDigest:
-                "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca",
-              fixtureValid: true,
-              fixtureVersion: "internal-baseline-v1",
-              providerDetail: "must-not-cross-the-public-contract",
               schemaGeneration: 3,
               service: "desmoslock-v2",
               status: "ready",

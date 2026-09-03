@@ -19,11 +19,15 @@ export function isSupportedStaffAuthClientSurface(
 }
 
 export const staffAuthSuccessCodes = [
+  "email_verified",
   "invitation_accepted",
   "invitation_created",
+  "invitation_revoked",
+  "login_succeeded",
   "membership_revoked",
   "recovery_completed",
   "recovery_requested",
+  "school_selected",
   "session_ended",
   "step_up_verified",
 ] as const;
@@ -33,20 +37,23 @@ export type StaffAuthSuccessCode = (typeof staffAuthSuccessCodes)[number];
 export const staffAuthErrorCodes = [
   "authentication_required",
   "authorization_denied",
+  "email_verification_failed",
   "existing_confirmed_user_unsupported",
   "identity_mismatch",
   "invalid_request",
   "invitation_already_accepted",
   "invitation_expired",
+  "invitation_link_revoked",
   "invitation_not_found",
   "invitation_owner_role_unsupported",
-  "invitation_revoked",
+  "invitation_revocation_failed",
+  "login_failed",
   "membership_already_active",
-  "membership_not_found",
   "membership_removed",
-  "membership_school_scope_mismatch",
+  "membership_suspended",
   "recovery_link_invalid_or_expired",
   "removed_member_reactivation_unsupported",
+  "school_selection_denied",
   "service_unavailable",
   "session_expired",
   "session_logged_out",
@@ -95,18 +102,27 @@ export function toPersistedStaffRole(
 export function authorizeStaffInvitation(input: {
   readonly actorMembershipStatus: "active" | "suspended" | "removed";
   readonly actorRole: ProductStaffRole;
+  readonly actorSchoolId: string;
+  readonly stepUp: StaffMutationStepUp;
+  readonly targetSchoolId: string;
   readonly targetRole: ProductStaffRole;
 }):
   | StaffAuthSuccess<"invitation_created">
   | StaffAuthFailure<
-      "authorization_denied" | "invitation_owner_role_unsupported"
+      | "authorization_denied"
+      | "invitation_owner_role_unsupported"
+      | "step_up_required"
     > {
   if (
     input.actorMembershipStatus !== "active" ||
-    input.actorRole === "teacher"
+    input.actorRole !== "owner" ||
+    input.actorSchoolId !== input.targetSchoolId
   ) {
     return { code: "authorization_denied", ok: false };
   }
+
+  const stepUp = verifyStaffMutationStepUp(input.stepUp);
+  if (!stepUp.ok) return stepUp;
 
   if (input.targetRole === "owner") {
     return { code: "invitation_owner_role_unsupported", ok: false };
@@ -133,7 +149,8 @@ export function closeStaffInvitation(
 export type StaffInvitationAccountLinkage =
   "invited_identity" | "existing_confirmed_user";
 
-export type StaffInvitationMembershipState = "absent" | "active" | "removed";
+export type StaffInvitationMembershipState =
+  "absent" | "active" | "suspended" | "removed";
 
 export type StaffInvitationAcceptanceResult =
   | (StaffAuthSuccess<"invitation_accepted"> & {
@@ -145,8 +162,9 @@ export type StaffInvitationAcceptanceResult =
       | "identity_mismatch"
       | "invitation_already_accepted"
       | "invitation_expired"
-      | "invitation_revoked"
+      | "invitation_link_revoked"
       | "membership_already_active"
+      | "membership_suspended"
       | "removed_member_reactivation_unsupported"
     > & {
       readonly invitationState: StaffInvitationState;
@@ -179,7 +197,7 @@ export function acceptStaffInvitation(input: {
     return { ...unchanged, code: "invitation_expired", ok: false };
   }
   if (input.invitationState === "revoked") {
-    return { ...unchanged, code: "invitation_revoked", ok: false };
+    return { ...unchanged, code: "invitation_link_revoked", ok: false };
   }
 
   if (input.accountLinkage === "existing_confirmed_user") {
@@ -191,6 +209,9 @@ export function acceptStaffInvitation(input: {
   }
   if (input.membershipState === "active") {
     return { ...unchanged, code: "membership_already_active", ok: false };
+  }
+  if (input.membershipState === "suspended") {
+    return { ...unchanged, code: "membership_suspended", ok: false };
   }
   if (input.membershipState === "removed") {
     return {
@@ -254,10 +275,12 @@ export interface StaffApplicationSession {
   readonly state: StaffApplicationSessionState;
 }
 
-export function revokeAllStaffApplicationSessions(
+export function revokeActiveStaffApplicationSessions(
   sessions: readonly StaffApplicationSession[],
 ): readonly StaffApplicationSession[] {
-  return sessions.map((session) => ({ ...session, state: "revoked" }));
+  return sessions.map((session) =>
+    session.state === "active" ? { ...session, state: "revoked" } : session,
+  );
 }
 
 export type StaffPasswordRecoveryState =
@@ -296,7 +319,7 @@ export function completeStaffPasswordRecovery(input: {
   return {
     code: "recovery_completed",
     ok: true,
-    sessions: revokeAllStaffApplicationSessions(input.sessions),
+    sessions: revokeActiveStaffApplicationSessions(input.sessions),
     state: "completed",
   };
 }
@@ -312,9 +335,7 @@ export type StaffMembershipRevocationResult =
       readonly memberships: readonly StaffMembershipReference[];
     })
   | (StaffAuthFailure<
-      | "membership_not_found"
-      | "membership_removed"
-      | "membership_school_scope_mismatch"
+      "authorization_denied" | "membership_removed" | "step_up_required"
     > & {
       readonly memberships: readonly StaffMembershipReference[];
     });
@@ -322,22 +343,32 @@ export type StaffMembershipRevocationResult =
 export function revokeStaffMembershipInSchool(
   memberships: readonly StaffMembershipReference[],
   input: {
+    readonly actorMembershipStatus: "active" | "suspended" | "removed";
+    readonly actorRole: ProductStaffRole;
+    readonly actorSchoolId: string;
     readonly membershipId: string;
     readonly schoolId: string;
+    readonly stepUp: StaffMutationStepUp;
   },
 ): StaffMembershipRevocationResult {
+  if (
+    input.actorMembershipStatus !== "active" ||
+    input.actorRole === "teacher" ||
+    input.actorSchoolId !== input.schoolId
+  ) {
+    return { code: "authorization_denied", memberships, ok: false };
+  }
+
+  const stepUp = verifyStaffMutationStepUp(input.stepUp);
+  if (!stepUp.ok) {
+    return { ...stepUp, memberships };
+  }
+
   const membership = memberships.find(
     (candidate) => candidate.id === input.membershipId,
   );
-  if (membership === undefined) {
-    return { code: "membership_not_found", memberships, ok: false };
-  }
-  if (membership.schoolId !== input.schoolId) {
-    return {
-      code: "membership_school_scope_mismatch",
-      memberships,
-      ok: false,
-    };
+  if (membership === undefined || membership.schoolId !== input.schoolId) {
+    return { code: "authorization_denied", memberships, ok: false };
   }
   if (membership.status === "removed") {
     return { code: "membership_removed", memberships, ok: false };
@@ -354,8 +385,45 @@ export function revokeStaffMembershipInSchool(
   };
 }
 
+export type ProtectedStaffSchoolAccessResult =
+  | { readonly allowed: true }
+  | {
+      readonly allowed: false;
+      readonly code:
+        | "authorization_denied"
+        | "session_expired"
+        | "session_logged_out"
+        | "session_revoked";
+    };
+
+export function evaluateProtectedStaffSchoolAccess(input: {
+  readonly membershipEvidence: "live_backend" | "cached_client";
+  readonly membershipSchoolId: string | null;
+  readonly membershipStatus: "active" | "suspended" | "removed" | null;
+  readonly requestedSchoolId: string;
+  readonly sessionState: StaffApplicationSessionState;
+}): ProtectedStaffSchoolAccessResult {
+  if (input.sessionState !== "active") {
+    return {
+      allowed: false,
+      code: terminalSessionCode[input.sessionState],
+    };
+  }
+
+  if (
+    input.membershipEvidence !== "live_backend" ||
+    input.membershipStatus !== "active" ||
+    input.membershipSchoolId !== input.requestedSchoolId
+  ) {
+    return { allowed: false, code: "authorization_denied" };
+  }
+
+  return { allowed: true };
+}
+
 export interface StaffMutationStepUp {
   readonly assuranceLevel: "aal1" | "aal2";
+  readonly evidenceSource: "signed_session_claims" | "untrusted_client";
   readonly factorStatus: "unverified" | "verified" | null;
   readonly factorType: "totp" | null;
   readonly isCurrentSession: boolean;
@@ -366,6 +434,7 @@ export function verifyStaffMutationStepUp(
 ): StaffAuthSuccess<"step_up_verified"> | StaffAuthFailure<"step_up_required"> {
   if (
     stepUp.assuranceLevel !== "aal2" ||
+    stepUp.evidenceSource !== "signed_session_claims" ||
     stepUp.factorType !== "totp" ||
     stepUp.factorStatus !== "verified" ||
     !stepUp.isCurrentSession

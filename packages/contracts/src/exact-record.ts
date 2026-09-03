@@ -20,6 +20,7 @@ export function parseExactRecord(
       return null;
     }
 
+    const snapshot = Object.create(null) as Record<string, unknown>;
     for (const key of expectedKeys) {
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
       if (
@@ -29,9 +30,11 @@ export function parseExactRecord(
       ) {
         return null;
       }
+
+      snapshot[key] = descriptor.value as unknown;
     }
 
-    return value as Record<string, unknown>;
+    return snapshot;
   } catch {
     return null;
   }

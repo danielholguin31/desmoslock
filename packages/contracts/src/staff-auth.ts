@@ -37,6 +37,11 @@ export interface SelectStaffSchoolRequest {
   readonly schoolId: string;
 }
 
+/** Web-only key fragment; compose it with an already-validated backend URL. */
+export interface PublicStaffAuthConfiguration {
+  readonly publishableKey: string;
+}
+
 export type StaffAuthResponse =
   | {
       readonly code: StaffAuthSuccessCode;
@@ -47,10 +52,29 @@ export type StaffAuthResponse =
       readonly ok: false;
     };
 
+export type RevokeStaffInvitationResponse =
+  | { readonly code: "invitation_revoked"; readonly ok: true }
+  | { readonly code: "invitation_revocation_failed"; readonly ok: false };
+
+export type SelectStaffSchoolResponse =
+  | { readonly code: "school_selected"; readonly ok: true }
+  | { readonly code: "school_selection_denied"; readonly ok: false };
+
+export type StaffLoginResponse =
+  | { readonly code: "login_succeeded"; readonly ok: true }
+  | { readonly code: "login_failed"; readonly ok: false };
+
+export type StaffEmailVerificationResponse =
+  | { readonly code: "email_verified"; readonly ok: true }
+  | { readonly code: "email_verification_failed"; readonly ok: false };
+
 const canonicalUuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const emailPattern =
   /^[a-z0-9!#$%&'*+/=?^_{}|~-]+(?:\.[a-z0-9!#$%&'*+/=?^_{}|~-]+)*@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/u;
+const publishableKeyPattern =
+  /^sb_publishable_([A-Za-z0-9_-]{22})_([A-Za-z0-9_-]{8})$/u;
+const privilegedKeyLabelPattern = /secret|service|operator|database/iu;
 
 const successCodeSet = new Set<string>(staffAuthSuccessCodes);
 const errorCodeSet = new Set<string>(staffAuthErrorCodes);
@@ -73,6 +97,38 @@ function parseCanonicalEmail(value: unknown): string | null {
   }
 
   return value;
+}
+
+function parseSupabasePublishableKey(value: unknown): string | null {
+  if (typeof value !== "string" || privilegedKeyLabelPattern.test(value)) {
+    return null;
+  }
+
+  const match = publishableKeyPattern.exec(value);
+  const random = match?.[1];
+  const checksum = match?.[2];
+  if (
+    random === undefined ||
+    checksum === undefined ||
+    !/[A-Za-z0-9]/u.test(random) ||
+    !/[A-Za-z0-9]/u.test(checksum)
+  ) {
+    return null;
+  }
+
+  return value;
+}
+
+export function parsePublicStaffAuthConfiguration(
+  value: unknown,
+): PublicStaffAuthConfiguration | null {
+  const configuration = parseExactRecord(value, ["publishableKey"]);
+  if (configuration === null) return null;
+
+  const publishableKey = parseSupabasePublishableKey(
+    configuration.publishableKey,
+  );
+  return publishableKey === null ? null : { publishableKey };
 }
 
 export function parseCreateStaffInvitationRequest(
@@ -166,5 +222,69 @@ export function parseStaffAuthResponse(
     return { code: response.code as StaffAuthErrorCode, ok: false };
   }
 
+  return null;
+}
+
+export function parseRevokeStaffInvitationResponse(
+  value: unknown,
+): RevokeStaffInvitationResponse | null {
+  const response = parseStaffAuthResponse(value);
+  if (response?.ok && response.code === "invitation_revoked") {
+    return { code: "invitation_revoked", ok: true };
+  }
+  if (
+    response !== null &&
+    !response.ok &&
+    response.code === "invitation_revocation_failed"
+  ) {
+    return { code: "invitation_revocation_failed", ok: false };
+  }
+  return null;
+}
+
+export function parseSelectStaffSchoolResponse(
+  value: unknown,
+): SelectStaffSchoolResponse | null {
+  const response = parseStaffAuthResponse(value);
+  if (response?.ok && response.code === "school_selected") {
+    return { code: "school_selected", ok: true };
+  }
+  if (
+    response !== null &&
+    !response.ok &&
+    response.code === "school_selection_denied"
+  ) {
+    return { code: "school_selection_denied", ok: false };
+  }
+  return null;
+}
+
+export function parseStaffLoginResponse(
+  value: unknown,
+): StaffLoginResponse | null {
+  const response = parseStaffAuthResponse(value);
+  if (response?.ok && response.code === "login_succeeded") {
+    return { code: "login_succeeded", ok: true };
+  }
+  if (response !== null && !response.ok && response.code === "login_failed") {
+    return { code: "login_failed", ok: false };
+  }
+  return null;
+}
+
+export function parseStaffEmailVerificationResponse(
+  value: unknown,
+): StaffEmailVerificationResponse | null {
+  const response = parseStaffAuthResponse(value);
+  if (response?.ok && response.code === "email_verified") {
+    return { code: "email_verified", ok: true };
+  }
+  if (
+    response !== null &&
+    !response.ok &&
+    response.code === "email_verification_failed"
+  ) {
+    return { code: "email_verification_failed", ok: false };
+  }
   return null;
 }

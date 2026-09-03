@@ -3,11 +3,16 @@ import { describe, expect, it } from "vitest";
 import {
   parseAcceptStaffInvitationRequest,
   parseCreateStaffInvitationRequest,
+  parsePublicStaffAuthConfiguration,
   parseRequestStaffPasswordRecoveryRequest,
   parseRevokeStaffInvitationRequest,
+  parseRevokeStaffInvitationResponse,
   parseRevokeStaffMembershipRequest,
   parseSelectStaffSchoolRequest,
+  parseSelectStaffSchoolResponse,
   parseStaffAuthResponse,
+  parseStaffEmailVerificationResponse,
+  parseStaffLoginResponse,
   staffAuthErrorCodes,
   staffAuthSuccessCodes,
 } from "../src/index.js";
@@ -16,6 +21,68 @@ const alphaSchoolId = "10000000-0000-4000-8000-000000000001";
 const betaSchoolId = "10000000-0000-4000-8000-000000000002";
 const invitationId = "20000000-0000-4000-8000-000000000001";
 const membershipId = "30000000-0000-4000-8000-000000000001";
+const syntheticPublishableKey = `sb_${"publishable"}_${"r".repeat(22)}_${"c".repeat(8)}`;
+
+describe("web-only public staff auth configuration", () => {
+  it("accepts only the exact modern publishable-key grammar", () => {
+    expect(
+      parsePublicStaffAuthConfiguration({
+        publishableKey: syntheticPublishableKey,
+      }),
+    ).toEqual({ publishableKey: syntheticPublishableKey });
+  });
+
+  it.each([
+    `sb_${"publishable"}_${"r".repeat(21)}_${"c".repeat(8)}`,
+    `sb_${"publishable"}_${"r".repeat(23)}_${"c".repeat(8)}`,
+    `sb_${"publishable"}_${"r".repeat(22)}_${"c".repeat(7)}`,
+    `sb_${"publishable"}_${"r".repeat(22)}_${"c".repeat(9)}`,
+    `sb_${"publishable"}_${"_".repeat(22)}_${"_".repeat(8)}`,
+    `sb_${"secret"}_${"r".repeat(22)}_${"c".repeat(8)}`,
+    `eyJ${"x".repeat(40)}`,
+    `service:${syntheticPublishableKey}`,
+    `operator:${syntheticPublishableKey}`,
+    `postgresql://${syntheticPublishableKey}@database.invalid/example`,
+    `"${syntheticPublishableKey}"`,
+    `${syntheticPublishableKey}-wrapped`,
+    `sb_${"publishable"}_${`secret${"r".repeat(16)}`}_${"c".repeat(8)}`,
+    `sb_${"publishable"}_${`service${"r".repeat(15)}`}_${"c".repeat(8)}`,
+    `sb_${"publishable"}_${`operator${"r".repeat(14)}`}_${"c".repeat(8)}`,
+    `sb_${"publishable"}_${`database${"r".repeat(14)}`}_${"c".repeat(8)}`,
+  ])("rejects malformed, wrapped, or disguised key material: %s", (value) => {
+    expect(
+      parsePublicStaffAuthConfiguration({ publishableKey: value }),
+    ).toBeNull();
+  });
+
+  it.each(["databaseUrl", "operatorCredential", "secretKey", "serviceRoleKey"])(
+    "rejects the privileged field %s",
+    (field) => {
+      expect(
+        parsePublicStaffAuthConfiguration({
+          [field]: "synthetic-placeholder",
+          publishableKey: syntheticPublishableKey,
+        }),
+      ).toBeNull();
+    },
+  );
+
+  it("rejects missing and unknown public configuration fields", () => {
+    expect(parsePublicStaffAuthConfiguration({})).toBeNull();
+    expect(
+      parsePublicStaffAuthConfiguration({
+        environment: "staging",
+        publishableKey: syntheticPublishableKey,
+      }),
+    ).toBeNull();
+    expect(
+      parsePublicStaffAuthConfiguration({
+        publishableKey: syntheticPublishableKey,
+        url: "https://synthetic-staging.supabase.co",
+      }),
+    ).toBeNull();
+  });
+});
 
 describe("staff auth request contracts", () => {
   it("accepts an exact Administrator or Teacher invitation request", () => {
@@ -216,5 +283,74 @@ describe("staff auth response contract", () => {
     expect(JSON.stringify(publicFailure)).not.toContain(
       "forbidden-sensitive-sentinel",
     );
+  });
+
+  it("snapshots descriptor values instead of rereading a time-varying Proxy", () => {
+    let propertyReads = 0;
+    const source = { code: "invitation_created", ok: true };
+    const timeVarying = new Proxy(source, {
+      get(target, property, receiver) {
+        propertyReads += 1;
+        if (property === "code") return "provider_specific_failure";
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+
+    const parsed = parseStaffAuthResponse(timeVarying);
+    source.code = "login_succeeded";
+
+    expect(parsed).toEqual({ code: "invitation_created", ok: true });
+    expect(propertyReads).toBe(0);
+  });
+
+  it("uses operation-specific visible-flow success and error codes", () => {
+    expect(
+      parseRevokeStaffInvitationResponse({
+        code: "invitation_revoked",
+        ok: true,
+      }),
+    ).toEqual({ code: "invitation_revoked", ok: true });
+    expect(
+      parseRevokeStaffInvitationResponse({
+        code: "invitation_revocation_failed",
+        ok: false,
+      }),
+    ).toEqual({ code: "invitation_revocation_failed", ok: false });
+    expect(
+      parseSelectStaffSchoolResponse({ code: "school_selected", ok: true }),
+    ).toEqual({ code: "school_selected", ok: true });
+    expect(
+      parseSelectStaffSchoolResponse({
+        code: "school_selection_denied",
+        ok: false,
+      }),
+    ).toEqual({ code: "school_selection_denied", ok: false });
+    expect(
+      parseStaffLoginResponse({ code: "login_succeeded", ok: true }),
+    ).toEqual({ code: "login_succeeded", ok: true });
+    expect(
+      parseStaffLoginResponse({ code: "login_failed", ok: false }),
+    ).toEqual({ code: "login_failed", ok: false });
+    expect(
+      parseStaffEmailVerificationResponse({ code: "email_verified", ok: true }),
+    ).toEqual({ code: "email_verified", ok: true });
+    expect(
+      parseStaffEmailVerificationResponse({
+        code: "email_verification_failed",
+        ok: false,
+      }),
+    ).toEqual({ code: "email_verification_failed", ok: false });
+  });
+
+  it("rejects a valid code from the wrong visible flow", () => {
+    expect(
+      parseStaffLoginResponse({ code: "email_verified", ok: true }),
+    ).toBeNull();
+    expect(
+      parseRevokeStaffInvitationResponse({
+        code: "invitation_link_revoked",
+        ok: false,
+      }),
+    ).toBeNull();
   });
 });

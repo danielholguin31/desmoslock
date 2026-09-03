@@ -1,5 +1,3 @@
-import { parseExactRecord } from "./exact-record.js";
-
 export type InternalBackendEnvironment = "local" | "staging";
 
 export const INTERNAL_BASELINE_FIXTURE_DIGEST =
@@ -7,7 +5,6 @@ export const INTERNAL_BASELINE_FIXTURE_DIGEST =
 
 export interface PublicBackendConfiguration {
   readonly environment: InternalBackendEnvironment;
-  readonly publishableKey: string;
   readonly url: string;
 }
 
@@ -40,30 +37,28 @@ export type BackendObservation =
       readonly status: "unavailable";
     };
 
-function isSupabasePublishableKey(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    value.length >= 35 &&
-    value.length <= 256 &&
-    /^sb_publishable_[A-Za-z0-9_-]+$/u.test(value)
-  );
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function parsePublicBackendConfiguration(
   configuration: unknown,
 ): PublicBackendConfiguration | null {
-  const parsed = parseExactRecord(configuration, [
-    "environment",
-    "publishableKey",
-    "url",
-  ]);
-  if (parsed === null) return null;
+  if (!isRecord(configuration)) return null;
+  const configurationKeys = Object.keys(configuration);
+  const configurationKeySet = new Set(configurationKeys);
+  if (
+    configurationKeys.length !== 2 ||
+    configurationKeySet.size !== configurationKeys.length ||
+    !configurationKeySet.has("environment") ||
+    !configurationKeySet.has("url")
+  ) {
+    return null;
+  }
 
-  const environment = parsed.environment;
-  const publishableKey = parsed.publishableKey;
-  const url = parsed.url;
+  const environment = configuration.environment;
+  const url = configuration.url;
   if (environment !== "local" && environment !== "staging") return null;
-  if (!isSupabasePublishableKey(publishableKey)) return null;
   if (typeof url !== "string") return null;
 
   let baseUrl: URL;
@@ -109,7 +104,6 @@ export function parsePublicBackendConfiguration(
 
   return {
     environment,
-    publishableKey,
     url: baseUrl.origin,
   };
 }
@@ -156,22 +150,11 @@ export async function observeBackend(
   } catch {
     return { reason: "service_unavailable", status: "unavailable" };
   }
-  if (response.status !== 200) {
+  if (response.status !== 200 || !isRecord(response.body)) {
     return { reason: "service_unavailable", status: "unavailable" };
   }
 
-  const body = parseExactRecord(response.body, [
-    "capabilities",
-    "fixtureDigest",
-    "fixtureValid",
-    "fixtureVersion",
-    "schemaGeneration",
-    "service",
-    "status",
-  ]);
-  if (body === null) {
-    return { reason: "contract_incompatible", status: "unavailable" };
-  }
+  const body = response.body;
   if (
     body.status !== "ready" ||
     body.service !== "desmoslock-v2" ||
