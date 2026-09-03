@@ -7,6 +7,7 @@ import { verifyLegacyQuarantineContract } from "./repository-contract/legacy-qua
 import { readJson } from "./repository-contract/shared.mjs";
 import { verifySourceReconciliationContract } from "./repository-contract/source-reconciliation-contract.mjs";
 import { verifySupabaseContract } from "./repository-contract/supabase-contract.mjs";
+import { verifyToolchainContract } from "./repository-contract/toolchain-contract.mjs";
 import { verifyWorkspaceContract } from "./repository-contract/workspace-contract.mjs";
 
 const repositoryRoot = path.resolve(
@@ -23,6 +24,7 @@ verifyLegacyQuarantineContract(repositoryRoot, reconciliation.draftRelease);
 verifySourceReconciliationContract(repositoryRoot, reconciliation);
 verifyEvidenceContract(repositoryRoot, reconciliation.retainedEvidence);
 verifyCiContract(repositoryRoot);
+verifyToolchainContract(repositoryRoot);
 verifySupabaseContract(repositoryRoot);
 
 process.stdout.write(

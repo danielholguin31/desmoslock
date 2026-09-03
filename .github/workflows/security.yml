@@ -25,8 +25,13 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.20.0
           cache: npm
+      - name: Activate and verify exact toolchain
+        run: |
+          corepack enable npm
+          test "$(node --version)" = "v24.20.0"
+          test "$(npm --version)" = "11.12.1"
       - run: npm ci
       - run: npm run test:dependencies
       - run: npm run test:secrets
@@ -36,6 +41,8 @@ jobs:
         env:
           DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT: local
           DESMOSLOCK_PUBLIC_BACKEND_URL: http://127.0.0.1:54321
+          DESMOSLOCK_PUBLIC_WEB_ORIGIN: http://localhost:43174
+          DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY: sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc
       - run: npm run sbom
       - run: npm run verify:licenses
       - run: npm run verify:packages

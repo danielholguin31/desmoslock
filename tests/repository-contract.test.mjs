@@ -10,7 +10,10 @@ import {
   assertLegacyReleaseTombstone,
   expectedLegacyReleaseTombstone,
 } from "../scripts/release-tombstone-contract.mjs";
-import { assertStaffAuthCiWorkflow } from "../scripts/repository-contract/ci-contract.mjs";
+import {
+  assertPublicWebCiWorkflow,
+  assertStaffAuthCiWorkflow,
+} from "../scripts/repository-contract/ci-contract.mjs";
 import {
   assertMigrationSetAttestation,
   assertSupabaseAuthConfiguration,
@@ -18,6 +21,10 @@ import {
   expectedMigrationFiles,
   expectedMigrationSetSha256,
 } from "../scripts/repository-contract/supabase-contract.mjs";
+import {
+  assertToolchainManifestContract,
+  assertWorkflowToolchain,
+} from "../scripts/repository-contract/toolchain-contract.mjs";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -172,6 +179,85 @@ test("v2 uses one typed npm workspace beside legacy v1", () => {
       typeof workspacePackage.scripts?.typecheck,
       "string",
       `${workspace} must expose typecheck`,
+    );
+  }
+});
+
+test("repository pins the exact Node.js, npm, type, and web client toolchain", () => {
+  const workspacePackages = Object.fromEntries(
+    [
+      "apps/desktop",
+      "apps/web",
+      "packages/contracts",
+      "packages/domain",
+      "packages/test-support",
+    ].map((workspace) => [workspace, readJson(`${workspace}/package.json`)]),
+  );
+  const manifestContract = {
+    lockfile: readJson("package-lock.json"),
+    nodeVersion: readText(".node-version"),
+    rootPackage: readJson("package.json"),
+    workspacePackages,
+  };
+
+  assert.doesNotThrow(() => assertToolchainManifestContract(manifestContract));
+  assert.throws(
+    () =>
+      assertToolchainManifestContract({
+        ...manifestContract,
+        rootPackage: {
+          ...manifestContract.rootPackage,
+          engines: { node: ">=24" },
+        },
+      }),
+    /engine must pin 24\.20\.0/u,
+  );
+  assert.throws(
+    () =>
+      assertToolchainManifestContract({
+        ...manifestContract,
+        workspacePackages: {
+          ...workspacePackages,
+          "apps/web": {
+            ...workspacePackages["apps/web"],
+            dependencies: {
+              ...workspacePackages["apps/web"].dependencies,
+              "@supabase/supabase-js": "^2.115.0",
+            },
+          },
+        },
+      }),
+    /Only apps\/web may depend directly/u,
+  );
+
+  for (const [workflowPath, expectedJobCount] of [
+    [".github/workflows/ci.yml", 9],
+    [".github/workflows/security.yml", 1],
+  ]) {
+    const workflow = readText(workflowPath);
+    assert.doesNotThrow(() =>
+      assertWorkflowToolchain(workflow, workflowPath, expectedJobCount),
+    );
+    assert.throws(
+      () =>
+        assertWorkflowToolchain(
+          workflow.replace("node-version: 24.20.0", "node-version: 24"),
+          workflowPath,
+          expectedJobCount,
+        ),
+      /exact Node\.js\/npm setup/u,
+    );
+    assert.throws(
+      () =>
+        assertWorkflowToolchain(
+          workflow.replace(
+            'test "$(npm --version)" = "11.12.1"',
+            'test "$(npm --version)" = "11"',
+          ),
+          workflowPath,
+          expectedJobCount,
+        ),
+      /exact Node\.js\/npm setup/u,
     );
   }
 });
@@ -331,7 +417,7 @@ test("generation-4 Supabase configuration is versioned and fails closed", () => 
     assert.equal(
       [
         ...workflow.matchAll(
-          /^\s+- run: npm run build\n\s+env:\n\s+DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT: local\n\s+DESMOSLOCK_PUBLIC_BACKEND_URL: http:\/\/127\.0\.0\.1:54321$/gmu,
+          /^\s+- run: npm run build\n\s+env:\n\s+DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT: local\n\s+DESMOSLOCK_PUBLIC_BACKEND_URL: http:\/\/127\.0\.0\.1:54321\n\s+DESMOSLOCK_PUBLIC_WEB_ORIGIN: http:\/\/localhost:43174\n\s+DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY: sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc$/gmu,
         ),
       ].length,
       expectedBuilds,
@@ -477,6 +563,41 @@ test("staff Auth schema and prerequisites have a required disposable CI lane", (
   assert.throws(
     () => assertStaffAuthCiWorkflow(relocatedAggregateNeed),
     /does not depend on staff-auth-lifecycle/u,
+  );
+});
+
+test("CI supplies synthetic web configuration without desktop-job leakage", () => {
+  const ciWorkflow = readText(".github/workflows/ci.yml");
+  const securityWorkflow = readText(".github/workflows/security.yml");
+
+  assert.doesNotThrow(() =>
+    assertPublicWebCiWorkflow(ciWorkflow, securityWorkflow),
+  );
+  assert.throws(
+    () =>
+      assertPublicWebCiWorkflow(
+        ciWorkflow.replace(
+          "sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc",
+          "sb_publishable_invalid",
+        ),
+        securityWorkflow,
+      ),
+    /exact synthetic public web origin and publishable key/u,
+  );
+  assert.throws(
+    () =>
+      assertPublicWebCiWorkflow(
+        ciWorkflow.replace(
+          "      - run: xvfb-run -a npm run test:electron",
+          [
+            "      - run: xvfb-run -a npm run test:electron",
+            "        env:",
+            "          DESMOSLOCK_PUBLIC_WEB_ORIGIN: http://localhost:43174",
+          ].join("\n"),
+        ),
+        securityWorkflow,
+      ),
+    /Desktop-specific CI/u,
   );
 });
 

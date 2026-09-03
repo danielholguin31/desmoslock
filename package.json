@@ -6,7 +6,7 @@
   "description": "DesmosLock v2 workspace; legacy v1 remains evidence-only during the expand phase.",
   "packageManager": "npm@11.12.1",
   "engines": {
-    "node": ">=24"
+    "node": "24.20.0"
   },
   "workspaces": [
     "apps/*",
@@ -58,7 +58,7 @@
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.62.1",
     "@secretlint/secretlint-rule-preset-recommend": "^13.0.4",
-    "@types/node": "^26.2.0",
+    "@types/node": "24.13.3",
     "actionlint": "^2.0.6",
     "deno": "^2.9.5",
     "esbuild": "^0.28.2",

@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@desmoslock/contracts": "2.0.0",
-    "@desmoslock/domain": "2.0.0"
+    "@desmoslock/domain": "2.0.0",
+    "@supabase/supabase-js": "2.115.0"
   }
 }

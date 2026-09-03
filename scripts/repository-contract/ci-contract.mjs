@@ -1,5 +1,9 @@
 import { fail, readJson, readText } from "./shared.mjs";
 
+const syntheticPublicWebOrigin = "http://localhost:43174";
+const syntheticSupabasePublishableKey =
+  "sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc";
+
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
@@ -63,6 +67,52 @@ export function assertStaffAuthCiWorkflow(ciWorkflow) {
   const requiredNeeds = readCiJobSection(requiredJob, "needs");
   if (!/^ {6}- staff-auth-lifecycle\s*$/mu.test(requiredNeeds)) {
     fail("Required CI aggregate does not depend on staff-auth-lifecycle");
+  }
+}
+
+export function assertPublicWebCiWorkflow(ciWorkflow, securityWorkflow) {
+  const configuredAggregateBuild = [
+    "      - run: npm run build",
+    "        env:",
+    "          DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT: local",
+    "          DESMOSLOCK_PUBLIC_BACKEND_URL: http://127.0.0.1:54321",
+    `          DESMOSLOCK_PUBLIC_WEB_ORIGIN: ${syntheticPublicWebOrigin}`,
+    `          DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${syntheticSupabasePublishableKey}`,
+  ].join("\n");
+  for (const [label, workflow, expectedBuildCount] of [
+    ["Required CI workflow", ciWorkflow, 2],
+    ["Required security workflow", securityWorkflow, 1],
+  ]) {
+    const configuredBuildCount = workflow
+      .split(configuredAggregateBuild)
+      .slice(1).length;
+    if (configuredBuildCount !== expectedBuildCount) {
+      fail(
+        `${label} must configure every aggregate build with the exact synthetic public web origin and publishable key`,
+      );
+    }
+  }
+
+  const webJob = readCiJob(ciWorkflow, "web");
+  const configuredWebTest = [
+    "      - run: npm run test:web",
+    "        env:",
+    `          DESMOSLOCK_PUBLIC_WEB_ORIGIN: ${syntheticPublicWebOrigin}`,
+    `          DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${syntheticSupabasePublishableKey}`,
+  ].join("\n");
+  if (!webJob.includes(configuredWebTest)) {
+    fail(
+      "Required web CI must provide the exact synthetic public origin and publishable key",
+    );
+  }
+
+  const electronJob = readCiJob(ciWorkflow, "electron");
+  if (
+    /DESMOSLOCK_PUBLIC_(?:WEB_ORIGIN|SUPABASE_PUBLISHABLE_KEY)/u.test(
+      electronJob,
+    )
+  ) {
+    fail("Desktop-specific CI must not receive public web configuration");
   }
 }
 
@@ -131,6 +181,7 @@ export function verifyCiContract(repositoryRoot) {
     );
   }
   assertStaffAuthCiWorkflow(ciWorkflow);
+  assertPublicWebCiWorkflow(ciWorkflow, securityWorkflow);
   if (!securityWorkflow.includes("name: Security required")) {
     fail("Security workflow does not expose its required aggregate");
   }
