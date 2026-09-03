@@ -1,26 +1,34 @@
 import { describe, expect, it } from "vitest";
 
+import { toPersistedStaffRole } from "@desmoslock/domain";
+
 import {
+  mapCreateStaffInvitationInternalResult,
+  mapStaffAuthInternalFailure,
   parseAcceptStaffInvitationRequest,
+  parseAcceptStaffInvitationResponse,
   parseCreateStaffInvitationRequest,
+  parseCreateStaffInvitationResponse,
   parsePublicStaffAuthConfiguration,
   parseRequestStaffPasswordRecoveryRequest,
+  parseRequestStaffPasswordRecoveryResponse,
   parseRevokeStaffInvitationRequest,
   parseRevokeStaffInvitationResponse,
   parseRevokeStaffMembershipRequest,
+  parseRevokeStaffMembershipResponse,
   parseSelectStaffSchoolRequest,
   parseSelectStaffSchoolResponse,
-  parseStaffAuthResponse,
   parseStaffEmailVerificationResponse,
   parseStaffLoginResponse,
   staffAuthErrorCodes,
-  staffAuthSuccessCodes,
+  staffAuthProviderFailureCodes,
+  staffAuthRpcFailureCodes,
 } from "../src/index.js";
 
 const alphaSchoolId = "10000000-0000-4000-8000-000000000001";
 const betaSchoolId = "10000000-0000-4000-8000-000000000002";
 const invitationId = "20000000-0000-4000-8000-000000000001";
-const membershipId = "30000000-0000-4000-8000-000000000001";
+const profileId = "30000000-0000-4000-8000-000000000001";
 const syntheticPublishableKey = `sb_${"publishable"}_${"r".repeat(22)}_${"c".repeat(8)}`;
 
 describe("web-only public staff auth configuration", () => {
@@ -86,17 +94,21 @@ describe("web-only public staff auth configuration", () => {
 
 describe("staff auth request contracts", () => {
   it("accepts an exact Administrator or Teacher invitation request", () => {
-    expect(
-      parseCreateStaffInvitationRequest({
-        email: "administrator@example.invalid",
-        role: "administrator",
-        schoolId: alphaSchoolId,
-      }),
-    ).toEqual({
+    const administratorRequest = parseCreateStaffInvitationRequest({
       email: "administrator@example.invalid",
       role: "administrator",
       schoolId: alphaSchoolId,
     });
+    expect(administratorRequest).toEqual({
+      email: "administrator@example.invalid",
+      role: "administrator",
+      schoolId: alphaSchoolId,
+    });
+    expect(
+      administratorRequest === null
+        ? null
+        : toPersistedStaffRole(administratorRequest.role),
+    ).toBe("admin");
     expect(
       parseCreateStaffInvitationRequest({
         email: "teacher@example.invalid",
@@ -110,7 +122,14 @@ describe("staff auth request contracts", () => {
     });
   });
 
-  it("rejects Owner invitations, unknown keys, and missing keys", () => {
+  it("rejects persisted roles, Owner invitations, unknown keys, and missing keys", () => {
+    expect(
+      parseCreateStaffInvitationRequest({
+        email: "administrator@example.invalid",
+        role: "admin",
+        schoolId: alphaSchoolId,
+      }),
+    ).toBeNull();
     expect(
       parseCreateStaffInvitationRequest({
         email: "owner@example.invalid",
@@ -155,14 +174,49 @@ describe("staff auth request contracts", () => {
     expect(parseSelectStaffSchoolRequest({ schoolId })).toBeNull();
   });
 
-  it("parses invitation acceptance without accepting a bearer value", () => {
-    expect(parseAcceptStaffInvitationRequest({ invitationId })).toEqual({
-      invitationId,
-    });
+  it("requires an exact, bounded display name when accepting an invitation", () => {
     expect(
       parseAcceptStaffInvitationRequest({
+        displayName: "Taylor Rivera",
+        invitationId,
+      }),
+    ).toEqual({ displayName: "Taylor Rivera", invitationId });
+    expect(parseAcceptStaffInvitationRequest({ invitationId })).toBeNull();
+    expect(
+      parseAcceptStaffInvitationRequest({
+        displayName: "Taylor Rivera",
         invitationId,
         invitationToken: "forbidden-sensitive-sentinel",
+      }),
+    ).toBeNull();
+    expect(
+      parseAcceptStaffInvitationRequest({
+        displayName: " ",
+        invitationId,
+      }),
+    ).toBeNull();
+    expect(
+      parseAcceptStaffInvitationRequest({
+        displayName: "x".repeat(161),
+        invitationId,
+      }),
+    ).toBeNull();
+    expect(
+      parseAcceptStaffInvitationRequest({
+        displayName: "x".repeat(160),
+        invitationId,
+      }),
+    ).toEqual({ displayName: "x".repeat(160), invitationId });
+    expect(
+      parseAcceptStaffInvitationRequest({
+        displayName: "é".repeat(81),
+        invitationId,
+      }),
+    ).toBeNull();
+    expect(
+      parseAcceptStaffInvitationRequest({
+        displayName: "Taylor\nRivera",
+        invitationId,
       }),
     ).toBeNull();
   });
@@ -179,13 +233,32 @@ describe("staff auth request contracts", () => {
     ).toBeNull();
   });
 
-  it("keeps Membership revocation and School selection explicitly scoped", () => {
+  it("revokes a Profile in one School without exposing a Membership identifier", () => {
     expect(
       parseRevokeStaffMembershipRequest({
-        membershipId,
+        profileId,
         schoolId: alphaSchoolId,
       }),
-    ).toEqual({ membershipId, schoolId: alphaSchoolId });
+    ).toEqual({ profileId, schoolId: alphaSchoolId });
+    expect(
+      parseRevokeStaffMembershipRequest({
+        membershipId: "40000000-0000-4000-8000-000000000001",
+        schoolId: alphaSchoolId,
+      }),
+    ).toBeNull();
+    expect(
+      parseRevokeStaffMembershipRequest({ schoolId: alphaSchoolId }),
+    ).toBeNull();
+    expect(
+      parseRevokeStaffMembershipRequest({
+        profileId,
+        reason: "provider-specific-detail",
+        schoolId: alphaSchoolId,
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps School selection explicitly scoped", () => {
     expect(parseSelectStaffSchoolRequest({ schoolId: betaSchoolId })).toEqual({
       schoolId: betaSchoolId,
     });
@@ -230,59 +303,236 @@ describe("staff auth request contracts", () => {
   });
 });
 
-describe("staff auth response contract", () => {
-  it.each(staffAuthSuccessCodes)(
-    "accepts the stable success code %s",
-    (code) => {
-      expect(parseStaffAuthResponse({ code, ok: true })).toEqual({
-        code,
+describe("operation-specific staff auth response contracts", () => {
+  it("accepts each operation's exact success", () => {
+    expect(
+      parseCreateStaffInvitationResponse({
+        code: "invitation_created",
         ok: true,
+      }),
+    ).toEqual({ code: "invitation_created", ok: true });
+    expect(
+      parseAcceptStaffInvitationResponse({
+        code: "invitation_accepted",
+        ok: true,
+      }),
+    ).toEqual({ code: "invitation_accepted", ok: true });
+    expect(
+      parseRevokeStaffInvitationResponse({
+        code: "invitation_revoked",
+        ok: true,
+      }),
+    ).toEqual({ code: "invitation_revoked", ok: true });
+    expect(
+      parseRevokeStaffMembershipResponse({
+        code: "membership_revoked",
+        ok: true,
+      }),
+    ).toEqual({ code: "membership_revoked", ok: true });
+    expect(
+      parseRequestStaffPasswordRecoveryResponse({
+        code: "recovery_requested",
+        ok: true,
+      }),
+    ).toEqual({ code: "recovery_requested", ok: true });
+    expect(
+      parseSelectStaffSchoolResponse({ code: "school_selected", ok: true }),
+    ).toEqual({ code: "school_selected", ok: true });
+    expect(
+      parseStaffLoginResponse({ code: "login_succeeded", ok: true }),
+    ).toEqual({ code: "login_succeeded", ok: true });
+    expect(
+      parseStaffEmailVerificationResponse({ code: "email_verified", ok: true }),
+    ).toEqual({ code: "email_verified", ok: true });
+  });
+
+  it.each(staffAuthErrorCodes)(
+    "accepts create-invitation product error %s",
+    (code) => {
+      expect(parseCreateStaffInvitationResponse({ code, ok: false })).toEqual({
+        code,
+        ok: false,
       });
     },
   );
 
-  it.each(staffAuthErrorCodes)("accepts the stable error code %s", (code) => {
-    expect(parseStaffAuthResponse({ code, ok: false })).toEqual({
-      code,
-      ok: false,
-    });
+  it("accepts only the documented failures for each remaining operation", () => {
+    const cases = [
+      [
+        parseAcceptStaffInvitationResponse,
+        [
+          "authentication_required",
+          "authorization_denied",
+          "existing_confirmed_user_unsupported",
+          "invalid_request",
+          "invitation_expired",
+          "invitation_not_found",
+          "rate_limited",
+          "service_unavailable",
+          "session_expired",
+          "session_revoked",
+        ],
+      ],
+      [
+        parseRevokeStaffInvitationResponse,
+        [
+          "authentication_required",
+          "authorization_denied",
+          "invalid_request",
+          "invitation_expired",
+          "invitation_not_found",
+          "rate_limited",
+          "service_unavailable",
+          "session_expired",
+          "session_revoked",
+          "step_up_required",
+        ],
+      ],
+      [
+        parseRevokeStaffMembershipResponse,
+        [
+          "authentication_required",
+          "authorization_denied",
+          "invalid_request",
+          "rate_limited",
+          "service_unavailable",
+          "session_expired",
+          "session_revoked",
+          "step_up_required",
+        ],
+      ],
+      [
+        parseSelectStaffSchoolResponse,
+        [
+          "authentication_required",
+          "authorization_denied",
+          "invalid_request",
+          "service_unavailable",
+          "session_expired",
+          "session_revoked",
+        ],
+      ],
+      [
+        parseStaffLoginResponse,
+        [
+          "authorization_denied",
+          "invalid_request",
+          "rate_limited",
+          "service_unavailable",
+        ],
+      ],
+      [
+        parseStaffEmailVerificationResponse,
+        [
+          "authorization_denied",
+          "invalid_request",
+          "rate_limited",
+          "service_unavailable",
+        ],
+      ],
+    ] as const;
+
+    for (const [parse, errorCodes] of cases) {
+      for (const code of errorCodes) {
+        expect(parse({ code, ok: false })).toEqual({ code, ok: false });
+      }
+    }
+
+    expect(
+      parseAcceptStaffInvitationResponse({
+        code: "step_up_required",
+        ok: false,
+      }),
+    ).toBeNull();
+    expect(
+      parseRevokeStaffMembershipResponse({
+        code: "invitation_expired",
+        ok: false,
+      }),
+    ).toBeNull();
+    expect(
+      parseSelectStaffSchoolResponse({ code: "rate_limited", ok: false }),
+    ).toBeNull();
+    expect(
+      parseStaffLoginResponse({ code: "session_expired", ok: false }),
+    ).toBeNull();
+    expect(
+      parseStaffEmailVerificationResponse({
+        code: "authentication_required",
+        ok: false,
+      }),
+    ).toBeNull();
   });
 
-  it("rejects success/error mismatches and unknown provider codes", () => {
+  it("keeps recovery non-enumerating while preserving retry failures", () => {
     expect(
-      parseStaffAuthResponse({ code: "invitation_created", ok: false }),
-    ).toBeNull();
-    expect(
-      parseStaffAuthResponse({ code: "authorization_denied", ok: true }),
-    ).toBeNull();
-    expect(
-      parseStaffAuthResponse({ code: "provider_specific_failure", ok: false }),
-    ).toBeNull();
-  });
-
-  it("does not admit account-existence or provider-detail leakage", () => {
-    expect(
-      parseStaffAuthResponse({
-        accountExists: false,
+      parseRequestStaffPasswordRecoveryResponse({
         code: "recovery_requested",
+        ok: true,
+      }),
+    ).toEqual({ code: "recovery_requested", ok: true });
+    expect(
+      parseRequestStaffPasswordRecoveryResponse({
+        code: "rate_limited",
+        ok: false,
+      }),
+    ).toEqual({ code: "rate_limited", ok: false });
+    expect(
+      parseRequestStaffPasswordRecoveryResponse({
+        code: "service_unavailable",
+        ok: false,
+      }),
+    ).toEqual({ code: "service_unavailable", ok: false });
+    expect(
+      parseRequestStaffPasswordRecoveryResponse({
+        code: "authorization_denied",
+        ok: false,
+      }),
+    ).toBeNull();
+  });
+
+  it("rejects missing or extra keys, ok/code mismatches, and wrong-operation codes", () => {
+    expect(
+      parseCreateStaffInvitationResponse({ code: "invitation_created" }),
+    ).toBeNull();
+    expect(parseCreateStaffInvitationResponse({ ok: true })).toBeNull();
+    expect(
+      parseCreateStaffInvitationResponse({
+        code: "invitation_created",
+        ok: true,
+        providerDetail: "forbidden-sensitive-sentinel",
+      }),
+    ).toBeNull();
+    expect(
+      parseCreateStaffInvitationResponse({
+        code: "invitation_created",
+        ok: false,
+      }),
+    ).toBeNull();
+    expect(
+      parseCreateStaffInvitationResponse({ code: "invalid_request", ok: true }),
+    ).toBeNull();
+    expect(
+      parseAcceptStaffInvitationResponse({
+        code: "invitation_created",
         ok: true,
       }),
     ).toBeNull();
     expect(
-      parseStaffAuthResponse({
-        code: "service_unavailable",
-        ok: false,
-        providerDetail: "forbidden-sensitive-sentinel",
+      parseStaffLoginResponse({ code: "email_verified", ok: true }),
+    ).toBeNull();
+    expect(
+      parseRevokeStaffInvitationResponse({
+        code: "membership_revoked",
+        ok: true,
       }),
     ).toBeNull();
-
-    const publicFailure = parseStaffAuthResponse({
-      code: "service_unavailable",
-      ok: false,
-    });
-    expect(JSON.stringify(publicFailure)).not.toContain(
-      "forbidden-sensitive-sentinel",
-    );
+    expect(
+      parseRevokeStaffInvitationResponse({
+        code: "invitation_consumed",
+        ok: false,
+      }),
+    ).toBeNull();
   });
 
   it("snapshots descriptor values instead of rereading a time-varying Proxy", () => {
@@ -296,61 +546,80 @@ describe("staff auth response contract", () => {
       },
     });
 
-    const parsed = parseStaffAuthResponse(timeVarying);
+    const parsed = parseCreateStaffInvitationResponse(timeVarying);
     source.code = "login_succeeded";
 
     expect(parsed).toEqual({ code: "invitation_created", ok: true });
     expect(propertyReads).toBe(0);
   });
+});
 
-  it("uses operation-specific visible-flow success and error codes", () => {
-    expect(
-      parseRevokeStaffInvitationResponse({
-        code: "invitation_revoked",
-        ok: true,
-      }),
-    ).toEqual({ code: "invitation_revoked", ok: true });
-    expect(
-      parseRevokeStaffInvitationResponse({
-        code: "invitation_revocation_failed",
-        ok: false,
-      }),
-    ).toEqual({ code: "invitation_revocation_failed", ok: false });
-    expect(
-      parseSelectStaffSchoolResponse({ code: "school_selected", ok: true }),
-    ).toEqual({ code: "school_selected", ok: true });
-    expect(
-      parseSelectStaffSchoolResponse({
-        code: "school_selection_denied",
-        ok: false,
-      }),
-    ).toEqual({ code: "school_selection_denied", ok: false });
-    expect(
-      parseStaffLoginResponse({ code: "login_succeeded", ok: true }),
-    ).toEqual({ code: "login_succeeded", ok: true });
-    expect(
-      parseStaffLoginResponse({ code: "login_failed", ok: false }),
-    ).toEqual({ code: "login_failed", ok: false });
-    expect(
-      parseStaffEmailVerificationResponse({ code: "email_verified", ok: true }),
-    ).toEqual({ code: "email_verified", ok: true });
-    expect(
-      parseStaffEmailVerificationResponse({
-        code: "email_verification_failed",
-        ok: false,
-      }),
-    ).toEqual({ code: "email_verification_failed", ok: false });
+describe("internal staff auth result mapping", () => {
+  const rpcMappings = [
+    ["conflict", "service_unavailable"],
+    ["dependency_unavailable", "service_unavailable"],
+    ["email_unverified", "authorization_denied"],
+    ["forbidden", "authorization_denied"],
+    ["invalid_request", "invalid_request"],
+    ["invitation_consumed", "invitation_not_found"],
+    ["invitation_expired", "invitation_expired"],
+    ["invitation_not_found", "invitation_not_found"],
+    ["membership_inactive", "authorization_denied"],
+    ["rate_limited", "rate_limited"],
+    ["session_expired", "session_expired"],
+    ["session_revoked", "session_revoked"],
+    ["step_up_required", "step_up_required"],
+    ["unauthenticated", "authentication_required"],
+    ["unknown", "service_unavailable"],
+  ] as const;
+  const providerMappings = [
+    ["dependency_unavailable", "service_unavailable"],
+    ["existing_user_conflict", "existing_confirmed_user_unsupported"],
+    ["rate_limited", "rate_limited"],
+    ["unknown", "service_unavailable"],
+  ] as const;
+
+  it("exhaustively translates detailed RPC outcomes to product failures", () => {
+    expect(staffAuthRpcFailureCodes).toEqual(
+      rpcMappings.map(([internalCode]) => internalCode),
+    );
+    for (const [internalCode, productCode] of rpcMappings) {
+      expect(
+        mapStaffAuthInternalFailure({
+          code: internalCode,
+          source: "rpc",
+        }),
+      ).toEqual({ code: productCode, ok: false });
+    }
   });
 
-  it("rejects a valid code from the wrong visible flow", () => {
+  it("exhaustively translates provider outcomes without leaking provider terms", () => {
+    expect(staffAuthProviderFailureCodes).toEqual(
+      providerMappings.map(([internalCode]) => internalCode),
+    );
+    for (const [internalCode, productCode] of providerMappings) {
+      expect(
+        mapStaffAuthInternalFailure({
+          code: internalCode,
+          source: "provider",
+        }),
+      ).toEqual({ code: productCode, ok: false });
+    }
+  });
+
+  it("publishes create success only after the invitation becomes usable", () => {
     expect(
-      parseStaffLoginResponse({ code: "email_verified", ok: true }),
-    ).toBeNull();
-    expect(
-      parseRevokeStaffInvitationResponse({
-        code: "invitation_link_revoked",
-        ok: false,
+      mapCreateStaffInvitationInternalResult({
+        code: "invitation_usable",
+        ok: true,
       }),
-    ).toBeNull();
+    ).toEqual({ code: "invitation_created", ok: true });
+    expect(
+      mapCreateStaffInvitationInternalResult({
+        code: "existing_user_conflict",
+        ok: false,
+        source: "provider",
+      }),
+    ).toEqual({ code: "existing_confirmed_user_unsupported", ok: false });
   });
 });

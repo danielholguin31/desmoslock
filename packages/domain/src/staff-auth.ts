@@ -37,26 +37,13 @@ export type StaffAuthSuccessCode = (typeof staffAuthSuccessCodes)[number];
 export const staffAuthErrorCodes = [
   "authentication_required",
   "authorization_denied",
-  "email_verification_failed",
   "existing_confirmed_user_unsupported",
-  "identity_mismatch",
   "invalid_request",
-  "invitation_already_accepted",
   "invitation_expired",
-  "invitation_link_revoked",
   "invitation_not_found",
-  "invitation_owner_role_unsupported",
-  "invitation_revocation_failed",
-  "login_failed",
-  "membership_already_active",
-  "membership_removed",
-  "membership_suspended",
-  "recovery_link_invalid_or_expired",
-  "removed_member_reactivation_unsupported",
-  "school_selection_denied",
+  "rate_limited",
   "service_unavailable",
   "session_expired",
-  "session_logged_out",
   "session_revoked",
   "step_up_required",
 ] as const;
@@ -73,6 +60,11 @@ export interface StaffAuthSuccess<
 export interface StaffAuthFailure<
   Code extends StaffAuthErrorCode = StaffAuthErrorCode,
 > {
+  readonly code: Code;
+  readonly ok: false;
+}
+
+export interface StaffAuthDomainFailure<Code extends string> {
   readonly code: Code;
   readonly ok: false;
 }
@@ -108,7 +100,7 @@ export function authorizeStaffInvitation(input: {
   readonly targetRole: ProductStaffRole;
 }):
   | StaffAuthSuccess<"invitation_created">
-  | StaffAuthFailure<
+  | StaffAuthDomainFailure<
       | "authorization_denied"
       | "invitation_owner_role_unsupported"
       | "step_up_required"
@@ -157,7 +149,7 @@ export type StaffInvitationAcceptanceResult =
       readonly invitationState: "accepted";
       readonly membershipState: "active";
     })
-  | (StaffAuthFailure<
+  | (StaffAuthDomainFailure<
       | "existing_confirmed_user_unsupported"
       | "identity_mismatch"
       | "invitation_already_accepted"
@@ -238,7 +230,7 @@ export type StaffSessionTransitionResult =
   | (StaffAuthSuccess<"session_ended"> & {
       readonly state: Exclude<StaffApplicationSessionState, "active">;
     })
-  | (StaffAuthFailure<
+  | (StaffAuthDomainFailure<
       "session_expired" | "session_logged_out" | "session_revoked"
     > & {
       readonly state: Exclude<StaffApplicationSessionState, "active">;
@@ -298,7 +290,7 @@ export type StaffPasswordRecoveryResult =
       readonly sessions: readonly StaffApplicationSession[];
       readonly state: "completed";
     })
-  | (StaffAuthFailure<"recovery_link_invalid_or_expired"> & {
+  | (StaffAuthDomainFailure<"recovery_link_invalid_or_expired"> & {
       readonly sessions: readonly StaffApplicationSession[];
       readonly state: StaffPasswordRecoveryState;
     });
@@ -325,7 +317,6 @@ export function completeStaffPasswordRecovery(input: {
 }
 
 export interface StaffMembershipReference {
-  readonly id: string;
   readonly profileId: string;
   readonly role: ProductStaffRole;
   readonly schoolId: string;
@@ -336,7 +327,7 @@ export type StaffMembershipRevocationResult =
   | (StaffAuthSuccess<"membership_revoked"> & {
       readonly memberships: readonly StaffMembershipReference[];
     })
-  | (StaffAuthFailure<
+  | (StaffAuthDomainFailure<
       "authorization_denied" | "membership_removed" | "step_up_required"
     > & {
       readonly memberships: readonly StaffMembershipReference[];
@@ -346,7 +337,7 @@ export function revokeStaffMembershipInSchool(
   authoritativeMemberships: readonly StaffMembershipReference[],
   input: {
     readonly authenticatedActorProfileId: string;
-    readonly membershipId: string;
+    readonly profileId: string;
     readonly schoolId: string;
     readonly stepUp: StaffMutationStepUp;
   },
@@ -374,11 +365,12 @@ export function revokeStaffMembershipInSchool(
   }
 
   const membership = authoritativeMemberships.find(
-    (candidate) => candidate.id === input.membershipId,
+    (candidate) =>
+      candidate.profileId === input.profileId &&
+      candidate.schoolId === input.schoolId,
   );
   if (
     membership === undefined ||
-    membership.schoolId !== input.schoolId ||
     membership.profileId === actorMembership.profileId ||
     (membership.role !== "administrator" && membership.role !== "teacher")
   ) {
@@ -399,7 +391,8 @@ export function revokeStaffMembershipInSchool(
   return {
     code: "membership_revoked",
     memberships: authoritativeMemberships.map((candidate) =>
-      candidate.id === input.membershipId
+      candidate.profileId === input.profileId &&
+      candidate.schoolId === input.schoolId
         ? { ...candidate, status: "removed" }
         : candidate,
     ),

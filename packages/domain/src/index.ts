@@ -71,6 +71,7 @@ export type {
   StaffApplicationSession,
   StaffApplicationSessionState,
   StaffAuthClientSurface,
+  StaffAuthDomainFailure,
   StaffAuthErrorCode,
   StaffAuthFailure,
   StaffAuthSuccess,
