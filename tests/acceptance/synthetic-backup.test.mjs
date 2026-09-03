@@ -18,7 +18,7 @@ import {
 } from "../../scripts/synthetic-backup/operator.mjs";
 
 const FIXTURE_DIGEST =
-  "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca";
+  "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201";
 const execFileAsync = promisify(execFile);
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -38,11 +38,11 @@ function sourceObservation() {
       },
       dataClass: "synthetic-only",
       digest: FIXTURE_DIGEST,
-      version: "internal-baseline-v1",
+      version: "internal-baseline-v2",
     },
     identity: "staging-instance-001",
     migrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
-    schemaGeneration: 3,
+    schemaGeneration: 4,
   };
 }
 
@@ -65,7 +65,7 @@ function emptyLocalObservation() {
     fixture: null,
     identity: "local-instance-001",
     migrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
-    schemaGeneration: 3,
+    schemaGeneration: 4,
   };
 }
 
@@ -306,7 +306,7 @@ test("exports a canonical synthetic-only backup and hash receipt", async (contex
     fixture: sourceObservation().fixture,
     format: "desmoslock.synthetic-backup/v1",
     schema: {
-      generation: 3,
+      generation: 4,
       migrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
       tables: SYNTHETIC_TABLES,
     },
@@ -315,6 +315,51 @@ test("exports a canonical synthetic-only backup and hash receipt", async (contex
       identity: "staging-instance-001",
     },
   });
+});
+
+test("refuses a stale generation-3 internal-baseline-v1 manifest before adapter use", async (context) => {
+  const { backupRoot, receipt } = await createBackup(context);
+  const manifestPath = path.join(receipt.backupDirectory, "manifest.json");
+  const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+  manifest.fixture.digest =
+    "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca";
+  manifest.fixture.version = "internal-baseline-v1";
+  manifest.schema.generation = 3;
+  const staleManifestBytes = Buffer.from(
+    `${JSON.stringify(manifest)}\n`,
+    "utf8",
+  );
+  await fs.writeFile(manifestPath, staleManifestBytes);
+  const calls = [];
+
+  await assertRefusal(
+    () =>
+      restoreSyntheticBackup(
+        {
+          backupName: "staging-baseline",
+          backupRoot,
+          databaseAlias: "local-restore",
+          expectedDatabaseIdentity: "local-instance-001",
+          expectedManifestSha256: crypto
+            .createHash("sha256")
+            .update(staleManifestBytes)
+            .digest("hex"),
+        },
+        {
+          async inspectDump() {
+            calls.push("inspectDump");
+          },
+          async observeDatabase() {
+            calls.push("observeDatabase");
+          },
+          async restoreVerifiedEmptyDatabase() {
+            calls.push("restoreVerifiedEmptyDatabase");
+          },
+        },
+      ),
+    "MANIFEST_INVALID",
+  );
+  assert.deepEqual(calls, []);
 });
 
 test("restores the verified bytes only into the independently identified empty local target", async (context) => {
@@ -1266,6 +1311,7 @@ test("pins the operator migration digest to the exact migration file set", async
   }
   assert.deepEqual(attestedMigrations, [
     "20260828000100_internal_release_backend.sql",
+    "20260903000200_staff_auth_generation_4.sql",
   ]);
   assert.equal(
     crypto.createHash("sha256").update(inventory.join("\n")).digest("hex"),

@@ -49,12 +49,12 @@ describe("web v2 foundation", () => {
         async readHealth() {
           return {
             body: {
-              capabilities: ["auth", "database", "rest"],
+              capabilities: ["auth", "database", "rest", "staff-auth"],
               fixtureDigest:
-                "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca",
+                "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
               fixtureValid: true,
-              fixtureVersion: "internal-baseline-v1",
-              schemaGeneration: 3,
+              fixtureVersion: "internal-baseline-v2",
+              schemaGeneration: 4,
               service: "desmoslock-v2",
               status: "ready",
             },
@@ -66,7 +66,7 @@ describe("web v2 foundation", () => {
 
     expect(observation).toMatchObject({
       environment: "local",
-      schemaGeneration: 3,
+      schemaGeneration: 4,
       status: "ready",
     });
   });

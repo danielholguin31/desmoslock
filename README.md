@@ -64,7 +64,10 @@ fails before bundling; there is no implicit loopback or staging default.
 
 The disposable v2 database starts from `supabase/migrations/` and
 `supabase/seed.sql`. It does not import legacy users or product rows. The
-generation-3 seed creates only the fixed two-School synthetic internal baseline.
+generation-4 seed creates only the fixed two-School synthetic internal
+baseline. Its six profiles remain unbound to Auth identities, and its six
+Memberships remain active, revision-one fixtures with no acceptance or
+revocation state.
 
 ```bash
 npm run db:start
@@ -72,6 +75,21 @@ npm run db:reset
 npm run test:db
 npm run db:stop
 ```
+
+For the full disposable staff-auth verification lane:
+
+```bash
+npm run db:start:full
+npm run db:reset
+npm run test:staff-auth
+npm run db:stop
+```
+
+CI owns startup and unconditional shutdown for that lane. The command covers
+database lifecycle contracts, credential-free live Auth/PostgREST/health
+probes, Edge behavior, and unit tests. Delivered-email callbacks and
+multi-browser revocation remain separate acceptance gates; this command does
+not claim those receipts.
 
 See
 [`docs/product-completion/reproducible-supabase.md`](docs/product-completion/reproducible-supabase.md)

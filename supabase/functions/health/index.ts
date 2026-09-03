@@ -1,9 +1,11 @@
+import { resolveSupabaseEgressOrigin } from "../_shared/supabase-http.ts";
+
 export interface BaselineStatus {
-  readonly capabilities: readonly ["auth", "database", "rest"];
+  readonly capabilities: readonly ["auth", "database", "rest", "staff-auth"];
   readonly fixtureDigest: string;
   readonly fixtureValid: true;
-  readonly fixtureVersion: "internal-baseline-v1";
-  readonly schemaGeneration: 3;
+  readonly fixtureVersion: "internal-baseline-v2";
+  readonly schemaGeneration: 4;
 }
 
 export type BaselineProbe = () => Promise<BaselineStatus>;
@@ -11,9 +13,9 @@ export type BaselineProbe = () => Promise<BaselineStatus>;
 export type BackendProbeTimeoutSignal = () => AbortSignal;
 
 const INTERNAL_BASELINE_FIXTURE_DIGEST =
-  "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca";
+  "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201";
 const INTERNAL_MIGRATION_SET_SHA256 =
-  "06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49";
+  "0ef2ff06cf7b93e67d4cf10ab422b96b41a486f65a7a6e52c07ce493a6e5dc66";
 
 const publicResponseHeaders = {
   "access-control-allow-origin": "*",
@@ -65,42 +67,16 @@ export function createBackendProbe(
     if (
       typeof serviceRoleKey !== "string" ||
       serviceRoleKey.length === 0 ||
-      typeof url !== "string" ||
-      typeof expectedOrigin !== "string"
+      (expectedOrigin !== undefined && typeof expectedOrigin !== "string")
     ) {
       throw new Error("Backend probe configuration is invalid");
     }
 
-    let baseUrl: URL;
-    try {
-      baseUrl = new URL(url);
-    } catch {
+    const suppliedOrigin = resolveSupabaseEgressOrigin(url, expectedOrigin);
+    if (suppliedOrigin === null) {
       throw new Error("Backend probe configuration is invalid");
     }
-    const allowedLocalHost =
-      baseUrl.hostname === "127.0.0.1" ||
-      baseUrl.hostname === "[::1]" ||
-      baseUrl.hostname === "host.docker.internal" ||
-      baseUrl.hostname === "kong";
-    const isLocalOrigin =
-      baseUrl.protocol === "http:" &&
-      allowedLocalHost &&
-      expectedOrigin === baseUrl.origin;
-    const isPinnedHostedOrigin =
-      baseUrl.protocol === "https:" &&
-      baseUrl.port === "" &&
-      /^[a-z0-9]{20}\.supabase\.co$/u.test(baseUrl.hostname) &&
-      expectedOrigin === baseUrl.origin;
-    if (
-      baseUrl.username !== "" ||
-      baseUrl.password !== "" ||
-      baseUrl.pathname !== "/" ||
-      baseUrl.search !== "" ||
-      baseUrl.hash !== "" ||
-      (!isLocalOrigin && !isPinnedHostedOrigin)
-    ) {
-      throw new Error("Backend probe configuration is invalid");
-    }
+    const baseUrl = new URL(suppliedOrigin);
 
     const timeoutSignal = createTimeoutSignal();
     const [authResponse, baselineResponse] = await Promise.all([
@@ -144,8 +120,8 @@ export function createBackendProbe(
         "migration_set_sha256",
         "schema_generation",
       ]) ||
-      baseline.schema_generation !== 3 ||
-      baseline.fixture_version !== "internal-baseline-v1" ||
+      baseline.schema_generation !== 4 ||
+      baseline.fixture_version !== "internal-baseline-v2" ||
       baseline.fixture_valid !== true ||
       baseline.fixture_digest !== INTERNAL_BASELINE_FIXTURE_DIGEST ||
       baseline.migration_set_sha256 !== INTERNAL_MIGRATION_SET_SHA256
@@ -154,11 +130,11 @@ export function createBackendProbe(
     }
 
     return {
-      capabilities: ["auth", "database", "rest"],
+      capabilities: ["auth", "database", "rest", "staff-auth"],
       fixtureDigest: baseline.fixture_digest,
       fixtureValid: true,
-      fixtureVersion: "internal-baseline-v1",
-      schemaGeneration: 3,
+      fixtureVersion: "internal-baseline-v2",
+      schemaGeneration: 4,
     };
   };
 }

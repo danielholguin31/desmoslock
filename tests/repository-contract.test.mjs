@@ -10,7 +10,13 @@ import {
   assertLegacyReleaseTombstone,
   expectedLegacyReleaseTombstone,
 } from "../scripts/release-tombstone-contract.mjs";
-import { assertSupabaseAuthConfiguration } from "../scripts/repository-contract/supabase-contract.mjs";
+import { assertStaffAuthCiWorkflow } from "../scripts/repository-contract/ci-contract.mjs";
+import {
+  assertMigrationSetAttestation,
+  assertSupabaseAuthConfiguration,
+  expectedMigrationFiles,
+  expectedMigrationSetSha256,
+} from "../scripts/repository-contract/supabase-contract.mjs";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -174,8 +180,12 @@ test("v2 data plane is migration-owned and clean-start only", () => {
     "supabase/config.toml",
     "supabase/migrations/20260824000100_v2_foundation.sql",
     "supabase/migrations/20260828000100_internal_release_backend.sql",
+    "supabase/migrations/20260903000100_staff_auth_lifecycle.sql",
+    "supabase/migrations/20260903000200_staff_auth_generation_4.sql",
     "supabase/seed.sql",
     "supabase/tests/database/internal_release_backend.test.sql",
+    "supabase/tests/database/staff_auth_generation_4.test.sql",
+    "supabase/tests/database/staff_auth_lifecycle.test.sql",
     "supabase/tests/database/v2_foundation.test.sql",
   ]) {
     assert.equal(
@@ -223,7 +233,7 @@ test("v2 data plane is migration-owned and clean-start only", () => {
   }
 });
 
-test("generation-3 Supabase configuration is versioned and fails closed", () => {
+test("generation-4 Supabase configuration is versioned and fails closed", () => {
   const configuration = readText("supabase/config.toml");
   const runbook = readText("docs/product-completion/reproducible-supabase.md");
   const authStart = configuration.indexOf("[auth]\n");
@@ -327,6 +337,91 @@ test("generation-3 Supabase configuration is versioned and fails closed", () => 
       `${workflowPath} configures every app build explicitly`,
     );
   }
+});
+
+test("generation-4 attests the exact normalized migration history", () => {
+  const migrations = expectedMigrationFiles.map((fileName) => [
+    fileName,
+    readText(`supabase/migrations/${fileName}`),
+  ]);
+
+  assert.doesNotThrow(() => assertMigrationSetAttestation(migrations));
+  assert.throws(
+    () => assertMigrationSetAttestation(migrations.slice(0, -1)),
+    /migration files/u,
+  );
+  assert.throws(
+    () =>
+      assertMigrationSetAttestation(
+        migrations.map(([fileName, source]) => [
+          fileName,
+          fileName === "20260903000100_staff_auth_lifecycle.sql"
+            ? `${source}\n-- drift\n`
+            : source,
+        ]),
+      ),
+    /normalized migration-set digest changed/u,
+  );
+  assert.throws(
+    () =>
+      assertMigrationSetAttestation(
+        migrations.map(([fileName, source]) => [
+          fileName,
+          fileName === "20260903000200_staff_auth_generation_4.sql"
+            ? source.replace(expectedMigrationSetSha256, "0".repeat(64))
+            : source,
+        ]),
+      ),
+    /does not attest the current migration set/u,
+  );
+});
+
+test("staff Auth has a required disposable full-stack verification lane", () => {
+  const rootPackage = readJson("package.json");
+  const workflow = readText(".github/workflows/ci.yml");
+
+  assert.equal(
+    fs.existsSync(
+      path.join(repositoryRoot, "tests/acceptance/staff-auth-stack.test.mjs"),
+    ),
+    true,
+  );
+
+  assert.equal(
+    rootPackage.scripts?.["test:staff-auth"],
+    "npm run test:db && npm run test:staff-auth:stack && npm run test:edge && npm run test:unit",
+  );
+  assert.equal(
+    rootPackage.scripts?.["test:staff-auth:stack"],
+    "node --test tests/acceptance/staff-auth-stack.test.mjs",
+  );
+  assert.doesNotThrow(() => assertStaffAuthCiWorkflow(workflow));
+
+  const lifecycleSteps = [
+    "      - run: npm run db:start:full",
+    "      - run: npm run db:reset",
+    "      - run: npm run test:staff-auth",
+    "      - if: always()",
+    "        run: npm run db:stop",
+    "",
+  ].join("\n");
+  const relocatedLifecycleSteps = workflow
+    .replace(lifecycleSteps, "")
+    .replace("  web:\n", `  web:\n${lifecycleSteps}`);
+  assert.notEqual(relocatedLifecycleSteps, workflow);
+  assert.throws(
+    () => assertStaffAuthCiWorkflow(relocatedLifecycleSteps),
+    /full disposable stack/u,
+  );
+
+  const relocatedAggregateNeed = workflow
+    .replace("      - staff-auth-lifecycle\n", "")
+    .replace("  web:\n", "  web:\n    needs:\n      - staff-auth-lifecycle\n");
+  assert.notEqual(relocatedAggregateNeed, workflow);
+  assert.throws(
+    () => assertStaffAuthCiWorkflow(relocatedAggregateNeed),
+    /does not depend on staff-auth-lifecycle/u,
+  );
 });
 
 test("synthetic operator reports scoped completion rather than external verification", () => {

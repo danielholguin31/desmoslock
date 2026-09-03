@@ -26,7 +26,7 @@ select ok(
         'student_sessions', 'baseline_fixture_state'
       )
   ),
-  'every generation-3 fixture table enables RLS'
+  'every generation-4 fixture table enables RLS'
 );
 select is(
   (
@@ -42,14 +42,14 @@ select is(
       )
   ),
   0::bigint,
-  'generation-3 tables have no direct allow policy'
+  'generation-4 tables have no direct allow policy'
 );
 select results_eq(
   $$
     select id, schema_generation, migration_set_sha256
     from desmoslock_v2.internal_release_attestation
   $$,
-  $$values (1::smallint, 3, '06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49')$$,
+  $$values (1::smallint, 4, '0ef2ff06cf7b93e67d4cf10ab422b96b41a486f65a7a6e52c07ce493a6e5dc66')$$,
   'the database records the exact versioned migration attestation'
 );
 select is_empty(
@@ -141,7 +141,7 @@ select results_eq(
     select schema_generation, fixture_version, fixture_digest, migration_set_sha256, fixture_valid
     from desmoslock_v2.internal_baseline_status()
   $$,
-  $$values (3, 'internal-baseline-v1', '7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca', '06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49', true)$$,
+  $$values (4, 'internal-baseline-v2', 'f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201', '0ef2ff06cf7b93e67d4cf10ab422b96b41a486f65a7a6e52c07ce493a6e5dc66', true)$$,
   'service baseline status verifies the pinned fixture digest'
 );
 
@@ -172,7 +172,7 @@ savepoint missing_foundation;
 delete from desmoslock_v2.foundation_seed;
 select results_eq(
   $$select fixture_digest, fixture_valid from desmoslock_v2.internal_baseline_status()$$,
-  $$values ('7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca', false)$$,
+  $$values ('f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201', false)$$,
   'service baseline status fails closed when the foundation marker is absent'
 );
 rollback to savepoint missing_foundation;
@@ -386,7 +386,7 @@ select throws_ok(
   $$,
   '23514',
   null,
-  'generation 3 rejects unsupported role breadth'
+  'generation 4 rejects unsupported role breadth'
 );
 select throws_ok(
   $$
@@ -403,9 +403,9 @@ select throws_ok(
       id, schema_generation, fixture_version, fixture_digest
     ) values (
       2,
-      3,
-      'internal-baseline-v1',
-      '7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca'
+      4,
+      'internal-baseline-v2',
+      'f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201'
     )
   $$,
   '23514',
@@ -414,7 +414,7 @@ select throws_ok(
 );
 select results_eq(
   $$select fixture_digest, fixture_valid from desmoslock_v2.internal_baseline_status()$$,
-  $$values ('7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca', true)$$,
+  $$values ('f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201', true)$$,
   'rejected mutations leave the pinned fixture digest valid'
 );
 

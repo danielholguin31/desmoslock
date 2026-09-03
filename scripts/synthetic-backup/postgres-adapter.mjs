@@ -9,7 +9,9 @@ import {
 } from "./operator.mjs";
 
 const FIXTURE_DIGEST =
-  "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca";
+  "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201";
+const FIXTURE_VERSION = "internal-baseline-v2";
+const SCHEMA_GENERATION = 4;
 const MAX_ARCHIVE_BYTES = 8 * 1024 * 1024;
 const MAX_RESTORE_SQL_BYTES = 16 * 1024 * 1024;
 const MAX_TEXT_OUTPUT_BYTES = 256 * 1024;
@@ -25,29 +27,38 @@ with baseline as (
   where id = 1
 ), counts as (
   select
+    (select count(*) from desmoslock_v2.application_session_revocations)::integer as application_session_revocations,
     (select count(*) from desmoslock_v2.baseline_fixture_state)::integer as baseline_fixture_state,
     (select count(*) from desmoslock_v2.foundation_seed)::integer as foundation_seed,
     (select count(*) from desmoslock_v2.memberships)::integer as memberships,
     (select count(*) from desmoslock_v2.profiles)::integer as profiles,
+    (select count(*) from desmoslock_v2.staff_audit_events)::integer as staff_audit_events,
+    (select count(*) from desmoslock_v2.staff_invitations)::integer as staff_invitations,
     (select count(*) from desmoslock_v2.student_sessions)::integer as student_sessions,
     (select count(*) from desmoslock_v2.tests)::integer as tests,
     (select count(*) from desmoslock_v2.workspaces)::integer as workspaces
 )
 select json_build_object(
   'applicationState', case
-    when counts.baseline_fixture_state = 0
+    when counts.application_session_revocations = 0
+      and counts.baseline_fixture_state = 0
       and counts.foundation_seed = 0
       and counts.memberships = 0
       and counts.profiles = 0
+      and counts.staff_audit_events = 0
+      and counts.staff_invitations = 0
       and counts.student_sessions = 0
       and counts.tests = 0
       and counts.workspaces = 0
       and baseline.schema_generation is null
       then 'empty'
-    when counts.baseline_fixture_state = 1
+    when counts.application_session_revocations = 0
+      and counts.baseline_fixture_state = 1
       and counts.foundation_seed = 1
       and counts.memberships = 6
       and counts.profiles = 6
+      and counts.staff_audit_events = 0
+      and counts.staff_invitations = 0
       and counts.student_sessions = 2
       and counts.tests = 2
       and counts.workspaces = 2
@@ -500,7 +511,7 @@ function parseObservation(output, profile) {
       payload.localRestoreMarker !== null) ||
     typeof payload.systemIdentifier !== "string" ||
     !/^\d{10,32}$/u.test(payload.systemIdentifier) ||
-    payload.schemaGeneration !== 3
+    payload.schemaGeneration !== SCHEMA_GENERATION
   ) {
     throw new Error("POSTGRES_OBSERVATION_INVALID");
   }
@@ -583,8 +594,20 @@ const COPY_COLUMNS = Object.freeze({
     "fixture_digest",
   ],
   foundation_seed: ["id", "schema_generation", "fixture_namespace"],
-  memberships: ["workspace_id", "profile_id", "role", "seed_key"],
-  profiles: ["id", "display_name", "seed_key"],
+  memberships: [
+    "workspace_id",
+    "profile_id",
+    "role",
+    "seed_key",
+    "status",
+    "role_revision",
+    "accepted_at",
+    "revoked_at",
+    "revoked_by_profile_id",
+    "revocation_reason_code",
+    "updated_at",
+  ],
+  profiles: ["id", "display_name", "seed_key", "auth_user_id"],
   student_sessions: ["id", "workspace_id", "test_id", "state", "seed_key"],
   tests: ["id", "workspace_id", "created_by_profile_id", "title", "seed_key"],
   workspaces: ["id", "kind", "slug", "display_name", "seed_key"],
@@ -598,6 +621,17 @@ const RESTORE_TABLE_ORDER = Object.freeze([
   "student_sessions",
   "baseline_fixture_state",
 ]);
+const POSTGRES_NULL = "\\N";
+const NULLABLE_COPY_COLUMNS = Object.freeze({
+  memberships: Object.freeze([
+    "accepted_at",
+    "revoked_at",
+    "revoked_by_profile_id",
+    "revocation_reason_code",
+    "updated_at",
+  ]),
+  profiles: Object.freeze(["auth_user_id"]),
+});
 
 function archiveContentError() {
   throw new Error("POSTGRES_ARCHIVE_CONTENT_INVALID");
@@ -675,7 +709,14 @@ function parseCopyBlocks(output) {
       const values = row.split("\t");
       if (
         values.length !== columns.length ||
-        values.some((value) => value.includes("\\") || value === "")
+        values.some((value, columnIndex) => {
+          if (value === POSTGRES_NULL) {
+            return !NULLABLE_COPY_COLUMNS[table]?.includes(
+              columns[columnIndex],
+            );
+          }
+          return value.includes("\\") || value === "";
+        })
       ) {
         archiveContentError();
       }
@@ -734,16 +775,61 @@ function canonicalEntityPayload(tables, counts) {
         seedKey,
       };
     }),
-    tables.get("profiles").map(([id, displayName, seedKey]) => ({
-      parts: ["profile", seedKey, id, displayName],
-      seedKey,
-    })),
+    tables.get("profiles").map(([id, displayName, seedKey, authUserId]) => {
+      if (authUserId !== POSTGRES_NULL) archiveContentError();
+      return {
+        parts: ["profile", seedKey, id, displayName, ""],
+        seedKey,
+      };
+    }),
     tables
       .get("memberships")
-      .map(([workspaceId, profileId, role, seedKey]) => ({
-        parts: ["membership", seedKey, workspaceId, profileId, role],
-        seedKey,
-      })),
+      .map(
+        ([
+          workspaceId,
+          profileId,
+          role,
+          seedKey,
+          status,
+          roleRevision,
+          acceptedAt,
+          revokedAt,
+          revokedByProfileId,
+          revocationReasonCode,
+          updatedAt,
+        ]) => {
+          if (
+            status !== "active" ||
+            roleRevision !== "1" ||
+            [
+              acceptedAt,
+              revokedAt,
+              revokedByProfileId,
+              revocationReasonCode,
+              updatedAt,
+            ].some((value) => value !== POSTGRES_NULL)
+          ) {
+            archiveContentError();
+          }
+          return {
+            parts: [
+              "membership",
+              seedKey,
+              workspaceId,
+              profileId,
+              role,
+              status,
+              roleRevision,
+              "",
+              "",
+              "",
+              "",
+              "",
+            ],
+            seedKey,
+          };
+        },
+      ),
     tables.get("tests").map(([id, workspaceId, creatorId, title, seedKey]) => ({
       parts: ["test", seedKey, id, workspaceId, creatorId, title],
       seedKey,
@@ -758,8 +844,8 @@ function canonicalEntityPayload(tables, counts) {
   return [
     frameText([
       "fixture",
-      "internal-baseline-v1",
-      "3",
+      FIXTURE_VERSION,
+      String(SCHEMA_GENERATION),
       "baseline_fixture_state",
       String(counts.baselineFixtureState),
       "foundation_seed",
@@ -791,8 +877,8 @@ function verifySyntheticArchiveContents(output) {
     fixtureStateRows.length !== 1 ||
     !hasExactRow(fixtureStateRows[0], [
       "1",
-      "3",
-      "internal-baseline-v1",
+      String(SCHEMA_GENERATION),
+      FIXTURE_VERSION,
       FIXTURE_DIGEST,
     ])
   ) {
@@ -823,7 +909,7 @@ function verifySyntheticArchiveContents(output) {
       counts,
       dataClass: "synthetic-only",
       digest: observedDigest,
-      version: "internal-baseline-v1",
+      version: FIXTURE_VERSION,
     },
     restoreSql: canonicalRestoreSql(tables),
   };
@@ -870,7 +956,7 @@ function parseAtomicRestoreTarget(target) {
     typeof target.expectedDatabaseIdentity !== "string" ||
     !/^\d{10,32}$/u.test(target.expectedDatabaseIdentity) ||
     target.expectedMigrationSetSha256 !== CURRENT_MIGRATION_SET_SHA256 ||
-    target.expectedSchemaGeneration !== 3 ||
+    target.expectedSchemaGeneration !== SCHEMA_GENERATION ||
     typeof target.sourceDatabaseIdentity !== "string" ||
     !/^\d{10,32}$/u.test(target.sourceDatabaseIdentity) ||
     target.sourceDatabaseIdentity === target.expectedDatabaseIdentity
@@ -912,7 +998,7 @@ begin
     select 1
     from desmoslock_v2.internal_release_attestation
     where id = 1
-      and schema_generation = 3
+      and schema_generation = ${SCHEMA_GENERATION}
       and migration_set_sha256 = '${CURRENT_MIGRATION_SET_SHA256}'
   ) then
     raise exception using errcode = '55000', message = 'restore migration attestation mismatch';
@@ -923,10 +1009,13 @@ begin
   ) is distinct from array[${expectedMigrationVersions}]::text[] then
     raise exception using errcode = '55000', message = 'restore migration set mismatch';
   end if;
-  if exists (select 1 from desmoslock_v2.baseline_fixture_state)
+  if exists (select 1 from desmoslock_v2.application_session_revocations)
+    or exists (select 1 from desmoslock_v2.baseline_fixture_state)
     or exists (select 1 from desmoslock_v2.foundation_seed)
     or exists (select 1 from desmoslock_v2.memberships)
     or exists (select 1 from desmoslock_v2.profiles)
+    or exists (select 1 from desmoslock_v2.staff_audit_events)
+    or exists (select 1 from desmoslock_v2.staff_invitations)
     or exists (select 1 from desmoslock_v2.student_sessions)
     or exists (select 1 from desmoslock_v2.tests)
     or exists (select 1 from desmoslock_v2.workspaces)
@@ -943,10 +1032,10 @@ begin
     select 1
     from desmoslock_v2.internal_baseline_status() as baseline
     where baseline.fixture_valid
-      and baseline.schema_generation = 3
-      and baseline.fixture_version = 'internal-baseline-v1'
+      and baseline.schema_generation = ${SCHEMA_GENERATION}
+      and baseline.fixture_version = '${FIXTURE_VERSION}'
       and baseline.fixture_digest =
-        '7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca'
+        '${FIXTURE_DIGEST}'
   ) then
     raise exception using errcode = '55000', message = 'restored fixture verification failed';
   end if;

@@ -1,7 +1,7 @@
 export type InternalBackendEnvironment = "local" | "staging";
 
 export const INTERNAL_BASELINE_FIXTURE_DIGEST =
-  "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca";
+  "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201";
 
 export interface PublicBackendConfiguration {
   readonly environment: InternalBackendEnvironment;
@@ -25,8 +25,8 @@ export type BackendObservation =
   | {
       readonly environment: InternalBackendEnvironment;
       readonly fixtureDigest: string;
-      readonly fixtureVersion: "internal-baseline-v1";
-      readonly schemaGeneration: 3;
+      readonly fixtureVersion: "internal-baseline-v2";
+      readonly schemaGeneration: 4;
       readonly status: "ready";
     }
   | {
@@ -158,14 +158,15 @@ export async function observeBackend(
   if (
     body.status !== "ready" ||
     body.service !== "desmoslock-v2" ||
-    body.schemaGeneration !== 3 ||
-    body.fixtureVersion !== "internal-baseline-v1" ||
+    body.schemaGeneration !== 4 ||
+    body.fixtureVersion !== "internal-baseline-v2" ||
     body.fixtureValid !== true ||
     body.fixtureDigest !== INTERNAL_BASELINE_FIXTURE_DIGEST ||
     !Array.isArray(body.capabilities) ||
-    body.capabilities.length !== 3 ||
+    body.capabilities.length !== 4 ||
     body.capabilities.some(
-      (capability, index) => capability !== ["auth", "database", "rest"][index],
+      (capability, index) =>
+        capability !== ["auth", "database", "rest", "staff-auth"][index],
     )
   ) {
     return { reason: "contract_incompatible", status: "unavailable" };
