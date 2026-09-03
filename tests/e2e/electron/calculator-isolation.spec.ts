@@ -244,17 +244,11 @@ test.describe.serial("isolated calculator surface", () => {
             ? {}
             : { chromiumSandbox: launchProfile.chromiumSandbox }),
         });
-        const child = acquiredApplication.process();
-        registerLocalCleanup(() =>
-          child.exitCode === null && child.signalCode === null
-            ? acquiredApplication.close()
-            : undefined,
-        );
+        const closeAcquiredApplication = () =>
+          closeElectronApplicationCooperatively(acquiredApplication);
+        registerCleanup(closeAcquiredApplication);
         await trackElectronApplicationForCooperativeCleanup(
           acquiredApplication,
-        );
-        registerCleanup(() =>
-          closeElectronApplicationCooperatively(acquiredApplication),
         );
         const acquiredShell = await acquiredApplication.firstWindow();
         await expect

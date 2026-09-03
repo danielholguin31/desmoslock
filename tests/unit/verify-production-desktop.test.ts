@@ -112,7 +112,7 @@ describe("production desktop verifier resource safety", () => {
     }
   });
 
-  it("falls back to raw close when application identity tracking fails", async () => {
+  it("keeps a persistent identity failure in both acquisition and cleanup results", async () => {
     const trackingFailure = new Error("application process unavailable");
     const application = {
       close: vi.fn().mockResolvedValue(undefined),
@@ -122,16 +122,190 @@ describe("production desktop verifier resource safety", () => {
     };
     const ready = vi.fn();
 
-    await expect(
-      acquireReadyElectronApplication({
-        launch: vi.fn().mockResolvedValue(application),
-        ready,
+    const acquisition = acquireReadyElectronApplication({
+      launch: vi.fn().mockResolvedValue(application),
+      ready,
+    });
+
+    await expect(acquisition).rejects.toEqual(
+      expect.objectContaining({
+        errors: [trackingFailure, trackingFailure],
       }),
-    ).rejects.toBe(trackingFailure);
+    );
+    await expect(acquisition).rejects.toBeInstanceOf(AggregateError);
 
     expect(application.close).toHaveBeenCalledOnce();
+    expect(application.process).toHaveBeenCalledTimes(2);
     expect(ready).not.toHaveBeenCalled();
   });
+
+  onlyPosix(
+    "retries transient acquisition tracking and observes a helper spawned during cleanup",
+    async () => {
+      const canarySource = [
+        'process.send?.({ type: "canary-ready" });',
+        'process.once("message", (message) => {',
+        '  if (message === "retire") {',
+        "    setTimeout(() => process.exit(0), 250);",
+        "  }",
+        "});",
+        "setInterval(() => {}, 1_000);",
+      ].join("\n");
+      const helperSource = [
+        'process.send?.({ type: "helper-ready" });',
+        "setTimeout(() => process.exit(0), 500);",
+      ].join("\n");
+      const applicationSource = [
+        'const { spawn } = require("node:child_process");',
+        `const canary = spawn(process.execPath, ["-e", ${JSON.stringify(canarySource)}], {`,
+        '  stdio: ["ignore", "ignore", "ignore", "ipc"],',
+        "});",
+        'canary.once("message", () => {',
+        '  process.send?.({ processId: canary.pid, type: "root-ready" });',
+        "});",
+        'process.once("message", (message) => {',
+        '  if (message !== "close-root") return;',
+        `  const helper = spawn(process.execPath, ["-e", ${JSON.stringify(helperSource)}], {`,
+        '    stdio: ["ignore", "ignore", "ignore", "ipc"],',
+        "  });",
+        '  helper.once("message", () => {',
+        '    process.send?.({ processId: helper.pid, type: "helper-ready" });',
+        '    canary.send("retire");',
+        "    canary.unref();",
+        "    helper.unref();",
+        "    setTimeout(() => process.exit(0), 100);",
+        "  });",
+        "});",
+        "setInterval(() => {}, 1_000);",
+      ].join("\n");
+      const child = spawn(process.execPath, ["-e", applicationSource], {
+        detached: true,
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+      });
+      const processGroupId = child.pid;
+      if (processGroupId === undefined) {
+        throw new Error("Test application did not expose a process id");
+      }
+      const processLookupFailure = new Error("transient process lookup failed");
+      const closeFailure = new Error("application close transport failed");
+      let canaryIdentity: {
+        processGroupId: number;
+        processId: number;
+        startedAt: string;
+      } | null = null;
+      let helperIdentity: {
+        processGroupId: number;
+        processId: number;
+        startedAt: string;
+      } | null = null;
+      let helperOutlivedRoot = false;
+
+      try {
+        const [rootReady] = (await once(child, "message")) as [
+          { processId: number; type: string },
+        ];
+        expect(rootReady.type).toBe("root-ready");
+        canaryIdentity = findProcessIdentity(
+          await readProcessIdentityTable(),
+          rootReady.processId,
+        );
+        expect(canaryIdentity).toMatchObject({
+          processGroupId,
+          processId: rootReady.processId,
+        });
+        const application = {
+          close: vi.fn(async () => {
+            const helperReadyPromise = once(child, "message");
+            const rootExit = once(child, "exit");
+            child.send("close-root");
+            const [helperReady] = (await helperReadyPromise) as [
+              { processId: number; type: string },
+            ];
+            expect(helperReady.type).toBe("helper-ready");
+            helperIdentity = findProcessIdentity(
+              await readProcessIdentityTable(),
+              helperReady.processId,
+            );
+            expect(helperIdentity).toMatchObject({
+              processGroupId,
+              processId: helperReady.processId,
+            });
+            await rootExit;
+            helperOutlivedRoot =
+              findProcessIdentity(
+                await readProcessIdentityTable(),
+                helperReady.processId,
+              )?.startedAt === helperIdentity?.startedAt;
+            throw closeFailure;
+          }),
+          process: vi
+            .fn()
+            .mockImplementationOnce(() => {
+              throw processLookupFailure;
+            })
+            .mockImplementation(() => child),
+        };
+        const ready = vi.fn();
+        let acquisitionFailure: unknown;
+        try {
+          await acquireReadyElectronApplication({
+            launch: vi.fn().mockResolvedValue(application),
+            ready,
+          });
+        } catch (error) {
+          acquisitionFailure = error;
+        }
+
+        expect(acquisitionFailure).toBeInstanceOf(AggregateError);
+        const [primaryFailure, cleanupFailure] = (
+          acquisitionFailure as AggregateError
+        ).errors;
+        expect(primaryFailure).toBe(processLookupFailure);
+        expect(cleanupFailure).toBeInstanceOf(AggregateError);
+        expect((cleanupFailure as AggregateError).errors).toEqual([
+          closeFailure,
+        ]);
+        expect(application.process).toHaveBeenCalledTimes(2);
+        expect(application.close).toHaveBeenCalledOnce();
+        expect(ready).not.toHaveBeenCalled();
+        expect(helperOutlivedRoot).toBe(true);
+        expect(helperIdentity).not.toBeNull();
+        expect(
+          findProcessIdentity(
+            await readProcessIdentityTable(),
+            helperIdentity!.processId,
+          ),
+        ).not.toEqual(helperIdentity);
+      } finally {
+        const recordedIdentities = [canaryIdentity, helperIdentity].filter(
+          (identity): identity is NonNullable<typeof identity> =>
+            identity !== null,
+        );
+        const currentIdentities = await readProcessIdentityTable();
+        const exactOwnedIdentityIsLive = recordedIdentities.some((recorded) =>
+          currentIdentities.some(
+            (current) =>
+              current.processGroupId === processGroupId &&
+              current.processId === recorded.processId &&
+              current.startedAt === recorded.startedAt,
+          ),
+        );
+        const rootIsLive = child.exitCode === null && child.signalCode === null;
+        const rootExit = rootIsLive ? once(child, "exit") : null;
+        if (rootIsLive || exactOwnedIdentityIsLive) {
+          killIsolatedProcessGroup(processGroupId);
+          if (rootExit !== null) await rootExit;
+          expect(
+            await waitForProcessIdentitiesToDisappear(
+              recordedIdentities,
+              2_000,
+            ),
+          ).toEqual([]);
+        }
+      }
+    },
+    10_000,
+  );
 
   onlyPosix(
     "fails closed when the root exits before its original process group can be captured",

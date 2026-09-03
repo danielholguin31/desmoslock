@@ -67,16 +67,10 @@ test("calculator close is idempotent and settles every cleanup task", async () =
           ? {}
           : { chromiumSandbox: launchProfile.chromiumSandbox }),
       });
-      const child = acquiredApplication.process();
-      registerCleanup(() =>
-        child.exitCode === null && child.signalCode === null
-          ? acquiredApplication.close()
-          : undefined,
-      );
-      await trackElectronApplicationForCooperativeCleanup(acquiredApplication);
       const cleanup = () =>
         closeElectronApplicationCooperatively(acquiredApplication);
       registerCleanup(cleanup);
+      await trackElectronApplicationForCooperativeCleanup(acquiredApplication);
       cleanupTasks.unshift(cleanup);
       return acquiredApplication;
     });
