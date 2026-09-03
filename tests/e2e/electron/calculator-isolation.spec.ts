@@ -386,22 +386,31 @@ test.describe.serial("isolated calculator surface", () => {
     await typeCalculatorExpression(application, "y=x^2");
     await clickCalculatorControl(application, "[data-zoom-in]");
 
-    const result = await callCalculator(
-      application,
-      () => ({
-        expressions: Array.from(
-          document.querySelectorAll<HTMLElement>("[data-expression]"),
-          (element) => element.dataset.expression,
+    await expect
+      .poll(() =>
+        callCalculator(
+          application,
+          () => ({
+            expressions: Array.from(
+              document.querySelectorAll<HTMLElement>("[data-expression]"),
+              (element) => element.dataset.expression,
+            ),
+            graphVisible:
+              document
+                .querySelector<SVGElement>("[data-graph]")
+                ?.getBoundingClientRect().height !== 0,
+            pathCount: document.querySelectorAll(".expression-path").length,
+            zoom: document.querySelector("[data-zoom-label]")?.textContent,
+          }),
+          null,
         ),
-        graphVisible:
-          document
-            .querySelector<SVGElement>("[data-graph]")
-            ?.getBoundingClientRect().height !== 0,
-        pathCount: document.querySelectorAll(".expression-path").length,
-        zoom: document.querySelector("[data-zoom-label]")?.textContent,
-      }),
-      null,
-    );
+      )
+      .toEqual({
+        expressions: ["y=x", "y=x^2"],
+        graphVisible: true,
+        pathCount: 2,
+        zoom: "125%",
+      });
     const screenshotBytes = await application.evaluate(
       async ({ webContents }, url) => {
         const calculator = webContents
@@ -413,12 +422,6 @@ test.describe.serial("isolated calculator surface", () => {
       calculatorUrl,
     );
 
-    expect(result).toEqual({
-      expressions: ["y=x", "y=x^2"],
-      graphVisible: true,
-      pathCount: 2,
-      zoom: "125%",
-    });
     expect(screenshotBytes).toBeGreaterThan(1_000);
   });
 
