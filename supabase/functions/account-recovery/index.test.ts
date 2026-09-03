@@ -4,6 +4,7 @@ import {
   type AccountRecoveryDependencies,
   createAccountRecoveryDependencies,
   handleRequest,
+  type RequestLifetimeWaitUntil,
 } from "./index.ts";
 
 const WEB_ORIGIN = "https://staff.desmoslock.invalid";
@@ -60,32 +61,52 @@ function dependencies(
 ): AccountRecoveryDependencies {
   return {
     allowedOrigin: WEB_ORIGIN,
-    requestRecovery: async () => "accepted",
-    settleResponseTime: async () => undefined,
+    requestRecovery: async () => undefined,
+    waitUntil: (task) => {
+      void task();
+    },
     ...overrides,
   };
 }
 
+async function publicSnapshot(response: Response): Promise<unknown> {
+  return {
+    accessControlAllowOrigin: response.headers.get(
+      "access-control-allow-origin",
+    ),
+    body: await response.text(),
+    cacheControl: response.headers.get("cache-control"),
+    contentType: response.headers.get("content-type"),
+    status: response.status,
+    vary: response.headers.get("vary"),
+  };
+}
+
 Deno.test(
-  "account recovery returns the exact public acceptance contract",
+  "account recovery returns the exact public contract while scheduling normalized email",
   async () => {
     const emails: string[] = [];
+    let background: Promise<void> | undefined;
     const response = await handleRequest(
       recoveryRequest(),
       dependencies({
         requestRecovery: async (email) => {
           emails.push(email);
-          return "accepted";
+        },
+        waitUntil: (task) => {
+          background = task();
         },
       }),
     );
-    assertEquals(response.status, 202);
-    assertEquals(response.headers.get("cache-control"), "no-store");
-    assertEquals(
-      response.headers.get("access-control-allow-origin"),
-      WEB_ORIGIN,
-    );
-    assertEquals(await response.json(), { code: "recovery_requested" });
+    assertEquals(await publicSnapshot(response), {
+      accessControlAllowOrigin: WEB_ORIGIN,
+      body: JSON.stringify({ code: "recovery_requested" }),
+      cacheControl: "no-store",
+      contentType: "application/json; charset=utf-8",
+      status: 202,
+      vary: "Origin",
+    });
+    await background;
     assertEquals(emails, ["owner@example.com"]);
   },
 );
@@ -161,21 +182,20 @@ Deno.test(
       recoveryRequest({ email: "owner@example.com", extra: true }),
       recoveryRequest({ email: "not-an-email" }),
     ];
-    let calls = 0;
+    let schedules = 0;
     for (const request of invalidRequests) {
       const response = await handleRequest(
         request,
         dependencies({
-          requestRecovery: async () => {
-            calls += 1;
-            return "accepted";
+          waitUntil: () => {
+            schedules += 1;
           },
         }),
       );
       assertEquals(response.status, 400);
       assertEquals(await response.json(), { code: "invalid_request" });
     }
-    assertEquals(calls, 0);
+    assertEquals(schedules, 0);
   },
 );
 
@@ -191,77 +211,117 @@ Deno.test(
 );
 
 Deno.test(
-  "account recovery maps only stable rate and dependency failures",
+  "every provider HTTP outcome has an identical immediate public response",
   async () => {
-    const rateLimited = await handleRequest(
-      recoveryRequest(),
-      dependencies({ requestRecovery: async () => "rate_limited" }),
+    const snapshots: unknown[] = [];
+    for (const status of [200, 400, 404, 422, 429, 500, 503]) {
+      let background: Promise<void> | undefined;
+      const service = createAccountRecoveryDependencies(
+        runtimeConfiguration(),
+        async () => new Response("{}", { status }),
+        (task) => {
+          background = task();
+        },
+      );
+      const response = await handleRequest(recoveryRequest(), service);
+      snapshots.push(await publicSnapshot(response));
+      await background;
+    }
+    assertEquals(
+      new Set(snapshots.map((snapshot) => JSON.stringify(snapshot))).size,
+      1,
     );
-    assertEquals(rateLimited.status, 429);
-    assertEquals(await rateLimited.json(), { code: "rate_limited" });
-
-    const dependencyFailure = await handleRequest(
-      recoveryRequest(),
-      dependencies({ requestRecovery: async () => "dependency_unavailable" }),
-    );
-    assertEquals(dependencyFailure.status, 503);
-    assertEquals(await dependencyFailure.json(), {
-      code: "dependency_unavailable",
+    assertEquals(snapshots[0], {
+      accessControlAllowOrigin: WEB_ORIGIN,
+      body: JSON.stringify({ code: "recovery_requested" }),
+      cacheControl: "no-store",
+      contentType: "application/json; charset=utf-8",
+      status: 202,
+      vary: "Origin",
     });
   },
 );
 
 Deno.test(
-  "account recovery sanitizes thrown provider details and secrets",
+  "account recovery response completes before delayed provider work",
   async () => {
-    const sentinel = "credential-shaped-provider-sentinel";
-    let delayFinished = false;
+    let finishProvider: (() => void) | undefined;
+    let providerFinished = false;
+    let background: Promise<void> | undefined;
     const response = await handleRequest(
       recoveryRequest(),
       dependencies({
         requestRecovery: () =>
-          Promise.reject(new Error(`provider ${sentinel}`)),
-        settleResponseTime: () =>
-          new Promise((resolve) =>
-            setTimeout(() => {
-              delayFinished = true;
+          new Promise((resolve) => {
+            finishProvider = () => {
+              providerFinished = true;
               resolve();
-            }, 1),
-          ),
+            };
+          }),
+        waitUntil: (task) => {
+          background = task();
+        },
       }),
     );
-    const body = await response.text();
-    assertEquals(response.status, 503);
-    assertEquals(body, JSON.stringify({ code: "dependency_unavailable" }));
-    assert(!body.includes(sentinel), "Provider detail leaked");
+    assertEquals(response.status, 202);
+    assert(!providerFinished, "Public response waited for the provider");
+    assert(finishProvider !== undefined, "Provider work was not scheduled");
+    finishProvider();
+    await background;
+    assert(providerFinished);
+  },
+);
+
+Deno.test(
+  "account recovery absorbs timeout and provider errors without leakage",
+  async () => {
+    const sentinel = "credential-shaped-provider-sentinel";
+    let background: Promise<void> | undefined;
+    const response = await handleRequest(
+      recoveryRequest(),
+      dependencies({
+        requestRecovery: () => Promise.reject(new Error(sentinel)),
+        waitUntil: (task) => {
+          background = task();
+        },
+      }),
+    );
+    const snapshot = await publicSnapshot(response);
+    await background;
+    assertEquals(snapshot, {
+      accessControlAllowOrigin: WEB_ORIGIN,
+      body: JSON.stringify({ code: "recovery_requested" }),
+      cacheControl: "no-store",
+      contentType: "application/json; charset=utf-8",
+      status: 202,
+      vary: "Origin",
+    });
     assert(
-      delayFinished,
-      "Rejected provider response bypassed the minimum response time",
+      !JSON.stringify(snapshot).includes(sentinel),
+      "Provider detail leaked",
     );
   },
 );
 
 Deno.test(
-  "account recovery waits for both provider and minimum response time",
+  "account recovery hides request-lifetime scheduler failures",
   async () => {
-    let providerFinished = false;
-    let delayFinished = false;
     const response = await handleRequest(
       recoveryRequest(),
       dependencies({
-        requestRecovery: async () => {
-          await Promise.resolve();
-          providerFinished = true;
-          return "accepted";
-        },
-        settleResponseTime: async () => {
-          await Promise.resolve();
-          delayFinished = true;
+        waitUntil: () => {
+          throw new Error("scheduler diagnostic must stay private");
         },
       }),
     );
-    assertEquals(response.status, 202);
-    assert(providerFinished && delayFinished);
+    assertEquals(await publicSnapshot(response), {
+      accessControlAllowOrigin: WEB_ORIGIN,
+      body: JSON.stringify({ code: "recovery_requested" }),
+      cacheControl: "no-store",
+      contentType: "application/json; charset=utf-8",
+      status: 202,
+      vary: "Origin",
+    });
   },
 );
 
@@ -278,30 +338,34 @@ function runtimeConfiguration(): Record<string, string> {
 Deno.test(
   "known and unknown account provider outcomes have an identical response",
   async () => {
-    const createService = (providerStatus: number) =>
-      createAccountRecoveryDependencies(
+    const createService = (providerStatus: number) => {
+      let background: Promise<void> | undefined;
+      const service = createAccountRecoveryDependencies(
         runtimeConfiguration(),
         async () => new Response("{}", { status: providerStatus }),
-        async () => undefined,
+        (task) => {
+          background = task();
+        },
       );
+      return { getBackground: () => background, service };
+    };
+    const knownService = createService(200);
+    const unknownService = createService(400);
     const known = await handleRequest(
       recoveryRequest({ email: "known@example.com" }),
-      createService(200),
+      knownService.service,
     );
     const unknown = await handleRequest(
       recoveryRequest({ email: "unknown@example.com" }),
-      createService(400),
+      unknownService.service,
     );
-    assertEquals(known.status, 202);
-    assertEquals(unknown.status, 202);
-    assertEquals(
-      await known.text(),
-      JSON.stringify({ code: "recovery_requested" }),
-    );
-    assertEquals(
-      await unknown.text(),
-      JSON.stringify({ code: "recovery_requested" }),
-    );
+    const knownSnapshot = await publicSnapshot(known);
+    const unknownSnapshot = await publicSnapshot(unknown);
+    await Promise.all([
+      knownService.getBackground(),
+      unknownService.getBackground(),
+    ]);
+    assertEquals(knownSnapshot, unknownSnapshot);
   },
 );
 
@@ -318,13 +382,13 @@ Deno.test(
           headers: new Headers(init?.headers),
           url: String(input),
         });
-        return new Response("{}", { status: 200 });
+        return new Response("{}", { status: 500 });
       },
-      async () => undefined,
+      (() => undefined) as RequestLifetimeWaitUntil,
     );
     assertEquals(
       await service.requestRecovery("unknown@example.com"),
-      "accepted",
+      undefined,
     );
     assertEquals(requests.length, 1);
     const request = requests[0];
@@ -349,27 +413,6 @@ Deno.test(
 );
 
 Deno.test(
-  "account recovery runtime maps provider rate and dependency states",
-  async () => {
-    for (const [status, expected] of [
-      [429, "rate_limited"],
-      [500, "dependency_unavailable"],
-      [401, "dependency_unavailable"],
-    ] as const) {
-      const service = createAccountRecoveryDependencies(
-        runtimeConfiguration(),
-        async () => new Response("{}", { status }),
-        async () => undefined,
-      );
-      assertEquals(
-        await service.requestRecovery("owner@example.com"),
-        expected,
-      );
-    }
-  },
-);
-
-Deno.test(
   "account recovery runtime rejects mismatched callback before egress",
   async () => {
     let requests = 0;
@@ -384,7 +427,7 @@ Deno.test(
           requests += 1;
           return new Response(null, { status: 500 });
         },
-        async () => undefined,
+        (() => undefined) as RequestLifetimeWaitUntil,
       );
     });
     assertEquals(requests, 0);

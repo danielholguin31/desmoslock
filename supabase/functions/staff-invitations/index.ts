@@ -19,7 +19,9 @@ import {
   type SupabaseHttpClient,
 } from "../_shared/supabase-http.ts";
 
-const INVITATION_LIFETIME_MILLISECONDS = 24 * 60 * 60 * 1_000;
+const MAXIMUM_INVITATION_LIFETIME_SECONDS = 86_400;
+const MINIMUM_INVITATION_LIFETIME_SECONDS = 60;
+const COMPLETE_ATTEMPTS = 2;
 
 const publicFailureCodes = new Set([
   "conflict",
@@ -50,14 +52,30 @@ export interface InvitationAuthorizationResult {
   readonly invitationId?: string;
 }
 
-export interface InvitationDeliveryResult {
+export interface GeneratedInvitationResult {
+  readonly actionLink?: string;
   readonly code:
-    "conflict" | "dependency_unavailable" | "rate_limited" | "user_created";
+    "conflict" | "dependency_unavailable" | "link_generated" | "rate_limited";
   readonly userId?: string;
+}
+
+export interface InvitationDeliveryMessage {
+  readonly actionLink: string;
+  readonly expiresAt: string;
+  readonly recipientEmail: string;
+}
+
+export type InvitationDeliveryResult = "delivered" | "dependency_unavailable";
+
+export interface StaffInvitationDeliveryTransport {
+  deliver(
+    message: InvitationDeliveryMessage,
+  ): Promise<InvitationDeliveryResult>;
 }
 
 export interface StaffInvitationDependencies {
   readonly allowedOrigin: string;
+  readonly inviteLifetimeSeconds: number;
   authorizeInvitation(
     jwt: string,
     input: StaffInvitationInput,
@@ -67,8 +85,11 @@ export interface StaffInvitationDependencies {
     userId: string,
     expiresAt: string,
   ): Promise<string>;
-  deliverInvitation(email: string): Promise<InvitationDeliveryResult>;
+  deliverInvitation(
+    message: InvitationDeliveryMessage,
+  ): Promise<InvitationDeliveryResult>;
   failInvitation(invitationId: string, reasonCode: string): Promise<string>;
+  generateInviteLink(email: string): Promise<GeneratedInvitationResult>;
   now(): number;
 }
 
@@ -82,6 +103,18 @@ function parseInput(value: unknown): StaffInvitationInput | null {
     value.role === "admin" || value.role === "teacher" ? value.role : null;
   return email !== null && workspaceId !== null && role !== null
     ? { email, role, workspaceId }
+    : null;
+}
+
+function parseInvitationLifetimeSeconds(value: unknown): number | null {
+  if (typeof value !== "string" || !/^[1-9][0-9]{1,5}$/u.test(value)) {
+    return null;
+  }
+  const seconds = Number(value);
+  return Number.isSafeInteger(seconds) &&
+    seconds >= MINIMUM_INVITATION_LIFETIME_SECONDS &&
+    seconds <= MAXIMUM_INVITATION_LIFETIME_SECONDS
+    ? seconds
     : null;
 }
 
@@ -147,48 +180,150 @@ async function callRpc(
     : { code: "dependency_unavailable" };
 }
 
-function isUnconfirmedInvitedUser(
-  value: unknown,
-  requestedEmail: string,
-): boolean {
-  const candidate = isExactRecord(value, ["user"]) ? value.user : value;
-  if (
-    typeof candidate !== "object" ||
-    candidate === null ||
-    Array.isArray(candidate)
-  ) {
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function hasUnverifiedEmailIdentity(user: Record<string, unknown>): boolean {
+  if (!Array.isArray(user.identities) || user.identities.length === 0) {
     return false;
   }
-  const user = candidate as Record<string, unknown>;
+  return user.identities.some((identityValue) => {
+    const identity = asRecord(identityValue);
+    const identityData = asRecord(identity?.identity_data);
+    return (
+      identity?.provider === "email" && identityData?.email_verified === false
+    );
+  });
+}
+
+function isUnconfirmedInvitedUser(
+  user: Record<string, unknown>,
+  requestedEmail: string,
+): boolean {
   const id = parseUuid(user.id);
   const email = parseEmail(user.email);
-  const emailConfirmedAt = user.email_confirmed_at;
-  const confirmedAt = user.confirmed_at;
-  const confirmationFieldsValid =
-    (emailConfirmedAt === undefined || emailConfirmedAt === null) &&
-    (confirmedAt === undefined || confirmedAt === null);
+  const confirmed =
+    typeof user.email_confirmed_at === "string" ||
+    typeof user.confirmed_at === "string";
   return (
     id !== null &&
     email === requestedEmail &&
-    confirmationFieldsValid &&
+    !confirmed &&
     user.is_anonymous === false &&
     typeof user.invited_at === "string" &&
     Number.isFinite(Date.parse(user.invited_at)) &&
-    typeof user.confirmation_sent_at === "string" &&
-    Number.isFinite(Date.parse(user.confirmation_sent_at))
+    hasUnverifiedEmailIdentity(user)
   );
+}
+
+function isConfirmedExistingUser(
+  user: Record<string, unknown>,
+  requestedEmail: string,
+): boolean {
+  const id = parseUuid(user.id);
+  const email = parseEmail(user.email);
+  const confirmationTimestamp =
+    typeof user.email_confirmed_at === "string"
+      ? user.email_confirmed_at
+      : typeof user.confirmed_at === "string"
+        ? user.confirmed_at
+        : null;
+  return (
+    id !== null &&
+    email === requestedEmail &&
+    confirmationTimestamp !== null &&
+    Number.isFinite(Date.parse(confirmationTimestamp))
+  );
+}
+
+function parseGeneratedActionLink(
+  value: unknown,
+  backendOrigin: string,
+  callback: string,
+): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > 8_192) {
+    return null;
+  }
+  let actionLink: URL;
+  try {
+    actionLink = new URL(value);
+  } catch {
+    return null;
+  }
+  if (
+    actionLink.origin !== backendOrigin ||
+    actionLink.pathname !== "/auth/v1/verify" ||
+    actionLink.username !== "" ||
+    actionLink.password !== "" ||
+    actionLink.hash !== ""
+  ) {
+    return null;
+  }
+  const queryKeys = [...actionLink.searchParams.keys()];
+  const allowedKeys = new Set(["redirect_to", "token", "token_hash", "type"]);
+  if (
+    queryKeys.some((key) => !allowedKeys.has(key)) ||
+    new Set(queryKeys).size !== queryKeys.length ||
+    actionLink.searchParams.get("type") !== "invite" ||
+    actionLink.searchParams.get("redirect_to") !== callback
+  ) {
+    return null;
+  }
+  const token = actionLink.searchParams.get("token");
+  const tokenHash = actionLink.searchParams.get("token_hash");
+  const hasToken = token !== null && token.length > 0 && token.length <= 4_096;
+  const hasTokenHash =
+    tokenHash !== null && tokenHash.length > 0 && tokenHash.length <= 4_096;
+  if (hasToken === hasTokenHash || queryKeys.length !== 3) {
+    return null;
+  }
+  return actionLink.href;
+}
+
+function parseGeneratedInvitation(
+  value: unknown,
+  requestedEmail: string,
+  backendOrigin: string,
+  callback: string,
+): GeneratedInvitationResult {
+  const response = asRecord(value);
+  if (response === null) {
+    return { code: "dependency_unavailable" };
+  }
+  const properties = asRecord(response.properties);
+  const wrappedUser = asRecord(response.user);
+  const user = wrappedUser ?? response;
+  if (isConfirmedExistingUser(user, requestedEmail)) {
+    return { code: "conflict" };
+  }
+  const actionLink = parseGeneratedActionLink(
+    properties?.action_link ?? response.action_link,
+    backendOrigin,
+    callback,
+  );
+  const userId = parseUuid(user.id);
+  return actionLink !== null &&
+    userId !== null &&
+    isUnconfirmedInvitedUser(user, requestedEmail)
+    ? { actionLink, code: "link_generated", userId }
+    : { code: "dependency_unavailable" };
 }
 
 export function createStaffInvitationDependencies(
   configuration: unknown,
   serviceFetch: ServiceFetch = globalThis.fetch,
   now: () => number = Date.now,
+  deliveryTransport?: StaffInvitationDeliveryTransport,
 ): StaffInvitationDependencies {
   if (
     !isExactRecord(configuration, [
       "DESMOSLOCK_ALLOWED_WEB_ORIGIN",
       "DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN",
       "DESMOSLOCK_STAFF_INVITATION_CALLBACK",
+      "DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS",
       "SUPABASE_ANON_KEY",
       "SUPABASE_SERVICE_ROLE_KEY",
       "SUPABASE_URL",
@@ -206,7 +341,16 @@ export function createStaffInvitationDependencies(
           configuration.DESMOSLOCK_STAFF_INVITATION_CALLBACK,
           allowedOrigin,
         );
-  if (allowedOrigin === null || callback === null) {
+  const inviteLifetimeSeconds = parseInvitationLifetimeSeconds(
+    configuration.DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS,
+  );
+  // This explicit value must exactly match the hosted
+  // `auth.email.otp_expiry`; there is intentionally no inferred default.
+  if (
+    allowedOrigin === null ||
+    callback === null ||
+    inviteLifetimeSeconds === null
+  ) {
     throw new Error("Staff invitation configuration is invalid");
   }
   const client = createSupabaseHttpClient(
@@ -226,6 +370,7 @@ export function createStaffInvitationDependencies(
 
   return {
     allowedOrigin,
+    inviteLifetimeSeconds,
     now,
     async authorizeInvitation(jwt, input) {
       const result = await callRpc(
@@ -261,11 +406,33 @@ export function createStaffInvitationDependencies(
       );
       return result.code;
     },
-    async deliverInvitation(email) {
-      const providerUrl = new URL("/auth/v1/invite", `${client.origin}/`);
+    async deliverInvitation(message) {
+      if (deliveryTransport === undefined) {
+        return "dependency_unavailable";
+      }
+      return await deliveryTransport.deliver(message);
+    },
+    async failInvitation(invitationId, reasonCode) {
+      const result = await callRpc(
+        client,
+        "internal_fail_staff_invitation",
+        {
+          invitation_id: invitationId,
+          reason_code: reasonCode,
+        },
+        serviceAuthorization,
+        serviceRoleKey,
+      );
+      return result.code;
+    },
+    async generateInviteLink(email) {
+      const providerUrl = new URL(
+        "/auth/v1/admin/generate_link",
+        `${client.origin}/`,
+      );
       providerUrl.searchParams.set("redirect_to", callback);
       const response = await client.request(providerUrl.href, {
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email, type: "invite" }),
         headers: {
           apikey: serviceRoleKey,
           authorization: serviceAuthorization,
@@ -282,35 +449,19 @@ export function createStaffInvitationDependencies(
       if (!response.ok) {
         return { code: "dependency_unavailable" };
       }
-      const responseBody = await readBoundedJsonResponse(response);
-      if (!isUnconfirmedInvitedUser(responseBody, email)) {
-        return { code: "conflict" };
-      }
-      const user = isExactRecord(responseBody, ["user"])
-        ? responseBody.user
-        : responseBody;
-      return {
-        code: "user_created",
-        userId: String((user as Record<string, unknown>).id).toLowerCase(),
-      };
-    },
-    async failInvitation(invitationId, reasonCode) {
-      const result = await callRpc(
-        client,
-        "internal_fail_staff_invitation",
-        {
-          invitation_id: invitationId,
-          reason_code: reasonCode,
-        },
-        serviceAuthorization,
-        serviceRoleKey,
+      return parseGeneratedInvitation(
+        await readBoundedJsonResponse(response),
+        email,
+        client.origin,
+        callback,
       );
-      return result.code;
     },
   };
 }
 
 function runtimeDependencies(): StaffInvitationDependencies {
+  // Delivery is deliberately unavailable until an approved server-only
+  // transport is wired; runtime configuration must never imply a vendor.
   return createStaffInvitationDependencies({
     DESMOSLOCK_ALLOWED_WEB_ORIGIN: Deno.env.get(
       "DESMOSLOCK_ALLOWED_WEB_ORIGIN",
@@ -320,6 +471,9 @@ function runtimeDependencies(): StaffInvitationDependencies {
     ),
     DESMOSLOCK_STAFF_INVITATION_CALLBACK: Deno.env.get(
       "DESMOSLOCK_STAFF_INVITATION_CALLBACK",
+    ),
+    DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS: Deno.env.get(
+      "DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS",
     ),
     SUPABASE_ANON_KEY: Deno.env.get("SUPABASE_ANON_KEY"),
     SUPABASE_SERVICE_ROLE_KEY: Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"),
@@ -339,6 +493,57 @@ async function recordFailedDelivery(
     );
   } catch {
     return false;
+  }
+}
+
+async function confirmInvitationUsable(
+  dependencies: StaffInvitationDependencies,
+  invitationId: string,
+  userId: string,
+  expiresAt: string,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < COMPLETE_ATTEMPTS; attempt += 1) {
+    try {
+      const code = await dependencies.completeInvitation(
+        invitationId,
+        userId,
+        expiresAt,
+      );
+      if (code === "invitation_usable") {
+        return true;
+      }
+      if (code !== "dependency_unavailable") {
+        return false;
+      }
+    } catch {
+      // A lost response is ambiguous. Retry the same idempotency tuple once;
+      // delivery remains forbidden until an exact usable result is observed.
+    }
+  }
+  return false;
+}
+
+function invitationExpiration(
+  dependencies: StaffInvitationDependencies,
+): string | null {
+  try {
+    const now = dependencies.now();
+    const lifetimeMilliseconds = dependencies.inviteLifetimeSeconds * 1_000;
+    if (
+      !Number.isSafeInteger(now) ||
+      now < 0 ||
+      !Number.isSafeInteger(lifetimeMilliseconds) ||
+      dependencies.inviteLifetimeSeconds <
+        MINIMUM_INVITATION_LIFETIME_SECONDS ||
+      dependencies.inviteLifetimeSeconds >
+        MAXIMUM_INVITATION_LIFETIME_SECONDS ||
+      now > 8_640_000_000_000_000 - lifetimeMilliseconds
+    ) {
+      return null;
+    }
+    return new Date(now + lifetimeMilliseconds).toISOString();
+  } catch {
+    return null;
   }
 }
 
@@ -376,11 +581,7 @@ export async function handleRequest(
 
   let authorization: InvitationAuthorizationResult;
   try {
-    authorization = await dependencies.authorizeInvitation(jwt, {
-      email: input.email,
-      role: input.role,
-      workspaceId: input.workspaceId,
-    });
+    authorization = await dependencies.authorizeInvitation(jwt, input);
   } catch {
     return codeResponse(
       "dependency_unavailable",
@@ -411,19 +612,26 @@ export async function handleRequest(
     );
   }
 
-  let delivery: InvitationDeliveryResult;
+  let generated: GeneratedInvitationResult;
   try {
-    delivery = await dependencies.deliverInvitation(input.email);
+    generated = await dependencies.generateInviteLink(input.email);
   } catch {
-    delivery = { code: "dependency_unavailable" };
+    generated = { code: "dependency_unavailable" };
   }
-  const deliveredUserId =
-    delivery.code === "user_created" ? parseUuid(delivery.userId) : null;
-  if (deliveredUserId === null) {
+  const generatedUserId =
+    generated.code === "link_generated" ? parseUuid(generated.userId) : null;
+  const actionLink =
+    generated.code === "link_generated" &&
+    typeof generated.actionLink === "string" &&
+    generated.actionLink.length > 0 &&
+    generated.actionLink.length <= 8_192
+      ? generated.actionLink
+      : null;
+  if (generatedUserId === null || actionLink === null) {
     const publicCode =
-      delivery.code === "user_created"
-        ? "dependency_unavailable"
-        : delivery.code;
+      generated.code === "conflict" || generated.code === "rate_limited"
+        ? generated.code
+        : "dependency_unavailable";
     const recorded = await recordFailedDelivery(
       dependencies,
       invitationId,
@@ -447,18 +655,8 @@ export async function handleRequest(
     );
   }
 
-  let expiresAt: string;
-  try {
-    const now = dependencies.now();
-    if (
-      !Number.isSafeInteger(now) ||
-      now < 0 ||
-      now > 8_640_000_000_000_000 - INVITATION_LIFETIME_MILLISECONDS
-    ) {
-      throw new Error("Clock is invalid");
-    }
-    expiresAt = new Date(now + INVITATION_LIFETIME_MILLISECONDS).toISOString();
-  } catch {
+  const expiresAt = invitationExpiration(dependencies);
+  if (expiresAt === null) {
     await recordFailedDelivery(
       dependencies,
       invitationId,
@@ -470,17 +668,37 @@ export async function handleRequest(
       dependencies.allowedOrigin,
     );
   }
-  let completeCode: string;
-  try {
-    completeCode = await dependencies.completeInvitation(
+  const usable = await confirmInvitationUsable(
+    dependencies,
+    invitationId,
+    generatedUserId,
+    expiresAt,
+  );
+  if (!usable) {
+    await recordFailedDelivery(
+      dependencies,
       invitationId,
-      deliveredUserId,
-      expiresAt,
+      "dependency_unavailable",
     );
-  } catch {
-    completeCode = "dependency_unavailable";
+    return codeResponse(
+      "dependency_unavailable",
+      503,
+      dependencies.allowedOrigin,
+    );
   }
-  if (completeCode !== "invitation_usable") {
+
+  let delivery: InvitationDeliveryResult = "dependency_unavailable";
+  try {
+    delivery = await dependencies.deliverInvitation({
+      actionLink,
+      expiresAt,
+      recipientEmail: input.email,
+    });
+  } catch {
+    // The SMTP outcome is ambiguous. Closing the invitation makes a possibly
+    // delivered link unusable instead of granting uncertain access.
+  }
+  if (delivery !== "delivered") {
     await recordFailedDelivery(
       dependencies,
       invitationId,

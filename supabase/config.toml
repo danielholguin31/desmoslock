@@ -51,8 +51,14 @@ enabled = true
 policy = "per_worker"
 deno_version = 2
 
+[functions.account-recovery]
+verify_jwt = false
+
 [functions.health]
 verify_jwt = false
+
+[functions.staff-invitations]
+verify_jwt = true
 
 [analytics]
 enabled = false

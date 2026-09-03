@@ -14,24 +14,35 @@ import {
   type ServiceFetch,
 } from "../_shared/supabase-http.ts";
 
-const MINIMUM_RESPONSE_MILLISECONDS = 300;
-
-export type RecoveryRequestResult =
-  "accepted" | "dependency_unavailable" | "rate_limited";
+export type RequestLifetimeWaitUntil = (task: () => Promise<void>) => void;
 
 export interface AccountRecoveryDependencies {
   readonly allowedOrigin: string;
-  requestRecovery(email: string): Promise<RecoveryRequestResult>;
-  settleResponseTime(): Promise<void>;
+  requestRecovery(email: string): Promise<void>;
+  waitUntil: RequestLifetimeWaitUntil;
+}
+
+interface EdgeRuntimeWaitUntil {
+  waitUntil(promise: Promise<unknown>): void;
+}
+
+function runtimeWaitUntil(task: () => Promise<void>): void {
+  const edgeRuntime = (
+    globalThis as typeof globalThis & { EdgeRuntime?: EdgeRuntimeWaitUntil }
+  ).EdgeRuntime;
+  if (
+    edgeRuntime === undefined ||
+    typeof edgeRuntime.waitUntil !== "function"
+  ) {
+    throw new Error("Request-lifetime background execution is unavailable");
+  }
+  edgeRuntime.waitUntil(Promise.resolve().then(task));
 }
 
 export function createAccountRecoveryDependencies(
   configuration: unknown,
   serviceFetch: ServiceFetch = globalThis.fetch,
-  settleResponseTime: () => Promise<void> = () =>
-    new Promise((resolve) =>
-      setTimeout(resolve, MINIMUM_RESPONSE_MILLISECONDS),
-    ),
+  waitUntil: RequestLifetimeWaitUntil = runtimeWaitUntil,
 ): AccountRecoveryDependencies {
   if (
     !isExactRecord(configuration, [
@@ -68,11 +79,11 @@ export function createAccountRecoveryDependencies(
 
   return {
     allowedOrigin,
-    settleResponseTime,
+    waitUntil,
     async requestRecovery(email) {
       const providerUrl = new URL("/auth/v1/recover", `${client.origin}/`);
       providerUrl.searchParams.set("redirect_to", callback);
-      const response = await client.request(providerUrl.href, {
+      await client.request(providerUrl.href, {
         body: JSON.stringify({ email }),
         headers: {
           apikey: client.publishableKey,
@@ -81,13 +92,6 @@ export function createAccountRecoveryDependencies(
         },
         method: "POST",
       });
-      if (response.status === 429) {
-        return "rate_limited";
-      }
-      if (response.ok || [400, 404, 422].includes(response.status)) {
-        return "accepted";
-      }
-      return "dependency_unavailable";
     },
   };
 }
@@ -140,32 +144,22 @@ export async function handleRequest(
     return codeResponse("invalid_request", 400, dependencies.allowedOrigin);
   }
 
-  const [providerOutcome, delayOutcome] = await Promise.allSettled([
-    dependencies.requestRecovery(email),
-    dependencies.settleResponseTime(),
-  ]);
-  if (
-    providerOutcome.status === "rejected" ||
-    delayOutcome.status === "rejected"
-  ) {
-    return codeResponse(
-      "dependency_unavailable",
-      503,
-      dependencies.allowedOrigin,
-    );
+  const recoveryTask = async (): Promise<void> => {
+    try {
+      await dependencies.requestRecovery(email);
+    } catch {
+      // Provider outcomes are intentionally absorbed to preserve the public
+      // non-enumeration contract. This path must never log provider details.
+    }
+  };
+  // Integration gate: any future externally visible abuse control must be
+  // durable, account-independent, and complete before provider lookup.
+  try {
+    dependencies.waitUntil(recoveryTask);
+  } catch {
+    // Scheduling failures are also hidden from the public response.
   }
-  const result = providerOutcome.value;
-  if (result === "accepted") {
-    return codeResponse("recovery_requested", 202, dependencies.allowedOrigin);
-  }
-  if (result === "rate_limited") {
-    return codeResponse("rate_limited", 429, dependencies.allowedOrigin);
-  }
-  return codeResponse(
-    "dependency_unavailable",
-    503,
-    dependencies.allowedOrigin,
-  );
+  return codeResponse("recovery_requested", 202, dependencies.allowedOrigin);
 }
 
 if (import.meta.main) {
