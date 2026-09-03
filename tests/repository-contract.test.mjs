@@ -409,6 +409,37 @@ test("Electron CI acceptance includes internal isolation and external package po
   assert.match(ciWorkflow, /xvfb-run -a npm run test:electron/);
 });
 
+test("the production desktop command cannot bypass observed application retirement", () => {
+  const verifier = readText("scripts/verify-production-desktop.mjs");
+  const launches = [
+    ...verifier.matchAll(
+      /application = await launchInternalProductionBuild\(userDataDirectory\);/g,
+    ),
+  ];
+  const observedCloses = [
+    ...verifier.matchAll(
+      /await closeElectronApplicationCooperatively\(application\);/g,
+    ),
+  ];
+
+  assert.equal(launches.length, 2);
+  assert.equal(
+    observedCloses.length,
+    launches.length + 1,
+    "each acquired application and the command finalizer must await observed retirement",
+  );
+  assert.doesNotMatch(
+    verifier,
+    /\bapplication\.close\s*\(/,
+    "the production command must not close a tracked application outside the retirement observer",
+  );
+  assert.match(
+    verifier,
+    /if \(application !== null\) \{\s*await closeElectronApplicationCooperatively\(application\);\s*\}/,
+    "the command finalizer must turn retirement-observer failures into a failing command status",
+  );
+});
+
 test("legacy release tombstone rejects every alternate execution path", () => {
   const mutations = [
     [

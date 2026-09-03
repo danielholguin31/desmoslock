@@ -134,6 +134,101 @@ describe("production desktop verifier resource safety", () => {
   });
 
   onlyPosix(
+    "fails closed when the root exits before its original process group can be captured",
+    async () => {
+      const orphanSource = "setTimeout(() => process.exit(0), 10_000);";
+      const applicationSource = [
+        'const { spawn } = require("node:child_process");',
+        `const orphan = spawn(process.execPath, ["-e", ${JSON.stringify(orphanSource)}], {`,
+        '  stdio: ["ignore", "ignore", "ignore"],',
+        "});",
+        'orphan.once("spawn", () => {',
+        '  process.send?.({ processId: orphan.pid, type: "orphan-ready" });',
+        "  orphan.unref();",
+        "  process.exit(0);",
+        "});",
+      ].join("\n");
+      const child = spawn(process.execPath, ["-e", applicationSource], {
+        detached: true,
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+      });
+      const processGroupId = child.pid;
+      if (processGroupId === undefined) {
+        throw new Error("Test application did not expose a process id");
+      }
+      let orphanIdentity: {
+        processGroupId: number;
+        processId: number;
+        startedAt: string;
+      } | null = null;
+      let orphanProcessId: number | null = null;
+
+      try {
+        const rootExit = once(child, "exit");
+        const [orphanReady] = (await once(child, "message")) as [
+          { processId: number; type: string },
+        ];
+        expect(orphanReady.type).toBe("orphan-ready");
+        orphanProcessId = orphanReady.processId;
+        await rootExit;
+        const liveOrphan = findProcessIdentity(
+          await readProcessIdentityTable(),
+          orphanReady.processId,
+        );
+        expect(liveOrphan).toMatchObject({
+          processGroupId,
+          processId: orphanReady.processId,
+        });
+        expect(liveOrphan?.parentPid).not.toBe(processGroupId);
+        orphanIdentity = liveOrphan;
+        const application = {
+          close: vi.fn().mockResolvedValue(undefined),
+          process: () => child,
+        };
+
+        await expect(
+          closeElectronApplicationCooperatively(application),
+        ).rejects.toThrow(
+          "Electron application exited before its initial process identity capture",
+        );
+
+        expect(application.close).toHaveBeenCalledOnce();
+        expect(
+          findProcessIdentity(
+            await readProcessIdentityTable(),
+            orphanReady.processId,
+          ),
+        ).toEqual(orphanIdentity);
+      } finally {
+        const currentIdentities = await readProcessIdentityTable();
+        const knownOrphanIsLive =
+          orphanProcessId !== null &&
+          currentIdentities.some(
+            (current) =>
+              current.processGroupId === processGroupId &&
+              current.processId === orphanProcessId &&
+              (orphanIdentity === null ||
+                current.startedAt === orphanIdentity.startedAt),
+          );
+        const rootIsLive = child.exitCode === null && child.signalCode === null;
+        const rootExit = rootIsLive ? once(child, "exit") : null;
+        if (rootIsLive || knownOrphanIsLive) {
+          killIsolatedProcessGroup(processGroupId);
+          if (rootExit !== null) await rootExit;
+          if (orphanIdentity !== null) {
+            expect(
+              await waitForProcessIdentitiesToDisappear(
+                [orphanIdentity],
+                2_000,
+              ),
+            ).toEqual([]);
+          }
+        }
+      }
+    },
+  );
+
+  onlyPosix(
     "retains a late same-group descendant after its intermediate parent exits",
     async () => {
       const descendantSource = [

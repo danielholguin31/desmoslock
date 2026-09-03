@@ -96,8 +96,6 @@ function captureLiveElectronProcessIdentities(state, identities) {
 }
 
 async function observeElectronProcessRetirement(state, closeLifecycle) {
-  if (state.rootIdentity === null) return;
-
   while (true) {
     const sampledAfterCloseSettled = closeLifecycle.settled;
     const identities = await readProcessIdentityTable();
@@ -169,19 +167,22 @@ export async function trackElectronApplicationForCooperativeCleanup(
   if (!Number.isSafeInteger(child.pid) || child.pid <= 1) {
     throw new Error("Electron application did not expose a safe process id");
   }
+  if (child.exitCode !== null || child.signalCode !== null) {
+    throw new Error(
+      "Electron application exited before its initial process identity capture",
+    );
+  }
   const identities = await readProcessIdentityTable();
+  if (child.exitCode !== null || child.signalCode !== null) {
+    throw new Error(
+      "Electron application exited during its initial process identity capture",
+    );
+  }
   const rootIdentity = findProcessIdentity(identities, child.pid);
   if (rootIdentity === null) {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      electronApplicationCleanupStates.set(application, {
-        child,
-        cleanupPromise: null,
-        recordedIdentities: new Map(),
-        rootIdentity: null,
-      });
-      return;
-    }
-    throw new Error("Electron application process identity is unavailable");
+    throw new Error(
+      "Electron application process identity is unavailable for initial capture",
+    );
   }
   const state = {
     child,
@@ -207,16 +208,25 @@ export async function refreshElectronApplicationProcessIdentities(application) {
 }
 
 export async function closeElectronApplicationCooperatively(application) {
-  await trackElectronApplicationForCooperativeCleanup(application);
+  try {
+    await trackElectronApplicationForCooperativeCleanup(application);
+  } catch (trackingFailure) {
+    try {
+      await application.close();
+    } catch (closeFailure) {
+      throw new AggregateError(
+        [trackingFailure, closeFailure],
+        "Electron identity tracking and application close both failed",
+        { cause: closeFailure },
+      );
+    }
+    throw trackingFailure;
+  }
   const state = electronApplicationCleanupStates.get(application);
   if (state.cleanupPromise !== null) return state.cleanupPromise;
   state.cleanupPromise = (async () => {
     const failures = [];
-    if (
-      state.rootIdentity !== null &&
-      state.child.exitCode === null &&
-      state.child.signalCode === null
-    ) {
+    if (state.child.exitCode === null && state.child.signalCode === null) {
       try {
         await refreshElectronApplicationProcessIdentities(application);
       } catch (error) {

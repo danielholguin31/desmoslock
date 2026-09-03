@@ -20,6 +20,7 @@ import { spawnIsolatedProcessTree } from "./isolated-process-tree.mjs";
 import {
   acquireReadyElectronApplication,
   acquireWithLocalCleanup,
+  closeElectronApplicationCooperatively,
   runIndependentCleanupTasks,
   runWithFinalizer,
   runWithIndependentCleanup,
@@ -872,7 +873,7 @@ await runWithIndependentCleanup(async () => {
   networkSinks = null;
 
   assert.deepEqual(await setCalculatorState(application), ["y=x", "y=x^2"]);
-  await application.close();
+  await closeElectronApplicationCooperatively(application);
   application = null;
 
   application = await launchInternalProductionBuild(userDataDirectory);
@@ -881,7 +882,7 @@ await runWithIndependentCleanup(async () => {
     expressions: ["y=x"],
     storedProbe: null,
   });
-  await application.close();
+  await closeElectronApplicationCooperatively(application);
   application = null;
 
   await verifyExternalPackagedLaunch(
@@ -932,7 +933,9 @@ await runWithIndependentCleanup(async () => {
   );
 }, [
   async () => {
-    if (application !== null) await application.close();
+    if (application !== null) {
+      await closeElectronApplicationCooperatively(application);
+    }
   },
   async () => {
     if (networkSinks !== null) await networkSinks.close();
