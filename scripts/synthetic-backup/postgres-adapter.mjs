@@ -27,6 +27,7 @@ with baseline as (
   where id = 1
 ), counts as (
   select
+    (select count(*) from desmoslock_v2.application_session_revocation_cutoffs)::integer as application_session_revocation_cutoffs,
     (select count(*) from desmoslock_v2.application_session_revocations)::integer as application_session_revocations,
     (select count(*) from desmoslock_v2.baseline_fixture_state)::integer as baseline_fixture_state,
     (select count(*) from desmoslock_v2.foundation_seed)::integer as foundation_seed,
@@ -34,31 +35,36 @@ with baseline as (
     (select count(*) from desmoslock_v2.profiles)::integer as profiles,
     (select count(*) from desmoslock_v2.staff_audit_events)::integer as staff_audit_events,
     (select count(*) from desmoslock_v2.staff_invitations)::integer as staff_invitations,
+    (select count(*) from desmoslock_v2.staff_password_recovery_operations)::integer as staff_password_recovery_operations,
     (select count(*) from desmoslock_v2.student_sessions)::integer as student_sessions,
     (select count(*) from desmoslock_v2.tests)::integer as tests,
     (select count(*) from desmoslock_v2.workspaces)::integer as workspaces
 )
 select json_build_object(
   'applicationState', case
-    when counts.application_session_revocations = 0
+    when counts.application_session_revocation_cutoffs = 0
+      and counts.application_session_revocations = 0
       and counts.baseline_fixture_state = 0
       and counts.foundation_seed = 0
       and counts.memberships = 0
       and counts.profiles = 0
       and counts.staff_audit_events = 0
       and counts.staff_invitations = 0
+      and counts.staff_password_recovery_operations = 0
       and counts.student_sessions = 0
       and counts.tests = 0
       and counts.workspaces = 0
       and baseline.schema_generation is null
       then 'empty'
-    when counts.application_session_revocations = 0
+    when counts.application_session_revocation_cutoffs = 0
+      and counts.application_session_revocations = 0
       and counts.baseline_fixture_state = 1
       and counts.foundation_seed = 1
       and counts.memberships = 6
       and counts.profiles = 6
       and counts.staff_audit_events = 0
       and counts.staff_invitations = 0
+      and counts.staff_password_recovery_operations = 0
       and counts.student_sessions = 2
       and counts.tests = 2
       and counts.workspaces = 2
@@ -1009,13 +1015,15 @@ begin
   ) is distinct from array[${expectedMigrationVersions}]::text[] then
     raise exception using errcode = '55000', message = 'restore migration set mismatch';
   end if;
-  if exists (select 1 from desmoslock_v2.application_session_revocations)
+  if exists (select 1 from desmoslock_v2.application_session_revocation_cutoffs)
+    or exists (select 1 from desmoslock_v2.application_session_revocations)
     or exists (select 1 from desmoslock_v2.baseline_fixture_state)
     or exists (select 1 from desmoslock_v2.foundation_seed)
     or exists (select 1 from desmoslock_v2.memberships)
     or exists (select 1 from desmoslock_v2.profiles)
     or exists (select 1 from desmoslock_v2.staff_audit_events)
     or exists (select 1 from desmoslock_v2.staff_invitations)
+    or exists (select 1 from desmoslock_v2.staff_password_recovery_operations)
     or exists (select 1 from desmoslock_v2.student_sessions)
     or exists (select 1 from desmoslock_v2.tests)
     or exists (select 1 from desmoslock_v2.workspaces)
