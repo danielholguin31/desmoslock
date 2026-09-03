@@ -22,7 +22,8 @@ import {
 
 const MAXIMUM_INVITATION_LIFETIME_SECONDS = 86_400;
 const MINIMUM_INVITATION_LIFETIME_SECONDS = 60;
-const COMPLETE_ATTEMPTS = 2;
+const PREPARE_ATTEMPTS = 2;
+const PUBLISH_ATTEMPTS = 2;
 
 const publicFailureCodes = new Set([
   "conflict",
@@ -81,7 +82,7 @@ export interface StaffInvitationDependencies {
     jwt: string,
     input: StaffInvitationInput,
   ): Promise<InvitationAuthorizationResult>;
-  completeInvitation(
+  prepareInvitation(
     invitationId: string,
     userId: string,
     expiresAt: string,
@@ -92,6 +93,7 @@ export interface StaffInvitationDependencies {
   failInvitation(invitationId: string, reasonCode: string): Promise<string>;
   generateInviteLink(email: string): Promise<GeneratedInvitationResult>;
   now(): number;
+  publishInvitation(invitationId: string): Promise<string>;
 }
 
 function parseInput(value: unknown): StaffInvitationInput | null {
@@ -398,15 +400,25 @@ export function createStaffInvitationDependencies(
         ? { code: "dependency_unavailable" }
         : { code: "invitation_pending", invitationId };
     },
-    async completeInvitation(invitationId, userId, expiresAt) {
+    async prepareInvitation(invitationId, userId, expiresAt) {
       const result = await callRpc(
         client,
-        "internal_complete_staff_invitation",
+        "internal_prepare_staff_invitation",
         {
           expires_at: expiresAt,
           invitation_id: invitationId,
           invited_user_id: userId,
         },
+        serviceAuthorization,
+        serviceRoleKey,
+      );
+      return result.code;
+    },
+    async publishInvitation(invitationId) {
+      const result = await callRpc(
+        client,
+        "internal_publish_staff_invitation",
+        { invitation_id: invitationId },
         serviceAuthorization,
         serviceRoleKey,
       );
@@ -505,20 +517,20 @@ async function recordFailedDelivery(
   }
 }
 
-async function confirmInvitationUsable(
+async function confirmInvitationDeliveryReady(
   dependencies: StaffInvitationDependencies,
   invitationId: string,
   userId: string,
   expiresAt: string,
 ): Promise<boolean> {
-  for (let attempt = 0; attempt < COMPLETE_ATTEMPTS; attempt += 1) {
+  for (let attempt = 0; attempt < PREPARE_ATTEMPTS; attempt += 1) {
     try {
-      const code = await dependencies.completeInvitation(
+      const code = await dependencies.prepareInvitation(
         invitationId,
         userId,
         expiresAt,
       );
-      if (code === "invitation_usable") {
+      if (code === "invitation_delivery_ready") {
         return true;
       }
       if (code !== "dependency_unavailable") {
@@ -526,7 +538,28 @@ async function confirmInvitationUsable(
       }
     } catch {
       // A lost response is ambiguous. Retry the same idempotency tuple once;
-      // delivery remains forbidden until an exact usable result is observed.
+      // delivery remains forbidden until an exact ready result is observed.
+    }
+  }
+  return false;
+}
+
+async function confirmInvitationPublished(
+  dependencies: StaffInvitationDependencies,
+  invitationId: string,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < PUBLISH_ATTEMPTS; attempt += 1) {
+    try {
+      const code = await dependencies.publishInvitation(invitationId);
+      if (code === "invitation_usable") {
+        return true;
+      }
+      if (code !== "dependency_unavailable") {
+        return false;
+      }
+    } catch {
+      // SMTP has already reported exact delivery. Reconcile only by repeating
+      // the idempotent publish transition; never retry the delivery itself.
     }
   }
   return false;
@@ -677,13 +710,13 @@ export async function handleRequest(
       dependencies.allowedOrigin,
     );
   }
-  const usable = await confirmInvitationUsable(
+  const ready = await confirmInvitationDeliveryReady(
     dependencies,
     invitationId,
     generatedUserId,
     expiresAt,
   );
-  if (!usable) {
+  if (!ready) {
     await recordFailedDelivery(
       dependencies,
       invitationId,
@@ -704,8 +737,8 @@ export async function handleRequest(
       recipientEmail: input.email,
     });
   } catch {
-    // The SMTP outcome is ambiguous. Closing the invitation makes a possibly
-    // delivered link unusable instead of granting uncertain access.
+    // A sent-then-failed SMTP outcome is ambiguous. The delivery-ready state is
+    // non-consumable, so safety does not depend on the failure write succeeding.
   }
   if (delivery !== "delivered") {
     await recordFailedDelivery(
@@ -713,6 +746,17 @@ export async function handleRequest(
       invitationId,
       "dependency_unavailable",
     );
+    return codeResponse(
+      "dependency_unavailable",
+      503,
+      dependencies.allowedOrigin,
+    );
+  }
+  const published = await confirmInvitationPublished(
+    dependencies,
+    invitationId,
+  );
+  if (!published) {
     return codeResponse(
       "dependency_unavailable",
       503,

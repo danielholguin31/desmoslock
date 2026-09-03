@@ -79,7 +79,6 @@ function dependencies(
       code: "invitation_pending",
       invitationId: INVITATION_ID,
     }),
-    completeInvitation: async () => "invitation_usable",
     deliverInvitation: async () => "delivered",
     failInvitation: async () => "invitation_delivery_failed",
     generateInviteLink: async () => ({
@@ -89,12 +88,14 @@ function dependencies(
     }),
     inviteLifetimeSeconds: 3_600,
     now: () => Date.UTC(2026, 7, 30, 12),
+    prepareInvitation: async () => "invitation_delivery_ready",
+    publishInvitation: async () => "invitation_usable",
     ...overrides,
   };
 }
 
 Deno.test(
-  "staff invitation sequences authorize, generate, complete, then deliver",
+  "staff invitation sequences authorize, generate, prepare, deliver, then publish",
   async () => {
     const calls: unknown[] = [];
     const response = await handleRequest(
@@ -112,13 +113,17 @@ Deno.test(
             userId: USER_ID,
           };
         },
-        completeInvitation: async (invitationId, userId, expiresAt) => {
-          calls.push(["complete", invitationId, userId, expiresAt]);
-          return "invitation_usable";
-        },
         deliverInvitation: async (message) => {
           calls.push(["deliver", message]);
           return "delivered";
+        },
+        prepareInvitation: async (invitationId, userId, expiresAt) => {
+          calls.push(["prepare", invitationId, userId, expiresAt]);
+          return "invitation_delivery_ready";
+        },
+        publishInvitation: async (invitationId) => {
+          calls.push(["publish", invitationId]);
+          return "invitation_usable";
         },
       }),
     );
@@ -141,7 +146,7 @@ Deno.test(
         },
       ],
       ["generate", "teacher@example.com"],
-      ["complete", INVITATION_ID, USER_ID, "2026-08-30T13:00:00.000Z"],
+      ["prepare", INVITATION_ID, USER_ID, "2026-08-30T13:00:00.000Z"],
       [
         "deliver",
         {
@@ -150,6 +155,7 @@ Deno.test(
           recipientEmail: "teacher@example.com",
         },
       ],
+      ["publish", INVITATION_ID],
     ]);
   },
 );
@@ -378,43 +384,47 @@ Deno.test(
 );
 
 Deno.test(
-  "staff invitation retries an ambiguous idempotent completion before delivery",
+  "staff invitation retries an ambiguous idempotent preparation before delivery",
   async () => {
     const calls: string[] = [];
-    let completes = 0;
+    let preparations = 0;
     const response = await handleRequest(
       invitationRequest(),
       dependencies({
-        completeInvitation: async () => {
-          completes += 1;
-          calls.push(`complete-${completes}`);
-          if (completes === 1) {
+        prepareInvitation: async () => {
+          preparations += 1;
+          calls.push(`prepare-${preparations}`);
+          if (preparations === 1) {
             throw new Error("lost response after possible commit");
           }
-          return "invitation_usable";
+          return "invitation_delivery_ready";
         },
         deliverInvitation: async () => {
           calls.push("deliver");
           return "delivered";
         },
+        publishInvitation: async () => {
+          calls.push("publish");
+          return "invitation_usable";
+        },
       }),
     );
     assertEquals(response.status, 201);
-    assertEquals(calls, ["complete-1", "complete-2", "deliver"]);
+    assertEquals(calls, ["prepare-1", "prepare-2", "deliver", "publish"]);
   },
 );
 
 Deno.test(
-  "staff invitation never delivers when completion cannot be confirmed",
+  "staff invitation never delivers when preparation cannot be confirmed",
   async () => {
-    let completes = 0;
+    let preparations = 0;
     let deliveries = 0;
     const failures: unknown[] = [];
     const response = await handleRequest(
       invitationRequest(),
       dependencies({
-        completeInvitation: async () => {
-          completes += 1;
+        prepareInvitation: async () => {
+          preparations += 1;
           return "dependency_unavailable";
         },
         deliverInvitation: async () => {
@@ -429,23 +439,23 @@ Deno.test(
     );
     assertEquals(response.status, 503);
     assertEquals(await response.json(), { code: "dependency_unavailable" });
-    assertEquals(completes, 2);
+    assertEquals(preparations, 2);
     assertEquals(deliveries, 0);
     assertEquals(failures, [[INVITATION_ID, "dependency_unavailable"]]);
   },
 );
 
 Deno.test(
-  "staff invitation treats an explicit finalization failure as closed",
+  "staff invitation treats an explicit preparation failure as closed",
   async () => {
-    let completes = 0;
+    let preparations = 0;
     let deliveries = 0;
     const failures: unknown[] = [];
     const response = await handleRequest(
       invitationRequest(),
       dependencies({
-        completeInvitation: async () => {
-          completes += 1;
+        prepareInvitation: async () => {
+          preparations += 1;
           return "conflict";
         },
         deliverInvitation: async () => {
@@ -460,22 +470,22 @@ Deno.test(
     );
     assertEquals(response.status, 503);
     assertEquals(await response.json(), { code: "dependency_unavailable" });
-    assertEquals(completes, 1);
+    assertEquals(preparations, 1);
     assertEquals(deliveries, 0);
     assertEquals(failures, [[INVITATION_ID, "dependency_unavailable"]]);
   },
 );
 
 Deno.test(
-  "staff invitation closes a usable invitation after delivery failure",
+  "staff invitation leaves delivery-ready non-consumable after delivery failure",
   async () => {
     const calls: unknown[] = [];
     const response = await handleRequest(
       invitationRequest(),
       dependencies({
-        completeInvitation: async () => {
-          calls.push("complete");
-          return "invitation_usable";
+        prepareInvitation: async () => {
+          calls.push("prepare");
+          return "invitation_delivery_ready";
         },
         deliverInvitation: async () => {
           calls.push("deliver");
@@ -485,15 +495,141 @@ Deno.test(
           calls.push(["fail", invitationId, reasonCode]);
           return "invitation_delivery_failed";
         },
+        publishInvitation: async () => {
+          calls.push("publish");
+          return "invitation_usable";
+        },
       }),
     );
     assertEquals(response.status, 503);
     assertEquals(await response.json(), { code: "dependency_unavailable" });
     assertEquals(calls, [
-      "complete",
+      "prepare",
       "deliver",
       ["fail", INVITATION_ID, "dependency_unavailable"],
     ]);
+  },
+);
+
+Deno.test(
+  "SMTP sent-then-throw remains non-consumable even when failure recording fails",
+  async () => {
+    for (const failureOutcome of ["throws", "unexpected"] as const) {
+      const events: unknown[] = [];
+      let deliveries = 0;
+      let publications = 0;
+      const diagnosticSentinel = "smtp-provider-diagnostic-sentinel";
+      const response = await handleRequest(
+        invitationRequest(),
+        dependencies({
+          deliverInvitation: async () => {
+            deliveries += 1;
+            events.push("smtp-sent-then-threw");
+            throw new Error(diagnosticSentinel);
+          },
+          failInvitation: async (invitationId, reasonCode) => {
+            events.push(["fail", invitationId, reasonCode]);
+            if (failureOutcome === "throws") {
+              throw new Error("failure-rpc-diagnostic-sentinel");
+            }
+            return "unexpected_result";
+          },
+          prepareInvitation: async () => {
+            events.push("ready");
+            return "invitation_delivery_ready";
+          },
+          publishInvitation: async () => {
+            publications += 1;
+            events.push("publish");
+            return "invitation_usable";
+          },
+        }),
+      );
+      const body = await response.text();
+      assertEquals(response.status, 503);
+      assertEquals(body, JSON.stringify({ code: "dependency_unavailable" }));
+      assertEquals(deliveries, 1);
+      assertEquals(publications, 0);
+      assertEquals(events, [
+        "ready",
+        "smtp-sent-then-threw",
+        ["fail", INVITATION_ID, "dependency_unavailable"],
+      ]);
+      assert(!body.includes(ACTION_TOKEN_SENTINEL), "Action token leaked");
+      assert(!body.includes("teacher@example.com"), "Recipient email leaked");
+      assert(!body.includes(diagnosticSentinel), "Provider error leaked");
+    }
+  },
+);
+
+Deno.test(
+  "staff invitation reconciles an ambiguous idempotent publish without resending SMTP",
+  async () => {
+    const calls: string[] = [];
+    let publications = 0;
+    const response = await handleRequest(
+      invitationRequest(),
+      dependencies({
+        deliverInvitation: async () => {
+          calls.push("deliver");
+          return "delivered";
+        },
+        prepareInvitation: async () => {
+          calls.push("ready");
+          return "invitation_delivery_ready";
+        },
+        publishInvitation: async () => {
+          publications += 1;
+          calls.push(`publish-${publications}`);
+          if (publications === 1) {
+            throw new Error("lost publish response after possible commit");
+          }
+          return "invitation_usable";
+        },
+      }),
+    );
+    assertEquals(response.status, 201);
+    assertEquals(await response.json(), { code: "invitation_created" });
+    assertEquals(calls, ["ready", "deliver", "publish-1", "publish-2"]);
+  },
+);
+
+Deno.test(
+  "staff invitation never resends SMTP when publish reconciliation stays ambiguous",
+  async () => {
+    let deliveries = 0;
+    let failureWrites = 0;
+    let publications = 0;
+    const diagnosticSentinel = "publish-timeout-diagnostic-sentinel";
+    const response = await handleRequest(
+      invitationRequest(),
+      dependencies({
+        deliverInvitation: async () => {
+          deliveries += 1;
+          return "delivered";
+        },
+        failInvitation: async () => {
+          failureWrites += 1;
+          return "invitation_delivery_failed";
+        },
+        publishInvitation: async () => {
+          publications += 1;
+          if (publications === 1) {
+            return "dependency_unavailable";
+          }
+          throw new Error(diagnosticSentinel);
+        },
+      }),
+    );
+    const body = await response.text();
+    assertEquals(response.status, 503);
+    assertEquals(body, JSON.stringify({ code: "dependency_unavailable" }));
+    assertEquals(deliveries, 1);
+    assertEquals(publications, 2);
+    assertEquals(failureWrites, 0);
+    assert(!body.includes(ACTION_TOKEN_SENTINEL), "Action token leaked");
+    assert(!body.includes("teacher@example.com"), "Recipient email leaked");
+    assert(!body.includes(diagnosticSentinel), "Publish error leaked");
   },
 );
 
@@ -602,6 +738,9 @@ Deno.test(
         if (url.includes("/auth/v1/admin/generate_link")) {
           return Response.json(generatedProviderResponse());
         }
+        if (url.includes("internal_prepare_staff_invitation")) {
+          return Response.json([{ code: "invitation_delivery_ready" }]);
+        }
         return Response.json([{ code: "invitation_usable" }]);
       },
       () => Date.UTC(2026, 7, 30, 12),
@@ -614,6 +753,12 @@ Deno.test(
       workspaceId: WORKSPACE_ID,
     });
     const generated = await service.generateInviteLink("teacher@example.com");
+    const prepared = await service.prepareInvitation(
+      INVITATION_ID,
+      USER_ID,
+      "2026-08-30T13:00:00.000Z",
+    );
+    const published = await service.publishInvitation(INVITATION_ID);
     assertEquals(authorization, {
       code: "invitation_pending",
       invitationId: INVITATION_ID,
@@ -623,7 +768,9 @@ Deno.test(
       code: "link_generated",
       userId: USER_ID,
     });
-    assertEquals(requests.length, 2);
+    assertEquals(prepared, "invitation_delivery_ready");
+    assertEquals(published, "invitation_usable");
+    assertEquals(requests.length, 4);
     assert(requests.every(({ url }) => new URL(url).origin === BACKEND_ORIGIN));
     assert(requests.every(({ url }) => !url.includes(serviceRoleSentinel)));
     assert(requests.every(({ url }) => !url.includes(publishableSentinel)));
@@ -643,6 +790,30 @@ Deno.test(
     });
     assertEquals(
       requests[1].headers.get("authorization"),
+      `Bearer ${serviceRoleSentinel}`,
+    );
+    assertEquals(
+      new URL(requests[2].url).pathname,
+      "/rest/v1/rpc/internal_prepare_staff_invitation",
+    );
+    assertEquals(JSON.parse(requests[2].body), {
+      expires_at: "2026-08-30T13:00:00.000Z",
+      invitation_id: INVITATION_ID,
+      invited_user_id: USER_ID,
+    });
+    assertEquals(
+      requests[2].headers.get("authorization"),
+      `Bearer ${serviceRoleSentinel}`,
+    );
+    assertEquals(
+      new URL(requests[3].url).pathname,
+      "/rest/v1/rpc/internal_publish_staff_invitation",
+    );
+    assertEquals(JSON.parse(requests[3].body), {
+      invitation_id: INVITATION_ID,
+    });
+    assertEquals(
+      requests[3].headers.get("authorization"),
       `Bearer ${serviceRoleSentinel}`,
     );
 
