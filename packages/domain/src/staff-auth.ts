@@ -326,6 +326,8 @@ export function completeStaffPasswordRecovery(input: {
 
 export interface StaffMembershipReference {
   readonly id: string;
+  readonly profileId: string;
+  readonly role: ProductStaffRole;
   readonly schoolId: string;
   readonly status: "active" | "suspended" | "removed";
 }
@@ -341,42 +343,62 @@ export type StaffMembershipRevocationResult =
     });
 
 export function revokeStaffMembershipInSchool(
-  memberships: readonly StaffMembershipReference[],
+  authoritativeMemberships: readonly StaffMembershipReference[],
   input: {
-    readonly actorMembershipStatus: "active" | "suspended" | "removed";
-    readonly actorRole: ProductStaffRole;
-    readonly actorSchoolId: string;
+    readonly authenticatedActorProfileId: string;
     readonly membershipId: string;
     readonly schoolId: string;
     readonly stepUp: StaffMutationStepUp;
   },
 ): StaffMembershipRevocationResult {
+  const actorMembership = authoritativeMemberships.find(
+    (candidate) =>
+      candidate.profileId === input.authenticatedActorProfileId &&
+      candidate.schoolId === input.schoolId,
+  );
   if (
-    input.actorMembershipStatus !== "active" ||
-    input.actorRole === "teacher" ||
-    input.actorSchoolId !== input.schoolId
+    actorMembership === undefined ||
+    actorMembership.status !== "active" ||
+    actorMembership.role !== "owner"
   ) {
-    return { code: "authorization_denied", memberships, ok: false };
+    return {
+      code: "authorization_denied",
+      memberships: authoritativeMemberships,
+      ok: false,
+    };
   }
 
   const stepUp = verifyStaffMutationStepUp(input.stepUp);
   if (!stepUp.ok) {
-    return { ...stepUp, memberships };
+    return { ...stepUp, memberships: authoritativeMemberships };
   }
 
-  const membership = memberships.find(
+  const membership = authoritativeMemberships.find(
     (candidate) => candidate.id === input.membershipId,
   );
-  if (membership === undefined || membership.schoolId !== input.schoolId) {
-    return { code: "authorization_denied", memberships, ok: false };
+  if (
+    membership === undefined ||
+    membership.schoolId !== input.schoolId ||
+    membership.profileId === actorMembership.profileId ||
+    (membership.role !== "administrator" && membership.role !== "teacher")
+  ) {
+    return {
+      code: "authorization_denied",
+      memberships: authoritativeMemberships,
+      ok: false,
+    };
   }
   if (membership.status === "removed") {
-    return { code: "membership_removed", memberships, ok: false };
+    return {
+      code: "membership_removed",
+      memberships: authoritativeMemberships,
+      ok: false,
+    };
   }
 
   return {
     code: "membership_revoked",
-    memberships: memberships.map((candidate) =>
+    memberships: authoritativeMemberships.map((candidate) =>
       candidate.id === input.membershipId
         ? { ...candidate, status: "removed" }
         : candidate,

@@ -362,44 +362,61 @@ describe("staff sessions and recovery", () => {
 
 describe("School-scoped Membership revocation", () => {
   const memberships = [
-    { id: "alpha-membership", schoolId: "alpha-school", status: "active" },
-    { id: "beta-membership", schoolId: "beta-school", status: "active" },
+    {
+      id: "alpha-owner-membership",
+      profileId: "owner-profile",
+      role: "owner",
+      schoolId: "alpha-school",
+      status: "active",
+    },
+    {
+      id: "alpha-admin-membership",
+      profileId: "admin-profile",
+      role: "administrator",
+      schoolId: "alpha-school",
+      status: "active",
+    },
+    {
+      id: "alpha-teacher-membership",
+      profileId: "teacher-profile",
+      role: "teacher",
+      schoolId: "alpha-school",
+      status: "active",
+    },
+    {
+      id: "beta-teacher-membership",
+      profileId: "teacher-profile",
+      role: "teacher",
+      schoolId: "beta-school",
+      status: "active",
+    },
   ] as const;
   const authorizedOwner = {
-    actorMembershipStatus: "active",
-    actorRole: "owner",
-    actorSchoolId: "alpha-school",
+    authenticatedActorProfileId: "owner-profile",
     stepUp: verifiedTotp,
   } as const;
 
-  it("removes only the selected School Membership", () => {
+  it("allows an active same-School Owner to revoke Administrator or Teacher", () => {
     expect(
       revokeStaffMembershipInSchool(memberships, {
         ...authorizedOwner,
-        membershipId: "alpha-membership",
+        membershipId: "alpha-admin-membership",
         schoolId: "alpha-school",
       }),
-    ).toEqual({
+    ).toMatchObject({
       code: "membership_revoked",
       memberships: [
-        {
-          id: "alpha-membership",
-          schoolId: "alpha-school",
-          status: "removed",
-        },
-        {
-          id: "beta-membership",
-          schoolId: "beta-school",
-          status: "active",
-        },
+        { id: "alpha-owner-membership", status: "active" },
+        { id: "alpha-admin-membership", status: "removed" },
+        { id: "alpha-teacher-membership", status: "active" },
+        { id: "beta-teacher-membership", status: "active" },
       ],
       ok: true,
     });
     expect(
       revokeStaffMembershipInSchool(memberships, {
         ...authorizedOwner,
-        actorRole: "administrator",
-        membershipId: "alpha-membership",
+        membershipId: "alpha-teacher-membership",
         schoolId: "alpha-school",
       }),
     ).toMatchObject({ code: "membership_revoked", ok: true });
@@ -415,7 +432,7 @@ describe("School-scoped Membership revocation", () => {
     expect(
       revokeStaffMembershipInSchool(memberships, {
         ...authorizedOwner,
-        membershipId: "beta-membership",
+        membershipId: "beta-teacher-membership",
         schoolId: "alpha-school",
       }),
     ).toEqual(denial);
@@ -429,19 +446,108 @@ describe("School-scoped Membership revocation", () => {
     expect(
       revokeStaffMembershipInSchool(memberships, {
         ...authorizedOwner,
-        actorSchoolId: "beta-school",
-        membershipId: "alpha-membership",
-        schoolId: "alpha-school",
+        membershipId: "alpha-teacher-membership",
+        schoolId: "beta-school",
       }),
     ).toEqual(denial);
     expect(
       revokeStaffMembershipInSchool(memberships, {
         ...authorizedOwner,
-        actorRole: "teacher",
-        membershipId: "alpha-membership",
+        authenticatedActorProfileId: "teacher-profile",
+        membershipId: "alpha-admin-membership",
         schoolId: "alpha-school",
       }),
     ).toEqual(denial);
+  });
+
+  it("ignores forged actor claims and denies every Administrator mutation", () => {
+    const forgedAdministrator = {
+      ...authorizedOwner,
+      actorMembershipStatus: "active",
+      actorRole: "owner",
+      actorSchoolId: "alpha-school",
+      authenticatedActorProfileId: "admin-profile",
+      membershipId: "alpha-teacher-membership",
+      schoolId: "alpha-school",
+    } as const;
+
+    expect(
+      revokeStaffMembershipInSchool(memberships, forgedAdministrator),
+    ).toEqual({ code: "authorization_denied", memberships, ok: false });
+  });
+
+  it("rejects Owner, self, and forged target-role mutations", () => {
+    expect(
+      revokeStaffMembershipInSchool(memberships, {
+        ...authorizedOwner,
+        membershipId: "alpha-owner-membership",
+        schoolId: "alpha-school",
+      }),
+    ).toEqual({ code: "authorization_denied", memberships, ok: false });
+
+    const ownershipMemberships = [
+      ...memberships,
+      {
+        id: "secondary-owner-membership",
+        profileId: "secondary-owner-profile",
+        role: "owner",
+        schoolId: "alpha-school",
+        status: "active",
+      },
+    ] as const;
+    const forgedOwnerTarget = {
+      ...authorizedOwner,
+      membershipId: "secondary-owner-membership",
+      schoolId: "alpha-school",
+      targetProfileId: "teacher-profile",
+      targetRole: "teacher",
+    } as const;
+    expect(
+      revokeStaffMembershipInSchool(ownershipMemberships, forgedOwnerTarget),
+    ).toEqual({
+      code: "authorization_denied",
+      memberships: ownershipMemberships,
+      ok: false,
+    });
+
+    const selfTargetMemberships = [
+      ...memberships,
+      {
+        id: "forged-self-teacher-membership",
+        profileId: "owner-profile",
+        role: "teacher",
+        schoolId: "alpha-school",
+        status: "active",
+      },
+    ] as const;
+    expect(
+      revokeStaffMembershipInSchool(selfTargetMemberships, {
+        ...authorizedOwner,
+        membershipId: "forged-self-teacher-membership",
+        schoolId: "alpha-school",
+      }),
+    ).toEqual({
+      code: "authorization_denied",
+      memberships: selfTargetMemberships,
+      ok: false,
+    });
+
+    const unknownRoleMemberships = memberships.map((membership) =>
+      membership.id === "alpha-admin-membership"
+        ? { ...membership, role: "superuser" }
+        : membership,
+    ) as unknown as Parameters<typeof revokeStaffMembershipInSchool>[0];
+    expect(
+      revokeStaffMembershipInSchool(unknownRoleMemberships, {
+        ...authorizedOwner,
+        membershipId: "alpha-admin-membership",
+        schoolId: "alpha-school",
+      }),
+    ).toEqual({
+      code: "authorization_denied",
+      memberships: unknownRoleMemberships,
+      ok: false,
+    });
   });
 
   it("requires current verified TOTP step-up before target lookup", () => {
@@ -458,12 +564,12 @@ describe("School-scoped Membership revocation", () => {
   it("denies the next protected request without globally ending the session", () => {
     const revoked = revokeStaffMembershipInSchool(memberships, {
       ...authorizedOwner,
-      membershipId: "alpha-membership",
+      membershipId: "alpha-admin-membership",
       schoolId: "alpha-school",
     });
     expect(revoked.ok).toBe(true);
     const alphaMembership = revoked.memberships.find(
-      (membership) => membership.id === "alpha-membership",
+      (membership) => membership.id === "alpha-admin-membership",
     );
 
     expect(
