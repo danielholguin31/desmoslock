@@ -78,6 +78,7 @@ create table desmoslock_v2.staff_invitations (
     check (
       status in (
         'pending_delivery',
+        'delivery_ready',
         'pending_acceptance',
         'accepted',
         'revoked',
@@ -104,6 +105,16 @@ create table desmoslock_v2.staff_invitations (
         status = 'pending_delivery'
         and invited_user_id is null
         and expires_at is null
+        and accepted_at is null
+        and accepted_profile_id is null
+        and revoked_at is null
+        and revoked_by_profile_id is null
+        and failure_reason_code is null
+      )
+      or (
+        status = 'delivery_ready'
+        and invited_user_id is not null
+        and expires_at is not null
         and accepted_at is null
         and accepted_profile_id is null
         and revoked_at is null
@@ -163,11 +174,11 @@ create table desmoslock_v2.staff_invitations (
 
 create unique index staff_invitations_one_open_email_per_school
   on desmoslock_v2.staff_invitations (workspace_id, invited_email_normalized)
-  where status in ('pending_delivery', 'pending_acceptance');
+  where status in ('pending_delivery', 'delivery_ready', 'pending_acceptance');
 
 create unique index staff_invitations_one_open_user_per_school
   on desmoslock_v2.staff_invitations (workspace_id, invited_user_id)
-  where status = 'pending_acceptance';
+  where status in ('delivery_ready', 'pending_acceptance');
 
 create table desmoslock_v2.application_session_revocations (
   user_id uuid not null references auth.users (id) on delete restrict,
@@ -199,6 +210,7 @@ create table desmoslock_v2.staff_audit_events (
       event_type in (
         'initial_owner_bound',
         'invitation_requested',
+        'invitation_delivery_ready',
         'invitation_ready',
         'invitation_delivery_failed',
         'invitation_accepted',
@@ -215,6 +227,7 @@ create table desmoslock_v2.staff_audit_events (
         'ok',
         'initial_owner_bound',
         'invitation_pending',
+        'invitation_delivery_ready',
         'invitation_usable',
         'invitation_delivery_failed',
         'invitation_accepted',
@@ -890,21 +903,21 @@ security definer
 set search_path = ''
 as $$
 declare
-  authorization record;
+  authorization_result record;
   normalized_email text;
   new_invitation_id uuid;
   expired_invitation desmoslock_v2.staff_invitations%rowtype;
 begin
   select *
-  into authorization
+  into authorization_result
   from desmoslock_v2.internal_authorize_staff(
     $1,
     array['owner']::text[],
     true
   );
 
-  if authorization.code <> 'ok' then
-    return query select authorization.code, null::uuid;
+  if authorization_result.code <> 'ok' then
+    return query select authorization_result.code, null::uuid;
     return;
   end if;
 
@@ -922,7 +935,7 @@ begin
     from desmoslock_v2.staff_invitations as invitation
     where invitation.workspace_id = $1
       and invitation.invited_email_normalized = normalized_email
-      and invitation.status = 'pending_acceptance'
+      and invitation.status in ('delivery_ready', 'pending_acceptance')
       and invitation.expires_at <= statement_timestamp()
     order by invitation.id
     for update
@@ -934,17 +947,17 @@ begin
       updated_at = statement_timestamp()
     where invitation.id = expired_invitation.id
       and invitation.revision = expired_invitation.revision
-      and invitation.status = 'pending_acceptance';
+      and invitation.status = expired_invitation.status;
 
     if found then
       perform desmoslock_v2.internal_append_auth_event(
         'invitation_expired',
         'invitation_expired',
         expired_invitation.workspace_id,
-        authorization.profile_id,
+        authorization_result.profile_id,
         null,
         expired_invitation.id,
-        authorization.session_id
+        authorization_result.session_id
       );
     end if;
   end loop;
@@ -958,7 +971,7 @@ begin
       status
     ) values (
       $1,
-      authorization.profile_id,
+      authorization_result.profile_id,
       normalized_email,
       $3,
       'pending_delivery'
@@ -974,10 +987,10 @@ begin
     'invitation_requested',
     'invitation_pending',
     $1,
-    authorization.profile_id,
+    authorization_result.profile_id,
     null,
     new_invitation_id,
-    authorization.session_id
+    authorization_result.session_id
   );
 
   return query select 'invitation_pending'::text, new_invitation_id;
@@ -989,7 +1002,7 @@ revoke all on function desmoslock_v2.begin_staff_invitation(uuid, text, text)
 grant execute on function desmoslock_v2.begin_staff_invitation(uuid, text, text)
   to authenticated;
 
-create function desmoslock_v2.internal_complete_staff_invitation(
+create function desmoslock_v2.internal_prepare_staff_invitation(
   invitation_id uuid,
   invited_user_id uuid,
   expires_at timestamp with time zone
@@ -1023,11 +1036,6 @@ begin
     return;
   end if;
 
-  if invitation_row.status <> 'pending_delivery' then
-    return query select 'invitation_consumed'::text;
-    return;
-  end if;
-
   select desmoslock_v2.internal_normalize_staff_email(auth_user.email)
   into target_email_normalized
   from auth.users as auth_user
@@ -1053,12 +1061,28 @@ begin
     return;
   end if;
 
+  if invitation_row.status = 'delivery_ready' then
+    if invitation_row.invited_user_id = $2
+      and invitation_row.expires_at = $3
+    then
+      return query select 'invitation_delivery_ready'::text;
+    else
+      return query select 'conflict'::text;
+    end if;
+    return;
+  end if;
+
+  if invitation_row.status <> 'pending_delivery' then
+    return query select 'invitation_consumed'::text;
+    return;
+  end if;
+
   begin
     update desmoslock_v2.staff_invitations
     set
       invited_user_id = $2,
       expires_at = $3,
-      status = 'pending_acceptance',
+      status = 'delivery_ready',
       revision = revision + 1,
       updated_at = statement_timestamp()
     where id = $1
@@ -1075,8 +1099,8 @@ begin
   end if;
 
   perform desmoslock_v2.internal_append_auth_event(
-    'invitation_ready',
-    'invitation_usable',
+    'invitation_delivery_ready',
+    'invitation_delivery_ready',
     invitation_row.workspace_id,
     null,
     null,
@@ -1084,16 +1108,115 @@ begin
     null
   );
 
+  return query select 'invitation_delivery_ready'::text;
+end;
+$$;
+
+revoke all on function desmoslock_v2.internal_prepare_staff_invitation(
+  uuid, uuid, timestamp with time zone
+) from public, anon, authenticated, service_role;
+grant execute on function desmoslock_v2.internal_prepare_staff_invitation(
+  uuid, uuid, timestamp with time zone
+) to service_role;
+
+create function desmoslock_v2.internal_publish_staff_invitation(
+  invitation_id uuid
+)
+returns table (code text)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  invitation_row desmoslock_v2.staff_invitations%rowtype;
+begin
+  if $1 is null then
+    return query select 'invalid_request'::text;
+    return;
+  end if;
+
+  select *
+  into invitation_row
+  from desmoslock_v2.staff_invitations as invitation
+  where invitation.id = $1
+  for update;
+
+  if not found then
+    return query select 'invitation_not_found'::text;
+    return;
+  end if;
+
+  if invitation_row.status = 'pending_acceptance' then
+    return query select 'invitation_usable'::text;
+    return;
+  end if;
+
+  if invitation_row.status <> 'delivery_ready' then
+    return query select 'invitation_consumed'::text;
+    return;
+  end if;
+
+  if invitation_row.expires_at <= statement_timestamp() then
+    update desmoslock_v2.staff_invitations as invitation
+    set
+      status = 'expired',
+      revision = invitation.revision + 1,
+      updated_at = statement_timestamp()
+    where invitation.id = invitation_row.id
+      and invitation.revision = invitation_row.revision
+      and invitation.status = 'delivery_ready';
+
+    if not found then
+      return query select 'conflict'::text;
+      return;
+    end if;
+
+    perform desmoslock_v2.internal_append_auth_event(
+      'invitation_expired',
+      'invitation_expired',
+      invitation_row.workspace_id,
+      null,
+      null,
+      invitation_row.id,
+      null
+    );
+
+    return query select 'invitation_expired'::text;
+    return;
+  end if;
+
+  update desmoslock_v2.staff_invitations as invitation
+  set
+    status = 'pending_acceptance',
+    revision = invitation.revision + 1,
+    updated_at = statement_timestamp()
+  where invitation.id = invitation_row.id
+    and invitation.revision = invitation_row.revision
+    and invitation.status = 'delivery_ready';
+
+  if not found then
+    return query select 'conflict'::text;
+    return;
+  end if;
+
+  perform desmoslock_v2.internal_append_auth_event(
+    'invitation_ready',
+    'invitation_usable',
+    invitation_row.workspace_id,
+    null,
+    null,
+    invitation_row.id,
+    null
+  );
+
   return query select 'invitation_usable'::text;
 end;
 $$;
 
-revoke all on function desmoslock_v2.internal_complete_staff_invitation(
-  uuid, uuid, timestamp with time zone
-) from public, anon, authenticated, service_role;
-grant execute on function desmoslock_v2.internal_complete_staff_invitation(
-  uuid, uuid, timestamp with time zone
-) to service_role;
+revoke all on function desmoslock_v2.internal_publish_staff_invitation(uuid)
+  from public, anon, authenticated, service_role;
+grant execute on function desmoslock_v2.internal_publish_staff_invitation(uuid)
+  to service_role;
 
 create function desmoslock_v2.internal_fail_staff_invitation(
   invitation_id uuid,
@@ -1131,7 +1254,7 @@ begin
     return;
   end if;
 
-  if invitation_row.status not in ('pending_delivery', 'pending_acceptance') then
+  if invitation_row.status not in ('pending_delivery', 'delivery_ready') then
     return query select 'invitation_consumed'::text;
     return;
   end if;
@@ -1233,6 +1356,7 @@ begin
     return query select
       case
         when invitation_row.status = 'expired' then 'invitation_expired'::text
+        when invitation_row.status = 'delivery_ready' then 'invitation_not_found'::text
         else 'invitation_consumed'::text
       end;
     return;
@@ -1358,7 +1482,7 @@ set search_path = ''
 as $$
 declare
   session_result record;
-  authorization record;
+  authorization_result record;
   invitation_row desmoslock_v2.staff_invitations%rowtype;
 begin
   select *
@@ -1382,29 +1506,33 @@ begin
   end if;
 
   select *
-  into authorization
+  into authorization_result
   from desmoslock_v2.internal_authorize_staff(
     invitation_row.workspace_id,
     array['owner']::text[],
     true
   );
 
-  if authorization.code <> 'ok' then
+  if authorization_result.code <> 'ok' then
     return query select
       case
-        when authorization.code in ('membership_inactive', 'forbidden')
+        when authorization_result.code in ('membership_inactive', 'forbidden')
           then 'invitation_not_found'::text
-        else authorization.code
+        else authorization_result.code
       end;
     return;
   end if;
 
-  if invitation_row.status not in ('pending_delivery', 'pending_acceptance') then
+  if invitation_row.status not in (
+    'pending_delivery',
+    'delivery_ready',
+    'pending_acceptance'
+  ) then
     return query select 'invitation_consumed'::text;
     return;
   end if;
 
-  if invitation_row.status = 'pending_acceptance'
+  if invitation_row.status in ('delivery_ready', 'pending_acceptance')
     and invitation_row.expires_at <= statement_timestamp()
   then
     update desmoslock_v2.staff_invitations
@@ -1419,10 +1547,10 @@ begin
       'invitation_expired',
       'invitation_expired',
       invitation_row.workspace_id,
-      authorization.profile_id,
+      authorization_result.profile_id,
       null,
       invitation_row.id,
-      authorization.session_id
+      authorization_result.session_id
     );
 
     return query select 'invitation_expired'::text;
@@ -1433,7 +1561,7 @@ begin
   set
     status = 'revoked',
     revoked_at = statement_timestamp(),
-    revoked_by_profile_id = authorization.profile_id,
+    revoked_by_profile_id = authorization_result.profile_id,
     revision = revision + 1,
     updated_at = statement_timestamp()
   where id = invitation_row.id
@@ -1448,10 +1576,10 @@ begin
     'invitation_revoked',
     'invitation_revoked',
     invitation_row.workspace_id,
-    authorization.profile_id,
+    authorization_result.profile_id,
     null,
     invitation_row.id,
-    authorization.session_id
+    authorization_result.session_id
   );
 
   return query select 'invitation_revoked'::text;
@@ -1473,19 +1601,19 @@ security definer
 set search_path = ''
 as $$
 declare
-  authorization record;
+  authorization_result record;
   target_membership desmoslock_v2.memberships%rowtype;
 begin
   select *
-  into authorization
+  into authorization_result
   from desmoslock_v2.internal_authorize_staff(
     $1,
     array['owner']::text[],
     true
   );
 
-  if authorization.code <> 'ok' then
-    return query select authorization.code;
+  if authorization_result.code <> 'ok' then
+    return query select authorization_result.code;
     return;
   end if;
 
@@ -1511,7 +1639,7 @@ begin
     status = 'revoked',
     role_revision = role_revision + 1,
     revoked_at = statement_timestamp(),
-    revoked_by_profile_id = authorization.profile_id,
+    revoked_by_profile_id = authorization_result.profile_id,
     revocation_reason_code = 'owner_action',
     updated_at = statement_timestamp()
   where memberships.workspace_id = $1
@@ -1528,10 +1656,10 @@ begin
     'membership_revoked',
     'membership_revoked',
     $1,
-    authorization.profile_id,
+    authorization_result.profile_id,
     $2,
     null,
-    authorization.session_id
+    authorization_result.session_id
   );
 
   return query select 'membership_revoked'::text;
@@ -1630,14 +1758,14 @@ security definer
 set search_path = ''
 as $$
 declare
-  authorization record;
+  authorization_result record;
 begin
   select *
-  into authorization
+  into authorization_result
   from desmoslock_v2.internal_authorize_any_staff(true);
 
-  if authorization.code <> 'ok' then
-    return query select authorization.code;
+  if authorization_result.code <> 'ok' then
+    return query select authorization_result.code;
     return;
   end if;
 
@@ -1648,21 +1776,21 @@ begin
     revoked_by_profile_id,
     reason_code
   ) values (
-    authorization.user_id,
-    authorization.session_id,
-    authorization.workspace_id,
-    authorization.profile_id,
+    authorization_result.user_id,
+    authorization_result.session_id,
+    authorization_result.workspace_id,
+    authorization_result.profile_id,
     'current_session'
   );
 
   perform desmoslock_v2.internal_append_auth_event(
     'session_revoked',
     'ok',
-    authorization.workspace_id,
-    authorization.profile_id,
-    authorization.profile_id,
+    authorization_result.workspace_id,
+    authorization_result.profile_id,
+    authorization_result.profile_id,
     null,
-    authorization.session_id
+    authorization_result.session_id
   );
 
   return query select 'ok'::text;
@@ -1681,14 +1809,14 @@ security definer
 set search_path = ''
 as $$
 declare
-  authorization record;
+  authorization_result record;
 begin
   select *
-  into authorization
+  into authorization_result
   from desmoslock_v2.internal_authorize_any_staff(true);
 
-  if authorization.code <> 'ok' then
-    return query select authorization.code;
+  if authorization_result.code <> 'ok' then
+    return query select authorization_result.code;
     return;
   end if;
 
@@ -1700,23 +1828,23 @@ begin
     reason_code
   )
   select
-    authorization.user_id,
+    authorization_result.user_id,
     auth_session.id,
-    authorization.workspace_id,
-    authorization.profile_id,
+    authorization_result.workspace_id,
+    authorization_result.profile_id,
     'account_recovery'
   from auth.sessions as auth_session
-  where auth_session.user_id = authorization.user_id
+  where auth_session.user_id = authorization_result.user_id
   on conflict (user_id, session_id) do nothing;
 
   perform desmoslock_v2.internal_append_auth_event(
     'account_recovery',
     'ok',
-    authorization.workspace_id,
-    authorization.profile_id,
-    authorization.profile_id,
+    authorization_result.workspace_id,
+    authorization_result.profile_id,
+    authorization_result.profile_id,
     null,
-    authorization.session_id
+    authorization_result.session_id
   );
 
   return query select 'ok'::text;
@@ -1952,13 +2080,15 @@ comment on function desmoslock_v2.internal_baseline_status() is
 comment on function desmoslock_v2.internal_bind_initial_owner(uuid, uuid, uuid) is
   'Service-only, idempotent binding of one confirmed Auth user to an active seeded initial Owner; returns code only.';
 comment on function desmoslock_v2.begin_staff_invitation(uuid, text, text) is
-  'Owner-only AAL2/TOTP seam. Expired matching invitations are terminalized before reissue; success code invitation_pending requires service-side delivery completion.';
-comment on function desmoslock_v2.internal_complete_staff_invitation(
+  'Owner-only AAL2/TOTP seam. Expired matching invitations are terminalized before reissue; invitation_pending requires service preparation and explicit delivery acknowledgment.';
+comment on function desmoslock_v2.internal_prepare_staff_invitation(
   uuid, uuid, timestamp with time zone
 ) is
-  'Service-only recipient binding. Success code invitation_usable exposes no recipient data.';
+  'Service-only recipient binding into non-consumable delivery_ready. Exact replay returns invitation_delivery_ready and exposes no recipient data.';
+comment on function desmoslock_v2.internal_publish_staff_invitation(uuid) is
+  'Service-only exact delivery_ready-to-pending_acceptance acknowledgment. Exact replay returns invitation_usable without another mail side effect.';
 comment on function desmoslock_v2.internal_fail_staff_invitation(uuid, text) is
-  'Service-only terminal delivery failure. Success code invitation_delivery_failed records only a stable code.';
+  'Service-only terminal failure for pending_delivery or delivery_ready. Success code invitation_delivery_failed records only a stable code.';
 comment on function desmoslock_v2.accept_staff_invitation(uuid, text) is
   'Recipient-bound identity and normalized email are matched before state reads; AAL2/TOTP mutation returns code only. Refresh current_staff_context after invitation_accepted.';
 comment on function desmoslock_v2.revoke_staff_invitation(uuid) is

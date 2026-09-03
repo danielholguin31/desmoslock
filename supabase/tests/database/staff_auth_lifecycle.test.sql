@@ -3,7 +3,7 @@ begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path = extensions, public, pg_catalog;
 
-select plan(107);
+select plan(136);
 
 select has_column(
   'desmoslock_v2',
@@ -109,18 +109,40 @@ select ok(
 select ok(
   not has_function_privilege(
     'authenticated',
-    'desmoslock_v2.internal_complete_staff_invitation(uuid,uuid,timestamp with time zone)',
+    'desmoslock_v2.internal_prepare_staff_invitation(uuid,uuid,timestamp with time zone)',
     'EXECUTE'
   ),
-  'authenticated cannot bind an invitation to an Auth user'
+  'authenticated cannot prepare an invitation for delivery'
 );
 select ok(
   has_function_privilege(
     'service_role',
-    'desmoslock_v2.internal_complete_staff_invitation(uuid,uuid,timestamp with time zone)',
+    'desmoslock_v2.internal_prepare_staff_invitation(uuid,uuid,timestamp with time zone)',
     'EXECUTE'
   ),
   'only the service delivery boundary can bind an invitation recipient'
+);
+select ok(
+  not has_function_privilege(
+    'authenticated',
+    'desmoslock_v2.internal_publish_staff_invitation(uuid)',
+    'EXECUTE'
+  ),
+  'authenticated cannot publish a prepared invitation'
+);
+select ok(
+  has_function_privilege(
+    'service_role',
+    'desmoslock_v2.internal_publish_staff_invitation(uuid)',
+    'EXECUTE'
+  ),
+  'only the service delivery boundary can acknowledge mail delivery'
+);
+select ok(
+  to_regprocedure(
+    'desmoslock_v2.internal_complete_staff_invitation(uuid,uuid,timestamp with time zone)'
+  ) is null,
+  'the former one-step prepare-and-publish RPC no longer exists'
 );
 select ok(
   has_function_privilege(
@@ -170,11 +192,21 @@ select is(
     select function_info.proargnames[1:function_info.pronargs]
     from pg_proc as function_info
     where function_info.oid = to_regprocedure(
-      'desmoslock_v2.internal_complete_staff_invitation(uuid,uuid,timestamp with time zone)'
+      'desmoslock_v2.internal_prepare_staff_invitation(uuid,uuid,timestamp with time zone)'
     )
   ),
   array['invitation_id', 'invited_user_id', 'expires_at']::text[],
-  'the service completion RPC keeps its exact PostgREST parameter names'
+  'the service preparation RPC keeps its exact PostgREST parameter names'
+);
+select is(
+  (
+    select function_info.proargnames[1:function_info.pronargs]
+    from pg_proc as function_info
+    where function_info.oid =
+      to_regprocedure('desmoslock_v2.internal_publish_staff_invitation(uuid)')
+  ),
+  array['invitation_id']::text[],
+  'the service publish RPC keeps its exact PostgREST parameter name'
 );
 select is(
   (
@@ -617,6 +649,7 @@ create temporary table staff_auth_test_results (
   label text primary key,
   code text not null,
   invitation_id uuid,
+  expires_at timestamp with time zone,
   profile_id uuid,
   school_id uuid,
   membership_role text
@@ -624,6 +657,26 @@ create temporary table staff_auth_test_results (
 
 grant select, insert, update, delete on table staff_auth_test_results
   to authenticated, service_role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.begin_staff_invitation(
+      '10000000-0000-4000-8000-000000000001',
+      'parser-regression@staff.invalid',
+      'owner'
+    )
+  ),
+  'invalid_request',
+  'Postgres can execute the compiled staff-authorization record path'
+);
+reset role;
 
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000003',
@@ -786,25 +839,286 @@ select is(
   'an initiated invitation is not usable before service-side recipient binding'
 );
 
+update pg_temp.staff_auth_test_results
+set expires_at = statement_timestamp() + interval '1 hour'
+where label = 'acceptance';
+
 set local role service_role;
 insert into pg_temp.staff_auth_test_results (label, code)
-select 'acceptance-complete', result.code
-from desmoslock_v2.internal_complete_staff_invitation(
+select 'acceptance-prepare', result.code
+from desmoslock_v2.internal_prepare_staff_invitation(
   (
     select invitation_id
     from pg_temp.staff_auth_test_results
     where label = 'acceptance'
   ),
   'a1000000-0000-4000-8000-000000000002',
-  now() + interval '1 hour'
+  (
+    select expires_at
+    from pg_temp.staff_auth_test_results
+    where label = 'acceptance'
+  )
 ) as result;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_prepare_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'acceptance'
+      ),
+      'a1000000-0000-4000-8000-000000000002',
+      (
+        select expires_at
+        from pg_temp.staff_auth_test_results
+        where label = 'acceptance'
+      )
+    )
+  ),
+  'invitation_delivery_ready',
+  'an exact preparation retry reconciles without advancing delivery state'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_prepare_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'acceptance'
+      ),
+      'a1000000-0000-4000-8000-000000000002',
+      (
+        select expires_at + interval '1 second'
+        from pg_temp.staff_auth_test_results
+        where label = 'acceptance'
+      )
+    )
+  ),
+  'conflict',
+  'a preparation retry with different immutable delivery data fails closed'
+);
 reset role;
 
 select is(
-  (select code from pg_temp.staff_auth_test_results where label = 'acceptance-complete'),
-  'invitation_usable',
-  'the service boundary binds the intended recipient and expiry'
+  (select code from pg_temp.staff_auth_test_results where label = 'acceptance-prepare'),
+  'invitation_delivery_ready',
+  'preparation binds the intended recipient without making the invitation consumable'
 );
+select is(
+  (
+    select status
+    from desmoslock_v2.staff_invitations
+    where id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'acceptance'
+    )
+  ),
+  'delivery_ready',
+  'recipient binding persists in a non-consumable delivery-ready state'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.begin_staff_invitation(
+      '10000000-0000-4000-8000-000000000001',
+      'invitee@staff.invalid',
+      'admin'
+    )
+  ),
+  'conflict',
+  'a repeated begin cannot generate another delivery while preparation is ambiguous'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000002',
+  'c1000000-0000-4000-8000-000000000002',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (select code from desmoslock_v2.current_staff_invitations()),
+  'invitation_not_found',
+  'a prepared recipient cannot discover an invitation before delivery acknowledgment'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.accept_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'acceptance'
+      ),
+      'Premature Recipient'
+    )
+  ),
+  'invitation_not_found',
+  'a prepared recipient cannot consume an invitation before delivery acknowledgment'
+);
+reset role;
+
+select is(
+  (
+    select count(*)
+    from desmoslock_v2.profiles
+    where auth_user_id = 'a1000000-0000-4000-8000-000000000002'
+  ),
+  0::bigint,
+  'premature acceptance creates no profile'
+);
+select is(
+  (
+    select status
+    from desmoslock_v2.staff_invitations
+    where id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'acceptance'
+    )
+  ),
+  'delivery_ready',
+  'premature acceptance leaves the delivery-ready state unchanged'
+);
+
+set local role service_role;
+insert into pg_temp.staff_auth_test_results (label, code)
+select 'acceptance-publish', result.code
+from desmoslock_v2.internal_publish_staff_invitation(
+  (
+    select invitation_id
+    from pg_temp.staff_auth_test_results
+    where label = 'acceptance'
+  )
+) as result;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_publish_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'acceptance'
+      )
+    )
+  ),
+  'invitation_usable',
+  'an exact publish retry reconciles without another delivery side effect'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_fail_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'acceptance'
+      ),
+      'dependency_unavailable'
+    )
+  ),
+  'invitation_consumed',
+  'a failure race cannot retract an already published invitation'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_publish_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'acceptance'
+      )
+    )
+  ),
+  'invitation_usable',
+  'publish reconciliation remains usable after the losing failure race'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_prepare_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'acceptance'
+      ),
+      'a1000000-0000-4000-8000-000000000002',
+      (
+        select expires_at
+        from pg_temp.staff_auth_test_results
+        where label = 'acceptance'
+      )
+    )
+  ),
+  'invitation_consumed',
+  'preparation cannot be replayed after delivery publication'
+);
+reset role;
+
+select is(
+  (select code from pg_temp.staff_auth_test_results where label = 'acceptance-publish'),
+  'invitation_usable',
+  'delivery acknowledgment is the only transition that makes an invitation usable'
+);
+select is(
+  (
+    select count(*)
+    from desmoslock_v2.staff_audit_events
+    where invitation_id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'acceptance'
+    )
+      and event_type = 'invitation_delivery_ready'
+  ),
+  1::bigint,
+  'exact preparation retries emit one delivery-ready audit event'
+);
+select is(
+  (
+    select count(*)
+    from desmoslock_v2.staff_audit_events
+    where invitation_id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'acceptance'
+    )
+      and event_type = 'invitation_ready'
+  ),
+  1::bigint,
+  'exact publish retries emit one usable audit event'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.begin_staff_invitation(
+      '10000000-0000-4000-8000-000000000001',
+      'invitee@staff.invalid',
+      'admin'
+    )
+  ),
+  'conflict',
+  'a repeated begin cannot redeliver while publish reconciliation is ambiguous'
+);
+reset role;
 
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000002',
@@ -824,7 +1138,7 @@ select results_eq(
     from pg_temp.staff_auth_test_results
     where label = 'acceptance'
   $$,
-  'only the bound and verified recipient can discover the usable invitation'
+  'only the bound and delivery-acknowledged recipient can discover the usable invitation'
 );
 reset role;
 
@@ -1112,7 +1426,7 @@ set local role service_role;
 select is(
   (
     select code
-    from desmoslock_v2.internal_complete_staff_invitation(
+    from desmoslock_v2.internal_prepare_staff_invitation(
       (
         select invitation_id
         from pg_temp.staff_auth_test_results
@@ -1122,8 +1436,22 @@ select is(
       now() + interval '1 hour'
     )
   ),
+  'invitation_delivery_ready',
+  'the rollback fixture is prepared without becoming usable'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_publish_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'rollback'
+      )
+    )
+  ),
   'invitation_usable',
-  'the rollback fixture becomes usable'
+  'the rollback fixture becomes usable only after delivery acknowledgment'
 );
 reset role;
 
@@ -1337,7 +1665,7 @@ set local role service_role;
 select is(
   (
     select code
-    from desmoslock_v2.internal_complete_staff_invitation(
+    from desmoslock_v2.internal_prepare_staff_invitation(
       (
         select invitation_id
         from pg_temp.staff_auth_test_results
@@ -1347,8 +1675,8 @@ select is(
       now() + interval '1 hour'
     )
   ),
-  'invitation_usable',
-  'the reissue fixture first becomes a recipient-bound invitation'
+  'invitation_delivery_ready',
+  'the reissue fixture first becomes recipient-bound but non-consumable'
 );
 reset role;
 
@@ -1485,6 +1813,20 @@ set local role service_role;
 select is(
   (
     select code
+    from desmoslock_v2.internal_publish_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'reissued'
+      )
+    )
+  ),
+  'invitation_consumed',
+  'publish cannot skip recipient preparation from pending delivery'
+);
+select is(
+  (
+    select code
     from desmoslock_v2.internal_fail_staff_invitation(
       (
         select invitation_id
@@ -1495,7 +1837,7 @@ select is(
     )
   ),
   'invitation_delivery_failed',
-  'service cleanup closes the replacement fixture before later lifecycle cases'
+  'service cleanup closes a pending-delivery replacement before later lifecycle cases'
 );
 reset role;
 
@@ -1518,7 +1860,7 @@ set local role service_role;
 select is(
   (
     select code
-    from desmoslock_v2.internal_complete_staff_invitation(
+    from desmoslock_v2.internal_prepare_staff_invitation(
       (
         select invitation_id
         from pg_temp.staff_auth_test_results
@@ -1528,8 +1870,8 @@ select is(
       now() + interval '1 hour'
     )
   ),
-  'invitation_usable',
-  'the revocation fixture is bound to a real intended recipient'
+  'invitation_delivery_ready',
+  'the revocation fixture is bound without being published'
 );
 reset role;
 
@@ -1641,7 +1983,7 @@ set local role service_role;
 select is(
   (
     select code
-    from desmoslock_v2.internal_complete_staff_invitation(
+    from desmoslock_v2.internal_prepare_staff_invitation(
       (
         select invitation_id
         from pg_temp.staff_auth_test_results
@@ -1651,8 +1993,8 @@ select is(
       now() + interval '1 hour'
     )
   ),
-  'invitation_usable',
-  'the ambiguous-response fixture reaches the usable state first'
+  'invitation_delivery_ready',
+  'the ambiguous-response fixture remains non-consumable after preparation'
 );
 select is(
   (
@@ -1667,7 +2009,7 @@ select is(
     )
   ),
   'invitation_delivery_failed',
-  'failure cleanup closes an invitation even if completion already committed'
+  'failure cleanup closes an invitation even if preparation already committed'
 );
 select is(
   (
@@ -1683,6 +2025,20 @@ select is(
   ),
   'invitation_delivery_failed',
   'delivery failure cleanup is idempotent and reveals no prior completion state'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_publish_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'delivery-failure'
+      )
+    )
+  ),
+  'invitation_consumed',
+  'a publish race cannot revive an invitation after delivery failure wins'
 );
 reset role;
 
@@ -1702,17 +2058,130 @@ select results_eq(
     null::timestamp with time zone,
     'dependency_unavailable'::text
   )$$,
-  'ambiguous completion cleanup removes the usable recipient binding'
+  'ambiguous preparation cleanup removes the non-consumable recipient binding'
 );
 select ok(
   not exists (
     select 1
     from desmoslock_v2.staff_audit_events
-    where event_type in ('invitation_ready', 'invitation_delivery_failed')
+    where event_type in (
+      'invitation_delivery_ready',
+      'invitation_ready',
+      'invitation_delivery_failed'
+    )
       and actor_profile_id is not null
   ),
-  'service completion and cleanup audit events never impersonate the requesting Owner'
+  'service preparation, publication, and cleanup never impersonate the requesting Owner'
 );
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
+select 'failure-unavailable', result.code, result.invitation_id
+from desmoslock_v2.begin_staff_invitation(
+  '10000000-0000-4000-8000-000000000001',
+  'rollback-recipient@staff.invalid',
+  'teacher'
+) as result;
+reset role;
+
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_prepare_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'failure-unavailable'
+      ),
+      'a1000000-0000-4000-8000-000000000004',
+      now() + interval '1 hour'
+    )
+  ),
+  'invitation_delivery_ready',
+  'the unavailable-failure fixture is prepared but remains non-consumable'
+);
+reset role;
+
+revoke execute on function desmoslock_v2.internal_fail_staff_invitation(uuid, text)
+  from service_role;
+set local role service_role;
+select throws_ok(
+  format(
+    'select * from desmoslock_v2.internal_fail_staff_invitation(%L::uuid, %L::text)',
+    (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'failure-unavailable'
+    ),
+    'dependency_unavailable'
+  ),
+  '42501',
+  null,
+  'an unavailable failure RPC cannot mutate the prepared invitation'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000004',
+  'c1000000-0000-4000-8000-000000000004',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.accept_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'failure-unavailable'
+      ),
+      'Unavailable Failure Recipient'
+    )
+  ),
+  'invitation_not_found',
+  'failure-path unavailability never makes a prepared invitation consumable'
+);
+reset role;
+select is(
+  (
+    select status
+    from desmoslock_v2.staff_invitations
+    where id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'failure-unavailable'
+    )
+  ),
+  'delivery_ready',
+  'failure-path unavailability leaves the durable non-consumable state intact'
+);
+
+grant execute on function desmoslock_v2.internal_fail_staff_invitation(uuid, text)
+  to service_role;
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_fail_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'failure-unavailable'
+      ),
+      'dependency_unavailable'
+    )
+  ),
+  'invitation_delivery_failed',
+  'restored cleanup can terminalize the same delivery-ready invitation'
+);
+reset role;
 
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000001',
@@ -1732,7 +2201,7 @@ set local role service_role;
 select is(
   (
     select code
-    from desmoslock_v2.internal_complete_staff_invitation(
+    from desmoslock_v2.internal_prepare_staff_invitation(
       (
         select invitation_id
         from pg_temp.staff_auth_test_results
