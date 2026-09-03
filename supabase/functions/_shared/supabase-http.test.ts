@@ -1,6 +1,9 @@
 // deno-lint-ignore-file require-await
 
-import { createSupabaseHttpClient } from "./supabase-http.ts";
+import {
+  createSupabaseHttpClient,
+  parseAuthActionLinkOrigin,
+} from "./supabase-http.ts";
 
 function assertEquals(actual: unknown, expected: unknown): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -109,6 +112,33 @@ Deno.test(
         async () => new Response(null, { status: 200 }),
       );
       assertEquals(client.origin, origin);
+    }
+  },
+);
+
+Deno.test(
+  "Auth action links accept only hosted or loopback public origins",
+  () => {
+    for (const origin of [
+      "https://abcdefghijklmnopqrst.supabase.co",
+      "http://127.0.0.1:54321",
+      "http://[::1]:54321",
+    ]) {
+      assertEquals(parseAuthActionLinkOrigin(origin), origin);
+    }
+    for (const origin of [
+      undefined,
+      "http://kong:8000",
+      "http://host.docker.internal:54321",
+      "http://localhost:54321",
+      "http://attacker.invalid",
+      "https://attacker.invalid",
+      "https://abcdefghijklmnopqrst.supabase.co/path",
+      "https://abcdefghijklmnopqrst.supabase.co?query=value",
+      "https://abcdefghijklmnopqrst.supabase.co#fragment",
+      "https://user:password@abcdefghijklmnopqrst.supabase.co",
+    ]) {
+      assertEquals(parseAuthActionLinkOrigin(origin), null);
     }
   },
 );

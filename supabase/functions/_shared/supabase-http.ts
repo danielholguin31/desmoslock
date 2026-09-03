@@ -61,6 +61,36 @@ function parseSupabaseOrigin(value: unknown): string | null {
   return parsed.origin;
 }
 
+export function parseAuthActionLinkOrigin(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > 2_048) {
+    return null;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return null;
+  }
+  const localLoopback =
+    parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
+  const hostedProject =
+    parsed.protocol === "https:" &&
+    parsed.port === "" &&
+    /^[a-z0-9]{20}\.supabase\.co$/u.test(parsed.hostname);
+  if (
+    (!hostedProject && !(parsed.protocol === "http:" && localLoopback)) ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.pathname !== "/" ||
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
+    parsed.origin !== value
+  ) {
+    return null;
+  }
+  return parsed.origin;
+}
+
 export function createSupabaseHttpClient(
   configuration: SupabaseRuntimeConfiguration,
   serviceFetch: ServiceFetch,

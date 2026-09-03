@@ -13,6 +13,7 @@ import {
 } from "../_shared/http.ts";
 import {
   createSupabaseHttpClient,
+  parseAuthActionLinkOrigin,
   readBoundedJsonResponse,
   readExactSingleRow,
   type ServiceFetch,
@@ -321,6 +322,7 @@ export function createStaffInvitationDependencies(
   if (
     !isExactRecord(configuration, [
       "DESMOSLOCK_ALLOWED_WEB_ORIGIN",
+      "DESMOSLOCK_EXPECTED_AUTH_ACTION_LINK_ORIGIN",
       "DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN",
       "DESMOSLOCK_STAFF_INVITATION_CALLBACK",
       "DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS",
@@ -333,6 +335,9 @@ export function createStaffInvitationDependencies(
   }
   const allowedOrigin = parseExactOrigin(
     configuration.DESMOSLOCK_ALLOWED_WEB_ORIGIN,
+  );
+  const actionLinkOrigin = parseAuthActionLinkOrigin(
+    configuration.DESMOSLOCK_EXPECTED_AUTH_ACTION_LINK_ORIGIN,
   );
   const callback =
     allowedOrigin === null
@@ -348,6 +353,7 @@ export function createStaffInvitationDependencies(
   // `auth.email.otp_expiry`; there is intentionally no inferred default.
   if (
     allowedOrigin === null ||
+    actionLinkOrigin === null ||
     callback === null ||
     inviteLifetimeSeconds === null
   ) {
@@ -452,7 +458,7 @@ export function createStaffInvitationDependencies(
       return parseGeneratedInvitation(
         await readBoundedJsonResponse(response),
         email,
-        client.origin,
+        actionLinkOrigin,
         callback,
       );
     },
@@ -465,6 +471,9 @@ function runtimeDependencies(): StaffInvitationDependencies {
   return createStaffInvitationDependencies({
     DESMOSLOCK_ALLOWED_WEB_ORIGIN: Deno.env.get(
       "DESMOSLOCK_ALLOWED_WEB_ORIGIN",
+    ),
+    DESMOSLOCK_EXPECTED_AUTH_ACTION_LINK_ORIGIN: Deno.env.get(
+      "DESMOSLOCK_EXPECTED_AUTH_ACTION_LINK_ORIGIN",
     ),
     DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: Deno.env.get(
       "DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN",

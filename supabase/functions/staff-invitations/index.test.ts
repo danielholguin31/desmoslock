@@ -538,6 +538,7 @@ function runtimeConfiguration(
 ): Record<string, unknown> {
   return {
     DESMOSLOCK_ALLOWED_WEB_ORIGIN: WEB_ORIGIN,
+    DESMOSLOCK_EXPECTED_AUTH_ACTION_LINK_ORIGIN: BACKEND_ORIGIN,
     DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: BACKEND_ORIGIN,
     DESMOSLOCK_STAFF_INVITATION_CALLBACK: CALLBACK,
     DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS: "3600",
@@ -655,6 +656,70 @@ Deno.test(
 );
 
 Deno.test(
+  "staff invitation separates internal egress from the public action-link origin",
+  async () => {
+    const internalOrigin = "http://kong:8000";
+    const publicActionLinkOrigin = "http://127.0.0.1:54321";
+    const publicActionLink =
+      `${publicActionLinkOrigin}/auth/v1/verify?token=${ACTION_TOKEN_SENTINEL}` +
+      `&type=invite&redirect_to=${encodeURIComponent(CALLBACK)}`;
+    const requests: string[] = [];
+    const service = createStaffInvitationDependencies(
+      runtimeConfiguration({
+        DESMOSLOCK_EXPECTED_AUTH_ACTION_LINK_ORIGIN: publicActionLinkOrigin,
+        DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: internalOrigin,
+        SUPABASE_URL: internalOrigin,
+      }),
+      async (input) => {
+        requests.push(String(input));
+        return Response.json(
+          generatedProviderResponse({ action_link: publicActionLink }),
+        );
+      },
+    );
+
+    assertEquals(await service.generateInviteLink("teacher@example.com"), {
+      actionLink: publicActionLink,
+      code: "link_generated",
+      userId: USER_ID,
+    });
+    assertEquals(requests.length, 1);
+    assertEquals(new URL(requests[0]).origin, internalOrigin);
+    assert(
+      !requests[0].includes(ACTION_TOKEN_SENTINEL),
+      "Token entered egress URL",
+    );
+  },
+);
+
+Deno.test(
+  "staff invitation rejects the internal origin when it is not the public action-link origin",
+  async () => {
+    const internalOrigin = "http://kong:8000";
+    const publicActionLinkOrigin = "http://127.0.0.1:54321";
+    const hostileLink =
+      `${internalOrigin}/auth/v1/verify?token=${ACTION_TOKEN_SENTINEL}` +
+      `&type=invite&redirect_to=${encodeURIComponent(CALLBACK)}`;
+    const service = createStaffInvitationDependencies(
+      runtimeConfiguration({
+        DESMOSLOCK_EXPECTED_AUTH_ACTION_LINK_ORIGIN: publicActionLinkOrigin,
+        DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: internalOrigin,
+        SUPABASE_URL: internalOrigin,
+      }),
+      async () =>
+        Response.json(generatedProviderResponse({ action_link: hostileLink })),
+    );
+
+    const result = await service.generateInviteLink("teacher@example.com");
+    assertEquals(result, { code: "dependency_unavailable" });
+    assert(
+      !JSON.stringify(result).includes(ACTION_TOKEN_SENTINEL),
+      "Rejected token leaked",
+    );
+  },
+);
+
+Deno.test(
   "staff invitation runtime rejects a provider-confirmed existing user",
   async () => {
     const service = createStaffInvitationDependencies(
@@ -748,6 +813,28 @@ Deno.test(
         createStaffInvitationDependencies(
           runtimeConfiguration({
             DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS: value,
+          }),
+        );
+      });
+    }
+  },
+);
+
+Deno.test(
+  "staff invitation runtime requires an exact public Auth action-link origin",
+  async () => {
+    for (const origin of [
+      undefined,
+      "http://kong:8000",
+      "https://attacker.invalid",
+      `${BACKEND_ORIGIN}/path`,
+      `${BACKEND_ORIGIN}?query=value`,
+      `${BACKEND_ORIGIN}#fragment`,
+    ]) {
+      await assertRejects(async () => {
+        createStaffInvitationDependencies(
+          runtimeConfiguration({
+            DESMOSLOCK_EXPECTED_AUTH_ACTION_LINK_ORIGIN: origin,
           }),
         );
       });
