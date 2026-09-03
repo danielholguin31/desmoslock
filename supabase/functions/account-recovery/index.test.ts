@@ -158,7 +158,7 @@ Deno.test("account recovery validates exact CORS preflight", async () => {
   assertEquals(wrongOrigin.status, 403);
   assertEquals(wrongOrigin.headers.get("access-control-allow-origin"), null);
   assertEquals(await wrongOrigin.json(), {
-    code: "authorization_denied",
+    code: "invalid_request",
     ok: false,
   });
 });
@@ -202,7 +202,7 @@ Deno.test(
       null,
     );
     assertEquals(await originResponse.json(), {
-      code: "authorization_denied",
+      code: "invalid_request",
       ok: false,
     });
   },

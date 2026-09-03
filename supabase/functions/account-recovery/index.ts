@@ -139,7 +139,7 @@ export async function handleRequest(
     return handlePreflight(request, corsPolicy);
   }
   if (!validateRequestOrigin(request, dependencies.allowedOrigin)) {
-    return codeResponse("authorization_denied", 403);
+    return codeResponse("invalid_request", 403);
   }
   if (request.method !== "POST") {
     return methodNotAllowedResponse(dependencies.allowedOrigin);

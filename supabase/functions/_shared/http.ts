@@ -145,7 +145,7 @@ export function handlePreflight(
   policy: CorsPolicy,
 ): Response {
   if (!validateRequestOrigin(request, policy.allowedOrigin)) {
-    return codeResponse("authorization_denied", 403);
+    return codeResponse("invalid_request", 403);
   }
   if (request.headers.get("access-control-request-method") !== "POST") {
     return codeResponse("invalid_request", 400, policy.allowedOrigin);

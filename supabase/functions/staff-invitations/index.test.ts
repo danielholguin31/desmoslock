@@ -13,6 +13,9 @@ const CALLBACK = `${WEB_ORIGIN}/auth/invitation`;
 const INVITATION_ID = "10000000-0000-0000-0000-000000000001";
 const USER_ID = "20000000-0000-0000-0000-000000000002";
 const WORKSPACE_ID = "30000000-0000-4000-8000-000000000003";
+const REQUEST_KEY = "40000000-0000-4000-8000-000000000004";
+const SECOND_REQUEST_KEY = "50000000-0000-4000-8000-000000000005";
+const THIRD_REQUEST_KEY = "60000000-0000-4000-8000-000000000006";
 const JWT = "synthetic-header.synthetic-payload.synthetic-signature";
 const ACTION_TOKEN_SENTINEL = "synthetic-action-token-sentinel";
 const ACTION_LINK =
@@ -87,6 +90,7 @@ function dependencies(
       userId: USER_ID,
     }),
     inviteLifetimeSeconds: 3_600,
+    newRequestKey: () => REQUEST_KEY,
     now: () => Date.UTC(2026, 7, 30, 12),
     prepareInvitation: async () => "invitation_delivery_ready",
     publishInvitation: async () => "invitation_usable",
@@ -101,8 +105,8 @@ Deno.test(
     const response = await handleRequest(
       invitationRequest(),
       dependencies({
-        authorizeInvitation: async (jwt, input) => {
-          calls.push(["authorize", jwt, input]);
+        authorizeInvitation: async (jwt, input, requestKey) => {
+          calls.push(["authorize", jwt, input, requestKey]);
           return { code: "invitation_pending", invitationId: INVITATION_ID };
         },
         generateInviteLink: async (email) => {
@@ -147,6 +151,7 @@ Deno.test(
           role: "administrator",
           schoolId: WORKSPACE_ID,
         },
+        REQUEST_KEY,
       ],
       ["generate", "teacher@example.com"],
       ["prepare", INVITATION_ID, USER_ID, "2026-08-30T13:00:00.000Z"],
@@ -211,7 +216,7 @@ Deno.test("staff invitation validates exact CORS preflight", async () => {
   assertEquals(wrongOrigin.status, 403);
   assertEquals(wrongOrigin.headers.get("access-control-allow-origin"), null);
   assertEquals(await wrongOrigin.json(), {
-    code: "authorization_denied",
+    code: "invalid_request",
     ok: false,
   });
 });
@@ -255,7 +260,7 @@ Deno.test(
       null,
     );
     assertEquals(await originResponse.json(), {
-      code: "authorization_denied",
+      code: "invalid_request",
       ok: false,
     });
   },
@@ -451,11 +456,96 @@ Deno.test(
 );
 
 Deno.test(
+  "staff invitation replays one request key after a lost begin response",
+  async () => {
+    const requestKeys: string[] = [];
+    let beginCalls = 0;
+    let generatedLinks = 0;
+    let requestKeyCalls = 0;
+    const response = await handleRequest(
+      invitationRequest(),
+      dependencies({
+        authorizeInvitation: async (_jwt, _input, requestKey) => {
+          beginCalls += 1;
+          requestKeys.push(requestKey);
+          if (beginCalls === 1) {
+            throw new Error("response lost after begin commit");
+          }
+          return { code: "invitation_pending", invitationId: INVITATION_ID };
+        },
+        generateInviteLink: async () => {
+          generatedLinks += 1;
+          return {
+            actionLink: ACTION_LINK,
+            code: "link_generated",
+            userId: USER_ID,
+          };
+        },
+        newRequestKey: () => {
+          requestKeyCalls += 1;
+          return REQUEST_KEY;
+        },
+      }),
+    );
+
+    assertEquals(response.status, 201);
+    assertEquals(await response.json(), {
+      code: "invitation_created",
+      ok: true,
+    });
+    assertEquals(requestKeyCalls, 1);
+    assertEquals(beginCalls, 2);
+    assertEquals(requestKeys, [REQUEST_KEY, REQUEST_KEY]);
+    assertEquals(generatedLinks, 1);
+  },
+);
+
+Deno.test(
+  "staff invitation fails closed when its server request key is unavailable",
+  async () => {
+    for (const newRequestKey of [
+      () => "not-a-uuid",
+      () => "40000000-0000-4000-A000-000000000004",
+      () => {
+        throw new Error("entropy diagnostic sentinel");
+      },
+    ]) {
+      let authorizationCalls = 0;
+      let providerCalls = 0;
+      const response = await handleRequest(
+        invitationRequest(),
+        dependencies({
+          authorizeInvitation: async () => {
+            authorizationCalls += 1;
+            return { code: "invitation_pending", invitationId: INVITATION_ID };
+          },
+          generateInviteLink: async () => {
+            providerCalls += 1;
+            return { code: "dependency_unavailable" };
+          },
+          newRequestKey,
+        }),
+      );
+      const body = await response.text();
+      assertEquals(response.status, 503);
+      assertEquals(
+        body,
+        JSON.stringify({ code: "service_unavailable", ok: false }),
+      );
+      assertEquals(authorizationCalls, 0);
+      assertEquals(providerCalls, 0);
+      assert(!body.includes("40000000"), "Request key leaked");
+      assert(!body.includes("entropy"), "Entropy failure leaked");
+    }
+  },
+);
+
+Deno.test(
   "staff invitation records accepted cleanup reasons before returning product failures",
   async () => {
     for (const [generatorCode, cleanupReason, publicCode, expectedStatus] of [
       [
-        "conflict",
+        "existing_user_conflict",
         "invalid_request",
         "existing_confirmed_user_unsupported",
         409,
@@ -483,6 +573,35 @@ Deno.test(
       assertEquals(await response.json(), { code: publicCode, ok: false });
       assertEquals(failures, [[INVITATION_ID, cleanupReason]]);
     }
+  },
+);
+
+Deno.test(
+  "staff invitation reconciles an ambiguous idempotent cleanup response",
+  async () => {
+    const failures: unknown[] = [];
+    const response = await handleRequest(
+      invitationRequest(),
+      dependencies({
+        failInvitation: async (invitationId, reasonCode) => {
+          failures.push([invitationId, reasonCode]);
+          return failures.length === 1
+            ? "dependency_unavailable"
+            : "invitation_delivery_failed";
+        },
+        generateInviteLink: async () => ({ code: "existing_user_conflict" }),
+      }),
+    );
+
+    assertEquals(response.status, 409);
+    assertEquals(await response.json(), {
+      code: "existing_confirmed_user_unsupported",
+      ok: false,
+    });
+    assertEquals(failures, [
+      [INVITATION_ID, "invalid_request"],
+      [INVITATION_ID, "invalid_request"],
+    ]);
   },
 );
 
@@ -665,11 +784,15 @@ Deno.test(
       );
       assertEquals(deliveries, 1);
       assertEquals(publications, 0);
-      assertEquals(events, [
+      const expectedEvents: unknown[] = [
         "ready",
         "smtp-sent-then-threw",
         ["fail", INVITATION_ID, "dependency_unavailable"],
-      ]);
+      ];
+      if (failureOutcome === "throws") {
+        expectedEvents.push(["fail", INVITATION_ID, "dependency_unavailable"]);
+      }
+      assertEquals(events, expectedEvents);
       assert(!body.includes(ACTION_TOKEN_SENTINEL), "Action token leaked");
       assert(!body.includes("teacher@example.com"), "Recipient email leaked");
       assert(!body.includes(diagnosticSentinel), "Provider error leaked");
@@ -870,10 +993,23 @@ function generatedProviderResponse(
 Deno.test(
   "generated-link cleanup closes pending delivery so provider failures are retryable",
   async () => {
-    for (const [providerStatus, cleanupReason, publicCode, publicStatus] of [
-      [409, "invalid_request", "existing_confirmed_user_unsupported", 409],
-      [429, "dependency_unavailable", "rate_limited", 429],
-      [500, "dependency_unavailable", "service_unavailable", 503],
+    for (const [
+      providerStatus,
+      confirmedUser,
+      cleanupReason,
+      publicCode,
+      publicStatus,
+    ] of [
+      [
+        200,
+        true,
+        "invalid_request",
+        "existing_confirmed_user_unsupported",
+        409,
+      ],
+      [409, false, "dependency_unavailable", "service_unavailable", 503],
+      [429, false, "dependency_unavailable", "rate_limited", 429],
+      [500, false, "dependency_unavailable", "service_unavailable", 503],
     ] as const) {
       let pendingDelivery = false;
       let beginCalls = 0;
@@ -894,6 +1030,13 @@ Deno.test(
             ]);
           }
           if (url.pathname === "/auth/v1/admin/generate_link") {
+            if (confirmedUser) {
+              return Response.json(
+                generatedProviderResponse({
+                  email_confirmed_at: "2026-08-30T11:00:00.000Z",
+                }),
+              );
+            }
             return Response.json(
               { message: providerSentinel },
               { status: providerStatus },
@@ -941,6 +1084,183 @@ Deno.test(
 );
 
 Deno.test(
+  "HTTP cleanup failure is reconciled before the next invitation request",
+  async () => {
+    let pendingDelivery = false;
+    let beginCalls = 0;
+    let cleanupCalls = 0;
+    let providerCalls = 0;
+    const beginRequestKeys: unknown[] = [];
+    const requestKeys = [REQUEST_KEY, SECOND_REQUEST_KEY];
+    const runtimeService = createStaffInvitationDependencies(
+      runtimeConfiguration(),
+      async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname.endsWith("/begin_staff_invitation")) {
+          const body = JSON.parse(String(init?.body)) as {
+            readonly request_key?: unknown;
+          };
+          beginRequestKeys.push(body.request_key);
+          beginCalls += 1;
+          if (pendingDelivery) {
+            return Response.json([{ code: "conflict", invitation_id: null }]);
+          }
+          pendingDelivery = true;
+          return Response.json([
+            { code: "invitation_pending", invitation_id: INVITATION_ID },
+          ]);
+        }
+        if (url.pathname === "/auth/v1/admin/generate_link") {
+          providerCalls += 1;
+          return Response.json(
+            { diagnostic: "provider-sentinel" },
+            {
+              status: 500,
+            },
+          );
+        }
+        if (url.pathname.endsWith("/internal_fail_staff_invitation")) {
+          cleanupCalls += 1;
+          if (cleanupCalls === 1) {
+            return Response.json(
+              { diagnostic: "cleanup-sentinel" },
+              {
+                status: 500,
+              },
+            );
+          }
+          pendingDelivery = false;
+          return Response.json([{ code: "invitation_delivery_failed" }]);
+        }
+        throw new Error("Unexpected service request");
+      },
+    );
+    const service: StaffInvitationDependencies = {
+      ...runtimeService,
+      newRequestKey: () => {
+        const requestKey = requestKeys.shift();
+        if (requestKey === undefined) throw new Error("No request key");
+        return requestKey;
+      },
+    };
+
+    for (let request = 0; request < 2; request += 1) {
+      const response = await handleRequest(invitationRequest(), service);
+      assertEquals(response.status, 503);
+      assertEquals(await response.json(), {
+        code: "service_unavailable",
+        ok: false,
+      });
+    }
+
+    assertEquals(beginCalls, 2);
+    assertEquals(beginRequestKeys, [REQUEST_KEY, SECOND_REQUEST_KEY]);
+    assertEquals(providerCalls, 2);
+    assertEquals(cleanupCalls, 3);
+    assertEquals(pendingDelivery, false);
+  },
+);
+
+Deno.test(
+  "expired pending-delivery lease recovers after all cleanup responses fail",
+  async () => {
+    let databaseSeconds = 0;
+    let pending:
+      | { readonly leaseExpiresAt: number; readonly requestKey: string }
+      | undefined;
+    let cleanupCalls = 0;
+    let leaseRecoveries = 0;
+    let providerCalls = 0;
+    const beginRequestKeys: string[] = [];
+    const requestKeys = [REQUEST_KEY, SECOND_REQUEST_KEY, THIRD_REQUEST_KEY];
+    const runtimeService = createStaffInvitationDependencies(
+      runtimeConfiguration(),
+      async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname.endsWith("/begin_staff_invitation")) {
+          const body = JSON.parse(String(init?.body)) as {
+            readonly request_key?: unknown;
+          };
+          const requestKey = String(body.request_key);
+          beginRequestKeys.push(requestKey);
+          if (
+            pending !== undefined &&
+            databaseSeconds >= pending.leaseExpiresAt
+          ) {
+            pending = undefined;
+            leaseRecoveries += 1;
+          }
+          if (pending !== undefined) {
+            return Response.json([
+              pending.requestKey === requestKey
+                ? { code: "invitation_pending", invitation_id: INVITATION_ID }
+                : { code: "conflict", invitation_id: null },
+            ]);
+          }
+          pending = { leaseExpiresAt: databaseSeconds + 300, requestKey };
+          return Response.json([
+            { code: "invitation_pending", invitation_id: INVITATION_ID },
+          ]);
+        }
+        if (url.pathname === "/auth/v1/admin/generate_link") {
+          providerCalls += 1;
+          return Response.json(
+            { diagnostic: "provider-sentinel" },
+            {
+              status: 500,
+            },
+          );
+        }
+        if (url.pathname.endsWith("/internal_fail_staff_invitation")) {
+          cleanupCalls += 1;
+          if (cleanupCalls <= 2) {
+            return Response.json(
+              { diagnostic: "cleanup-sentinel" },
+              {
+                status: 500,
+              },
+            );
+          }
+          pending = undefined;
+          return Response.json([{ code: "invitation_delivery_failed" }]);
+        }
+        throw new Error("Unexpected service request");
+      },
+    );
+    const service: StaffInvitationDependencies = {
+      ...runtimeService,
+      newRequestKey: () => {
+        const requestKey = requestKeys.shift();
+        if (requestKey === undefined) throw new Error("No request key");
+        return requestKey;
+      },
+    };
+
+    const first = await handleRequest(invitationRequest(), service);
+    const blocked = await handleRequest(invitationRequest(), service);
+    databaseSeconds = 301;
+    const recovered = await handleRequest(invitationRequest(), service);
+
+    for (const response of [first, blocked, recovered]) {
+      assertEquals(response.status, 503);
+      assertEquals(await response.json(), {
+        code: "service_unavailable",
+        ok: false,
+      });
+    }
+    assertEquals(beginRequestKeys, [
+      REQUEST_KEY,
+      SECOND_REQUEST_KEY,
+      THIRD_REQUEST_KEY,
+    ]);
+    assertEquals(providerCalls, 2);
+    assertEquals(cleanupCalls, 3);
+    assertEquals(leaseRecoveries, 1);
+    assertEquals(pending, undefined);
+  },
+);
+
+Deno.test(
   "staff invitation runtime pins Auth Admin generation and callback origins",
   async () => {
     const serviceRoleSentinel = "synthetic-service-role-sentinel";
@@ -982,11 +1302,15 @@ Deno.test(
       transport,
     );
 
-    const authorization = await service.authorizeInvitation(JWT, {
-      email: "teacher@example.com",
-      role: "administrator",
-      schoolId: WORKSPACE_ID,
-    });
+    const authorization = await service.authorizeInvitation(
+      JWT,
+      {
+        email: "teacher@example.com",
+        role: "administrator",
+        schoolId: WORKSPACE_ID,
+      },
+      REQUEST_KEY,
+    );
     const generated = await service.generateInviteLink("teacher@example.com");
     const prepared = await service.prepareInvitation(
       INVITATION_ID,
@@ -1011,6 +1335,7 @@ Deno.test(
     assert(requests.every(({ url }) => !url.includes(publishableSentinel)));
     assertEquals(JSON.parse(requests[0].body), {
       email: "teacher@example.com",
+      request_key: REQUEST_KEY,
       role: "admin",
       workspace_id: WORKSPACE_ID,
     });
@@ -1144,7 +1469,7 @@ Deno.test(
         ),
     );
     assertEquals(await service.generateInviteLink("teacher@example.com"), {
-      code: "conflict",
+      code: "existing_user_conflict",
     });
   },
 );
@@ -1154,10 +1479,10 @@ Deno.test(
   async () => {
     const sentinel = "provider-diagnostic-sentinel";
     for (const [status, expectedCode] of [
-      [400, "conflict"],
-      [404, "conflict"],
-      [409, "conflict"],
-      [422, "conflict"],
+      [400, "dependency_unavailable"],
+      [404, "dependency_unavailable"],
+      [409, "dependency_unavailable"],
+      [422, "dependency_unavailable"],
       [429, "rate_limited"],
       [500, "dependency_unavailable"],
       [503, "dependency_unavailable"],

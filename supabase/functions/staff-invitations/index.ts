@@ -24,6 +24,8 @@ import {
 
 const MAXIMUM_INVITATION_LIFETIME_SECONDS = 86_400;
 const MINIMUM_INVITATION_LIFETIME_SECONDS = 60;
+const BEGIN_ATTEMPTS = 2;
+const FAILURE_ATTEMPTS = 2;
 const PREPARE_ATTEMPTS = 2;
 const PUBLISH_ATTEMPTS = 2;
 
@@ -65,7 +67,10 @@ export interface InvitationAuthorizationResult {
 export interface GeneratedInvitationResult {
   readonly actionLink?: string;
   readonly code:
-    "conflict" | "dependency_unavailable" | "link_generated" | "rate_limited";
+    | "dependency_unavailable"
+    | "existing_user_conflict"
+    | "link_generated"
+    | "rate_limited";
   readonly userId?: string;
 }
 
@@ -89,6 +94,7 @@ export interface StaffInvitationDependencies {
   authorizeInvitation(
     jwt: string,
     input: StaffInvitationInput,
+    requestKey: string,
   ): Promise<InvitationAuthorizationResult>;
   prepareInvitation(
     invitationId: string,
@@ -100,6 +106,7 @@ export interface StaffInvitationDependencies {
   ): Promise<InvitationDeliveryResult>;
   failInvitation(invitationId: string, reasonCode: string): Promise<string>;
   generateInviteLink(email: string): Promise<GeneratedInvitationResult>;
+  newRequestKey(): string;
   now(): number;
   publishInvitation(invitationId: string): Promise<string>;
 }
@@ -161,7 +168,7 @@ function mapAuthorizationFailure(code: string): PublicInvitationFailure {
 function mapGeneratedInvitationFailure(
   code: GeneratedInvitationResult["code"],
 ): GeneratedInvitationFailure {
-  if (code === "conflict") {
+  if (code === "existing_user_conflict") {
     return {
       cleanupReason: "invalid_request",
       code: "existing_confirmed_user_unsupported",
@@ -339,7 +346,7 @@ function parseGeneratedInvitation(
   const wrappedUser = asRecord(response.user);
   const user = wrappedUser ?? response;
   if (isConfirmedExistingUser(user, requestedEmail)) {
-    return { code: "conflict" };
+    return { code: "existing_user_conflict" };
   }
   const actionLink = parseGeneratedActionLink(
     properties?.action_link ?? response.action_link,
@@ -424,13 +431,15 @@ export function createStaffInvitationDependencies(
   return {
     allowedOrigin,
     inviteLifetimeSeconds,
+    newRequestKey: () => crypto.randomUUID(),
     now,
-    async authorizeInvitation(jwt, input) {
+    async authorizeInvitation(jwt, input, requestKey) {
       const result = await callRpc(
         client,
         "begin_staff_invitation",
         {
           email: input.email,
+          request_key: requestKey,
           role: input.role === "administrator" ? "admin" : "teacher",
           workspace_id: input.schoolId,
         },
@@ -506,9 +515,6 @@ export function createStaffInvitationDependencies(
       if (response.status === 429) {
         return { code: "rate_limited" };
       }
-      if ([400, 404, 409, 422].includes(response.status)) {
-        return { code: "conflict" };
-      }
       if (!response.ok) {
         return { code: "dependency_unavailable" };
       }
@@ -552,14 +558,45 @@ async function recordFailedDelivery(
   invitationId: string,
   reasonCode: string,
 ): Promise<boolean> {
-  try {
-    return (
-      (await dependencies.failInvitation(invitationId, reasonCode)) ===
-      "invitation_delivery_failed"
-    );
-  } catch {
-    return false;
+  for (let attempt = 0; attempt < FAILURE_ATTEMPTS; attempt += 1) {
+    try {
+      const code = await dependencies.failInvitation(invitationId, reasonCode);
+      if (code === "invitation_delivery_failed") {
+        return true;
+      }
+      if (code !== "conflict" && code !== "dependency_unavailable") {
+        return false;
+      }
+    } catch {
+      // The failure transition is idempotent. Retry the same tuple after an
+      // ambiguous response so a committed terminal state can be reconciled.
+    }
   }
+  return false;
+}
+
+async function beginStaffInvitation(
+  dependencies: StaffInvitationDependencies,
+  jwt: string,
+  input: StaffInvitationInput,
+  requestKey: string,
+): Promise<InvitationAuthorizationResult> {
+  for (let attempt = 0; attempt < BEGIN_ATTEMPTS; attempt += 1) {
+    try {
+      const result = await dependencies.authorizeInvitation(
+        jwt,
+        input,
+        requestKey,
+      );
+      if (result.code !== "dependency_unavailable") {
+        return result;
+      }
+    } catch {
+      // The DB request key makes begin idempotent. Reusing it reconciles a
+      // possibly committed insert without allowing a second delivery owner.
+    }
+  }
+  return { code: "dependency_unavailable" };
 }
 
 async function confirmInvitationDeliveryReady(
@@ -652,7 +689,7 @@ export async function handleRequest(
     return handlePreflight(request, corsPolicy);
   }
   if (!validateRequestOrigin(request, dependencies.allowedOrigin)) {
-    return codeResponse("authorization_denied", 403);
+    return codeResponse("invalid_request", 403);
   }
   if (request.method !== "POST") {
     return methodNotAllowedResponse(dependencies.allowedOrigin);
@@ -670,12 +707,22 @@ export async function handleRequest(
     return codeResponse("invalid_request", 400, dependencies.allowedOrigin);
   }
 
-  let authorization: InvitationAuthorizationResult;
+  let requestKey: string | null = null;
   try {
-    authorization = await dependencies.authorizeInvitation(jwt, input);
+    requestKey = parseCanonicalUuid(dependencies.newRequestKey());
   } catch {
+    // A runtime entropy failure is an internal dependency failure.
+  }
+  if (requestKey === null) {
     return codeResponse("service_unavailable", 503, dependencies.allowedOrigin);
   }
+
+  const authorization = await beginStaffInvitation(
+    dependencies,
+    jwt,
+    input,
+    requestKey,
+  );
   if (authorization.code !== "invitation_pending") {
     const failure = mapAuthorizationFailure(authorization.code);
     return codeResponse(
