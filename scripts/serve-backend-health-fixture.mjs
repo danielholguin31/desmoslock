@@ -8,7 +8,7 @@ if (!Number.isInteger(port) || port < 1024 || port > 65_535) {
 }
 
 const healthBody = JSON.stringify({
-  capabilities: ["auth", "database", "rest", "staff-auth"],
+  capabilities: ["auth", "database", "rest"],
   fixtureDigest:
     "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
   fixtureValid: true,

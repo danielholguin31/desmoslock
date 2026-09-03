@@ -1,7 +1,7 @@
 import { resolveSupabaseEgressOrigin } from "../_shared/supabase-http.ts";
 
 export interface BaselineStatus {
-  readonly capabilities: readonly ["auth", "database", "rest", "staff-auth"];
+  readonly capabilities: readonly ["auth", "database", "rest"];
   readonly fixtureDigest: string;
   readonly fixtureValid: true;
   readonly fixtureVersion: "internal-baseline-v2";
@@ -130,7 +130,7 @@ export function createBackendProbe(
     }
 
     return {
-      capabilities: ["auth", "database", "rest", "staff-auth"],
+      capabilities: ["auth", "database", "rest"],
       fixtureDigest: baseline.fixture_digest,
       fixtureValid: true,
       fixtureVersion: "internal-baseline-v2",

@@ -19,6 +19,19 @@ import {
 
 const FIXTURE_DIGEST =
   "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201";
+const MIGRATION_ATTESTATIONS = Object.freeze({
+  "20260828000100_internal_release_backend.sql": Object.freeze({
+    migrationSetSha256:
+      "06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49",
+    rawSha256:
+      "1a60d2fb308a8e2cfad102f9c218c319bacd95c33a40801d5b0b731119434f2f",
+  }),
+  "20260903000200_staff_auth_generation_4.sql": Object.freeze({
+    migrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
+    rawSha256:
+      "bf55012c9edae81c191e241eee806a09918cc34211b3a0ac3eacbb9f1d6ff321",
+  }),
+});
 const execFileAsync = promisify(execFile);
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -1253,6 +1266,7 @@ test("pins the operator migration digest to the exact migration file set", async
   assert.deepEqual(discoveredMigrations, CURRENT_MIGRATION_FILES);
   const inventory = [];
   const attestedMigrations = [];
+  const currentAttestedMigrations = [];
   for (const migrationName of discoveredMigrations) {
     const source = await fs.readFile(
       new URL(`../../supabase/migrations/${migrationName}`, import.meta.url),
@@ -1295,7 +1309,25 @@ test("pins the operator migration digest to the exact migration file set", async
         1,
         `${migrationName} has one delimited migration-set digest literal`,
       );
-      assert.equal(literals[0][1], CURRENT_MIGRATION_SET_SHA256);
+      const expectedAttestation = MIGRATION_ATTESTATIONS[migrationName];
+      assert.notEqual(
+        expectedAttestation,
+        undefined,
+        `${migrationName} has a pinned migration attestation`,
+      );
+      assert.equal(
+        crypto.createHash("sha256").update(source, "utf8").digest("hex"),
+        expectedAttestation.rawSha256,
+        `${migrationName} preserves its exact published bytes`,
+      );
+      assert.equal(
+        literals[0][1],
+        expectedAttestation.migrationSetSha256,
+        `${migrationName} preserves its pinned migration-set digest literal`,
+      );
+      if (literals[0][1] === CURRENT_MIGRATION_SET_SHA256) {
+        currentAttestedMigrations.push(migrationName);
+      }
       normalizedSource = `${source.slice(0, beginIndex)}${attestationBlock.replace(
         literals[0][1],
         "0".repeat(64),
@@ -1311,6 +1343,9 @@ test("pins the operator migration digest to the exact migration file set", async
   }
   assert.deepEqual(attestedMigrations, [
     "20260828000100_internal_release_backend.sql",
+    "20260903000200_staff_auth_generation_4.sql",
+  ]);
+  assert.deepEqual(currentAttestedMigrations, [
     "20260903000200_staff_auth_generation_4.sql",
   ]);
   assert.equal(

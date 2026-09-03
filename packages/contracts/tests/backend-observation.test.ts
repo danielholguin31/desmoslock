@@ -62,7 +62,7 @@ describe("backend observation", () => {
         async readHealth() {
           return {
             body: {
-              capabilities: ["auth", "database", "rest", "staff-auth"],
+              capabilities: ["auth", "database", "rest"],
               fixtureDigest:
                 "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
               fixtureValid: true,
@@ -210,7 +210,7 @@ describe("backend observation", () => {
         async readHealth() {
           return {
             body: {
-              capabilities: ["auth", "database", "rest", "staff-auth"],
+              capabilities: ["auth", "database", "rest"],
               fixtureDigest: "not-a-sha-256",
               fixtureValid: true,
               fixtureVersion: "internal-baseline-v2",
@@ -240,7 +240,7 @@ describe("backend observation", () => {
         async readHealth() {
           return {
             body: {
-              capabilities: ["auth", "database", "rest", "staff-auth"],
+              capabilities: ["auth", "database", "rest"],
               fixtureDigest: "0".repeat(64),
               fixtureValid: true,
               fixtureVersion: "internal-baseline-v2",
@@ -260,7 +260,7 @@ describe("backend observation", () => {
     });
   });
 
-  it("fails closed when generation 4 does not advertise staff-auth", async () => {
+  it("fails closed when health overclaims operational staff-auth readiness", async () => {
     const observation = await observeBackend(
       {
         environment: "staging",
@@ -270,7 +270,7 @@ describe("backend observation", () => {
         async readHealth() {
           return {
             body: {
-              capabilities: ["auth", "database", "rest"],
+              capabilities: ["auth", "database", "rest", "staff-auth"],
               fixtureDigest:
                 "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
               fixtureValid: true,
@@ -301,7 +301,7 @@ describe("backend observation", () => {
         async readHealth() {
           return {
             body: {
-              capabilities: ["auth,database", "rest", "staff-auth"],
+              capabilities: ["auth,database", "rest", "auth"],
               fixtureDigest:
                 "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
               fixtureValid: true,

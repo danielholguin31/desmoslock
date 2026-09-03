@@ -21,6 +21,8 @@ export type BackendHealthFetch = (
 ) => Promise<Response>;
 export type BackendHealthTimeoutSignal = () => AbortSignal;
 
+const operationalBackendCapabilities = ["auth", "database", "rest"] as const;
+
 export type BackendObservation =
   | {
       readonly environment: InternalBackendEnvironment;
@@ -163,10 +165,10 @@ export async function observeBackend(
     body.fixtureValid !== true ||
     body.fixtureDigest !== INTERNAL_BASELINE_FIXTURE_DIGEST ||
     !Array.isArray(body.capabilities) ||
-    body.capabilities.length !== 4 ||
+    body.capabilities.length !== operationalBackendCapabilities.length ||
     body.capabilities.some(
       (capability, index) =>
-        capability !== ["auth", "database", "rest", "staff-auth"][index],
+        capability !== operationalBackendCapabilities[index],
     )
   ) {
     return { reason: "contract_incompatible", status: "unavailable" };

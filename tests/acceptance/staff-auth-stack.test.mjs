@@ -61,7 +61,7 @@ test("anonymous PostgREST access fails closed before a staff RPC executes", asyn
   await response.body?.cancel();
 });
 
-test("live public health is exact-ready for the disposable staff Auth stack", async () => {
+test("live public health is exact-ready for generation-4 schema prerequisites", async () => {
   const response = await fetchLocal(
     "/functions/v1/health",
     { method: "GET" },
@@ -72,7 +72,7 @@ test("live public health is exact-ready for the disposable staff Auth stack", as
   assert.equal(response.headers.get("access-control-allow-origin"), "*");
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.deepEqual(await response.json(), {
-    capabilities: ["auth", "database", "rest", "staff-auth"],
+    capabilities: ["auth", "database", "rest"],
     fixtureDigest:
       "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
     fixtureValid: true,

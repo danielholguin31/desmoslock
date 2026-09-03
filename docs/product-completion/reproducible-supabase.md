@@ -8,6 +8,11 @@ lifecycle foundation from issue 31 while remaining deliberately smaller than
 the future role-policy, Student Session capability, and calculator-isolation
 work in issues 32–34.
 
+Generation 4 is a schema and RPC foundation, not an operational staff-auth
+capability. No delivery transport is configured in this repository baseline,
+so health and the local verification lane do not claim delivered invitations,
+completed callbacks, or cross-browser session revocation.
+
 The baseline contains exactly the generation-2 foundation marker, two fictional
 Schools, six fictional staff profiles and memberships, two Tests, and two
 Student Sessions. The canonical fixture contains no Auth users, email addresses,
@@ -45,11 +50,14 @@ SHA-256
 `f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201`.
 The exact discovered migration file set has normalized SHA-256
 `0ef2ff06cf7b93e67d4cf10ab422b96b41a486f65a7a6e52c07ce493a6e5dc66`.
-Both delimited attestation blocks record that same current digest; zeroing only
-those two self-referential literals makes the complete four-file inventory
-reproducible without excluding any other migration byte. The later generation-4
-migration updates already-migrated singleton attestations and constraints, so
-the upgrade path does not depend on replaying an earlier migration.
+The published generation-3 migration retains its contemporaneous digest
+`06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49`;
+only the later generation-4 migration records the current aggregate. The
+repository contract pins each attested migration's raw SHA-256 and literal
+independently, then zeroes only those two delimited self-references when deriving
+the four-file aggregate. The later migration updates already-migrated singleton
+attestations and constraints, so the upgrade path does not depend on rewriting
+or replaying the earlier migration.
 The seed takes a transaction advisory lock, refuses altered or partial targets,
 and verifies this digest plus the exact generation-2 foundation marker after
 insertion. The fixture digest length-frames every seeded identity and content
@@ -77,8 +85,8 @@ npm run test:web
 npm run test:electron
 ```
 
-`db:start` is the database-only verification profile. The complete staff Auth
-lane requires the full disposable stack:
+`db:start` is the database-only verification profile. The staff Auth schema and
+local-prerequisite lane requires the full disposable stack:
 
 ```bash
 npm run db:start:full
@@ -90,9 +98,11 @@ npm run db:stop
 The web and desktop tests build against a credential-free loopback health
 fixture and verify the same public contract through their rendered status. The
 dedicated staff-auth CI lane starts the full disposable stack, resets it, runs
-all pgTAP lifecycle contracts, performs credential-free live Auth, PostgREST,
-and health probes, runs Edge and unit behavior suites, and always attempts
-stack shutdown.
+all pgTAP schema/RPC lifecycle contracts, performs credential-free local Auth,
+PostgREST, and health prerequisite probes, runs Edge handler and unit behavior
+suites, and always attempts stack shutdown. It does not exercise delivered
+email or a complete callback in two browser contexts, so passing the lane is
+not operational staff-auth evidence.
 The versioned Auth configuration is intentionally fail-closed for this ticket:
 it uses a non-routable placeholder origin and disables global and anonymous
 signup. It also explicitly preserves the hosted-safe Auth settings that differ
@@ -139,15 +149,19 @@ npm run build
 ## Health contract
 
 `GET /functions/v1/health` is public and credential-free. Its generation-4
-ready response includes the exact `auth`, `database`, `rest`, and `staff-auth`
-capabilities. It returns `200` only when Auth responds and the service-only
-database RPC verifies the exact migration generation and fixture digest. Client reads omit credentials, reject
-redirects, bypass caches, and time out after five seconds. Missing runtime
-configuration, dependency errors, invalid fixtures, and incompatible responses
-fail closed without returning internal diagnostics, project identifiers, or
-credentials. The Edge function also bounds its Auth and database dependency
-probes to five seconds and maps a timeout to the same sanitized unavailable
-response.
+ready response includes exactly the `auth`, `database`, and `rest` capabilities.
+The separate `schemaGeneration: 4`, fixture version, and fixture digest fields
+attest the schema foundation; `staff-auth` is deliberately absent from the
+operational capability list until delivery and full browser acceptance exist.
+Clients require that exact distinction and reject a response that adds the
+unproven capability. Health returns `200` only when Auth responds and the
+service-only database RPC verifies the exact migration generation and fixture
+digest. Client reads omit credentials, reject redirects, bypass caches, and
+time out after five seconds. Missing runtime configuration, dependency errors,
+invalid fixtures, and incompatible responses fail closed without returning
+internal diagnostics, project identifiers, or credentials. The Edge function
+also bounds its Auth and database dependency probes to five seconds and maps a
+timeout to the same sanitized unavailable response.
 
 The Edge runtime receives `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` from the
 Supabase platform. It must also receive

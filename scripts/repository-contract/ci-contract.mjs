@@ -41,12 +41,21 @@ function readCiJobSection(job, sectionName) {
 export function assertStaffAuthCiWorkflow(ciWorkflow) {
   const lifecycleJob = readCiJob(ciWorkflow, "staff-auth-lifecycle");
   if (
+    !/^ {4}name: Staff Auth schema and prerequisite checks$/mu.test(
+      lifecycleJob,
+    )
+  ) {
+    fail(
+      "Required staff Auth CI must identify itself as schema and prerequisite verification",
+    );
+  }
+  if (
     !/- run: npm run db:start:full\s+[\s\S]*?- run: npm run db:reset\s+[\s\S]*?- run: npm run test:staff-auth\s+[\s\S]*?- if: always\(\)\s+run: npm run db:stop/u.test(
       lifecycleJob,
     )
   ) {
     fail(
-      "Required staff Auth CI must reset and test a full disposable stack with unconditional cleanup",
+      "Required staff Auth schema and prerequisite CI must reset and test a full disposable local stack with unconditional cleanup",
     );
   }
 
@@ -70,7 +79,9 @@ export function verifyCiContract(repositoryRoot) {
     rootPackage.scripts?.["test:staff-auth:stack"] !==
       "node --test tests/acceptance/staff-auth-stack.test.mjs"
   ) {
-    fail("Root package does not expose the exact staff Auth verification lane");
+    fail(
+      "Root package does not expose the exact staff Auth schema and prerequisite lane",
+    );
   }
   readText(repositoryRoot, "tests/acceptance/staff-auth-stack.test.mjs");
   for (const command of [

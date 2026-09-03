@@ -13,10 +13,23 @@ export const expectedMigrationFiles = Object.freeze([
 export const expectedMigrationSetSha256 =
   "0ef2ff06cf7b93e67d4cf10ab422b96b41a486f65a7a6e52c07ce493a6e5dc66";
 
-const attestedMigrationFiles = Object.freeze([
-  "20260828000100_internal_release_backend.sql",
-  "20260903000200_staff_auth_generation_4.sql",
-]);
+const currentAttestationFile = "20260903000200_staff_auth_generation_4.sql";
+export const expectedMigrationAttestations = Object.freeze({
+  "20260828000100_internal_release_backend.sql": Object.freeze({
+    migrationSetSha256:
+      "06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49",
+    rawSha256:
+      "1a60d2fb308a8e2cfad102f9c218c319bacd95c33a40801d5b0b731119434f2f",
+  }),
+  [currentAttestationFile]: Object.freeze({
+    migrationSetSha256: expectedMigrationSetSha256,
+    rawSha256:
+      "bf55012c9edae81c191e241eee806a09918cc34211b3a0ac3eacbb9f1d6ff321",
+  }),
+});
+const attestedMigrationFiles = Object.freeze(
+  Object.keys(expectedMigrationAttestations),
+);
 const migrationDigestBegin = "-- desmoslock-migration-set-sha256:begin";
 const migrationDigestEnd = "-- desmoslock-migration-set-sha256:end";
 const migrationDigestLiteral = /select '([0-9a-f]{64})'::text;/gu;
@@ -32,6 +45,10 @@ const expectedAssignments = [
   ["auth.mfa.totp", "enroll_enabled", "true"],
   ["auth.mfa.totp", "verify_enabled", "true"],
 ];
+
+function sha256(source) {
+  return crypto.createHash("sha256").update(source, "utf8").digest("hex");
+}
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
@@ -92,14 +109,27 @@ function normalizeAttestedMigration(fileName, source) {
   if (literals.length !== 1) {
     fail(`${fileName} must attest exactly one migration-set digest`);
   }
-  if (literals[0][1] !== expectedMigrationSetSha256) {
-    fail(`${fileName} does not attest the current migration set`);
+  const expectedAttestation = expectedMigrationAttestations[fileName];
+  if (expectedAttestation === undefined) {
+    fail(`${fileName} has an unexpected migration-set attestation block`);
+  }
+  const attestedMigrationSetSha256 = literals[0][1];
+  if (attestedMigrationSetSha256 !== expectedAttestation.migrationSetSha256) {
+    fail(
+      fileName === currentAttestationFile
+        ? `${fileName} does not attest the current migration set`
+        : `${fileName} does not preserve its historical migration-set attestation`,
+    );
+  }
+  if (sha256(source) !== expectedAttestation.rawSha256) {
+    fail(`${fileName} raw migration SHA-256 changed`);
   }
 
   return {
     attested: true,
+    attestedMigrationSetSha256,
     source: `${source.slice(0, beginIndex)}${block.replace(
-      literals[0][1],
+      attestedMigrationSetSha256,
       "0".repeat(64),
     )}${source.slice(endIndex + migrationDigestEnd.length)}`,
   };
@@ -116,9 +146,17 @@ export function assertMigrationSetAttestation(migrations) {
   );
 
   const attested = [];
+  const currentAttested = [];
   const inventory = orderedMigrations.map(([fileName, source]) => {
     const normalized = normalizeAttestedMigration(fileName, source);
-    if (normalized.attested) attested.push(fileName);
+    if (normalized.attested) {
+      attested.push(fileName);
+      if (
+        normalized.attestedMigrationSetSha256 === expectedMigrationSetSha256
+      ) {
+        currentAttested.push(fileName);
+      }
+    }
     return `supabase/migrations/${fileName}\n${crypto
       .createHash("sha256")
       .update(normalized.source, "utf8")
@@ -128,6 +166,11 @@ export function assertMigrationSetAttestation(migrations) {
     attested,
     attestedMigrationFiles,
     "Supabase migration attestation history",
+  );
+  requireEqual(
+    currentAttested,
+    [currentAttestationFile],
+    "Supabase current migration-set attestation",
   );
 
   const observedMigrationSetSha256 = crypto

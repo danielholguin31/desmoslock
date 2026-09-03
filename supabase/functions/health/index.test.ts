@@ -23,7 +23,7 @@ Deno.test(
     const response = await handleRequest(
       new Request("http://localhost/health"),
       async () => ({
-        capabilities: ["auth", "database", "rest", "staff-auth"],
+        capabilities: ["auth", "database", "rest"],
         fixtureDigest:
           "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
         fixtureValid: true,
@@ -36,7 +36,7 @@ Deno.test(
     assertEquals(response.headers.get("cache-control"), "no-store");
     assertEquals(response.headers.get("access-control-allow-origin"), "*");
     assertEquals(await response.json(), {
-      capabilities: ["auth", "database", "rest", "staff-auth"],
+      capabilities: ["auth", "database", "rest"],
       fixtureDigest:
         "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
       fixtureValid: true,
@@ -117,7 +117,7 @@ Deno.test(
     );
 
     await assertEquals(await probe(), {
-      capabilities: ["auth", "database", "rest", "staff-auth"],
+      capabilities: ["auth", "database", "rest"],
       fixtureDigest:
         "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
       fixtureValid: true,

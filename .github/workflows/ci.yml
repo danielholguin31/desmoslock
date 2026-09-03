@@ -89,7 +89,7 @@ jobs:
       - run: npm run test:edge
 
   staff-auth-lifecycle:
-    name: Disposable staff Auth lifecycle
+    name: Staff Auth schema and prerequisite checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

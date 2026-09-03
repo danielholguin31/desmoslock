@@ -49,7 +49,7 @@ describe("web v2 foundation", () => {
         async readHealth() {
           return {
             body: {
-              capabilities: ["auth", "database", "rest", "staff-auth"],
+              capabilities: ["auth", "database", "rest"],
               fixtureDigest:
                 "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
               fixtureValid: true,

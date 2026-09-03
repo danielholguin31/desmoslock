@@ -76,7 +76,7 @@ npm run test:db
 npm run db:stop
 ```
 
-For the full disposable staff-auth verification lane:
+For the disposable staff-auth schema and local-prerequisite verification lane:
 
 ```bash
 npm run db:start:full
@@ -85,11 +85,12 @@ npm run test:staff-auth
 npm run db:stop
 ```
 
-CI owns startup and unconditional shutdown for that lane. The command covers
-database lifecycle contracts, credential-free live Auth/PostgREST/health
-probes, Edge behavior, and unit tests. Delivered-email callbacks and
-multi-browser revocation remain separate acceptance gates; this command does
-not claim those receipts.
+CI owns startup and unconditional shutdown for that lane. The command verifies
+database schema/RPC lifecycle contracts, credential-free local
+Auth/PostgREST/health prerequisites, Edge handler behavior, and unit tests. It
+does not establish operational staff-auth readiness: delivered email,
+callback completion, and multi-browser revocation remain separate acceptance
+gates.
 
 See
 [`docs/product-completion/reproducible-supabase.md`](docs/product-completion/reproducible-supabase.md)

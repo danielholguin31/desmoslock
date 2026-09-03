@@ -14,6 +14,7 @@ import { assertStaffAuthCiWorkflow } from "../scripts/repository-contract/ci-con
 import {
   assertMigrationSetAttestation,
   assertSupabaseAuthConfiguration,
+  expectedMigrationAttestations,
   expectedMigrationFiles,
   expectedMigrationSetSha256,
 } from "../scripts/repository-contract/supabase-contract.mjs";
@@ -345,6 +346,19 @@ test("generation-4 attests the exact normalized migration history", () => {
     readText(`supabase/migrations/${fileName}`),
   ]);
 
+  assert.deepEqual(expectedMigrationAttestations, {
+    "20260828000100_internal_release_backend.sql": {
+      migrationSetSha256:
+        "06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49",
+      rawSha256:
+        "1a60d2fb308a8e2cfad102f9c218c319bacd95c33a40801d5b0b731119434f2f",
+    },
+    "20260903000200_staff_auth_generation_4.sql": {
+      migrationSetSha256: expectedMigrationSetSha256,
+      rawSha256:
+        "bf55012c9edae81c191e241eee806a09918cc34211b3a0ac3eacbb9f1d6ff321",
+    },
+  });
   assert.doesNotThrow(() => assertMigrationSetAttestation(migrations));
   assert.throws(
     () => assertMigrationSetAttestation(migrations.slice(0, -1)),
@@ -367,6 +381,33 @@ test("generation-4 attests the exact normalized migration history", () => {
       assertMigrationSetAttestation(
         migrations.map(([fileName, source]) => [
           fileName,
+          fileName === "20260828000100_internal_release_backend.sql"
+            ? source.replace(
+                expectedMigrationAttestations[fileName].migrationSetSha256,
+                expectedMigrationSetSha256,
+              )
+            : source,
+        ]),
+      ),
+    /does not preserve its historical migration-set attestation/u,
+  );
+  assert.throws(
+    () =>
+      assertMigrationSetAttestation(
+        migrations.map(([fileName, source]) => [
+          fileName,
+          fileName === "20260828000100_internal_release_backend.sql"
+            ? source.replace("-- Generation 3", "-- Generation three")
+            : source,
+        ]),
+      ),
+    /raw migration SHA-256 changed/u,
+  );
+  assert.throws(
+    () =>
+      assertMigrationSetAttestation(
+        migrations.map(([fileName, source]) => [
+          fileName,
           fileName === "20260903000200_staff_auth_generation_4.sql"
             ? source.replace(expectedMigrationSetSha256, "0".repeat(64))
             : source,
@@ -376,7 +417,7 @@ test("generation-4 attests the exact normalized migration history", () => {
   );
 });
 
-test("staff Auth has a required disposable full-stack verification lane", () => {
+test("staff Auth schema and prerequisites have a required disposable CI lane", () => {
   const rootPackage = readJson("package.json");
   const workflow = readText(".github/workflows/ci.yml");
 
@@ -396,6 +437,16 @@ test("staff Auth has a required disposable full-stack verification lane", () => 
     "node --test tests/acceptance/staff-auth-stack.test.mjs",
   );
   assert.doesNotThrow(() => assertStaffAuthCiWorkflow(workflow));
+  assert.throws(
+    () =>
+      assertStaffAuthCiWorkflow(
+        workflow.replace(
+          "name: Staff Auth schema and prerequisite checks",
+          "name: Disposable staff Auth lifecycle",
+        ),
+      ),
+    /schema and prerequisite verification/u,
+  );
 
   const lifecycleSteps = [
     "      - run: npm run db:start:full",
@@ -411,7 +462,7 @@ test("staff Auth has a required disposable full-stack verification lane", () => 
   assert.notEqual(relocatedLifecycleSteps, workflow);
   assert.throws(
     () => assertStaffAuthCiWorkflow(relocatedLifecycleSteps),
-    /full disposable stack/u,
+    /full disposable local stack/u,
   );
 
   const relocatedAggregateNeed = workflow
