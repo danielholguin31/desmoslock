@@ -197,6 +197,7 @@ create table desmoslock_v2.staff_audit_events (
   constraint staff_audit_events_type_check
     check (
       event_type in (
+        'initial_owner_bound',
         'invitation_requested',
         'invitation_ready',
         'invitation_delivery_failed',
@@ -212,6 +213,7 @@ create table desmoslock_v2.staff_audit_events (
     check (
       result_code in (
         'ok',
+        'initial_owner_bound',
         'invitation_pending',
         'invitation_usable',
         'invitation_delivery_failed',
@@ -574,6 +576,154 @@ revoke all on function desmoslock_v2.internal_append_auth_event(
   text, text, uuid, uuid, uuid, uuid, uuid
 ) from public, anon, authenticated, service_role;
 
+create function desmoslock_v2.internal_bind_initial_owner(
+  workspace_id uuid,
+  profile_id uuid,
+  auth_user_id uuid
+)
+returns table (code text)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  target_auth_user_id uuid;
+  auth_user_email_confirmed_at timestamp with time zone;
+  auth_user_deleted_at timestamp with time zone;
+  auth_user_banned_until timestamp with time zone;
+begin
+  if $1 is null or $2 is null or $3 is null then
+    return query select 'invalid_request'::text;
+    return;
+  end if;
+
+  perform 1
+  from desmoslock_v2.workspaces as workspace
+  where workspace.id = $1
+    and workspace.seed_key is not null
+  for update;
+
+  if not found then
+    return query select 'invalid_request'::text;
+    return;
+  end if;
+
+  select profile.auth_user_id
+  into target_auth_user_id
+  from desmoslock_v2.profiles as profile
+  join desmoslock_v2.memberships as membership
+    on membership.profile_id = profile.id
+  where profile.id = $2
+    and membership.workspace_id = $1
+    and profile.seed_key is not null
+    and membership.seed_key is not null
+    and membership.role = 'owner'
+    and membership.status = 'active'
+  for update of profile, membership;
+
+  if not found then
+    return query select 'invalid_request'::text;
+    return;
+  end if;
+
+  select
+    auth_user.email_confirmed_at,
+    auth_user.deleted_at,
+    auth_user.banned_until
+  into
+    auth_user_email_confirmed_at,
+    auth_user_deleted_at,
+    auth_user_banned_until
+  from auth.users as auth_user
+  where auth_user.id = $3
+  for update;
+
+  if not found
+    or auth_user_deleted_at is not null
+    or (
+      auth_user_banned_until is not null
+      and auth_user_banned_until > statement_timestamp()
+    )
+  then
+    return query select 'invalid_request'::text;
+    return;
+  end if;
+
+  if auth_user_email_confirmed_at is null then
+    return query select 'email_unverified'::text;
+    return;
+  end if;
+
+  if target_auth_user_id is not null and target_auth_user_id <> $3 then
+    return query select 'conflict'::text;
+    return;
+  end if;
+
+  if exists (
+    select 1
+    from desmoslock_v2.profiles as profile
+    where profile.auth_user_id = $3
+      and profile.id <> $2
+  ) then
+    return query select 'conflict'::text;
+    return;
+  end if;
+
+  if exists (
+    select 1
+    from desmoslock_v2.memberships as membership
+    join desmoslock_v2.profiles as profile
+      on profile.id = membership.profile_id
+    where membership.workspace_id = $1
+      and membership.role = 'owner'
+      and membership.status = 'active'
+      and profile.auth_user_id is not null
+      and profile.id <> $2
+  ) then
+    return query select 'conflict'::text;
+    return;
+  end if;
+
+  if target_auth_user_id = $3 then
+    return query select 'initial_owner_bound'::text;
+    return;
+  end if;
+
+  begin
+    update desmoslock_v2.profiles as profile
+    set auth_user_id = $3
+    where profile.id = $2
+      and profile.auth_user_id is null;
+  exception
+    when unique_violation then
+      return query select 'conflict'::text;
+      return;
+  end;
+
+  if not found then
+    return query select 'conflict'::text;
+    return;
+  end if;
+
+  perform desmoslock_v2.internal_append_auth_event(
+    'initial_owner_bound',
+    'initial_owner_bound',
+    $1,
+    null,
+    $2,
+    null,
+    null
+  );
+
+  return query select 'initial_owner_bound'::text;
+end;
+$$;
+
+revoke all on function desmoslock_v2.internal_bind_initial_owner(uuid, uuid, uuid)
+  from public, anon, authenticated, service_role;
+grant execute on function desmoslock_v2.internal_bind_initial_owner(uuid, uuid, uuid)
+  to service_role;
+
 create function desmoslock_v2.current_staff_context()
 returns table (
   code text,
@@ -743,6 +893,7 @@ declare
   authorization record;
   normalized_email text;
   new_invitation_id uuid;
+  expired_invitation desmoslock_v2.staff_invitations%rowtype;
 begin
   select *
   into authorization
@@ -765,6 +916,38 @@ begin
     return query select 'invalid_request'::text, null::uuid;
     return;
   end if;
+
+  for expired_invitation in
+    select invitation.*
+    from desmoslock_v2.staff_invitations as invitation
+    where invitation.workspace_id = $1
+      and invitation.invited_email_normalized = normalized_email
+      and invitation.status = 'pending_acceptance'
+      and invitation.expires_at <= statement_timestamp()
+    order by invitation.id
+    for update
+  loop
+    update desmoslock_v2.staff_invitations as invitation
+    set
+      status = 'expired',
+      revision = invitation.revision + 1,
+      updated_at = statement_timestamp()
+    where invitation.id = expired_invitation.id
+      and invitation.revision = expired_invitation.revision
+      and invitation.status = 'pending_acceptance';
+
+    if found then
+      perform desmoslock_v2.internal_append_auth_event(
+        'invitation_expired',
+        'invitation_expired',
+        expired_invitation.workspace_id,
+        authorization.profile_id,
+        null,
+        expired_invitation.id,
+        authorization.session_id
+      );
+    end if;
+  end loop;
 
   begin
     insert into desmoslock_v2.staff_invitations (
@@ -895,7 +1078,7 @@ begin
     'invitation_ready',
     'invitation_usable',
     invitation_row.workspace_id,
-    invitation_row.requested_by_profile_id,
+    null,
     null,
     $1,
     null
@@ -973,7 +1156,7 @@ begin
     'invitation_delivery_failed',
     'invitation_delivery_failed',
     invitation_row.workspace_id,
-    invitation_row.requested_by_profile_id,
+    null,
     null,
     $1,
     null
@@ -1023,10 +1206,22 @@ begin
     return;
   end if;
 
+  select desmoslock_v2.internal_normalize_staff_email(auth_user.email)
+  into current_email_normalized
+  from auth.users as auth_user
+  where auth_user.id = session_result.user_id;
+
+  if not found or current_email_normalized is null then
+    return query select 'invitation_not_found'::text;
+    return;
+  end if;
+
   select *
   into invitation_row
   from desmoslock_v2.staff_invitations as invitation
   where invitation.id = $1
+    and invitation.invited_user_id = session_result.user_id
+    and invitation.invited_email_normalized = current_email_normalized
   for update;
 
   if not found then
@@ -1061,26 +1256,13 @@ begin
       'invitation_expired',
       'invitation_expired',
       invitation_row.workspace_id,
-      invitation_row.requested_by_profile_id,
+      null,
       null,
       invitation_row.id,
       session_result.session_id
     );
 
     return query select 'invitation_expired'::text;
-    return;
-  end if;
-
-  select desmoslock_v2.internal_normalize_staff_email(auth_user.email)
-  into current_email_normalized
-  from auth.users as auth_user
-  where auth_user.id = session_result.user_id;
-
-  if invitation_row.invited_user_id <> session_result.user_id
-    or current_email_normalized is null
-    or current_email_normalized <> invitation_row.invited_email_normalized
-  then
-    return query select 'forbidden'::text;
     return;
   end if;
 
@@ -1767,8 +1949,10 @@ comment on function desmoslock_v2.current_staff_invitations() is
   'Recipient-scoped rows: code, invitation_id, school_id, school_name, invited_role, expires_at; target email is never returned.';
 comment on function desmoslock_v2.internal_baseline_status() is
   'Service-only deterministic verification of synthetic rows; runtime rows have null seed keys and are excluded.';
+comment on function desmoslock_v2.internal_bind_initial_owner(uuid, uuid, uuid) is
+  'Service-only, idempotent binding of one confirmed Auth user to an active seeded initial Owner; returns code only.';
 comment on function desmoslock_v2.begin_staff_invitation(uuid, text, text) is
-  'Owner-only AAL2/TOTP seam. Success code invitation_pending requires service-side delivery completion.';
+  'Owner-only AAL2/TOTP seam. Expired matching invitations are terminalized before reissue; success code invitation_pending requires service-side delivery completion.';
 comment on function desmoslock_v2.internal_complete_staff_invitation(
   uuid, uuid, timestamp with time zone
 ) is
@@ -1776,7 +1960,7 @@ comment on function desmoslock_v2.internal_complete_staff_invitation(
 comment on function desmoslock_v2.internal_fail_staff_invitation(uuid, text) is
   'Service-only terminal delivery failure. Success code invitation_delivery_failed records only a stable code.';
 comment on function desmoslock_v2.accept_staff_invitation(uuid, text) is
-  'Recipient-only AAL2/TOTP mutation returning code only; refresh current_staff_context after invitation_accepted.';
+  'Recipient-bound identity and normalized email are matched before state reads; AAL2/TOTP mutation returns code only. Refresh current_staff_context after invitation_accepted.';
 comment on function desmoslock_v2.revoke_staff_invitation(uuid) is
   'Owner-only AAL2/TOTP mutation returning one stable code row.';
 comment on function desmoslock_v2.revoke_membership(uuid, uuid) is

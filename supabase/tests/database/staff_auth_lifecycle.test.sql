@@ -3,7 +3,7 @@ begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path = extensions, public, pg_catalog;
 
-select no_plan();
+select plan(107);
 
 select has_column(
   'desmoslock_v2',
@@ -123,6 +123,30 @@ select ok(
   'only the service delivery boundary can bind an invitation recipient'
 );
 select ok(
+  has_function_privilege(
+    'service_role',
+    'desmoslock_v2.internal_bind_initial_owner(uuid,uuid,uuid)',
+    'EXECUTE'
+  ),
+  'the service boundary can bind an initial seeded Owner'
+);
+select ok(
+  not has_function_privilege(
+    'authenticated',
+    'desmoslock_v2.internal_bind_initial_owner(uuid,uuid,uuid)',
+    'EXECUTE'
+  ),
+  'authenticated cannot bind an initial Owner'
+);
+select ok(
+  not has_function_privilege(
+    'anon',
+    'desmoslock_v2.internal_bind_initial_owner(uuid,uuid,uuid)',
+    'EXECUTE'
+  ),
+  'anonymous callers cannot bind an initial Owner'
+);
+select ok(
   not has_function_privilege(
     'anon',
     'desmoslock_v2.current_staff_context()',
@@ -161,6 +185,16 @@ select is(
   ),
   array['invitation_id', 'reason_code']::text[],
   'the service cleanup RPC keeps its exact PostgREST parameter names'
+);
+select is(
+  (
+    select function_info.proargnames[1:function_info.pronargs]
+    from pg_proc as function_info
+    where function_info.oid =
+      to_regprocedure('desmoslock_v2.internal_bind_initial_owner(uuid,uuid,uuid)')
+  ),
+  array['workspace_id', 'profile_id', 'auth_user_id']::text[],
+  'the initial Owner binding RPC keeps its exact PostgREST parameter names'
 );
 
 select ok(
@@ -377,13 +411,180 @@ values
     now() + interval '2 hours'
   );
 
-update desmoslock_v2.profiles
-set auth_user_id = 'a1000000-0000-4000-8000-000000000001'
-where seed_key = 'profile.alpha.owner';
+update auth.users
+set email_confirmed_at = null
+where id = 'a1000000-0000-4000-8000-000000000001';
 
-update desmoslock_v2.profiles
-set auth_user_id = 'a1000000-0000-4000-8000-000000000005'
-where seed_key = 'profile.beta.owner';
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_bind_initial_owner(
+      '10000000-0000-4000-8000-000000000001',
+      '20000000-0000-4000-8000-000000000001',
+      'a1000000-0000-4000-8000-000000000001'
+    )
+  ),
+  'email_unverified',
+  'an unconfirmed Auth identity cannot become the initial Owner'
+);
+reset role;
+
+update auth.users
+set email_confirmed_at = now()
+where id = 'a1000000-0000-4000-8000-000000000001';
+
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_bind_initial_owner(
+      '10000000-0000-4000-8000-000000000001',
+      '20000000-0000-4000-8000-000000000001',
+      'a1000000-0000-4000-8000-000000000001'
+    )
+  ),
+  'initial_owner_bound',
+  'the service boundary binds the confirmed Alpha Owner'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_bind_initial_owner(
+      '10000000-0000-4000-8000-000000000001',
+      '20000000-0000-4000-8000-000000000001',
+      'a1000000-0000-4000-8000-000000000001'
+    )
+  ),
+  'initial_owner_bound',
+  'exact initial Owner binding replay is idempotent'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_bind_initial_owner(
+      '10000000-0000-4000-8000-000000000001',
+      '20000000-0000-4000-8000-000000000001',
+      'a1000000-0000-4000-8000-000000000003'
+    )
+  ),
+  'conflict',
+  'a differently bound Auth user cannot replace the initial Owner'
+);
+reset role;
+
+insert into desmoslock_v2.profiles (id, display_name, seed_key)
+values (
+  '20000000-0000-4000-8000-000000000099',
+  'Synthetic second Alpha Owner',
+  'review-second-alpha-owner'
+);
+insert into desmoslock_v2.memberships (
+  workspace_id,
+  profile_id,
+  role,
+  seed_key
+) values (
+  '10000000-0000-4000-8000-000000000001',
+  '20000000-0000-4000-8000-000000000099',
+  'owner',
+  'review-second-alpha-owner-membership'
+);
+
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_bind_initial_owner(
+      '10000000-0000-4000-8000-000000000001',
+      '20000000-0000-4000-8000-000000000099',
+      'a1000000-0000-4000-8000-000000000003'
+    )
+  ),
+  'conflict',
+  'a School with a bound Owner cannot bind a different seeded Owner'
+);
+reset role;
+
+delete from desmoslock_v2.memberships
+where workspace_id = '10000000-0000-4000-8000-000000000001'
+  and profile_id = '20000000-0000-4000-8000-000000000099';
+delete from desmoslock_v2.profiles
+where id = '20000000-0000-4000-8000-000000000099';
+
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_bind_initial_owner(
+      '10000000-0000-4000-8000-000000000001',
+      '20000000-0000-4000-8000-000000000002',
+      'a1000000-0000-4000-8000-000000000003'
+    )
+  ),
+  'invalid_request',
+  'a seeded Administrator profile cannot be bound as the initial Owner'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_bind_initial_owner(
+      '10000000-0000-4000-8000-000000000002',
+      '20000000-0000-4000-8000-000000000011',
+      'a1000000-0000-4000-8000-000000000001'
+    )
+  ),
+  'conflict',
+  'an Auth identity already bound in another School cannot bind a second profile'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_bind_initial_owner(
+      '10000000-0000-4000-8000-000000000002',
+      '20000000-0000-4000-8000-000000000011',
+      'a1000000-0000-4000-8000-000000000005'
+    )
+  ),
+  'initial_owner_bound',
+  'the service boundary independently binds the confirmed Beta Owner'
+);
+reset role;
+
+select is(
+  (
+    select count(*)
+    from desmoslock_v2.staff_audit_events
+    where event_type = 'initial_owner_bound'
+  ),
+  2::bigint,
+  'initial Owner binding emits one minimal audit event per actual bind only'
+);
+select ok(
+  not exists (
+    select 1
+    from desmoslock_v2.staff_audit_events
+    where event_type = 'initial_owner_bound'
+      and (actor_profile_id is not null or invitation_id is not null or session_id is not null)
+  ),
+  'initial Owner binding audit is system-attributed and carries no unrelated identity data'
+);
+
+set local role authenticated;
+select throws_ok(
+  $$
+    select *
+    from desmoslock_v2.internal_bind_initial_owner(
+      '10000000-0000-4000-8000-000000000001',
+      '20000000-0000-4000-8000-000000000001',
+      'a1000000-0000-4000-8000-000000000001'
+    )
+  $$,
+  '42501',
+  null,
+  'authenticated cannot bypass the service-only initial Owner gate'
+);
+reset role;
 
 create function pg_temp.set_staff_claims(
   user_id uuid,
@@ -645,8 +846,8 @@ select is(
       'Wrong Recipient'
     )
   ),
-  'forbidden',
-  'a valid but different Auth user cannot accept the invitation'
+  'invitation_not_found',
+  'a different Auth user gets the non-enumerating invitation result'
 );
 reset role;
 
@@ -671,8 +872,8 @@ select is(
       'Changed Recipient'
     )
   ),
-  'forbidden',
-  'an email identity changed after delivery cannot accept the invitation'
+  'invitation_not_found',
+  'a changed email identity gets the same non-enumerating invitation result'
 );
 reset role;
 update auth.users
@@ -805,6 +1006,40 @@ select is(
   1::bigint,
   'the accepted invitation has exactly one acceptance audit event'
 );
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000003',
+  'c1000000-0000-4000-8000-000000000003',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.accept_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'acceptance'
+      ),
+      'Wrong Accepted Recipient'
+    )
+  ),
+  'invitation_not_found',
+  'a non-recipient cannot distinguish an accepted invitation from an absent one'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.accept_staff_invitation(
+      'd1000000-0000-4000-8000-000000000098',
+      'Missing Invitation'
+    )
+  ),
+  'invitation_not_found',
+  'an absent invitation uses the same non-enumerating result'
+);
+reset role;
 
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000002',
@@ -958,6 +1193,56 @@ where id = (
   where label = 'rollback'
 );
 select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000003',
+  'c1000000-0000-4000-8000-000000000003',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.accept_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'rollback'
+      ),
+      'Wrong Expired Recipient'
+    )
+  ),
+  'invitation_not_found',
+  'a non-recipient cannot discover that an invitation has elapsed'
+);
+reset role;
+select is(
+  (
+    select status
+    from desmoslock_v2.staff_invitations
+    where id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'rollback'
+    )
+  ),
+  'pending_acceptance',
+  'a non-recipient cannot terminalize another user invitation'
+);
+select is(
+  (
+    select count(*)
+    from desmoslock_v2.staff_audit_events
+    where invitation_id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'rollback'
+    )
+      and event_type = 'invitation_expired'
+  ),
+  0::bigint,
+  'a non-recipient expiration probe creates no audit event'
+);
+
+select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000004',
   'c1000000-0000-4000-8000-000000000004',
   'aal2'
@@ -992,6 +1277,227 @@ select is(
   'expired',
   'expiry is a terminal audited invitation transition'
 );
+select results_eq(
+  $$
+    select actor_profile_id, session_id
+    from desmoslock_v2.staff_audit_events
+    where invitation_id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'rollback'
+    )
+      and event_type = 'invitation_expired'
+  $$,
+  $$values (
+    null::uuid,
+    'c1000000-0000-4000-8000-000000000004'::uuid
+  )$$,
+  'recipient-driven expiry records the actual session without impersonating the requester'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000003',
+  'c1000000-0000-4000-8000-000000000003',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.accept_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'rollback'
+      ),
+      'Wrong Terminal Recipient'
+    )
+  ),
+  'invitation_not_found',
+  'a non-recipient gets the same result after expiration is persisted'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
+select 'elapsed', result.code, result.invitation_id
+from desmoslock_v2.begin_staff_invitation(
+  '10000000-0000-4000-8000-000000000001',
+  'wrong-recipient@staff.invalid',
+  'teacher'
+) as result;
+reset role;
+
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_complete_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'elapsed'
+      ),
+      'a1000000-0000-4000-8000-000000000003',
+      now() + interval '1 hour'
+    )
+  ),
+  'invitation_usable',
+  'the reissue fixture first becomes a recipient-bound invitation'
+);
+reset role;
+
+update desmoslock_v2.staff_invitations
+set expires_at = now() - interval '1 minute'
+where id = (
+  select invitation_id
+  from pg_temp.staff_auth_test_results
+  where label = 'elapsed'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
+select 'reissued', result.code, result.invitation_id
+from desmoslock_v2.begin_staff_invitation(
+  '10000000-0000-4000-8000-000000000001',
+  ' WRONG-RECIPIENT@staff.invalid ',
+  'admin'
+) as result;
+reset role;
+
+select is(
+  (select code from pg_temp.staff_auth_test_results where label = 'reissued'),
+  'invitation_pending',
+  'an elapsed open invitation no longer blocks a normalized-email reissue'
+);
+select ok(
+  (
+    select prior.invitation_id <> replacement.invitation_id
+    from pg_temp.staff_auth_test_results as prior
+    cross join pg_temp.staff_auth_test_results as replacement
+    where prior.label = 'elapsed'
+      and replacement.label = 'reissued'
+  ),
+  'reissue creates a new invitation identity'
+);
+select results_eq(
+  $$
+    select result.label, invitation.status
+    from pg_temp.staff_auth_test_results as result
+    join desmoslock_v2.staff_invitations as invitation
+      on invitation.id = result.invitation_id
+    where result.label in ('elapsed', 'reissued')
+    order by result.label
+  $$,
+  $$values
+    ('elapsed'::text, 'expired'::text),
+    ('reissued'::text, 'pending_delivery'::text)
+  $$,
+  'reissue terminalizes only the elapsed row and leaves the replacement pending delivery'
+);
+select results_eq(
+  $$
+    select actor_profile_id, session_id
+    from desmoslock_v2.staff_audit_events
+    where invitation_id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'elapsed'
+    )
+      and event_type = 'invitation_expired'
+  $$,
+  $$values (
+    '20000000-0000-4000-8000-000000000001'::uuid,
+    'c1000000-0000-4000-8000-000000000001'::uuid
+  )$$,
+  'Owner-driven reissue expiry is attributed to the actual Owner session'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.begin_staff_invitation(
+      '10000000-0000-4000-8000-000000000001',
+      'wrong-recipient@staff.invalid',
+      'teacher'
+    )
+  ),
+  'conflict',
+  'a second reissue attempt conflicts while its replacement remains open'
+);
+reset role;
+select results_eq(
+  $$
+    select result.label, invitation.status
+    from pg_temp.staff_auth_test_results as result
+    join desmoslock_v2.staff_invitations as invitation
+      on invitation.id = result.invitation_id
+    where result.label in ('elapsed', 'reissued')
+    order by result.label
+  $$,
+  $$values
+    ('elapsed'::text, 'expired'::text),
+    ('reissued'::text, 'pending_delivery'::text)
+  $$,
+  'repeat conflict leaves the terminal original and open replacement unchanged'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000004',
+  'c1000000-0000-4000-8000-000000000004',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.accept_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'elapsed'
+      ),
+      'Wrong Reissue Recipient'
+    )
+  ),
+  'invitation_not_found',
+  'a non-recipient cannot distinguish the reissue-terminalized invitation'
+);
+reset role;
+
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_fail_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'reissued'
+      ),
+      'dependency_unavailable'
+    )
+  ),
+  'invitation_delivery_failed',
+  'service cleanup closes the replacement fixture before later lifecycle cases'
+);
+reset role;
 
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000001',
@@ -1003,9 +1509,28 @@ insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
 select 'revoke', result.code, result.invitation_id
 from desmoslock_v2.begin_staff_invitation(
   '10000000-0000-4000-8000-000000000001',
-  'revoked-recipient@staff.invalid',
+  'wrong-recipient@staff.invalid',
   'teacher'
 ) as result;
+reset role;
+
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_complete_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'revoke'
+      ),
+      'a1000000-0000-4000-8000-000000000003',
+      now() + interval '1 hour'
+    )
+  ),
+  'invitation_usable',
+  'the revocation fixture is bound to a real intended recipient'
+);
 reset role;
 
 select pg_temp.set_staff_claims(
@@ -1049,6 +1574,52 @@ select is(
   ),
   'invitation_revoked',
   'the same-School Owner can revoke a pending invitation'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000004',
+  'c1000000-0000-4000-8000-000000000004',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.accept_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'revoke'
+      ),
+      'Wrong Revoked Recipient'
+    )
+  ),
+  'invitation_not_found',
+  'a non-recipient cannot distinguish a revoked invitation from an absent one'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000003',
+  'c1000000-0000-4000-8000-000000000003',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.accept_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'revoke'
+      ),
+      'Intended Revoked Recipient'
+    )
+  ),
+  'invitation_consumed',
+  'only the bound recipient may observe that its invitation is terminal'
 );
 reset role;
 
@@ -1132,6 +1703,15 @@ select results_eq(
     'dependency_unavailable'::text
   )$$,
   'ambiguous completion cleanup removes the usable recipient binding'
+);
+select ok(
+  not exists (
+    select 1
+    from desmoslock_v2.staff_audit_events
+    where event_type in ('invitation_ready', 'invitation_delivery_failed')
+      and actor_profile_id is not null
+  ),
+  'service completion and cleanup audit events never impersonate the requesting Owner'
 );
 
 select pg_temp.set_staff_claims(
