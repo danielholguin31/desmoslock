@@ -586,6 +586,7 @@ export function createStaffAuthController(dependencies: {
     code: "dependency_unavailable" | "invalid_backend_result",
     retry: RetryPlan | null = null,
   ): void {
+    activeGrant = null;
     clearTotpCeremony();
     clearInvitation();
     clearMembershipRevocation();
@@ -687,12 +688,7 @@ export function createStaffAuthController(dependencies: {
         discardMutationResponse(response);
         return null;
       }
-      const result =
-        isRecord(response) &&
-        hasExactKeys(response, ["operationId", "result"]) &&
-        response.operationId === request.operationId
-          ? decodeBoundaryResult(response.result)
-          : null;
+      const result = decodeMutationResponse(response, request.operationId);
       if (result === null) {
         discardMutationResponse(response);
         fail(operation, "invalid_backend_result");
@@ -1128,10 +1124,20 @@ export function createStaffAuthController(dependencies: {
     if (current === null) {
       return;
     }
-    const event = decodeAccessEvent(rawEvent);
+    const eventSnapshot = snapshotRecord(rawEvent);
+    if (eventSnapshot === null) {
+      operationEpoch += 1;
+      retryPlan = null;
+      activeGrant = null;
+      fail("bootstrap", "invalid_backend_result");
+      clearProtectedSchoolData();
+      return;
+    }
+    const event = decodeAccessEvent(eventSnapshot);
     if (event === null) {
-      if (rawEventMatchesAuthority(rawEvent, current)) {
+      if (snapshotEventMatchesAuthority(eventSnapshot, current)) {
         operationEpoch += 1;
+        retryPlan = null;
         activeGrant = null;
         fail("bootstrap", "invalid_backend_result");
         clearProtectedSchoolData();
@@ -1149,15 +1155,27 @@ export function createStaffAuthController(dependencies: {
     }
 
     operationEpoch += 1;
+    const eventEpoch = operationEpoch;
     retryPlan = null;
     clearTotpCeremony();
     clearInvitation();
     clearMembershipRevocation();
     if (event.kind === "access_changed") {
+      activeGrant = null;
+      transition({ kind: "bootstrapping" });
+      if (!isCurrent(eventEpoch)) {
+        return;
+      }
+      const cleared = clearProtectedSchoolData();
+      if (!isCurrent(eventEpoch)) {
+        return;
+      }
+      if (!cleared) {
+        fail("bootstrap", "dependency_unavailable");
+        return;
+      }
       if (!acceptEntry(event.access)) {
-        activeGrant = null;
         fail("bootstrap", "invalid_backend_result");
-        clearProtectedSchoolData();
       }
       return;
     }
@@ -1259,6 +1277,7 @@ export function createStaffAuthController(dependencies: {
       }
       case "inspect_invitation": {
         if (
+          snapshot.kind !== "bootstrapping" &&
           snapshot.kind !== "signed_out" &&
           snapshot.kind !== "invitation_rejected"
         ) {
@@ -1284,6 +1303,20 @@ export function createStaffAuthController(dependencies: {
                 throw new Error("operation unavailable");
               }
               operationId = allocated;
+              activeGrant = null;
+              transition({ kind: "inspecting_invitation" });
+              if (!isCurrent(epoch)) {
+                throw new Error("stale operation");
+              }
+              const cleared = clearProtectedSchoolData();
+              if (!isCurrent(epoch)) {
+                throw new Error("stale operation");
+              }
+              if (!cleared) {
+                operationEpoch += 1;
+                fail("invitation", "dependency_unavailable");
+                throw new Error("protected data unavailable");
+              }
               response = await dependencies.adapter.perform({
                 invitationToken,
                 operationId: allocated,
@@ -1297,9 +1330,6 @@ export function createStaffAuthController(dependencies: {
             route: dependencies.invitationCallback.route,
           },
         );
-        if (isCurrent(epoch)) {
-          transition({ kind: "inspecting_invitation" });
-        }
         const receipt = await callbackWork;
         if (!isCurrent(epoch)) {
           return snapshot;
@@ -1316,12 +1346,9 @@ export function createStaffAuthController(dependencies: {
           return snapshot;
         }
         const result =
-          operationId !== null &&
-          isRecord(response) &&
-          hasExactKeys(response, ["operationId", "result"]) &&
-          response.operationId === operationId
-            ? decodeBoundaryResult(response.result)
-            : null;
+          operationId === null
+            ? null
+            : decodeMutationResponse(response, operationId);
         if (result === null) {
           discardMutationResponse(response);
           fail("invitation", "invalid_backend_result");
@@ -1579,6 +1606,8 @@ export function createStaffAuthController(dependencies: {
         operationEpoch += 1;
         retryPlan = null;
         clearTotpCeremony();
+        clearInvitation();
+        clearMembershipRevocation();
         const epoch = operationEpoch;
         let operationId: string | null = null;
         let operationAllocationFailed = false;
@@ -1611,7 +1640,21 @@ export function createStaffAuthController(dependencies: {
           states: dependencies.callback.states,
         });
         if (isCurrent(epoch)) {
+          activeGrant = null;
           transition({ kind: "processing_pkce_callback" });
+          if (!isCurrent(epoch)) {
+            await callbackWork;
+            return snapshot;
+          }
+          const cleared = clearProtectedSchoolData();
+          if (!isCurrent(epoch)) {
+            await callbackWork;
+            return snapshot;
+          }
+          if (!cleared) {
+            operationEpoch += 1;
+            fail("pkce_callback", "dependency_unavailable");
+          }
         }
         const receipt = await callbackWork;
         if (!isCurrent(epoch)) {
@@ -1626,12 +1669,9 @@ export function createStaffAuthController(dependencies: {
         }
         const response: unknown = exchangeResponse;
         const result =
-          operationId !== null &&
-          isRecord(response) &&
-          hasExactKeys(response, ["operationId", "result"]) &&
-          response.operationId === operationId
-            ? decodeBoundaryResult(response.result)
-            : null;
+          operationId === null
+            ? null
+            : decodeMutationResponse(response, operationId);
         if (result === null) {
           discardMutationResponse(response);
           fail("pkce_callback", "invalid_backend_result");
@@ -1847,18 +1887,111 @@ export function createStaffAuthController(dependencies: {
   };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+type BoundaryRecord = Readonly<Record<string, unknown>>;
+
+/**
+ * Takes one immutable-by-convention copy of an untrusted record's own data
+ * descriptors. Accessors and throwing proxy traps are rejected without ever
+ * evaluating a property on the boundary object itself.
+ */
+function snapshotRecord(value: unknown): BoundaryRecord | null {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return null;
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(value) as Record<
+      string,
+      PropertyDescriptor
+    >;
+    const names = Reflect.ownKeys(descriptors);
+    const snapshot: Record<string, unknown> = Object.create(null) as Record<
+      string,
+      unknown
+    >;
+    for (const name of names) {
+      if (typeof name !== "string") {
+        return null;
+      }
+      const descriptor = descriptors[name];
+      if (
+        descriptor === undefined ||
+        !("value" in descriptor) ||
+        !descriptor.enumerable
+      ) {
+        return null;
+      }
+      snapshot[name] = descriptor.value;
+    }
+    return snapshot;
+  } catch {
+    return null;
+  }
 }
 
-function hasExactKeys(
-  value: Record<string, unknown>,
-  keys: readonly string[],
-): boolean {
+function snapshotArray(value: unknown): readonly unknown[] | null {
+  try {
+    if (!Array.isArray(value)) {
+      return null;
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(value) as Record<
+      string,
+      PropertyDescriptor
+    >;
+    const names = Reflect.ownKeys(descriptors);
+    const lengthDescriptor = descriptors.length;
+    const length = lengthDescriptor?.value;
+    if (
+      lengthDescriptor === undefined ||
+      !("value" in lengthDescriptor) ||
+      typeof length !== "number" ||
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > 10_000 ||
+      names.length !== length + 1
+    ) {
+      return null;
+    }
+    const snapshot: unknown[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = descriptors[String(index)];
+      if (
+        descriptor === undefined ||
+        !("value" in descriptor) ||
+        !descriptor.enumerable
+      ) {
+        return null;
+      }
+      snapshot.push(descriptor.value);
+    }
+    if (
+      names.some(
+        (name) =>
+          typeof name !== "string" ||
+          (name !== "length" &&
+            (!/^(0|[1-9]\d*)$/.test(name) || Number(name) >= length)),
+      )
+    ) {
+      return null;
+    }
+    return snapshot;
+  } catch {
+    return null;
+  }
+}
+
+function hasExactKeys(value: BoundaryRecord, keys: readonly string[]): boolean {
   const actual = Object.keys(value);
   return (
     actual.length === keys.length && keys.every((key) => actual.includes(key))
   );
+}
+
+function snapshotExactRecord(
+  value: unknown,
+  keys: readonly string[],
+): BoundaryRecord | null {
+  const snapshot = snapshotRecord(value);
+  return snapshot !== null && hasExactKeys(snapshot, keys) ? snapshot : null;
 }
 
 function validText(value: unknown, maximumLength: number): value is string {
@@ -1886,93 +2019,114 @@ function isStaffRole(value: unknown): value is StorageStaffRole {
 }
 
 function decodeIdentity(value: unknown): StaffAuthBoundaryIdentity | null {
+  const record = snapshotExactRecord(value, [
+    "accountId",
+    "email",
+    "membership",
+    "profile",
+    "school",
+  ]);
+  if (record === null) {
+    return null;
+  }
+  const profile = snapshotExactRecord(record.profile, ["displayName", "id"]);
+  const membership = snapshotExactRecord(record.membership, [
+    "id",
+    "role",
+    "status",
+  ]);
+  const school = snapshotExactRecord(record.school, ["id", "label"]);
   if (
-    !isRecord(value) ||
-    !hasExactKeys(value, [
-      "accountId",
-      "email",
-      "membership",
-      "profile",
-      "school",
-    ]) ||
-    !validText(value.accountId, 256) ||
-    !validText(value.email, 320) ||
-    !isRecord(value.profile) ||
-    !hasExactKeys(value.profile, ["displayName", "id"]) ||
-    !validText(value.profile.displayName, 200) ||
-    !validText(value.profile.id, 256) ||
-    !isRecord(value.membership) ||
-    !hasExactKeys(value.membership, ["id", "role", "status"]) ||
-    !validText(value.membership.id, 256) ||
-    !isStaffRole(value.membership.role) ||
-    value.membership.status !== "active" ||
-    !isRecord(value.school) ||
-    !hasExactKeys(value.school, ["id", "label"]) ||
-    !validText(value.school.id, 256) ||
-    !validText(value.school.label, 200)
+    !validText(record.accountId, 256) ||
+    !validText(record.email, 320) ||
+    profile === null ||
+    !validText(profile.displayName, 200) ||
+    !validText(profile.id, 256) ||
+    membership === null ||
+    !validText(membership.id, 256) ||
+    !isStaffRole(membership.role) ||
+    membership.status !== "active" ||
+    school === null ||
+    !validText(school.id, 256) ||
+    !validText(school.label, 200)
   ) {
     return null;
   }
   return {
-    accountId: value.accountId,
-    email: value.email,
+    accountId: record.accountId,
+    email: record.email,
     membership: {
-      id: value.membership.id,
-      role: value.membership.role,
+      id: membership.id,
+      role: membership.role,
       status: "active",
     },
     profile: {
-      displayName: value.profile.displayName,
-      id: value.profile.id,
+      displayName: profile.displayName,
+      id: profile.id,
     },
-    school: { id: value.school.id, label: value.school.label },
+    school: { id: school.id, label: school.label },
   };
 }
 
 function decodeManagedStaff(
   value: unknown,
 ): StaffAuthBoundaryManagedStaff | null {
+  const record = snapshotExactRecord(value, [
+    "membershipId",
+    "profile",
+    "role",
+    "schoolId",
+  ]);
+  if (record === null) {
+    return null;
+  }
+  const profile = snapshotExactRecord(record.profile, [
+    "displayName",
+    "email",
+    "id",
+  ]);
   if (
-    !isRecord(value) ||
-    !hasExactKeys(value, ["membershipId", "profile", "role", "schoolId"]) ||
-    !validText(value.membershipId, 256) ||
-    !isManagedRole(value.role) ||
-    !validText(value.schoolId, 256) ||
-    !isRecord(value.profile) ||
-    !hasExactKeys(value.profile, ["displayName", "email", "id"]) ||
-    !validText(value.profile.displayName, 200) ||
-    !validText(value.profile.email, 320) ||
-    !validText(value.profile.id, 256)
+    !validText(record.membershipId, 256) ||
+    !isManagedRole(record.role) ||
+    !validText(record.schoolId, 256) ||
+    profile === null ||
+    !validText(profile.displayName, 200) ||
+    !validText(profile.email, 320) ||
+    !validText(profile.id, 256)
   ) {
     return null;
   }
   return {
-    membershipId: value.membershipId,
+    membershipId: record.membershipId,
     profile: {
-      displayName: value.profile.displayName,
-      email: value.profile.email,
-      id: value.profile.id,
+      displayName: profile.displayName,
+      email: profile.email,
+      id: profile.id,
     },
-    role: value.role,
-    schoolId: value.schoolId,
+    role: record.role,
+    schoolId: record.schoolId,
   };
 }
 
 function decodeAccessGrant(value: unknown): StaffAuthAccessGrant | null {
+  const record = snapshotRecord(value);
   if (
-    !isRecord(value) ||
-    value.kind !== "access_granted" ||
-    (value.assuranceLevel !== "aal1" && value.assuranceLevel !== "aal2") ||
-    !validText(value.identityGeneration, 256) ||
-    !validText(value.sessionGeneration, 256) ||
-    !Array.isArray(value.manageableStaff)
+    record === null ||
+    record.kind !== "access_granted" ||
+    (record.assuranceLevel !== "aal1" && record.assuranceLevel !== "aal2") ||
+    !validText(record.identityGeneration, 256) ||
+    !validText(record.sessionGeneration, 256)
   ) {
     return null;
   }
-  const identity = decodeIdentity(value.identity);
-  const manageableStaff = value.manageableStaff.map(decodeManagedStaff);
+  const identity = decodeIdentity(record.identity);
+  const rawManageableStaff = snapshotArray(record.manageableStaff);
+  if (rawManageableStaff === null) {
+    return null;
+  }
+  const manageableStaff = rawManageableStaff.map(decodeManagedStaff);
   const exactKeys =
-    value.secondFactor === "challenge_required"
+    record.secondFactor === "challenge_required"
       ? [
           "assuranceLevel",
           "challengeReceipt",
@@ -1993,22 +2147,22 @@ function decodeAccessGrant(value: unknown): StaffAuthAccessGrant | null {
           "sessionGeneration",
         ];
   if (
-    !hasExactKeys(value, exactKeys) ||
+    !hasExactKeys(record, exactKeys) ||
     identity === null ||
     manageableStaff.some((entry) => entry === null) ||
-    (value.secondFactor !== "challenge_required" &&
-      value.secondFactor !== "enrollment_required" &&
-      value.secondFactor !== "satisfied") ||
-    ((value.secondFactor === "challenge_required" ||
-      value.secondFactor === "enrollment_required") &&
-      value.assuranceLevel !== "aal1") ||
-    (value.secondFactor === "challenge_required" &&
-      !validText(value.challengeReceipt, 512))
+    (record.secondFactor !== "challenge_required" &&
+      record.secondFactor !== "enrollment_required" &&
+      record.secondFactor !== "satisfied") ||
+    ((record.secondFactor === "challenge_required" ||
+      record.secondFactor === "enrollment_required") &&
+      record.assuranceLevel !== "aal1") ||
+    (record.secondFactor === "challenge_required" &&
+      !validText(record.challengeReceipt, 512))
   ) {
     return null;
   }
   const staff = manageableStaff as StaffAuthBoundaryManagedStaff[];
-  const assuranceLevel = value.assuranceLevel as "aal1" | "aal2";
+  const assuranceLevel = record.assuranceLevel as "aal1" | "aal2";
   const membershipIds = new Set<string>();
   const profileIds = new Set<string>();
   if (identity.membership.role !== "owner" && staff.length !== 0) {
@@ -2029,50 +2183,55 @@ function decodeAccessGrant(value: unknown): StaffAuthAccessGrant | null {
   const base = {
     assuranceLevel,
     identity,
-    identityGeneration: value.identityGeneration,
+    identityGeneration: record.identityGeneration,
     kind: "access_granted" as const,
     manageableStaff: staff,
-    sessionGeneration: value.sessionGeneration,
+    sessionGeneration: record.sessionGeneration,
   };
-  if (value.secondFactor === "challenge_required") {
+  if (record.secondFactor === "challenge_required") {
     return {
       ...base,
-      challengeReceipt: value.challengeReceipt as string,
+      challengeReceipt: record.challengeReceipt as string,
       secondFactor: "challenge_required",
     };
   }
-  return { ...base, secondFactor: value.secondFactor };
+  return { ...base, secondFactor: record.secondFactor };
 }
 
 function decodePresentation(value: unknown): TotpEnrollmentPresentation | null {
+  const presentation = snapshotExactRecord(value, ["blobUrl", "revoke"]);
   if (
-    !isRecord(value) ||
-    !hasExactKeys(value, ["blobUrl", "revoke"]) ||
-    !validText(value.blobUrl, 2048) ||
-    typeof value.revoke !== "function"
+    presentation === null ||
+    !validText(presentation.blobUrl, 2048) ||
+    typeof presentation.revoke !== "function"
   ) {
     return null;
   }
   try {
-    if (new URL(value.blobUrl).protocol !== "blob:") {
+    if (new URL(presentation.blobUrl).protocol !== "blob:") {
       return null;
     }
   } catch {
     return null;
   }
-  const revoke = value.revoke as () => void;
-  return { blobUrl: value.blobUrl, revoke: () => revoke.call(value) };
+  const blobUrl = presentation.blobUrl;
+  const revoke = presentation.revoke;
+  return {
+    blobUrl,
+    revoke: () => Reflect.apply(revoke, presentation, []),
+  };
 }
 
 function decodeBoundaryResult(value: unknown): StaffAuthBoundaryResult | null {
-  if (!isRecord(value) || typeof value.kind !== "string") {
+  const record = snapshotRecord(value);
+  if (record === null || typeof record.kind !== "string") {
     return null;
   }
-  if (value.kind === "access_granted") {
-    return decodeAccessGrant(value);
+  if (record.kind === "access_granted") {
+    return decodeAccessGrant(record);
   }
-  if (hasExactKeys(value, ["kind"])) {
-    switch (value.kind) {
+  if (hasExactKeys(record, ["kind"])) {
+    switch (record.kind) {
       case "email_verification_required":
       case "email_verification_sent":
       case "membership_inactive":
@@ -2085,20 +2244,21 @@ function decodeBoundaryResult(value: unknown): StaffAuthBoundaryResult | null {
       case "sign_in_rejected":
       case "signed_out":
       case "totp_rejected":
-        return { kind: value.kind };
+        return { kind: record.kind };
     }
   }
-  if (value.kind === "invitation_rejected") {
-    return hasExactKeys(value, ["kind", "reason"]) &&
-      (value.reason === "expired" ||
-        value.reason === "invalid" ||
-        value.reason === "replayed")
-      ? { kind: "invitation_rejected", reason: value.reason }
+  if (record.kind === "invitation_rejected") {
+    return hasExactKeys(record, ["kind", "reason"]) &&
+      (record.reason === "expired" ||
+        record.reason === "invalid" ||
+        record.reason === "replayed")
+      ? { kind: "invitation_rejected", reason: record.reason }
       : null;
   }
-  if (value.kind === "invitation_ready") {
+  if (record.kind === "invitation_ready") {
+    const school = snapshotExactRecord(record.school, ["id", "label"]);
     if (
-      !hasExactKeys(value, [
+      !hasExactKeys(record, [
         "acceptanceReceipt",
         "expiresAt",
         "inspectionOperationId",
@@ -2108,105 +2268,105 @@ function decodeBoundaryResult(value: unknown): StaffAuthBoundaryResult | null {
         "role",
         "school",
       ]) ||
-      !validText(value.acceptanceReceipt, 1024) ||
-      !validText(value.expiresAt, 64) ||
-      !isIsoInstant(value.expiresAt) ||
-      !validText(value.inspectionOperationId, 200) ||
-      !validText(value.intendedAccountId, 256) ||
-      !validText(value.intendedEmail, 320) ||
-      !isManagedRole(value.role) ||
-      !isRecord(value.school) ||
-      !hasExactKeys(value.school, ["id", "label"]) ||
-      !validText(value.school.id, 256) ||
-      !validText(value.school.label, 200)
+      !validText(record.acceptanceReceipt, 1024) ||
+      !validText(record.expiresAt, 64) ||
+      !isIsoInstant(record.expiresAt) ||
+      !validText(record.inspectionOperationId, 200) ||
+      !validText(record.intendedAccountId, 256) ||
+      !validText(record.intendedEmail, 320) ||
+      !isManagedRole(record.role) ||
+      school === null ||
+      !validText(school.id, 256) ||
+      !validText(school.label, 200)
     ) {
       return null;
     }
     return {
-      acceptanceReceipt: value.acceptanceReceipt,
-      expiresAt: value.expiresAt,
-      inspectionOperationId: value.inspectionOperationId,
-      intendedAccountId: value.intendedAccountId,
-      intendedEmail: value.intendedEmail,
+      acceptanceReceipt: record.acceptanceReceipt,
+      expiresAt: record.expiresAt,
+      inspectionOperationId: record.inspectionOperationId,
+      intendedAccountId: record.intendedAccountId,
+      intendedEmail: record.intendedEmail,
       kind: "invitation_ready",
-      role: value.role,
-      school: { id: value.school.id, label: value.school.label },
+      role: record.role,
+      school: { id: school.id, label: school.label },
     };
   }
-  if (value.kind === "totp_enrollment_ready") {
-    const presentation = decodePresentation(value.presentation);
-    return hasExactKeys(value, ["enrollmentReceipt", "kind", "presentation"]) &&
-      validText(value.enrollmentReceipt, 512) &&
+  if (record.kind === "totp_enrollment_ready") {
+    const presentation = decodePresentation(record.presentation);
+    return hasExactKeys(record, [
+      "enrollmentReceipt",
+      "kind",
+      "presentation",
+    ]) &&
+      validText(record.enrollmentReceipt, 512) &&
       presentation !== null
       ? {
-          enrollmentReceipt: value.enrollmentReceipt,
+          enrollmentReceipt: record.enrollmentReceipt,
           kind: "totp_enrollment_ready",
           presentation,
         }
       : null;
   }
-  if (value.kind === "sign_out_complete") {
-    return hasExactKeys(value, ["kind", "scope"]) &&
-      (value.scope === "all" || value.scope === "local")
-      ? { kind: "sign_out_complete", scope: value.scope }
+  if (record.kind === "sign_out_complete") {
+    return hasExactKeys(record, ["kind", "scope"]) &&
+      (record.scope === "all" || record.scope === "local")
+      ? { kind: "sign_out_complete", scope: record.scope }
       : null;
   }
   if (
-    value.kind === "staff_invitation_created" ||
-    value.kind === "staff_invitation_rejected" ||
-    value.kind === "staff_membership_revoked" ||
-    value.kind === "staff_membership_revocation_rejected"
+    record.kind === "staff_invitation_created" ||
+    record.kind === "staff_invitation_rejected" ||
+    record.kind === "staff_membership_revoked" ||
+    record.kind === "staff_membership_revocation_rejected"
   ) {
-    const actor = decodeAccessGrant(value.actor);
+    const actor = decodeAccessGrant(record.actor);
     if (actor === null) {
       return null;
     }
-    if (value.kind === "staff_invitation_created") {
-      return hasExactKeys(value, ["actor", "invitedRole", "kind"]) &&
-        isManagedRole(value.invitedRole)
+    if (record.kind === "staff_invitation_created") {
+      return hasExactKeys(record, ["actor", "invitedRole", "kind"]) &&
+        isManagedRole(record.invitedRole)
         ? {
             actor,
-            invitedRole: value.invitedRole,
+            invitedRole: record.invitedRole,
             kind: "staff_invitation_created",
           }
         : null;
     }
-    if (value.kind === "staff_invitation_rejected") {
-      return hasExactKeys(value, ["actor", "kind"])
+    if (record.kind === "staff_invitation_rejected") {
+      return hasExactKeys(record, ["actor", "kind"])
         ? { actor, kind: "staff_invitation_rejected" }
         : null;
     }
-    if (value.kind === "staff_membership_revoked") {
-      return hasExactKeys(value, [
+    if (record.kind === "staff_membership_revoked") {
+      return hasExactKeys(record, [
         "actor",
         "kind",
         "membershipId",
         "revokedRole",
       ]) &&
-        validText(value.membershipId, 256) &&
-        isManagedRole(value.revokedRole)
+        validText(record.membershipId, 256) &&
+        isManagedRole(record.revokedRole)
         ? {
             actor,
             kind: "staff_membership_revoked",
-            membershipId: value.membershipId,
-            revokedRole: value.revokedRole,
+            membershipId: record.membershipId,
+            revokedRole: record.revokedRole,
           }
         : null;
     }
-    return hasExactKeys(value, ["actor", "kind"])
+    return hasExactKeys(record, ["actor", "kind"])
       ? { actor, kind: "staff_membership_revocation_rejected" }
       : null;
   }
   return null;
 }
 
-function rawEventMatchesAuthority(
-  value: unknown,
+function snapshotEventMatchesAuthority(
+  value: BoundaryRecord,
   current: StaffAuthAccessGrant,
 ): boolean {
-  if (!isRecord(value)) {
-    return false;
-  }
   if (value.kind === "access_changed") {
     return (
       value.previousIdentityGeneration === current.identityGeneration &&
@@ -2228,48 +2388,59 @@ function rawEventMatchesAuthority(
 }
 
 function decodeAccessEvent(value: unknown): StaffAuthAccessEvent | null {
-  if (!isRecord(value) || typeof value.kind !== "string") {
+  const record = snapshotRecord(value);
+  if (record === null || typeof record.kind !== "string") {
     return null;
   }
-  if (value.kind === "access_changed") {
-    const access = decodeAccessGrant(value.access);
-    return hasExactKeys(value, [
+  if (record.kind === "access_changed") {
+    const access = decodeAccessGrant(record.access);
+    return hasExactKeys(record, [
       "access",
       "kind",
       "previousIdentityGeneration",
       "previousSessionGeneration",
     ]) &&
-      validText(value.previousIdentityGeneration, 256) &&
-      validText(value.previousSessionGeneration, 256) &&
+      validText(record.previousIdentityGeneration, 256) &&
+      validText(record.previousSessionGeneration, 256) &&
       access !== null
       ? {
           access,
           kind: "access_changed",
-          previousIdentityGeneration: value.previousIdentityGeneration,
-          previousSessionGeneration: value.previousSessionGeneration,
+          previousIdentityGeneration: record.previousIdentityGeneration,
+          previousSessionGeneration: record.previousSessionGeneration,
         }
       : null;
   }
   if (
-    value.kind !== "membership_inactive" &&
-    value.kind !== "session_expired" &&
-    value.kind !== "session_revoked" &&
-    value.kind !== "signed_out"
+    record.kind !== "membership_inactive" &&
+    record.kind !== "session_expired" &&
+    record.kind !== "session_revoked" &&
+    record.kind !== "signed_out"
   ) {
     return null;
   }
-  return hasExactKeys(value, [
+  return hasExactKeys(record, [
     "identityGeneration",
     "kind",
     "sessionGeneration",
   ]) &&
-    validText(value.identityGeneration, 256) &&
-    validText(value.sessionGeneration, 256)
+    validText(record.identityGeneration, 256) &&
+    validText(record.sessionGeneration, 256)
     ? {
-        identityGeneration: value.identityGeneration,
-        kind: value.kind,
-        sessionGeneration: value.sessionGeneration,
+        identityGeneration: record.identityGeneration,
+        kind: record.kind,
+        sessionGeneration: record.sessionGeneration,
       }
+    : null;
+}
+
+function decodeMutationResponse(
+  value: unknown,
+  expectedOperationId: string,
+): StaffAuthBoundaryResult | null {
+  const response = snapshotExactRecord(value, ["operationId", "result"]);
+  return response !== null && response.operationId === expectedOperationId
+    ? decodeBoundaryResult(response.result)
     : null;
 }
 
@@ -2286,14 +2457,14 @@ function isFutureExpiry(value: string, now: number): boolean {
 }
 
 function discardBoundaryResult(value: unknown): void {
-  if (
-    isRecord(value) &&
-    value.kind === "totp_enrollment_ready" &&
-    isRecord(value.presentation) &&
-    typeof value.presentation.revoke === "function"
-  ) {
+  const result = snapshotRecord(value);
+  const presentation =
+    result?.kind === "totp_enrollment_ready"
+      ? snapshotExactRecord(result.presentation, ["blobUrl", "revoke"])
+      : null;
+  if (presentation !== null && typeof presentation.revoke === "function") {
     try {
-      value.presentation.revoke();
+      Reflect.apply(presentation.revoke, presentation, []);
     } catch {
       // Best-effort cleanup of an untrusted or stale presentation.
     }
@@ -2301,7 +2472,8 @@ function discardBoundaryResult(value: unknown): void {
 }
 
 function discardMutationResponse(value: unknown): void {
-  if (isRecord(value)) {
-    discardBoundaryResult(value.result);
+  const response = snapshotRecord(value);
+  if (response !== null) {
+    discardBoundaryResult(response.result);
   }
 }

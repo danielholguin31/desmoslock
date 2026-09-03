@@ -1735,4 +1735,340 @@ describe("staff auth controller", () => {
       kind: "dependency_failure",
     });
   });
+
+  it("rejects an accessor boundary before a validated Membership role can change", async () => {
+    let getterReads = 0;
+    const membership: Record<string, unknown> = {
+      id: "membership-teacher",
+      status: "active",
+    };
+    Object.defineProperty(membership, "role", {
+      enumerable: true,
+      get() {
+        getterReads += 1;
+        return getterReads === 1 ? "teacher" : "owner";
+      },
+    });
+    const mutableIdentity = {
+      ...identity("teacher"),
+      membership,
+    };
+    const result = {
+      ...access("teacher"),
+      identity: mutableIdentity,
+    } as unknown as StaffAuthBoundaryResult;
+    const controller = createController(createAdapter(result));
+
+    await controller.dispatch({ type: "bootstrap" });
+
+    expect(getterReads).toBe(0);
+    expect(controller.getSnapshot()).toMatchObject({
+      code: "invalid_backend_result",
+      kind: "dependency_failure",
+      operation: "bootstrap",
+    });
+  });
+
+  it("rejects accessor fields on a mutation envelope without evaluating them", async () => {
+    let getterReads = 0;
+    const adapter = createAdapter({ kind: "signed_out" });
+    adapter.perform = async (request) => {
+      const response: Record<string, unknown> = {
+        result: { kind: "sign_in_rejected" },
+      };
+      Object.defineProperty(response, "operationId", {
+        enumerable: true,
+        get() {
+          getterReads += 1;
+          return request.operationId;
+        },
+      });
+      return response as unknown as StaffAuthMutationResult;
+    };
+    const controller = createController(adapter);
+    await controller.dispatch({ type: "bootstrap" });
+
+    await controller.dispatch({
+      email: "teacher@example.test",
+      password: "password",
+      type: "sign_in",
+    });
+
+    expect(getterReads).toBe(0);
+    expect(controller.getSnapshot()).toMatchObject({
+      code: "invalid_backend_result",
+      kind: "dependency_failure",
+      operation: "sign_in",
+    });
+  });
+
+  it("fails closed and clears access when an event Proxy throws during its snapshot", async () => {
+    const clear = vi.fn();
+    let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
+    const adapter = createAdapter(access("teacher"));
+    adapter.subscribe = (listener) => {
+      emit = listener;
+      return () => undefined;
+    };
+    const controller = createController(adapter, { clear });
+    await controller.dispatch({ type: "bootstrap" });
+    clear.mockClear();
+    const event = new Proxy(
+      {
+        identityGeneration: "identity-teacher",
+        kind: "session_revoked",
+        sessionGeneration: "session-teacher",
+      },
+      {
+        ownKeys() {
+          throw new Error("boundary trap");
+        },
+      },
+    ) as StaffAuthAccessEvent;
+
+    expect(() => emit?.(event)).not.toThrow();
+
+    expect(controller.getSnapshot()).toMatchObject({
+      code: "invalid_backend_result",
+      kind: "dependency_failure",
+    });
+    expect(clear).toHaveBeenCalledOnce();
+  });
+
+  it("clears the prior School before an access change enters a different account TOTP challenge", async () => {
+    const order: string[] = [];
+    let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
+    const adapter = createAdapter(access("teacher"));
+    adapter.subscribe = (listener) => {
+      emit = listener;
+      return () => undefined;
+    };
+    const controller = createController(adapter, {
+      clear: () => order.push("clear"),
+    });
+    await controller.dispatch({ type: "bootstrap" });
+    order.splice(0);
+    controller.subscribe((state) => order.push(`state:${state.kind}`));
+    const administrator: StaffAuthBoundaryIdentity = {
+      ...identity("admin", "admin@other-school.test"),
+      accountId: "account-admin-school-2",
+      school: { id: "school-2", label: "Other School" },
+    };
+
+    emit?.({
+      access: access("admin", {
+        assuranceLevel: "aal1",
+        identity: administrator,
+        identityGeneration: "identity-admin-school-2",
+        secondFactor: "challenge_required",
+        sessionGeneration: "session-admin-school-2",
+      }),
+      kind: "access_changed",
+      previousIdentityGeneration: "identity-teacher",
+      previousSessionGeneration: "session-teacher",
+    });
+
+    expect(order).toEqual([
+      "state:bootstrapping",
+      "clear",
+      "state:totp_challenge",
+    ]);
+    expect(controller.getSnapshot()).toMatchObject({
+      kind: "totp_challenge",
+      role: "administrator",
+    });
+    expect(JSON.stringify(controller.getSnapshot())).not.toContain("school-1");
+  });
+
+  it("does not enter a new access challenge when clearing the prior School fails", async () => {
+    let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
+    let clears = 0;
+    const adapter = createAdapter(access("teacher"));
+    adapter.subscribe = (listener) => {
+      emit = listener;
+      return () => undefined;
+    };
+    const controller = createController(adapter, {
+      clear() {
+        clears += 1;
+        if (clears > 1) {
+          throw new Error("storage unavailable");
+        }
+      },
+    });
+    await controller.dispatch({ type: "bootstrap" });
+
+    emit?.({
+      access: access("admin", {
+        assuranceLevel: "aal1",
+        secondFactor: "challenge_required",
+      }),
+      kind: "access_changed",
+      previousIdentityGeneration: "identity-teacher",
+      previousSessionGeneration: "session-teacher",
+    });
+
+    expect(controller.getSnapshot()).toMatchObject({
+      code: "dependency_unavailable",
+      kind: "dependency_failure",
+      operation: "bootstrap",
+    });
+  });
+
+  it("scrubs and inspects an invitation while the cold bootstrap read is pending", async () => {
+    const read = deferred<StaffAuthBoundaryResult>();
+    const history = vi.fn();
+    const requests: StaffAuthMutation[] = [];
+    const adapter: StaffAuthAdapter = {
+      read: () => read.promise,
+      async perform(request) {
+        requests.push(request);
+        return {
+          operationId: request.operationId,
+          result: invitationReady(request.operationId),
+        };
+      },
+      subscribe() {
+        return () => undefined;
+      },
+    };
+    const controller = createController(adapter, {
+      invitationHistory: history,
+    });
+    const bootstrap = controller.dispatch({ type: "bootstrap" });
+
+    const invitation = controller.dispatch({
+      callbackUrl:
+        "https://app.example.test/auth/invitation?token=SENTINEL-cold-token",
+      type: "inspect_invitation",
+    });
+    expect(history).toHaveBeenCalledWith("/auth/invitation");
+    expect(requests).toHaveLength(1);
+    await invitation;
+    read.resolve(access("owner"));
+    await bootstrap;
+
+    expect(controller.getSnapshot()).toMatchObject({
+      intendedEmail: "invited@example.test",
+      kind: "invitation_ready",
+    });
+    expect(JSON.stringify(controller.getSnapshot())).not.toContain("SENTINEL");
+  });
+
+  it("clears cold protected data before a PKCE exchange can publish access", async () => {
+    const order: string[] = [];
+    const controller = createController(
+      createAdapter({ kind: "signed_out" }, async () => {
+        order.push("exchange");
+        return access("teacher");
+      }),
+      {
+        clear: () => order.push("clear"),
+        history: () => order.push("scrub"),
+      },
+    );
+    controller.subscribe((state) => order.push(`state:${state.kind}`));
+
+    await controller.dispatch({
+      callbackUrl:
+        "https://app.example.test/auth/callback?code=code&state=state&flow=sign_in",
+      type: "complete_pkce_callback",
+    });
+
+    expect(order).toEqual([
+      "scrub",
+      "state:processing_pkce_callback",
+      "clear",
+      "exchange",
+      "state:authenticated",
+    ]);
+  });
+
+  it("blocks a cold PKCE exchange when protected data cannot be cleared", async () => {
+    const perform = vi.fn();
+    const history = vi.fn();
+    const adapter = createAdapter({ kind: "signed_out" });
+    adapter.perform = perform;
+    const controller = createController(adapter, {
+      clear() {
+        throw new Error("storage unavailable");
+      },
+      history,
+    });
+
+    await controller.dispatch({
+      callbackUrl:
+        "https://app.example.test/auth/callback?code=code&state=state&flow=sign_in",
+      type: "complete_pkce_callback",
+    });
+
+    expect(history).toHaveBeenCalledWith("/auth/callback");
+    expect(perform).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({
+      code: "dependency_unavailable",
+      kind: "dependency_failure",
+      operation: "pkce_callback",
+    });
+  });
+
+  it("keeps an invalid invitation operation-ID failure terminal after scrubbing", async () => {
+    const perform = vi.fn();
+    const history = vi.fn();
+    const adapter = createAdapter({ kind: "signed_out" });
+    adapter.perform = perform;
+    const controller = createController(adapter, {
+      invitationHistory: history,
+      nextOperationId: () => "",
+    });
+
+    await controller.dispatch({
+      callbackUrl:
+        "https://app.example.test/auth/invitation?token=SENTINEL-invalid-id",
+      type: "inspect_invitation",
+    });
+
+    expect(history).toHaveBeenCalledWith("/auth/invitation");
+    expect(perform).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({
+      code: "invalid_backend_result",
+      kind: "dependency_failure",
+      operation: "invitation",
+    });
+  });
+
+  it("keeps a duplicate invitation operation-ID failure terminal after scrubbing", async () => {
+    const requests: StaffAuthMutation[] = [];
+    const history = vi.fn();
+    const controller = createController(
+      createAdapter({ kind: "signed_out" }, async (request) => {
+        requests.push(request);
+        return { kind: "invitation_rejected", reason: "invalid" };
+      }),
+      {
+        invitationHistory: history,
+        nextOperationId: () => "same-operation",
+      },
+    );
+    await controller.dispatch({ type: "bootstrap" });
+    await controller.dispatch({
+      callbackUrl:
+        "https://app.example.test/auth/invitation?token=first-invitation",
+      type: "inspect_invitation",
+    });
+
+    await controller.dispatch({
+      callbackUrl:
+        "https://app.example.test/auth/invitation?token=SENTINEL-duplicate-id",
+      type: "inspect_invitation",
+    });
+
+    expect(history).toHaveBeenCalledTimes(2);
+    expect(history).toHaveBeenCalledWith("/auth/invitation");
+    expect(requests).toHaveLength(1);
+    expect(controller.getSnapshot()).toMatchObject({
+      code: "invalid_backend_result",
+      kind: "dependency_failure",
+      operation: "invitation",
+    });
+  });
 });
