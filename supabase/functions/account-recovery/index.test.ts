@@ -413,6 +413,29 @@ Deno.test(
 );
 
 Deno.test(
+  "account recovery accepts the exact CLI kong origin when its independent pin is absent",
+  async () => {
+    const requests: string[] = [];
+    const service = createAccountRecoveryDependencies(
+      {
+        ...runtimeConfiguration(),
+        DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: undefined,
+        SUPABASE_URL: "http://kong:8000",
+      },
+      async (input) => {
+        requests.push(String(input));
+        return new Response("{}", { status: 200 });
+      },
+      (() => undefined) as RequestLifetimeWaitUntil,
+    );
+
+    await service.requestRecovery("unknown@example.com");
+    assertEquals(requests.length, 1);
+    assertEquals(new URL(requests[0]).origin, "http://kong:8000");
+  },
+);
+
+Deno.test(
   "account recovery runtime rejects mismatched callback before egress",
   async () => {
     let requests = 0;

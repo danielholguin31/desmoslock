@@ -65,14 +65,23 @@ export function createAccountRecoveryDependencies(
           configuration.DESMOSLOCK_ACCOUNT_RECOVERY_CALLBACK,
           allowedOrigin,
         );
-  if (allowedOrigin === null || callback === null) {
+  const expectedSupabaseOrigin =
+    configuration.DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN;
+  const supabaseUrl = configuration.SUPABASE_URL;
+  if (
+    allowedOrigin === null ||
+    callback === null ||
+    typeof supabaseUrl !== "string" ||
+    (expectedSupabaseOrigin !== undefined &&
+      typeof expectedSupabaseOrigin !== "string")
+  ) {
     throw new Error("Account recovery configuration is invalid");
   }
   const client = createSupabaseHttpClient(
     {
-      expectedOrigin: String(configuration.DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN),
+      expectedOrigin: expectedSupabaseOrigin,
       publishableKey: String(configuration.SUPABASE_ANON_KEY),
-      supabaseUrl: String(configuration.SUPABASE_URL),
+      supabaseUrl,
     },
     serviceFetch,
   );

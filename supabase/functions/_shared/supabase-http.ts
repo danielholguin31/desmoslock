@@ -6,7 +6,7 @@ export type ServiceFetch = (
 ) => Promise<Response>;
 
 export interface SupabaseRuntimeConfiguration {
-  readonly expectedOrigin: string;
+  readonly expectedOrigin?: string;
   readonly publishableKey: string;
   readonly serviceRoleKey?: string;
   readonly supabaseUrl: string;
@@ -61,6 +61,32 @@ function parseSupabaseOrigin(value: unknown): string | null {
   return parsed.origin;
 }
 
+const CANONICAL_LOCAL_EDGE_RUNTIME_ORIGIN = "http://kong:8000";
+
+/**
+ * Resolves the sole permitted Supabase egress origin. Hosted and externally
+ * reachable local origins require an independent exact pin. The only absent-pin
+ * exception is the byte-exact URL injected inside Supabase's local Edge runtime.
+ */
+export function resolveSupabaseEgressOrigin(
+  supabaseUrl: unknown,
+  expectedOrigin: unknown,
+): string | null {
+  const suppliedOrigin = parseSupabaseOrigin(supabaseUrl);
+  if (suppliedOrigin === null) {
+    return null;
+  }
+  if (expectedOrigin === undefined) {
+    return supabaseUrl === CANONICAL_LOCAL_EDGE_RUNTIME_ORIGIN
+      ? suppliedOrigin
+      : null;
+  }
+  const pinnedOrigin = parseSupabaseOrigin(expectedOrigin);
+  return pinnedOrigin !== null && pinnedOrigin === suppliedOrigin
+    ? suppliedOrigin
+    : null;
+}
+
 export function parseAuthActionLinkOrigin(value: unknown): string | null {
   if (typeof value !== "string" || value.length === 0 || value.length > 2_048) {
     return null;
@@ -95,12 +121,12 @@ export function createSupabaseHttpClient(
   configuration: SupabaseRuntimeConfiguration,
   serviceFetch: ServiceFetch,
 ): SupabaseHttpClient {
-  const expectedOrigin = parseSupabaseOrigin(configuration.expectedOrigin);
-  const suppliedOrigin = parseSupabaseOrigin(configuration.supabaseUrl);
+  const suppliedOrigin = resolveSupabaseEgressOrigin(
+    configuration.supabaseUrl,
+    configuration.expectedOrigin,
+  );
   if (
-    expectedOrigin === null ||
     suppliedOrigin === null ||
-    expectedOrigin !== suppliedOrigin ||
     !isServerValue(configuration.publishableKey) ||
     (configuration.serviceRoleKey !== undefined &&
       !isServerValue(configuration.serviceRoleKey))

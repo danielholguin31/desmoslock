@@ -862,7 +862,7 @@ Deno.test(
 );
 
 Deno.test(
-  "staff invitation separates internal egress from the public action-link origin",
+  "staff invitation accepts injected canonical kong without an independent egress pin",
   async () => {
     const internalOrigin = "http://kong:8000";
     const publicActionLinkOrigin = "http://127.0.0.1:54321";
@@ -873,7 +873,7 @@ Deno.test(
     const service = createStaffInvitationDependencies(
       runtimeConfiguration({
         DESMOSLOCK_EXPECTED_AUTH_ACTION_LINK_ORIGIN: publicActionLinkOrigin,
-        DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: internalOrigin,
+        DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: undefined,
         SUPABASE_URL: internalOrigin,
       }),
       async (input) => {

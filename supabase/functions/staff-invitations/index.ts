@@ -351,22 +351,28 @@ export function createStaffInvitationDependencies(
   const inviteLifetimeSeconds = parseInvitationLifetimeSeconds(
     configuration.DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS,
   );
+  const expectedSupabaseOrigin =
+    configuration.DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN;
+  const supabaseUrl = configuration.SUPABASE_URL;
   // This explicit value must exactly match the hosted
   // `auth.email.otp_expiry`; there is intentionally no inferred default.
   if (
     allowedOrigin === null ||
     actionLinkOrigin === null ||
     callback === null ||
-    inviteLifetimeSeconds === null
+    inviteLifetimeSeconds === null ||
+    typeof supabaseUrl !== "string" ||
+    (expectedSupabaseOrigin !== undefined &&
+      typeof expectedSupabaseOrigin !== "string")
   ) {
     throw new Error("Staff invitation configuration is invalid");
   }
   const client = createSupabaseHttpClient(
     {
-      expectedOrigin: String(configuration.DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN),
+      expectedOrigin: expectedSupabaseOrigin,
       publishableKey: String(configuration.SUPABASE_ANON_KEY),
       serviceRoleKey: String(configuration.SUPABASE_SERVICE_ROLE_KEY),
-      supabaseUrl: String(configuration.SUPABASE_URL),
+      supabaseUrl,
     },
     serviceFetch,
   );

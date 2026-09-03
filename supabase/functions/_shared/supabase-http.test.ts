@@ -3,6 +3,7 @@
 import {
   createSupabaseHttpClient,
   parseAuthActionLinkOrigin,
+  resolveSupabaseEgressOrigin,
 } from "./supabase-http.ts";
 
 function assertEquals(actual: unknown, expected: unknown): void {
@@ -112,6 +113,53 @@ Deno.test(
         async () => new Response(null, { status: 200 }),
       );
       assertEquals(client.origin, origin);
+    }
+  },
+);
+
+Deno.test(
+  "Supabase HTTP client accepts only canonical CLI kong without an independent pin",
+  () => {
+    const client = createSupabaseHttpClient(
+      {
+        publishableKey: "synthetic-publishable-sentinel",
+        supabaseUrl: "http://kong:8000",
+      },
+      async () => new Response(null, { status: 200 }),
+    );
+    assertEquals(client.origin, "http://kong:8000");
+    assertEquals(
+      resolveSupabaseEgressOrigin("http://kong:8000", undefined),
+      "http://kong:8000",
+    );
+  },
+);
+
+Deno.test(
+  "absent egress pin rejects every canonical-kong near miss and other origin",
+  () => {
+    for (const origin of [
+      "http://kong:8000/",
+      "http://KONG:8000",
+      "http://kong:8001",
+      "http://kong:08000",
+      "http://kong.:8000",
+      "http://kong:8000/path",
+      "http://kong:8000?query=value",
+      "http://kong:8000#fragment",
+      "http://user:password@kong:8000",
+      "http://127.0.0.1:54321",
+      "http://[::1]:54321",
+      "http://host.docker.internal:54321",
+      "https://abcdefghijklmnopqrst.supabase.co",
+    ]) {
+      assertEquals(resolveSupabaseEgressOrigin(origin, undefined), null);
+    }
+    for (const nonAbsentPin of [null, "", "undefined"]) {
+      assertEquals(
+        resolveSupabaseEgressOrigin("http://kong:8000", nonAbsentPin),
+        null,
+      );
     }
   },
 );
