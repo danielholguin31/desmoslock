@@ -66,7 +66,11 @@ test("production Electron shell configures renderer boundaries and resets assess
       window.getByRole("heading", { exact: true, name: "DesmosLock" }),
     ).toBeVisible();
     await expect(window.locator("[data-v2-status]")).toHaveText(
-      "Secure calculator ready",
+      "Synthetic backend ready",
+    );
+    await expect(window.locator("[data-v2-status]")).toHaveAttribute(
+      "data-backend-status",
+      "ready",
     );
     await expect(
       window.evaluate(() => ({

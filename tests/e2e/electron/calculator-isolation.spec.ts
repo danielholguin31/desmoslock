@@ -516,7 +516,11 @@ test.describe.serial("isolated calculator surface", () => {
     expect(tcpSinkConnections).toBe(0);
     expect(udpSinkRequests).toBe(0);
     await expect(shell.locator("[data-v2-status]")).toHaveText(
-      "Secure calculator ready",
+      "Synthetic backend ready",
+    );
+    await expect(shell.locator("[data-v2-status]")).toHaveAttribute(
+      "data-backend-status",
+      "ready",
     );
 
     await typeCalculatorExpression(application, "(2,3)");

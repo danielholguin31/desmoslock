@@ -54,6 +54,7 @@ async function registerCalculatorProtocol(
 ): Promise<void> {
   const handle = createStaticProtocolHandler({
     assets: await loadCalculatorProtocolAssets(outputDirectory),
+    connectionAllowlist: "(response-origin);webrtc=block",
     contentSecurityPolicy: calculatorContentSecurityPolicy,
   });
 

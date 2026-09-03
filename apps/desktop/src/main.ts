@@ -11,8 +11,12 @@ import {
   type WebContents,
 } from "electron";
 
-import type { RepositoryBuildIdentity } from "@desmoslock/contracts";
+import {
+  parsePublicBackendConfiguration,
+  type RepositoryBuildIdentity,
+} from "@desmoslock/contracts";
 
+import { publicDesktopBackendConfiguration } from "./backend-status.js";
 import type { CalculatorSurface } from "./main/calculator-surface.js";
 import { calculatorScheme } from "./main/calculator-assets.js";
 import { createElectronCalculatorSurface } from "./main/electron-calculator-surface.js";
@@ -66,12 +70,23 @@ const shellScheme = "desmoslock-app";
 const shellBarHeight = 140;
 const connectionAllowlistOverride =
   "OverrideConnectionAllowlistOriginTrial" as const;
+const publicBackendConfiguration = parsePublicBackendConfiguration(
+  publicDesktopBackendConfiguration,
+);
+const shellConnectionAllowlist =
+  publicBackendConfiguration === null
+    ? "(response-origin);webrtc=block"
+    : `(response-origin ${JSON.stringify(
+        publicBackendConfiguration.url,
+      )});webrtc=block`;
 const shellContentSecurityPolicy = [
   "default-src 'none'",
   "script-src 'self'",
   "style-src 'self'",
   "img-src 'none'",
-  "connect-src 'none'",
+  publicBackendConfiguration === null
+    ? "connect-src 'none'"
+    : `connect-src ${publicBackendConfiguration.url}`,
   "font-src 'none'",
   "object-src 'none'",
   "frame-src 'none'",
@@ -182,6 +197,7 @@ async function ensureShellProtocol(outputDirectory: string): Promise<void> {
         contentType: "text/css; charset=utf-8",
       },
     },
+    connectionAllowlist: shellConnectionAllowlist,
     contentSecurityPolicy: shellContentSecurityPolicy,
   });
   session.defaultSession.protocol.handle(shellScheme, (request) =>

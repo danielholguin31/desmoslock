@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
 
+import { parsePublicBackendConfiguration } from "../packages/contracts/dist/index.js";
+
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -18,6 +20,23 @@ const appRoot = path.join(repositoryRoot, "apps", appName);
 const sourceRoot = path.join(appRoot, "src");
 const outputRoot = path.join(appRoot, "dist");
 const productionMode = process.argv.includes("--production");
+const publicBackendConfiguration = parsePublicBackendConfiguration({
+  environment: process.env.DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT,
+  url: process.env.DESMOSLOCK_PUBLIC_BACKEND_URL,
+});
+
+if (publicBackendConfiguration === null) {
+  throw new Error("Public backend build configuration is invalid");
+}
+
+const browserDefine = {
+  __DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT__: JSON.stringify(
+    publicBackendConfiguration.environment,
+  ),
+  __DESMOSLOCK_PUBLIC_BACKEND_URL__: JSON.stringify(
+    publicBackendConfiguration.url,
+  ),
+};
 
 await fs.rm(outputRoot, { force: true, recursive: true });
 await fs.mkdir(outputRoot, { recursive: true });
@@ -25,6 +44,7 @@ await fs.mkdir(outputRoot, { recursive: true });
 if (appName === "desktop") {
   await build({
     bundle: true,
+    define: browserDefine,
     entryPoints: [path.join(sourceRoot, "main.ts")],
     external: ["electron"],
     format: "esm",
@@ -35,6 +55,7 @@ if (appName === "desktop") {
   });
   await build({
     bundle: true,
+    define: browserDefine,
     entryPoints: [path.join(sourceRoot, "preload.ts")],
     external: ["electron"],
     format: "cjs",
@@ -45,6 +66,7 @@ if (appName === "desktop") {
   });
   await build({
     bundle: true,
+    define: browserDefine,
     entryPoints: {
       "calculator/host": path.join(sourceRoot, "calculator", "host.ts"),
       renderer: path.join(sourceRoot, "renderer.ts"),
@@ -75,6 +97,7 @@ if (appName === "desktop") {
 } else {
   await build({
     bundle: true,
+    define: browserDefine,
     entryPoints: [path.join(sourceRoot, "main.ts")],
     format: "esm",
     outdir: outputRoot,

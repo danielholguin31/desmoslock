@@ -14,6 +14,8 @@ describe("exact local protocol handler", () => {
         contentType: "text/html; charset=utf-8",
       },
     },
+    connectionAllowlist:
+      '(response-origin "https://api.example.invalid");webrtc=block',
     contentSecurityPolicy:
       "default-src 'none'; script-src 'self'; style-src 'self'",
   });
@@ -35,7 +37,7 @@ describe("exact local protocol handler", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("referrer-policy")).toBe("no-referrer");
     expect(response.headers.get("connection-allowlist")).toBe(
-      "(response-origin);webrtc=block",
+      '(response-origin "https://api.example.invalid");webrtc=block',
     );
     expect(await response.text()).toContain("Controlled Calculator");
   });

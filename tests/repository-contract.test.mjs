@@ -10,6 +10,7 @@ import {
   assertLegacyReleaseTombstone,
   expectedLegacyReleaseTombstone,
 } from "../scripts/release-tombstone-contract.mjs";
+import { assertSupabaseAuthConfiguration } from "../scripts/repository-contract/supabase-contract.mjs";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -172,7 +173,9 @@ test("v2 data plane is migration-owned and clean-start only", () => {
   for (const relativePath of [
     "supabase/config.toml",
     "supabase/migrations/20260824000100_v2_foundation.sql",
+    "supabase/migrations/20260828000100_internal_release_backend.sql",
     "supabase/seed.sql",
+    "supabase/tests/database/internal_release_backend.test.sql",
     "supabase/tests/database/v2_foundation.test.sql",
   ]) {
     assert.equal(
@@ -181,6 +184,13 @@ test("v2 data plane is migration-owned and clean-start only", () => {
       `${relativePath} is required`,
     );
   }
+
+  const buildScript = readText("scripts/build-app.mjs");
+  assert.doesNotMatch(
+    buildScript,
+    /DESMOSLOCK_PUBLIC_BACKEND_(?:ENVIRONMENT|URL)[\s\S]{0,80}\?\?/u,
+    "public app builds must not default missing backend configuration",
+  );
 
   const migration = fs.readFileSync(
     path.join(
@@ -211,6 +221,119 @@ test("v2 data plane is migration-owned and clean-start only", () => {
   for (const table of legacyProductTables) {
     assert.doesNotMatch(seed, new RegExp(`\\b${table}\\b`, "i"));
   }
+});
+
+test("generation-3 Supabase configuration is versioned and fails closed", () => {
+  const configuration = readText("supabase/config.toml");
+  const runbook = readText("docs/product-completion/reproducible-supabase.md");
+  const authStart = configuration.indexOf("[auth]\n");
+  const nextSection = configuration.indexOf("\n[", authStart + 1);
+  const authSection = configuration.slice(
+    authStart,
+    nextSection === -1 ? undefined : nextSection,
+  );
+
+  assert.match(
+    configuration,
+    /^schemas = \["public", "graphql_public", "desmoslock_v2"\]$/mu,
+  );
+  assert.match(configuration, /^\[functions\.health\]\nverify_jwt = false$/mu);
+  assert.notEqual(authStart, -1);
+  assert.match(authSection, /^site_url = "https:\/\/desmoslock\.invalid"$/mu);
+  assert.match(authSection, /^additional_redirect_urls = \[\]$/mu);
+  assert.match(authSection, /^enable_signup = false$/mu);
+  assert.match(authSection, /^enable_anonymous_sign_ins = false$/mu);
+  assert.doesNotThrow(() => assertSupabaseAuthConfiguration(configuration));
+  for (const [label, unsafeConfiguration] of [
+    [
+      "site URL made routable",
+      configuration.replace(
+        'site_url = "https://desmoslock.invalid"',
+        'site_url = "https://example.com"',
+      ),
+    ],
+    [
+      "redirect added",
+      configuration.replace(
+        "additional_redirect_urls = []",
+        'additional_redirect_urls = ["https://example.com"]',
+      ),
+    ],
+    [
+      "global signup enabled",
+      configuration.replace("enable_signup = false", "enable_signup = true"),
+    ],
+    [
+      "anonymous sign-in enabled",
+      configuration.replace(
+        "enable_anonymous_sign_ins = false",
+        "enable_anonymous_sign_ins = true",
+      ),
+    ],
+    [
+      "email confirmations disabled",
+      configuration.replace(
+        "enable_confirmations = true",
+        "enable_confirmations = false",
+      ),
+    ],
+    [
+      "email resend interval reduced",
+      configuration.replace('max_frequency = "1m"', 'max_frequency = "1s"'),
+    ],
+    [
+      "email OTP shortened",
+      configuration.replace("otp_length = 8", "otp_length = 6"),
+    ],
+    [
+      "TOTP enrollment disabled",
+      configuration.replace("enroll_enabled = true", "enroll_enabled = false"),
+    ],
+    [
+      "TOTP verification disabled",
+      configuration.replace("verify_enabled = true", "verify_enabled = false"),
+    ],
+  ]) {
+    assert.throws(
+      () => assertSupabaseAuthConfiguration(unsafeConfiguration),
+      undefined,
+      label,
+    );
+  }
+  assert.deepEqual(
+    [...runbook.matchAll(/^npm run build(?::[a-z-]+)?$/gmu)].map(
+      ([command]) => command,
+    ),
+    ["npm run build", "npm run build"],
+    "both configured app examples use the clean-working aggregate build",
+  );
+  for (const [workflowPath, expectedBuilds] of [
+    [".github/workflows/ci.yml", 2],
+    [".github/workflows/security.yml", 1],
+  ]) {
+    const workflow = readText(workflowPath);
+    assert.equal(
+      [...workflow.matchAll(/^\s+- run: npm run build$/gmu)].length,
+      expectedBuilds,
+      `${workflowPath} has the expected app build count`,
+    );
+    assert.equal(
+      [
+        ...workflow.matchAll(
+          /^\s+- run: npm run build\n\s+env:\n\s+DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT: local\n\s+DESMOSLOCK_PUBLIC_BACKEND_URL: http:\/\/127\.0\.0\.1:54321$/gmu,
+        ),
+      ].length,
+      expectedBuilds,
+      `${workflowPath} configures every app build explicitly`,
+    );
+  }
+});
+
+test("synthetic operator reports scoped completion rather than external verification", () => {
+  const backupRunner = readText("scripts/synthetic-backup/run.mjs");
+
+  assert.match(backupRunner, /receipt, status: "succeeded"/u);
+  assert.doesNotMatch(backupRunner, /receipt, status: "verified"/u);
 });
 
 test("legacy v1 and test-only support cannot enter a v2 release path", () => {
@@ -518,6 +641,25 @@ test("source-reconciliation ledger exactly covers both evidence inputs", () => {
   assert.equal(ledger.canonicalSource.repository, "danielholguin31/desmoslock");
   assert.equal(ledger.canonicalSource.branch, "main");
   assert.equal(ledger.canonicalSource.onlyIntegrationAndReleaseSource, true);
+  assert.deepEqual(ledger.canonicalSource.canonicalPaths, {
+    product: [
+      "apps",
+      "packages",
+      "supabase/config.toml",
+      "supabase/functions/deno.json",
+      "supabase/functions/health",
+      "supabase/migrations",
+      "supabase/seed.sql",
+      "supabase/tests/database",
+    ],
+    operations: ["scripts/synthetic-backup"],
+  });
+  assert.equal(
+    ledger.canonicalSource.canonicalPaths.product.includes(
+      "supabase/enterprise.sql",
+    ),
+    false,
+  );
   assert.deepEqual(ledger.canonicalSource.integrationBaseline, {
     commit: baseline,
     tree: baselineTree,

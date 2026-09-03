@@ -369,16 +369,22 @@ async function launchInternalProductionBuild(userDataDirectory) {
 
 async function inspectRuntime(application) {
   const shell = await application.firstWindow();
+  await shell.waitForFunction(
+    () =>
+      globalThis.document.querySelector("[data-v2-status]")?.dataset
+        .backendStatus === "ready",
+  );
   const shellBoundary = await shell.evaluate(async () => {
     const bridge = globalThis.desmoslockDesktop;
+    const status = globalThis.document.querySelector("[data-v2-status]");
     return {
+      backendStatus: status?.dataset.backendStatus,
       bridgeKeys: bridge === undefined ? [] : Object.keys(bridge).sort(),
       bridgeVersion: bridge?.version,
       lockRequestResult: await bridge?.requestAssessmentLock(),
       manualLockControls:
         globalThis.document.querySelectorAll("[data-lock-intent]").length,
-      status:
-        globalThis.document.querySelector("[data-v2-status]")?.textContent,
+      status: status?.textContent,
     };
   });
   const runtime = await application.evaluate(
@@ -527,6 +533,51 @@ async function createHostileNetworkSinks() {
   });
 }
 
+async function createBackendHealthFixture() {
+  return acquireWithLocalCleanup(async (registerCleanup) => {
+    const healthBody = JSON.stringify({
+      capabilities: ["auth", "database", "rest"],
+      fixtureDigest:
+        "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca",
+      fixtureValid: true,
+      fixtureVersion: "internal-baseline-v1",
+      schemaGeneration: 3,
+      service: "desmoslock-v2",
+      status: "ready",
+    });
+    const server = http.createServer((request, response) => {
+      if (request.method !== "GET" || request.url !== "/functions/v1/health") {
+        response.writeHead(404, {
+          "cache-control": "no-store",
+          "content-type": "text/plain; charset=utf-8",
+        });
+        response.end("Not Found");
+        return;
+      }
+      response.writeHead(200, {
+        "access-control-allow-origin": "*",
+        "cache-control": "no-store",
+        "content-type": "application/json; charset=utf-8",
+      });
+      response.end(healthBody);
+    });
+    await waitForResourceAcquisition(server, () =>
+      server.listen(0, "127.0.0.1"),
+    );
+    const close = () => new Promise((resolve) => server.close(() => resolve()));
+    registerCleanup(close);
+    const address = server.address();
+    assert.ok(
+      address !== null && typeof address !== "string",
+      "Backend health fixture did not expose an address",
+    );
+    return {
+      close,
+      origin: `http://127.0.0.1:${address.port}`,
+    };
+  });
+}
+
 async function runInternalHostileProbe(application, sinks) {
   await application.evaluate(({ webContents }, url) => {
     const calculator = webContents
@@ -635,14 +686,26 @@ const temporaryRoot = await fs.mkdtemp(
   path.join(os.tmpdir(), "desmoslock-production-verification-"),
 );
 let application = null;
+let backendFixture = null;
 let networkSinks = null;
 
 await runWithIndependentCleanup(async () => {
-  await run(process.execPath, [
-    path.join(repositoryRoot, "scripts", "build-app.mjs"),
-    "desktop",
-    "--production",
-  ]);
+  backendFixture = await createBackendHealthFixture();
+  await run(
+    process.execPath,
+    [
+      path.join(repositoryRoot, "scripts", "build-app.mjs"),
+      "desktop",
+      "--production",
+    ],
+    {
+      env: {
+        ...process.env,
+        DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT: "local",
+        DESMOSLOCK_PUBLIC_BACKEND_URL: backendFixture.origin,
+      },
+    },
+  );
   assert.deepEqual(
     await listFiles(distributionRoot),
     expectedDistributionFiles,
@@ -656,7 +719,6 @@ await runWithIndependentCleanup(async () => {
     )
   ).join("\n");
   for (const prohibited of [
-    /\bsynthetic\b/i,
     /authorized local fixture/i,
     /controlled calculator/i,
     /desmoslock\.security\.denial\.observers/i,
@@ -752,11 +814,12 @@ await runWithIndependentCleanup(async () => {
   application = await launchInternalProductionBuild(userDataDirectory);
   const firstLaunch = await inspectRuntime(application);
   assert.deepEqual(firstLaunch.shellBoundary, {
+    backendStatus: "ready",
     bridgeKeys: ["requestAssessmentLock", "version"],
     bridgeVersion: "2.0.0",
     lockRequestResult: { ok: true },
     manualLockControls: 0,
-    status: "Secure calculator ready",
+    status: "Synthetic backend ready",
   });
   assert.deepEqual(firstLaunch.runtime, {
     chromiumSandboxDisabledByLaunch: process.platform === "linux",
@@ -873,6 +936,9 @@ await runWithIndependentCleanup(async () => {
   },
   async () => {
     if (networkSinks !== null) await networkSinks.close();
+  },
+  async () => {
+    if (backendFixture !== null) await backendFixture.close();
   },
   () => fs.rm(temporaryRoot, { force: true, recursive: true }),
 ]);

@@ -6,6 +6,19 @@
     "repository": "danielholguin31/desmoslock",
     "branch": "main",
     "onlyIntegrationAndReleaseSource": true,
+    "canonicalPaths": {
+      "product": [
+        "apps",
+        "packages",
+        "supabase/config.toml",
+        "supabase/functions/deno.json",
+        "supabase/functions/health",
+        "supabase/migrations",
+        "supabase/seed.sql",
+        "supabase/tests/database"
+      ],
+      "operations": ["scripts/synthetic-backup"]
+    },
     "integrationBaseline": {
       "commit": "388170e94418d20ad205812553e1c9fdf5de9139",
       "tree": "95a00a77f84962248523f38a8c554216270cc23d"

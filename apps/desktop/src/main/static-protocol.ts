@@ -10,6 +10,7 @@ export interface StaticProtocolRequest {
 
 export interface StaticProtocolHandlerOptions {
   readonly assets: Readonly<Record<string, StaticProtocolAsset>>;
+  readonly connectionAllowlist: string;
   readonly contentSecurityPolicy: string;
 }
 
@@ -31,7 +32,7 @@ export function createStaticProtocolHandler(
     return new Response(asset.body, {
       headers: {
         "Cache-Control": "no-store",
-        "Connection-Allowlist": "(response-origin);webrtc=block",
+        "Connection-Allowlist": options.connectionAllowlist,
         "Content-Security-Policy": options.contentSecurityPolicy,
         "Content-Type": asset.contentType,
         "Referrer-Policy": "no-referrer",

@@ -43,6 +43,20 @@ export {
 } from "./gatekeeper-acceptance.js";
 export type { GatekeeperAcceptanceInput } from "./gatekeeper-acceptance.js";
 export {
+  createBackendHealthReader,
+  INTERNAL_BASELINE_FIXTURE_DIGEST,
+  observeBackend,
+  parsePublicBackendConfiguration,
+} from "./backend-observation.js";
+export type {
+  BackendHealthFetch,
+  BackendHealthReader,
+  BackendHealthTimeoutSignal,
+  BackendObservation,
+  InternalBackendEnvironment,
+  PublicBackendConfiguration,
+} from "./backend-observation.js";
+export {
   parseTrustedGitHubOrigin,
   verifyReleaseProvenance,
 } from "./release-provenance.js";

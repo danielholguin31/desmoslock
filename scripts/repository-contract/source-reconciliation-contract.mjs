@@ -237,6 +237,7 @@ export function verifySourceReconciliationContract(
       "repository",
       "branch",
       "onlyIntegrationAndReleaseSource",
+      "canonicalPaths",
       "integrationBaseline",
       "preservedLegacyEvidence",
       "releasePolicy",
@@ -250,6 +251,31 @@ export function verifySourceReconciliationContract(
     reconciliation.canonicalSource.onlyIntegrationAndReleaseSource !== true
   ) {
     fail("Ledger must name main as the sole canonical source");
+  }
+  requireEqual(
+    reconciliation.canonicalSource.canonicalPaths,
+    {
+      product: [
+        "apps",
+        "packages",
+        "supabase/config.toml",
+        "supabase/functions/deno.json",
+        "supabase/functions/health",
+        "supabase/migrations",
+        "supabase/seed.sql",
+        "supabase/tests/database",
+      ],
+      operations: ["scripts/synthetic-backup"],
+    },
+    "Canonical v2 source paths",
+  );
+  for (const sourcePath of [
+    ...reconciliation.canonicalSource.canonicalPaths.product,
+    ...reconciliation.canonicalSource.canonicalPaths.operations,
+  ]) {
+    if (!fs.existsSync(path.join(repositoryRoot, sourcePath))) {
+      fail(`Canonical v2 source path is missing: ${sourcePath}`);
+    }
   }
   requireEqual(
     reconciliation.canonicalSource.integrationBaseline,

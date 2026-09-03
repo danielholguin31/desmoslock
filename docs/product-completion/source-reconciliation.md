@@ -19,6 +19,13 @@ The machine-readable authority for the identities and per-commit decisions is
 verifier contains an independent expected inventory and fails when the ledger,
 release tombstone, evidence counts, or package-version contract drifts.
 
+Within that sole canonical line, v2 product authority is narrow: `apps/`,
+`packages/`, `supabase/config.toml`, `supabase/functions/deno.json`,
+`supabase/functions/health/`, `supabase/migrations/`, `supabase/seed.sql`, and
+`supabase/tests/database/`. The only issue-30 operations source is
+`scripts/synthetic-backup/`. These paths do not make any sibling legacy SQL,
+deployment surface, or operator code authoritative.
+
 The legacy enterprise-administration surface remains visible on the canonical
 line at `web/admin`, `supabase/enterprise.sql`, and `docs/OPERATIONS.md` only as
 historical evidence. It is excluded from the v2 workspaces and every legacy

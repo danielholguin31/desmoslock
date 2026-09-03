@@ -37,6 +37,9 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
+        env:
+          DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT: local
+          DESMOSLOCK_PUBLIC_BACKEND_URL: http://127.0.0.1:54321
       - run: npm run test:repository
       - run: npm run verify:repository
 
@@ -129,6 +132,9 @@ jobs:
       - run: npm run test:workflows
       - run: npm run verify:locks
       - run: npm run build
+        env:
+          DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT: local
+          DESMOSLOCK_PUBLIC_BACKEND_URL: http://127.0.0.1:54321
       - run: npm run sbom
       - run: npm run verify:licenses
       - run: npm run verify:packages
