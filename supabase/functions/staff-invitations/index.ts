@@ -750,7 +750,12 @@ export async function handleRequest(
     return codeResponse("service_unavailable", 503);
   }
   const corsPolicy = {
-    allowedHeaders: ["authorization", "content-type"],
+    allowedHeaders: [
+      "apikey",
+      "authorization",
+      "content-type",
+      "x-client-info",
+    ],
     allowedOrigin: dependencies.allowedOrigin,
   } as const;
   if (request.method === "OPTIONS") {

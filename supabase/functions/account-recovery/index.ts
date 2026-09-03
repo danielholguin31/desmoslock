@@ -173,7 +173,7 @@ export async function handleRequest(
     return codeResponse("service_unavailable", 503);
   }
   const corsPolicy = {
-    allowedHeaders: ["content-type"],
+    allowedHeaders: ["apikey", "content-type", "x-client-info"],
     allowedOrigin: dependencies.allowedOrigin,
   } as const;
   if (request.method === "OPTIONS") {

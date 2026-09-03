@@ -169,11 +169,12 @@ Deno.test(
   },
 );
 
-Deno.test("staff invitation validates exact CORS preflight", async () => {
+Deno.test("staff invitation CORS matches Supabase SDK", async () => {
   const valid = await handleRequest(
     invitationRequest(undefined, {
       headers: {
-        "access-control-request-headers": "Content-Type, Authorization",
+        "access-control-request-headers":
+          "X-Client-Info, Authorization, ApiKey, Content-Type",
         "access-control-request-method": "POST",
       },
       method: "OPTIONS",
@@ -183,14 +184,30 @@ Deno.test("staff invitation validates exact CORS preflight", async () => {
   assertEquals(valid.status, 204);
   assertEquals(
     valid.headers.get("access-control-allow-headers"),
-    "authorization, content-type",
+    "apikey, authorization, content-type, x-client-info",
   );
+
+  const omittedAuthorization = await handleRequest(
+    invitationRequest(undefined, {
+      headers: {
+        "access-control-request-headers": "apikey, content-type, x-client-info",
+        "access-control-request-method": "POST",
+      },
+      method: "OPTIONS",
+    }),
+    dependencies(),
+  );
+  assertEquals(omittedAuthorization.status, 400);
+  assertEquals(await omittedAuthorization.json(), {
+    code: "invalid_request",
+    ok: false,
+  });
 
   const extraHeader = await handleRequest(
     invitationRequest(undefined, {
       headers: {
         "access-control-request-headers":
-          "authorization, content-type, x-extra",
+          "apikey, authorization, content-type, x-client-info, x-extra",
         "access-control-request-method": "POST",
       },
       method: "OPTIONS",
@@ -206,7 +223,8 @@ Deno.test("staff invitation validates exact CORS preflight", async () => {
   const wrongOrigin = await handleRequest(
     invitationRequest(undefined, {
       headers: {
-        "access-control-request-headers": "authorization, content-type",
+        "access-control-request-headers":
+          "apikey, authorization, content-type, x-client-info",
         "access-control-request-method": "POST",
         origin: "https://attacker.invalid",
       },

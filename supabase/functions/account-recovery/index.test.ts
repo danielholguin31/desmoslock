@@ -120,11 +120,11 @@ Deno.test(
   },
 );
 
-Deno.test("account recovery validates exact CORS preflight", async () => {
+Deno.test("account recovery CORS matches Supabase SDK", async () => {
   const valid = await handleRequest(
     recoveryRequest(undefined, {
       headers: {
-        "access-control-request-headers": "Content-Type",
+        "access-control-request-headers": "X-Client-Info, Content-Type, ApiKey",
         "access-control-request-method": "POST",
       },
       method: "OPTIONS",
@@ -134,13 +134,46 @@ Deno.test("account recovery validates exact CORS preflight", async () => {
   assertEquals(valid.status, 204);
   assertEquals(
     valid.headers.get("access-control-allow-headers"),
-    "content-type",
+    "apikey, content-type, x-client-info",
   );
+
+  const omittedSdkHeader = await handleRequest(
+    recoveryRequest(undefined, {
+      headers: {
+        "access-control-request-headers": "apikey, content-type",
+        "access-control-request-method": "POST",
+      },
+      method: "OPTIONS",
+    }),
+    dependencies(),
+  );
+  assertEquals(omittedSdkHeader.status, 400);
+  assertEquals(await omittedSdkHeader.json(), {
+    code: "invalid_request",
+    ok: false,
+  });
+
+  const extraHeader = await handleRequest(
+    recoveryRequest(undefined, {
+      headers: {
+        "access-control-request-headers":
+          "apikey, content-type, x-client-info, x-extra",
+        "access-control-request-method": "POST",
+      },
+      method: "OPTIONS",
+    }),
+    dependencies(),
+  );
+  assertEquals(extraHeader.status, 400);
+  assertEquals(await extraHeader.json(), {
+    code: "invalid_request",
+    ok: false,
+  });
 
   const wrongMethod = await handleRequest(
     recoveryRequest(undefined, {
       headers: {
-        "access-control-request-headers": "content-type",
+        "access-control-request-headers": "apikey, content-type, x-client-info",
         "access-control-request-method": "PUT",
       },
       method: "OPTIONS",
@@ -156,7 +189,7 @@ Deno.test("account recovery validates exact CORS preflight", async () => {
   const wrongOrigin = await handleRequest(
     recoveryRequest(undefined, {
       headers: {
-        "access-control-request-headers": "content-type",
+        "access-control-request-headers": "apikey, content-type, x-client-info",
         "access-control-request-method": "POST",
         origin: "https://attacker.invalid",
       },
