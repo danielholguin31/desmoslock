@@ -1549,28 +1549,33 @@ describe("staff auth controller", () => {
     expect(JSON.stringify(controller.getSnapshot())).not.toContain(sharedEmail);
   });
 
-  it.each([" SHARED@example.test", "SHARED@example.test"])(
-    "rejects noncanonical manageable email %j",
-    async (email) => {
-      const controller = createController(
-        createAdapter(
-          access("owner", {
-            manageableStaff: [
-              {
-                ...manageableStaff()[0]!,
-                profile: { ...manageableStaff()[0]!.profile, email },
-              },
-            ],
-          }),
-        ),
-      );
-      await controller.dispatch({ type: "bootstrap" });
-      expect(controller.getSnapshot()).toMatchObject({
-        code: "invalid_backend_result",
-        kind: "dependency_failure",
-      });
-    },
-  );
+  // This table mirrors the canonical email predicate in packages/contracts.
+  it.each([
+    " SHARED@example.test",
+    "SHARED@example.test",
+    "shared\u0000@example.test",
+    "not-an-email",
+    "user@localhost",
+    "usér@example.test",
+  ])("rejects noncanonical manageable email %j", async (email) => {
+    const controller = createController(
+      createAdapter(
+        access("owner", {
+          manageableStaff: [
+            {
+              ...manageableStaff()[0]!,
+              profile: { ...manageableStaff()[0]!.profile, email },
+            },
+          ],
+        }),
+      ),
+    );
+    await controller.dispatch({ type: "bootstrap" });
+    expect(controller.getSnapshot()).toMatchObject({
+      code: "invalid_backend_result",
+      kind: "dependency_failure",
+    });
+  });
 
   it("rejects duplicate pending invitation email identity with different IDs", async () => {
     const original = manageableInvitations()[0]!;
@@ -1591,23 +1596,27 @@ describe("staff auth controller", () => {
     });
   });
 
-  it.each([" pending@example.test", "PENDING@example.test"])(
-    "rejects noncanonical pending invitation email %j",
-    async (email) => {
-      const controller = createController(
-        createAdapter(
-          access("owner", {
-            manageableInvitations: [{ ...manageableInvitations()[0]!, email }],
-          }),
-        ),
-      );
-      await controller.dispatch({ type: "bootstrap" });
-      expect(controller.getSnapshot()).toMatchObject({
-        code: "invalid_backend_result",
-        kind: "dependency_failure",
-      });
-    },
-  );
+  it.each([
+    " pending@example.test",
+    "PENDING@example.test",
+    "pending\u0000@example.test",
+    "not-an-email",
+    "user@localhost",
+    "usér@example.test",
+  ])("rejects noncanonical pending invitation email %j", async (email) => {
+    const controller = createController(
+      createAdapter(
+        access("owner", {
+          manageableInvitations: [{ ...manageableInvitations()[0]!, email }],
+        }),
+      ),
+    );
+    await controller.dispatch({ type: "bootstrap" });
+    expect(controller.getSnapshot()).toMatchObject({
+      code: "invalid_backend_result",
+      kind: "dependency_failure",
+    });
+  });
 
   it.each([
     { invitationId: "", schoolId: "school-1" },

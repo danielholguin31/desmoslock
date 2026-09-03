@@ -2339,11 +2339,17 @@ function validText(value: unknown, maximumLength: number): value is string {
   );
 }
 
+// Keep this duplicate predicate exactly aligned with packages/contracts/src/staff-auth.ts
+// until the shared package exports its canonical email scalar parser.
+const canonicalManagementEmailPattern =
+  /^[a-z0-9!#$%&'*+/=?^_{}|~-]+(?:\.[a-z0-9!#$%&'*+/=?^_{}|~-]+)*@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/u;
+
 function isCanonicalManagementEmail(value: unknown): value is string {
   return (
     validText(value, 254) &&
     value === value.trim() &&
-    value === value.toLowerCase()
+    value === value.toLowerCase() &&
+    canonicalManagementEmailPattern.test(value)
   );
 }
 
