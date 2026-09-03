@@ -1,0 +1,1424 @@
+begin;
+
+create extension if not exists pgtap with schema extensions;
+set local search_path = extensions, public, pg_catalog;
+
+select no_plan();
+
+select has_column(
+  'desmoslock_v2',
+  'profiles',
+  'auth_user_id',
+  'a staff profile can be bound to exactly one Auth identity'
+);
+select has_column(
+  'desmoslock_v2',
+  'memberships',
+  'status',
+  'School memberships have an explicit lifecycle state'
+);
+select has_column(
+  'desmoslock_v2',
+  'memberships',
+  'role_revision',
+  'School memberships carry a live role revision'
+);
+select has_table(
+  'desmoslock_v2',
+  'staff_invitations',
+  'controlled staff invitations exist'
+);
+select has_table(
+  'desmoslock_v2',
+  'application_session_revocations',
+  'application session revocations exist independently of Auth sessions'
+);
+select has_table(
+  'desmoslock_v2',
+  'staff_audit_events',
+  'a minimized staff authentication audit exists'
+);
+
+select ok(
+  (
+    select bool_and(class.relrowsecurity)
+    from pg_class as class
+    join pg_namespace as namespace on namespace.oid = class.relnamespace
+    where namespace.nspname = 'desmoslock_v2'
+      and class.relname in (
+        'staff_invitations',
+        'application_session_revocations',
+        'staff_audit_events'
+      )
+  ),
+  'every staff lifecycle table enables RLS'
+);
+select is(
+  (
+    select count(*)::bigint
+    from pg_policy as policy
+    join pg_class as class on class.oid = policy.polrelid
+    join pg_namespace as namespace on namespace.oid = class.relnamespace
+    where namespace.nspname = 'desmoslock_v2'
+      and class.relname in (
+        'staff_invitations',
+        'application_session_revocations',
+        'staff_audit_events'
+      )
+  ),
+  0::bigint,
+  'staff lifecycle tables have no direct allow policy'
+);
+
+select ok(
+  not exists (
+    select 1
+    from unnest(array[
+      'staff_invitations',
+      'application_session_revocations',
+      'staff_audit_events'
+    ]) as lifecycle_table(table_name)
+    cross join unnest(array[
+      'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'
+    ]) as checked_privilege(privilege_name)
+    where has_table_privilege(
+      'authenticated',
+      'desmoslock_v2.' || lifecycle_table.table_name,
+      checked_privilege.privilege_name
+    )
+  ),
+  'authenticated has no direct lifecycle table privileges'
+);
+
+select ok(
+  has_function_privilege(
+    'authenticated',
+    'desmoslock_v2.current_staff_context()',
+    'EXECUTE'
+  ),
+  'authenticated can request its server-derived staff context'
+);
+select ok(
+  has_function_privilege(
+    'authenticated',
+    'desmoslock_v2.begin_staff_invitation(uuid,text,text)',
+    'EXECUTE'
+  ),
+  'authenticated can invoke the controlled invitation seam'
+);
+select ok(
+  not has_function_privilege(
+    'authenticated',
+    'desmoslock_v2.internal_complete_staff_invitation(uuid,uuid,timestamp with time zone)',
+    'EXECUTE'
+  ),
+  'authenticated cannot bind an invitation to an Auth user'
+);
+select ok(
+  has_function_privilege(
+    'service_role',
+    'desmoslock_v2.internal_complete_staff_invitation(uuid,uuid,timestamp with time zone)',
+    'EXECUTE'
+  ),
+  'only the service delivery boundary can bind an invitation recipient'
+);
+select ok(
+  not has_function_privilege(
+    'anon',
+    'desmoslock_v2.current_staff_context()',
+    'EXECUTE'
+  ),
+  'anonymous callers cannot enter the staff lifecycle'
+);
+
+select is(
+  (
+    select function_info.proargnames[1:function_info.pronargs]
+    from pg_proc as function_info
+    where function_info.oid =
+      to_regprocedure('desmoslock_v2.begin_staff_invitation(uuid,text,text)')
+  ),
+  array['workspace_id', 'email', 'role']::text[],
+  'the public invitation RPC keeps its exact PostgREST parameter names'
+);
+select is(
+  (
+    select function_info.proargnames[1:function_info.pronargs]
+    from pg_proc as function_info
+    where function_info.oid = to_regprocedure(
+      'desmoslock_v2.internal_complete_staff_invitation(uuid,uuid,timestamp with time zone)'
+    )
+  ),
+  array['invitation_id', 'invited_user_id', 'expires_at']::text[],
+  'the service completion RPC keeps its exact PostgREST parameter names'
+);
+select is(
+  (
+    select function_info.proargnames[1:function_info.pronargs]
+    from pg_proc as function_info
+    where function_info.oid =
+      to_regprocedure('desmoslock_v2.internal_fail_staff_invitation(uuid,text)')
+  ),
+  array['invitation_id', 'reason_code']::text[],
+  'the service cleanup RPC keeps its exact PostgREST parameter names'
+);
+
+select ok(
+  (
+    select bool_and(column_info.is_nullable = 'YES')
+    from information_schema.columns as column_info
+    where column_info.table_schema = 'desmoslock_v2'
+      and column_info.column_name = 'seed_key'
+      and column_info.table_name in (
+        'workspaces', 'profiles', 'memberships', 'tests', 'student_sessions'
+      )
+  ),
+  'runtime rows do not require synthetic fixture seed keys'
+);
+
+insert into auth.users (
+  instance_id,
+  id,
+  aud,
+  role,
+  email,
+  encrypted_password,
+  email_confirmed_at,
+  raw_app_meta_data,
+  raw_user_meta_data,
+  created_at,
+  updated_at
+)
+values
+  (
+    '00000000-0000-0000-0000-000000000000',
+    'a1000000-0000-4000-8000-000000000001',
+    'authenticated',
+    'authenticated',
+    'owner-alpha@staff.invalid',
+    '',
+    now(),
+    '{"provider":"email","providers":["email"]}',
+    '{}',
+    now(),
+    now()
+  ),
+  (
+    '00000000-0000-0000-0000-000000000000',
+    'a1000000-0000-4000-8000-000000000002',
+    'authenticated',
+    'authenticated',
+    'invitee@staff.invalid',
+    '',
+    now(),
+    '{"provider":"email","providers":["email"]}',
+    '{}',
+    now(),
+    now()
+  ),
+  (
+    '00000000-0000-0000-0000-000000000000',
+    'a1000000-0000-4000-8000-000000000003',
+    'authenticated',
+    'authenticated',
+    'wrong-recipient@staff.invalid',
+    '',
+    now(),
+    '{"provider":"email","providers":["email"]}',
+    '{}',
+    now(),
+    now()
+  ),
+  (
+    '00000000-0000-0000-0000-000000000000',
+    'a1000000-0000-4000-8000-000000000004',
+    'authenticated',
+    'authenticated',
+    'rollback-recipient@staff.invalid',
+    '',
+    now(),
+    '{"provider":"email","providers":["email"]}',
+    '{}',
+    now(),
+    now()
+  ),
+  (
+    '00000000-0000-0000-0000-000000000000',
+    'a1000000-0000-4000-8000-000000000005',
+    'authenticated',
+    'authenticated',
+    'owner-beta@staff.invalid',
+    '',
+    now(),
+    '{"provider":"email","providers":["email"]}',
+    '{}',
+    now(),
+    now()
+  );
+
+insert into auth.mfa_factors (
+  id,
+  user_id,
+  friendly_name,
+  factor_type,
+  status,
+  created_at,
+  updated_at
+)
+values
+  (
+    'b1000000-0000-4000-8000-000000000001',
+    'a1000000-0000-4000-8000-000000000001',
+    'Synthetic alpha owner factor',
+    'totp',
+    'verified',
+    now(),
+    now()
+  ),
+  (
+    'b1000000-0000-4000-8000-000000000002',
+    'a1000000-0000-4000-8000-000000000002',
+    'Synthetic invitee factor',
+    'totp',
+    'verified',
+    now(),
+    now()
+  ),
+  (
+    'b1000000-0000-4000-8000-000000000003',
+    'a1000000-0000-4000-8000-000000000003',
+    'Synthetic wrong-recipient factor',
+    'totp',
+    'verified',
+    now(),
+    now()
+  ),
+  (
+    'b1000000-0000-4000-8000-000000000004',
+    'a1000000-0000-4000-8000-000000000004',
+    'Synthetic rollback-recipient factor',
+    'totp',
+    'verified',
+    now(),
+    now()
+  ),
+  (
+    'b1000000-0000-4000-8000-000000000005',
+    'a1000000-0000-4000-8000-000000000005',
+    'Synthetic beta owner factor',
+    'totp',
+    'verified',
+    now(),
+    now()
+  );
+
+insert into auth.sessions (
+  id,
+  user_id,
+  created_at,
+  updated_at,
+  factor_id,
+  aal,
+  not_after
+)
+values
+  (
+    'c1000000-0000-4000-8000-000000000001',
+    'a1000000-0000-4000-8000-000000000001',
+    now(),
+    now(),
+    'b1000000-0000-4000-8000-000000000001',
+    'aal2',
+    now() + interval '2 hours'
+  ),
+  (
+    'c1000000-0000-4000-8000-000000000002',
+    'a1000000-0000-4000-8000-000000000002',
+    now(),
+    now(),
+    'b1000000-0000-4000-8000-000000000002',
+    'aal2',
+    now() + interval '2 hours'
+  ),
+  (
+    'c1000000-0000-4000-8000-000000000003',
+    'a1000000-0000-4000-8000-000000000003',
+    now(),
+    now(),
+    'b1000000-0000-4000-8000-000000000003',
+    'aal2',
+    now() + interval '2 hours'
+  ),
+  (
+    'c1000000-0000-4000-8000-000000000004',
+    'a1000000-0000-4000-8000-000000000004',
+    now(),
+    now(),
+    'b1000000-0000-4000-8000-000000000004',
+    'aal2',
+    now() + interval '2 hours'
+  ),
+  (
+    'c1000000-0000-4000-8000-000000000005',
+    'a1000000-0000-4000-8000-000000000005',
+    now(),
+    now(),
+    'b1000000-0000-4000-8000-000000000005',
+    'aal2',
+    now() + interval '2 hours'
+  ),
+  (
+    'c1000000-0000-4000-8000-000000000011',
+    'a1000000-0000-4000-8000-000000000001',
+    now(),
+    now(),
+    'b1000000-0000-4000-8000-000000000001',
+    'aal2',
+    now() + interval '2 hours'
+  );
+
+update desmoslock_v2.profiles
+set auth_user_id = 'a1000000-0000-4000-8000-000000000001'
+where seed_key = 'profile.alpha.owner';
+
+update desmoslock_v2.profiles
+set auth_user_id = 'a1000000-0000-4000-8000-000000000005'
+where seed_key = 'profile.beta.owner';
+
+create function pg_temp.set_staff_claims(
+  user_id uuid,
+  session_id uuid,
+  aal text,
+  extra_claims jsonb default '{}'::jsonb,
+  expires_in interval default interval '1 hour'
+)
+returns void
+language plpgsql
+as $$
+begin
+  perform set_config(
+    'request.jwt.claims',
+    (
+      jsonb_build_object(
+        'sub', user_id::text,
+        'role', 'authenticated',
+        'session_id', session_id::text,
+        'aal', aal,
+        'exp', floor(extract(epoch from clock_timestamp() + expires_in))::bigint
+      ) || extra_claims
+    )::text,
+    true
+  );
+end;
+$$;
+
+create temporary table staff_auth_test_results (
+  label text primary key,
+  code text not null,
+  invitation_id uuid,
+  profile_id uuid,
+  school_id uuid,
+  membership_role text
+) on commit drop;
+
+grant select, insert, update, delete on table staff_auth_test_results
+  to authenticated, service_role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000003',
+  'c1000000-0000-4000-8000-000000000003',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (select code from desmoslock_v2.current_staff_context()),
+  'membership_inactive',
+  'an uninvited verified Auth user has no staff context'
+);
+select is(
+  (select code from desmoslock_v2.current_staff_invitations()),
+  'invitation_not_found',
+  'an uninvited verified Auth user has no discoverable invitation'
+);
+select throws_ok(
+  $$select * from desmoslock_v2.tests$$,
+  '42501',
+  null,
+  'an uninvited Auth user cannot read School Tests directly'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+select results_eq(
+  $$
+    select code, school_id::text, membership_role
+    from desmoslock_v2.current_staff_context()
+  $$,
+  $$values ('ok'::text, '10000000-0000-4000-8000-000000000001'::text, 'owner'::text)$$,
+  'live database identity, session, membership, and role produce Alpha context'
+);
+select results_eq(
+  $$
+    select school_id::text, school_slug, membership_role
+    from desmoslock_v2.current_school_summary()
+  $$,
+  $$values ('10000000-0000-4000-8000-000000000001'::text, 'synthetic-alpha'::text, 'owner'::text)$$,
+  'the original School summary now uses the live Auth/session/membership seam'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal1'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.begin_staff_invitation(
+      '10000000-0000-4000-8000-000000000001',
+      'aal1-recipient@staff.invalid',
+      'teacher'
+    )
+  ),
+  'step_up_required',
+  'a signed AAL1 session cannot initiate an invitation'
+);
+reset role;
+
+update auth.mfa_factors
+set status = 'unverified'
+where id = 'b1000000-0000-4000-8000-000000000001';
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.begin_staff_invitation(
+      '10000000-0000-4000-8000-000000000001',
+      'removed-factor-recipient@staff.invalid',
+      'teacher'
+    )
+  ),
+  'step_up_required',
+  'a removed TOTP factor invalidates an already-open AAL2 mutation path'
+);
+reset role;
+update auth.mfa_factors
+set status = 'verified'
+where id = 'b1000000-0000-4000-8000-000000000001';
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2',
+  '{"app_metadata":{"role":"owner","workspace_id":"10000000-0000-4000-8000-000000000002"}}'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.begin_staff_invitation(
+      '10000000-0000-4000-8000-000000000002',
+      'cross-school-recipient@staff.invalid',
+      'admin'
+    )
+  ),
+  'membership_inactive',
+  'forged JWT role and School metadata cannot cross the School boundary'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.begin_staff_invitation(
+      '10000000-0000-4000-8000-000000000001',
+      'owner-role-recipient@staff.invalid',
+      'owner'
+    )
+  ),
+  'invalid_request',
+  'the invitation API never creates another Owner'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
+select 'acceptance', result.code, result.invitation_id
+from desmoslock_v2.begin_staff_invitation(
+  '10000000-0000-4000-8000-000000000001',
+  'invitee@staff.invalid',
+  'admin'
+) as result;
+reset role;
+
+select is(
+  (select code from pg_temp.staff_auth_test_results where label = 'acceptance'),
+  'invitation_pending',
+  'an Owner can initiate an Administrator invitation'
+);
+select is(
+  (
+    select status
+    from desmoslock_v2.staff_invitations
+    where id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'acceptance'
+    )
+  ),
+  'pending_delivery',
+  'an initiated invitation is not usable before service-side recipient binding'
+);
+
+set local role service_role;
+insert into pg_temp.staff_auth_test_results (label, code)
+select 'acceptance-complete', result.code
+from desmoslock_v2.internal_complete_staff_invitation(
+  (
+    select invitation_id
+    from pg_temp.staff_auth_test_results
+    where label = 'acceptance'
+  ),
+  'a1000000-0000-4000-8000-000000000002',
+  now() + interval '1 hour'
+) as result;
+reset role;
+
+select is(
+  (select code from pg_temp.staff_auth_test_results where label = 'acceptance-complete'),
+  'invitation_usable',
+  'the service boundary binds the intended recipient and expiry'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000002',
+  'c1000000-0000-4000-8000-000000000002',
+  'aal2'
+);
+set local role authenticated;
+select results_eq(
+  $$
+    select code, invitation_id
+    from desmoslock_v2.current_staff_invitations()
+  $$,
+  $$
+    select
+      'ok'::text,
+      invitation_id
+    from pg_temp.staff_auth_test_results
+    where label = 'acceptance'
+  $$,
+  'only the bound and verified recipient can discover the usable invitation'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000003',
+  'c1000000-0000-4000-8000-000000000003',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.accept_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'acceptance'
+      ),
+      'Wrong Recipient'
+    )
+  ),
+  'forbidden',
+  'a valid but different Auth user cannot accept the invitation'
+);
+reset role;
+
+update auth.users
+set email = 'changed-recipient@staff.invalid'
+where id = 'a1000000-0000-4000-8000-000000000002';
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000002',
+  'c1000000-0000-4000-8000-000000000002',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.accept_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'acceptance'
+      ),
+      'Changed Recipient'
+    )
+  ),
+  'forbidden',
+  'an email identity changed after delivery cannot accept the invitation'
+);
+reset role;
+update auth.users
+set email = 'invitee@staff.invalid', email_confirmed_at = null
+where id = 'a1000000-0000-4000-8000-000000000002';
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000002',
+  'c1000000-0000-4000-8000-000000000002',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.accept_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'acceptance'
+      ),
+      'Unconfirmed Recipient'
+    )
+  ),
+  'email_unverified',
+  'an unconfirmed email identity cannot accept an invitation'
+);
+reset role;
+update auth.users
+set email_confirmed_at = now()
+where id = 'a1000000-0000-4000-8000-000000000002';
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000002',
+  'c1000000-0000-4000-8000-000000000002',
+  'aal1'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.accept_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'acceptance'
+      ),
+      'AAL1 Recipient'
+    )
+  ),
+  'step_up_required',
+  'invitation acceptance requires signed AAL2'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000002',
+  'c1000000-0000-4000-8000-000000000002',
+  'aal2'
+);
+set local role authenticated;
+insert into pg_temp.staff_auth_test_results (
+  label,
+  code
+)
+select
+  'accepted',
+  result.code
+from desmoslock_v2.accept_staff_invitation(
+  (
+    select invitation_id
+    from pg_temp.staff_auth_test_results
+    where label = 'acceptance'
+  ),
+  'Synthetic Accepted Administrator'
+) as result;
+reset role;
+
+update pg_temp.staff_auth_test_results
+set
+  profile_id = (
+    select profile.id
+    from desmoslock_v2.profiles as profile
+    where profile.auth_user_id = 'a1000000-0000-4000-8000-000000000002'
+  ),
+  school_id = '10000000-0000-4000-8000-000000000001',
+  membership_role = 'admin'
+where label = 'accepted';
+
+select is(
+  (select code from pg_temp.staff_auth_test_results where label = 'accepted'),
+  'invitation_accepted',
+  'the intended stepped-up recipient accepts exactly once'
+);
+select results_eq(
+  $$
+    select
+      profile.auth_user_id::text,
+      membership.workspace_id::text,
+      membership.role,
+      membership.status,
+      invitation.status
+    from desmoslock_v2.profiles as profile
+    join desmoslock_v2.memberships as membership
+      on membership.profile_id = profile.id
+    join desmoslock_v2.staff_invitations as invitation
+      on invitation.accepted_profile_id = profile.id
+    where profile.auth_user_id = 'a1000000-0000-4000-8000-000000000002'
+  $$,
+  $$values (
+    'a1000000-0000-4000-8000-000000000002'::text,
+    '10000000-0000-4000-8000-000000000001'::text,
+    'admin'::text,
+    'active'::text,
+    'accepted'::text
+  )$$,
+  'acceptance atomically creates one profile, one live membership, and a terminal invitation'
+);
+select is(
+  (
+    select count(*)
+    from desmoslock_v2.staff_audit_events
+    where invitation_id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'acceptance'
+    )
+      and event_type = 'invitation_accepted'
+  ),
+  1::bigint,
+  'the accepted invitation has exactly one acceptance audit event'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000002',
+  'c1000000-0000-4000-8000-000000000002',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.accept_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'acceptance'
+      ),
+      'Replay Attempt'
+    )
+  ),
+  'invitation_consumed',
+  'a terminal row-lock/CAS invitation rejects replay and concurrent losers'
+);
+reset role;
+
+select is(
+  (
+    select count(*)
+    from desmoslock_v2.profiles
+    where auth_user_id = 'a1000000-0000-4000-8000-000000000002'
+  ),
+  1::bigint,
+  'replay never creates a second profile'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000002',
+  'c1000000-0000-4000-8000-000000000002',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.begin_staff_invitation(
+      '10000000-0000-4000-8000-000000000001',
+      'admin-cannot-invite@staff.invalid',
+      'teacher'
+    )
+  ),
+  'forbidden',
+  'a live Administrator cannot initiate another staff invitation'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
+select 'rollback', result.code, result.invitation_id
+from desmoslock_v2.begin_staff_invitation(
+  '10000000-0000-4000-8000-000000000001',
+  'rollback-recipient@staff.invalid',
+  'teacher'
+) as result;
+reset role;
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_complete_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'rollback'
+      ),
+      'a1000000-0000-4000-8000-000000000004',
+      now() + interval '1 hour'
+    )
+  ),
+  'invitation_usable',
+  'the rollback fixture becomes usable'
+);
+reset role;
+
+create function pg_temp.reject_staff_audit_insert()
+returns trigger
+language plpgsql
+as $$
+begin
+  raise exception using errcode = '55000', message = 'synthetic audit sink failure';
+end;
+$$;
+create trigger reject_staff_audit_insert
+before insert on desmoslock_v2.staff_audit_events
+for each row execute function pg_temp.reject_staff_audit_insert();
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000004',
+  'c1000000-0000-4000-8000-000000000004',
+  'aal2'
+);
+set local role authenticated;
+select throws_ok(
+  format(
+    'select * from desmoslock_v2.accept_staff_invitation(%L::uuid, %L::text)',
+    (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'rollback'
+    ),
+    'Rollback Recipient'
+  ),
+  '55000',
+  'synthetic audit sink failure',
+  'an audit failure aborts the entire acceptance mutation'
+);
+reset role;
+drop trigger reject_staff_audit_insert on desmoslock_v2.staff_audit_events;
+
+select is(
+  (
+    select count(*)
+    from desmoslock_v2.profiles
+    where auth_user_id = 'a1000000-0000-4000-8000-000000000004'
+  ),
+  0::bigint,
+  'a failed acceptance leaves no profile behind'
+);
+select is(
+  (
+    select status
+    from desmoslock_v2.staff_invitations
+    where id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'rollback'
+    )
+  ),
+  'pending_acceptance',
+  'a failed acceptance rolls the invitation back to its usable state'
+);
+
+update desmoslock_v2.staff_invitations
+set expires_at = now() - interval '1 minute'
+where id = (
+  select invitation_id
+  from pg_temp.staff_auth_test_results
+  where label = 'rollback'
+);
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000004',
+  'c1000000-0000-4000-8000-000000000004',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.accept_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'rollback'
+      ),
+      'Expired Recipient'
+    )
+  ),
+  'invitation_expired',
+  'an expired invitation fails closed'
+);
+reset role;
+select is(
+  (
+    select status
+    from desmoslock_v2.staff_invitations
+    where id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'rollback'
+    )
+  ),
+  'expired',
+  'expiry is a terminal audited invitation transition'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
+select 'revoke', result.code, result.invitation_id
+from desmoslock_v2.begin_staff_invitation(
+  '10000000-0000-4000-8000-000000000001',
+  'revoked-recipient@staff.invalid',
+  'teacher'
+) as result;
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000005',
+  'c1000000-0000-4000-8000-000000000005',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.revoke_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'revoke'
+      )
+    )
+  ),
+  'invitation_not_found',
+  'a cross-School Owner cannot revoke or discover another School invitation'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.revoke_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'revoke'
+      )
+    )
+  ),
+  'invitation_revoked',
+  'the same-School Owner can revoke a pending invitation'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
+select 'delivery-failure', result.code, result.invitation_id
+from desmoslock_v2.begin_staff_invitation(
+  '10000000-0000-4000-8000-000000000001',
+  'wrong-recipient@staff.invalid',
+  'teacher'
+) as result;
+reset role;
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_complete_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'delivery-failure'
+      ),
+      'a1000000-0000-4000-8000-000000000003',
+      now() + interval '1 hour'
+    )
+  ),
+  'invitation_usable',
+  'the ambiguous-response fixture reaches the usable state first'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_fail_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'delivery-failure'
+      ),
+      'dependency_unavailable'
+    )
+  ),
+  'invitation_delivery_failed',
+  'failure cleanup closes an invitation even if completion already committed'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_fail_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'delivery-failure'
+      ),
+      'dependency_unavailable'
+    )
+  ),
+  'invitation_delivery_failed',
+  'delivery failure cleanup is idempotent and reveals no prior completion state'
+);
+reset role;
+
+select results_eq(
+  $$
+    select status, invited_user_id, expires_at, failure_reason_code
+    from desmoslock_v2.staff_invitations
+    where id = (
+      select invitation_id
+      from pg_temp.staff_auth_test_results
+      where label = 'delivery-failure'
+    )
+  $$,
+  $$values (
+    'delivery_failed'::text,
+    null::uuid,
+    null::timestamp with time zone,
+    'dependency_unavailable'::text
+  )$$,
+  'ambiguous completion cleanup removes the usable recipient binding'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
+select 'existing-user', result.code, result.invitation_id
+from desmoslock_v2.begin_staff_invitation(
+  '10000000-0000-4000-8000-000000000001',
+  'owner-alpha@staff.invalid',
+  'teacher'
+) as result;
+reset role;
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_complete_staff_invitation(
+      (
+        select invitation_id
+        from pg_temp.staff_auth_test_results
+        where label = 'existing-user'
+      ),
+      'a1000000-0000-4000-8000-000000000001',
+      now() + interval '1 hour'
+    )
+  ),
+  'conflict',
+  'delivery cannot repurpose an already-linked Auth identity'
+);
+reset role;
+
+insert into desmoslock_v2.memberships (
+  workspace_id,
+  profile_id,
+  role,
+  seed_key,
+  status,
+  role_revision,
+  accepted_at
+)
+select
+  '10000000-0000-4000-8000-000000000002',
+  profile.id,
+  'teacher',
+  null,
+  'active',
+  1,
+  now()
+from desmoslock_v2.profiles as profile
+where profile.auth_user_id = 'a1000000-0000-4000-8000-000000000002';
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code
+    from desmoslock_v2.revoke_membership(
+      '10000000-0000-4000-8000-000000000001',
+      (
+        select profile_id
+        from pg_temp.staff_auth_test_results
+        where label = 'accepted'
+      )
+    )
+  ),
+  'membership_revoked',
+  'an Owner can revoke an Administrator membership at the backend boundary'
+);
+reset role;
+
+select results_eq(
+  $$
+    select workspace_id::text, status
+    from desmoslock_v2.memberships
+    where profile_id = (
+      select profile_id
+      from pg_temp.staff_auth_test_results
+      where label = 'accepted'
+    )
+    order by workspace_id
+  $$,
+  $$values
+    ('10000000-0000-4000-8000-000000000001'::text, 'revoked'::text),
+    ('10000000-0000-4000-8000-000000000002'::text, 'active'::text)
+  $$,
+  'membership revocation affects only the selected School'
+);
+select is(
+  (
+    select count(*)
+    from desmoslock_v2.application_session_revocations
+    where user_id = 'a1000000-0000-4000-8000-000000000002'
+  ),
+  0::bigint,
+  'School membership revocation does not globally revoke Auth application sessions'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000002',
+  'c1000000-0000-4000-8000-000000000002',
+  'aal2',
+  '{"app_metadata":{"role":"owner","workspace_id":"10000000-0000-4000-8000-000000000002"}}'
+);
+set local role authenticated;
+select results_eq(
+  $$
+    select code, school_id::text, membership_role
+    from desmoslock_v2.current_staff_context()
+  $$,
+  $$values ('ok'::text, '10000000-0000-4000-8000-000000000002'::text, 'teacher'::text)$$,
+  'an already-open session observes only the remaining live School role'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.begin_staff_invitation(
+      '10000000-0000-4000-8000-000000000002',
+      'forged-role-recipient@staff.invalid',
+      'teacher'
+    )
+  ),
+  'forbidden',
+  'forged stale Owner metadata cannot elevate a live Teacher role'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000099',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (select code from desmoslock_v2.current_staff_context()),
+  'session_expired',
+  'a signed claim for a missing Auth session fails closed'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000005',
+  'c1000000-0000-4000-8000-000000000005',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (select code from desmoslock_v2.revoke_current_staff_session()),
+  'ok',
+  'staff can revoke the current application session'
+);
+select is(
+  (select code from desmoslock_v2.current_staff_context()),
+  'session_revoked',
+  'current-session revocation takes effect at the next backend boundary'
+);
+reset role;
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (select code from desmoslock_v2.revoke_all_current_user_staff_sessions()),
+  'ok',
+  'account recovery can revoke every live application session for the current user'
+);
+reset role;
+select is(
+  (
+    select count(*)
+    from desmoslock_v2.application_session_revocations
+    where user_id = 'a1000000-0000-4000-8000-000000000001'
+  ),
+  2::bigint,
+  'recovery records both current and other application sessions'
+);
+
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000011',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (select code from desmoslock_v2.current_staff_context()),
+  'session_revoked',
+  'a second already-open session is invalid immediately after recovery'
+);
+reset role;
+
+set local role anon;
+select throws_ok(
+  $$select * from desmoslock_v2.current_staff_context()$$,
+  '42501',
+  null,
+  'anonymous staff-context access is denied at the function grant boundary'
+);
+reset role;
+
+grant select, insert, update, delete on table
+  desmoslock_v2.staff_invitations,
+  desmoslock_v2.application_session_revocations,
+  desmoslock_v2.staff_audit_events
+to authenticated;
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000003',
+  'c1000000-0000-4000-8000-000000000003',
+  'aal2'
+);
+set local role authenticated;
+select throws_ok(
+  $$
+    insert into desmoslock_v2.staff_invitations (
+      id,
+      workspace_id,
+      requested_by_profile_id,
+      role,
+      status
+    ) values (
+      'd1000000-0000-4000-8000-000000000099',
+      '10000000-0000-4000-8000-000000000001',
+      '20000000-0000-4000-8000-000000000001',
+      'teacher',
+      'pending_delivery'
+    )
+  $$,
+  '42501',
+  null,
+  'even an accidental table grant cannot create an invitation through RLS'
+);
+select is_empty(
+  $$select * from desmoslock_v2.staff_audit_events$$,
+  'even an accidental table grant cannot read the staff audit through RLS'
+);
+reset role;
+
+select throws_ok(
+  $$
+    update desmoslock_v2.staff_audit_events
+    set result_code = 'ok'
+    where true
+  $$,
+  '55000',
+  'staff audit events are append-only',
+  'the audit rejects mutation even for its owning maintenance role'
+);
+select throws_ok(
+  $$delete from desmoslock_v2.staff_audit_events where true$$,
+  '55000',
+  'staff audit events are append-only',
+  'the audit rejects deletion even for its owning maintenance role'
+);
+
+select ok(
+  not exists (
+    select 1
+    from information_schema.columns as column_info
+    where column_info.table_schema = 'desmoslock_v2'
+      and column_info.table_name = 'staff_audit_events'
+      and column_info.column_name in (
+        'email', 'ip', 'user_agent', 'metadata', 'payload', 'provider_error', 'secret'
+      )
+  ),
+  'the append-only audit has no PII, arbitrary payload, secret, or provider-error column'
+);
+
+select results_eq(
+  $$
+    select fixture_digest, fixture_valid
+    from desmoslock_v2.internal_baseline_status()
+  $$,
+  $$values (
+    '7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca'::text,
+    true
+  )$$,
+  'runtime staff rows never invalidate the pinned synthetic health fixture'
+);
+
+select * from finish();
+rollback;
