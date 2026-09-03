@@ -65,6 +65,23 @@ describe("packaged switch rejection boundary", () => {
     ).toThrow();
   });
 
+  it("rejects command-line-only controls that were not present in the curated launch", () => {
+    expect(() =>
+      assertPackagedSwitchRejectionBoundary({
+        boundary: {
+          argumentSwitches: ["inspect"],
+          commandLineSwitches: ["inspect", "single-process"],
+          environmentSandboxControlPresent: false,
+          isPackaged: true,
+        },
+        forbiddenSwitch: "--inspect=0",
+        launchProfile: createElectronLaunchProfile({}, "darwin"),
+      }),
+    ).toThrow(
+      "Electron app.commandLine exposed a launch control outside the curated rejection probe",
+    );
+  });
+
   it("rejects a sandbox environment receipt that disagrees with the curated launch", () => {
     expect(() =>
       assertPackagedSwitchRejectionBoundary({

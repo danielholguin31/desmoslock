@@ -53,6 +53,16 @@ export function assertPackagedSwitchRejectionBoundary({
   );
   assert.deepEqual(boundary.argumentSwitches, expectedArgumentSwitches);
   assert.ok(Array.isArray(boundary.commandLineSwitches));
+  const allowedCommandLineSwitches = new Set(expectedArgumentSwitches);
+  if (launchProfile.env.ELECTRON_DISABLE_SANDBOX !== undefined) {
+    allowedCommandLineSwitches.add("no-sandbox");
+  }
+  assert.ok(
+    boundary.commandLineSwitches.every((name) =>
+      allowedCommandLineSwitches.has(name),
+    ),
+    "Electron app.commandLine exposed a launch control outside the curated rejection probe",
+  );
   if (forbiddenSwitch.startsWith("--")) {
     assert.ok(
       boundary.commandLineSwitches.includes(normalizedName),
