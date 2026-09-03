@@ -82,7 +82,7 @@ export {
   staffAuthErrorCodes,
   staffAuthProviderFailureCodes,
   staffAuthRpcFailureCodes,
-  staffAuthSuccessCodes,
+  staffAuthWireSuccessCodes,
 } from "./staff-auth.js";
 export type {
   AcceptStaffInvitationRequest,
@@ -103,7 +103,7 @@ export type {
   StaffAuthInternalFailure,
   StaffAuthProviderFailureCode,
   StaffAuthRpcFailureCode,
-  StaffAuthSuccessCode,
+  StaffAuthWireSuccessCode,
   StaffEmailVerificationResponse,
   StaffLoginResponse,
 } from "./staff-auth.js";

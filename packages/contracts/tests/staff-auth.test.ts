@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { toPersistedStaffRole } from "@desmoslock/domain";
 
+import type { StaffAuthWireSuccessCode } from "../src/index.js";
 import {
   mapCreateStaffInvitationInternalResult,
   mapStaffAuthInternalFailure,
@@ -23,6 +24,7 @@ import {
   staffAuthErrorCodes,
   staffAuthProviderFailureCodes,
   staffAuthRpcFailureCodes,
+  staffAuthWireSuccessCodes,
 } from "../src/index.js";
 
 const alphaSchoolId = "10000000-0000-4000-8000-000000000001";
@@ -30,6 +32,16 @@ const betaSchoolId = "10000000-0000-4000-8000-000000000002";
 const invitationId = "20000000-0000-4000-8000-000000000001";
 const profileId = "30000000-0000-4000-8000-000000000001";
 const syntheticPublishableKey = `sb_${"publishable"}_${"r".repeat(22)}_${"c".repeat(8)}`;
+const expectedWireSuccesses = {
+  email_verified: true,
+  invitation_accepted: true,
+  invitation_created: true,
+  invitation_revoked: true,
+  login_succeeded: true,
+  membership_revoked: true,
+  recovery_requested: true,
+  school_selected: true,
+} as const satisfies Record<StaffAuthWireSuccessCode, true>;
 
 describe("web-only public staff auth configuration", () => {
   it("accepts only the exact modern publishable-key grammar", () => {
@@ -304,6 +316,15 @@ describe("staff auth request contracts", () => {
 });
 
 describe("operation-specific staff auth response contracts", () => {
+  it("keeps domain-composite success codes outside the public wire vocabulary", () => {
+    expect(staffAuthWireSuccessCodes).toEqual(
+      Object.keys(expectedWireSuccesses),
+    );
+    expect(staffAuthWireSuccessCodes).not.toContain("recovery_completed");
+    expect(staffAuthWireSuccessCodes).not.toContain("session_ended");
+    expect(staffAuthWireSuccessCodes).not.toContain("step_up_verified");
+  });
+
   it("accepts each operation's exact success", () => {
     expect(
       parseCreateStaffInvitationResponse({
@@ -371,6 +392,7 @@ describe("operation-specific staff auth response contracts", () => {
           "service_unavailable",
           "session_expired",
           "session_revoked",
+          "step_up_required",
         ],
       ],
       [
@@ -443,7 +465,7 @@ describe("operation-specific staff auth response contracts", () => {
         code: "step_up_required",
         ok: false,
       }),
-    ).toBeNull();
+    ).toEqual({ code: "step_up_required", ok: false });
     expect(
       parseRevokeStaffMembershipResponse({
         code: "invitation_expired",

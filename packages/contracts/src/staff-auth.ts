@@ -1,16 +1,14 @@
-import { staffAuthErrorCodes, staffAuthSuccessCodes } from "@desmoslock/domain";
+import { staffAuthErrorCodes } from "@desmoslock/domain";
 import type {
   InvitableStaffRole,
   StaffAuthErrorCode,
   StaffAuthFailure,
-  StaffAuthSuccess,
-  StaffAuthSuccessCode,
 } from "@desmoslock/domain";
 
 import { parseExactRecord } from "./exact-record.js";
 
-export { staffAuthErrorCodes, staffAuthSuccessCodes };
-export type { StaffAuthErrorCode, StaffAuthSuccessCode };
+export { staffAuthErrorCodes };
+export type { StaffAuthErrorCode };
 
 export interface CreateStaffInvitationRequest {
   readonly email: string;
@@ -45,10 +43,24 @@ export interface PublicStaffAuthConfiguration {
   readonly publishableKey: string;
 }
 
+export const staffAuthWireSuccessCodes = [
+  "email_verified",
+  "invitation_accepted",
+  "invitation_created",
+  "invitation_revoked",
+  "login_succeeded",
+  "membership_revoked",
+  "recovery_requested",
+  "school_selected",
+] as const;
+
+export type StaffAuthWireSuccessCode =
+  (typeof staffAuthWireSuccessCodes)[number];
+
 type StaffAuthOperationResponse<
-  Success extends StaffAuthSuccessCode,
+  Success extends StaffAuthWireSuccessCode,
   Error extends StaffAuthErrorCode,
-> = StaffAuthSuccess<Success> | StaffAuthFailure<Error>;
+> = { readonly code: Success; readonly ok: true } | StaffAuthFailure<Error>;
 
 const createStaffInvitationErrorCodes = staffAuthErrorCodes;
 const acceptStaffInvitationErrorCodes = [
@@ -62,6 +74,7 @@ const acceptStaffInvitationErrorCodes = [
   "service_unavailable",
   "session_expired",
   "session_revoked",
+  "step_up_required",
 ] as const satisfies readonly StaffAuthErrorCode[];
 const revokeStaffInvitationErrorCodes = [
   "authentication_required",
@@ -390,7 +403,7 @@ export function parseSelectStaffSchoolRequest(
 }
 
 function parseStaffAuthOperationResponse<
-  Success extends StaffAuthSuccessCode,
+  Success extends StaffAuthWireSuccessCode,
   ErrorCodes extends readonly StaffAuthErrorCode[],
 >(
   value: unknown,
