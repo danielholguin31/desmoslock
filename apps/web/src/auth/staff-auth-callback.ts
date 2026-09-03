@@ -283,10 +283,7 @@ async function consumeTokenHashCallback(
   if (
     kind !== expectedKind ||
     tokenHash === null ||
-    tokenHash.length === 0 ||
-    tokenHash !== tokenHash.trim() ||
-    encodedByteLength(tokenHash) > 4096 ||
-    hasControlText(tokenHash)
+    !/^[0-9a-f]{56}$/.test(tokenHash)
   ) {
     return rejected("malformed_callback");
   }

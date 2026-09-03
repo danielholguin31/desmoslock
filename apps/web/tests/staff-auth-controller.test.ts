@@ -15,6 +15,9 @@ import {
   type StaffAuthMutationResult,
 } from "../src/auth/staff-auth-controller.js";
 
+const invitationTokenHash = "a".repeat(56);
+const alternateInvitationTokenHash = "b".repeat(56);
+
 function identity(
   role: "admin" | "owner" | "teacher",
   email = `${role}@example.test`,
@@ -434,7 +437,7 @@ describe("staff auth controller", () => {
       );
       await controller.dispatch({ type: "bootstrap" });
       await controller.dispatch({
-        callbackUrl: `https://app.example.test/?auth=invite&token_hash=SENTINEL-${reason}`,
+        callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
         type: "inspect_invitation",
       });
 
@@ -468,7 +471,7 @@ describe("staff auth controller", () => {
     const controller = createController(adapter);
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: "https://app.example.test/?auth=invite&token_hash=one-time",
+      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
     await controller.dispatch({
@@ -507,7 +510,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: "https://app.example.test/?auth=invite&token_hash=one-time",
+      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
 
@@ -1613,8 +1616,7 @@ describe("staff auth controller", () => {
     await controller.dispatch({ type: "bootstrap" });
 
     const pending = controller.dispatch({
-      callbackUrl:
-        "https://app.example.test/?auth=invite&token_hash=SENTINEL-token",
+      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
     expect(order).toEqual(["scrub", "inspect"]);
@@ -1630,7 +1632,7 @@ describe("staff auth controller", () => {
       kind: "invitation_ready",
     });
     expect(JSON.stringify(controller.getSnapshot())).not.toMatch(
-      /SENTINEL|acceptance-receipt/,
+      new RegExp(`${invitationTokenHash}|acceptance-receipt`),
     );
   });
 
@@ -1646,7 +1648,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: "https://app.example.test/?auth=invite&token_hash=one-time",
+      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
     await controller.dispatch({
@@ -1683,8 +1685,7 @@ describe("staff auth controller", () => {
       );
       await controller.dispatch({ type: "bootstrap" });
       await controller.dispatch({
-        callbackUrl:
-          "https://app.example.test/?auth=invite&token_hash=one-time",
+        callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
         type: "inspect_invitation",
       });
       await controller.dispatch({
@@ -1712,7 +1713,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: "https://app.example.test/?auth=invite&token_hash=one-time",
+      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
     await controller.dispatch({
@@ -1734,7 +1735,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: "https://app.example.test/?auth=invite&token_hash=one-time",
+      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
     const action = { password: "pw", type: "accept_invitation" };
@@ -1763,7 +1764,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: "https://app.example.test/?auth=invite&token_hash=one-time",
+      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
     await controller.dispatch({
@@ -1806,8 +1807,7 @@ describe("staff auth controller", () => {
       );
       await controller.dispatch({ type: "bootstrap" });
       await controller.dispatch({
-        callbackUrl:
-          "https://app.example.test/?auth=invite&token_hash=one-time",
+        callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
         type: "inspect_invitation",
       });
       await controller.dispatch({
@@ -1836,7 +1836,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: "https://app.example.test/?auth=invite&token_hash=one-time",
+      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
     now = Date.parse("2026-09-05T12:00:00.000Z");
@@ -2033,7 +2033,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: "https://app.example.test/?auth=invite&token_hash=one-time",
+      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
 
@@ -2318,8 +2318,7 @@ describe("staff auth controller", () => {
     const bootstrap = controller.dispatch({ type: "bootstrap" });
 
     const invitation = controller.dispatch({
-      callbackUrl:
-        "https://app.example.test/?auth=invite&token_hash=SENTINEL-cold-token",
+      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
     expect(history).toHaveBeenCalledWith("/");
@@ -2332,7 +2331,9 @@ describe("staff auth controller", () => {
       intendedEmail: "invited@example.test",
       kind: "invitation_ready",
     });
-    expect(JSON.stringify(controller.getSnapshot())).not.toContain("SENTINEL");
+    expect(JSON.stringify(controller.getSnapshot())).not.toContain(
+      invitationTokenHash,
+    );
   });
 
   it("clears cold protected data before a recovery exchange can publish readiness", async () => {
@@ -2400,8 +2401,7 @@ describe("staff auth controller", () => {
     });
 
     await controller.dispatch({
-      callbackUrl:
-        "https://app.example.test/?auth=invite&token_hash=SENTINEL-invalid-id",
+      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
 
@@ -2429,14 +2429,12 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl:
-        "https://app.example.test/?auth=invite&token_hash=first-invitation",
+      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
 
     await controller.dispatch({
-      callbackUrl:
-        "https://app.example.test/?auth=invite&token_hash=SENTINEL-duplicate-id",
+      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${alternateInvitationTokenHash}`,
       type: "inspect_invitation",
     });
 

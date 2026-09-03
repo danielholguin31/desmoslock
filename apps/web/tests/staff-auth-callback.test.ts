@@ -96,6 +96,12 @@ describe("staff invitation callback", () => {
     ["mixed recovery", `${origin}/?auth=invite&token_hash=${tokenHash}&code=x`],
     ["missing hash", `${origin}/?auth=invite`],
     ["blank hash", `${origin}/?auth=invite&token_hash=`],
+    ["short hash", `${origin}/?auth=invite&token_hash=${"a".repeat(55)}`],
+    ["long hash", `${origin}/?auth=invite&token_hash=${"a".repeat(57)}`],
+    ["uppercase hash", `${origin}/?auth=invite&token_hash=${"A".repeat(56)}`],
+    ["non-hex hash", `${origin}/?auth=invite&token_hash=${"g".repeat(56)}`],
+    ["whitespace hash", `${origin}/?auth=invite&token_hash=%20${tokenHash}`],
+    ["control hash", `${origin}/?auth=invite&token_hash=%00${tokenHash}`],
     [
       "wrong path",
       `${origin}/auth/invitation?auth=invite&token_hash=${tokenHash}`,
