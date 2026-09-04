@@ -37,7 +37,7 @@
     "db:stop": "supabase stop",
     "test:db": "supabase test db",
     "test:edge": "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts",
-    "test:web": "npm run build:packages && DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=local DESMOSLOCK_PUBLIC_BACKEND_URL=http://127.0.0.1:43174 npm run build --workspace @desmoslock/web && vitest run apps/web && npm run test:web:e2e",
+    "test:web": "npm run build:packages && DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=local DESMOSLOCK_PUBLIC_BACKEND_URL=http://127.0.0.1:43174 DESMOSLOCK_PUBLIC_WEB_ORIGIN=http://127.0.0.1:43173 DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc npm run build --workspace @desmoslock/web && vitest run apps/web && npm run test:web:e2e",
     "test:web:e2e": "playwright test --config playwright.web.config.ts",
     "test:electron": "npm run build:packages && DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=local DESMOSLOCK_PUBLIC_BACKEND_URL=http://127.0.0.1:43175 npm run build --workspace @desmoslock/desktop && npm run test:runtime --workspace @desmoslock/desktop && vitest run apps/desktop && npm run test:electron:integration && npm run test:electron:production",
     "test:electron:integration": "playwright test --config playwright.electron.config.ts",

@@ -4,6 +4,7 @@ import {
   createSupabaseStaffAuthAdapter,
   type SupabaseStaffAuthPort,
 } from "../src/auth/supabase-staff-auth-adapter.js";
+import type { StaffAuthAccessEvent } from "../src/auth/staff-auth-controller.js";
 
 const firstOperationId = "10000000-0000-4000-8000-000000000001";
 const secondOperationId = "10000000-0000-4000-8000-000000000002";
@@ -288,6 +289,7 @@ describe("Supabase staff auth adapter", () => {
       factors: { factors: [] },
       expected: { secondFactor: "enrollment_required" },
       label: "requires enrollment without a verified factor",
+      nextLevel: "aal1" as const,
     },
     {
       factors: {
@@ -303,56 +305,60 @@ describe("Supabase staff auth adapter", () => {
         secondFactor: "challenge_required",
       },
       label: "requires a challenge for the one verified factor",
+      nextLevel: "aal2" as const,
     },
-  ])("$label for privileged AAL1 access", async ({ expected, factors }) => {
-    const identifiers = [
-      firstOperationId,
-      secondOperationId,
-      "10000000-0000-4000-8000-000000000003",
-    ];
-    const adapter = createSupabaseStaffAuthAdapter({
-      clock: { now: () => 1_788_300_000_000 },
-      createBlobUrl: () => {
-        throw new Error("not used");
-      },
-      operationIds: {
-        next: () => identifiers.shift() ?? "identifier-exhausted",
-      },
-      port: port({
-        readAccount: async () => ({
-          accountId,
-          email: "owner@example.test",
-          emailVerified: true,
+  ])(
+    "$label for privileged AAL1 access",
+    async ({ expected, factors, nextLevel }) => {
+      const identifiers = [
+        firstOperationId,
+        secondOperationId,
+        "10000000-0000-4000-8000-000000000003",
+      ];
+      const adapter = createSupabaseStaffAuthAdapter({
+        clock: { now: () => 1_788_300_000_000 },
+        createBlobUrl: () => {
+          throw new Error("not used");
+        },
+        operationIds: {
+          next: () => identifiers.shift() ?? "identifier-exhausted",
+        },
+        port: port({
+          readAccount: async () => ({
+            accountId,
+            email: "owner@example.test",
+            emailVerified: true,
+          }),
+          readAssurance: async () => ({
+            currentLevel: "aal1",
+            nextLevel,
+          }),
+          readCurrentContext: async () => [
+            {
+              code: "ok",
+              display_name: "Olivia Owner",
+              membership_role: "owner",
+              profile_id: profileId,
+              role_revision: 8,
+              school_id: schoolId,
+              school_name: "Example School",
+              school_slug: "example-school",
+            },
+          ],
+          readSession: async () => ({ status: "authenticated" }),
+          readTotpFactors: async () => factors,
         }),
-        readAssurance: async () => ({
-          currentLevel: "aal1",
-          nextLevel: "aal2",
-        }),
-        readCurrentContext: async () => [
-          {
-            code: "ok",
-            display_name: "Olivia Owner",
-            membership_role: "owner",
-            profile_id: profileId,
-            role_revision: 8,
-            school_id: schoolId,
-            school_name: "Example School",
-            school_slug: "example-school",
-          },
-        ],
-        readSession: async () => ({ status: "authenticated" }),
-        readTotpFactors: async () => factors,
-      }),
-      revokeBlobUrl: () => undefined,
-    });
+        revokeBlobUrl: () => undefined,
+      });
 
-    await expect(adapter.read()).resolves.toMatchObject({
-      assuranceLevel: "aal1",
-      kind: "access_granted",
-      ...expected,
-    });
-    adapter.dispose();
-  });
+      await expect(adapter.read()).resolves.toMatchObject({
+        assuranceLevel: "aal1",
+        kind: "access_granted",
+        ...expected,
+      });
+      adapter.dispose();
+    },
+  );
 
   it.each([
     ["rejected", { kind: "sign_in_rejected" }],
@@ -541,11 +547,12 @@ describe("Supabase staff auth adapter", () => {
 
   it("binds invitation acceptance to a private receipt and the same verified account", async () => {
     const invitationId = "41000000-0000-4000-8000-000000000001";
-    const acceptanceReceipt = "10000000-0000-4000-8000-000000000003";
+    const acceptanceReceipt = "10000000-0000-4000-8000-000000000006";
     const identifiers = [
-      acceptanceReceipt,
+      "10000000-0000-4000-8000-000000000003",
       "10000000-0000-4000-8000-000000000004",
       "10000000-0000-4000-8000-000000000005",
+      acceptanceReceipt,
     ];
     let accepted = false;
     const adapter = createSupabaseStaffAuthAdapter({
@@ -667,6 +674,158 @@ describe("Supabase staff auth adapter", () => {
       },
     });
     expect(JSON.stringify(adapter)).not.toContain("new-invited-password");
+    adapter.dispose();
+  });
+
+  it("resumes a transient invitation lookup without verifying the one-shot token twice", async () => {
+    const continuationReceipt = "10000000-0000-4000-8000-000000000003";
+    const acceptanceReceipt = "10000000-0000-4000-8000-000000000006";
+    const identifiers = [
+      continuationReceipt,
+      "10000000-0000-4000-8000-000000000004",
+      "10000000-0000-4000-8000-000000000005",
+      acceptanceReceipt,
+    ];
+    const verifyInvitationToken = vi.fn(async () => ({
+      accountId,
+      email: "invitee@example.test",
+      status: "verified",
+    }));
+    let invitationReads = 0;
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => Date.parse("2026-09-03T20:00:00.000Z") },
+      createBlobUrl: () => {
+        throw new Error("not used");
+      },
+      operationIds: {
+        next: () => identifiers.shift() ?? "identifier-exhausted",
+      },
+      port: port({
+        readAccount: async () => ({
+          accountId,
+          email: "invitee@example.test",
+          emailVerified: true,
+        }),
+        readCurrentInvitations: async () => {
+          invitationReads += 1;
+          if (invitationReads === 1) {
+            throw new Error("temporary lookup failure");
+          }
+          return [
+            {
+              code: "ok",
+              expires_at: "2026-09-04T12:00:00+00:00",
+              invitation_id: invitationId,
+              invited_role: "teacher",
+              school_id: schoolId,
+              school_name: "Example School",
+            },
+          ];
+        },
+        readSession: async () => ({ status: "authenticated" }),
+        verifyInvitationToken,
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+
+    const interrupted = await adapter.perform({
+      operationId: firstOperationId,
+      tokenHash: "a".repeat(56),
+      type: "inspect_invitation",
+    });
+    expect(interrupted).toEqual({
+      operationId: firstOperationId,
+      result: {
+        continuationReceipt,
+        inspectionOperationId: firstOperationId,
+        kind: "invitation_inspection_interrupted",
+      },
+    });
+    expect(JSON.stringify(interrupted)).not.toContain("invitee@example.test");
+    expect(JSON.stringify(interrupted)).not.toContain("a".repeat(56));
+
+    await expect(
+      adapter.perform({
+        continuationReceipt,
+        inspectionOperationId: firstOperationId,
+        operationId: secondOperationId,
+        type: "resume_invitation_inspection",
+      }),
+    ).resolves.toMatchObject({
+      operationId: secondOperationId,
+      result: { acceptanceReceipt, kind: "invitation_ready" },
+    });
+    expect(verifyInvitationToken).toHaveBeenCalledOnce();
+
+    await expect(
+      adapter.perform({
+        continuationReceipt,
+        inspectionOperationId: firstOperationId,
+        operationId: "10000000-0000-4000-8000-000000000007",
+        type: "resume_invitation_inspection",
+      }),
+    ).resolves.toEqual({
+      operationId: "10000000-0000-4000-8000-000000000007",
+      result: { kind: "invitation_rejected", reason: "invalid" },
+    });
+    adapter.dispose();
+  });
+
+  it("invalidates an interrupted invitation inspection when the account changes", async () => {
+    const continuationReceipt = "10000000-0000-4000-8000-000000000003";
+    const identifiers = [
+      continuationReceipt,
+      "10000000-0000-4000-8000-000000000004",
+      "10000000-0000-4000-8000-000000000005",
+    ];
+    let currentAccountId = accountId;
+    let invitationReads = 0;
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => Date.parse("2026-09-03T20:00:00.000Z") },
+      createBlobUrl: () => {
+        throw new Error("not used");
+      },
+      operationIds: {
+        next: () => identifiers.shift() ?? "identifier-exhausted",
+      },
+      port: port({
+        readAccount: async () => ({
+          accountId: currentAccountId,
+          email: "invitee@example.test",
+          emailVerified: true,
+        }),
+        readCurrentInvitations: async () => {
+          invitationReads += 1;
+          throw new Error("temporary lookup failure");
+        },
+        readSession: async () => ({ status: "authenticated" }),
+        verifyInvitationToken: async () => ({
+          accountId,
+          email: "invitee@example.test",
+          status: "verified",
+        }),
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+
+    await adapter.perform({
+      operationId: firstOperationId,
+      tokenHash: "a".repeat(56),
+      type: "inspect_invitation",
+    });
+    currentAccountId = "a1000000-0000-4000-8000-000000000002";
+    await expect(
+      adapter.perform({
+        continuationReceipt,
+        inspectionOperationId: firstOperationId,
+        operationId: secondOperationId,
+        type: "resume_invitation_inspection",
+      }),
+    ).resolves.toEqual({
+      operationId: secondOperationId,
+      result: { kind: "invitation_rejected", reason: "invalid" },
+    });
+    expect(invitationReads).toBe(1);
     adapter.dispose();
   });
 
@@ -1219,6 +1378,73 @@ describe("Supabase staff auth adapter", () => {
     adapter.dispose();
   });
 
+  it("invalidates authority once when the sole auth-event refresh fails", async () => {
+    let notify: () => void = () => undefined;
+    let contextReads = 0;
+    const events: StaffAuthAccessEvent[] = [];
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => "blob:not-used",
+      operationIds: operationIdSource(),
+      port: port({
+        onAuthStateChange: (listener) => {
+          notify = listener;
+          return () => undefined;
+        },
+        readAccount: async () => ({
+          accountId,
+          email: "teacher@example.test",
+          emailVerified: true,
+        }),
+        readAssurance: async () => ({
+          currentLevel: "aal1",
+          nextLevel: "aal1",
+        }),
+        readCurrentContext: async () => {
+          contextReads += 1;
+          if (contextReads > 1) {
+            throw new Error("SENTINEL-authority-read-failure");
+          }
+          return [
+            {
+              code: "ok",
+              display_name: "Taylor Teacher",
+              membership_role: "teacher",
+              profile_id: profileId,
+              role_revision: 1,
+              school_id: schoolId,
+              school_name: "Example School",
+              school_slug: "example-school",
+            },
+          ];
+        },
+        readSession: async () => ({ status: "authenticated" }),
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+    const initial = await adapter.read();
+    if (initial.kind !== "access_granted") {
+      throw new Error("expected initial authority");
+    }
+    adapter.subscribe((event) => events.push(event));
+
+    notify();
+
+    await vi.waitFor(() => expect(events).toHaveLength(1));
+    expect(events).toEqual([
+      {
+        identityGeneration: initial.identityGeneration,
+        kind: "authority_unavailable",
+        sessionGeneration: initial.sessionGeneration,
+      },
+    ]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(contextReads).toBe(2);
+    expect(JSON.stringify(events)).not.toContain("SENTINEL");
+    adapter.dispose();
+  });
+
   it("unsubscribes and ignores a queued authority read after disposal", async () => {
     let notify: () => void = () => undefined;
     const contextDeferred: { resolve?: (value: unknown) => void } = {};
@@ -1296,7 +1522,7 @@ describe("Supabase staff auth adapter", () => {
     await expect(adapter.read()).rejects.toThrow("disposed");
   });
 
-  it("coalesces duplicate operation IDs and rejects cross-command reuse", async () => {
+  it("never coalesces or replays a credential-bearing operation ID", async () => {
     const signInDeferred: { resolve?: (value: unknown) => void } = {};
     let calls = 0;
     const adapter = createSupabaseStaffAuthAdapter({
@@ -1321,18 +1547,19 @@ describe("Supabase staff auth adapter", () => {
     };
     const first = adapter.perform(request);
     const duplicate = adapter.perform(request);
+    const mismatchedCredential = adapter.perform({
+      ...request,
+      password: "different-sentinel-not-retained",
+    });
     expect(calls).toBe(1);
+    await expect(duplicate).rejects.toThrow("reused");
+    await expect(mismatchedCredential).rejects.toThrow("reused");
     signInDeferred.resolve?.({ status: "rejected" });
-    await expect(Promise.all([first, duplicate])).resolves.toEqual([
-      {
-        operationId: request.operationId,
-        result: { kind: "sign_in_rejected" },
-      },
-      {
-        operationId: request.operationId,
-        result: { kind: "sign_in_rejected" },
-      },
-    ]);
+    await expect(first).resolves.toEqual({
+      operationId: request.operationId,
+      result: { kind: "sign_in_rejected" },
+    });
+    await expect(adapter.perform(request)).rejects.toThrow("requires re-entry");
     await expect(
       adapter.perform({
         operationId: request.operationId,
@@ -1340,6 +1567,53 @@ describe("Supabase staff auth adapter", () => {
       }),
     ).rejects.toThrow("reused");
     expect(JSON.stringify(adapter)).not.toContain("sentinel-not-retained");
+    expect(JSON.stringify(adapter)).not.toContain(
+      "different-sentinel-not-retained",
+    );
+    adapter.dispose();
+  });
+
+  it("binds a non-secret operation ID to its exact scope before coalescing", async () => {
+    const revocationDeferred: { resolve?: (value: unknown) => void } = {};
+    const revokeCurrentStaffSession = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          revocationDeferred.resolve = resolve;
+        }),
+    );
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => "blob:not-used",
+      operationIds: operationIdSource(),
+      port: port({
+        revokeCurrentStaffSession,
+        signOut: async () => ({ status: "signed_out" }),
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+    const operationId = "90000000-0000-4000-8000-000000000015";
+    const request = {
+      operationId,
+      scope: "local" as const,
+      type: "sign_out" as const,
+    };
+    const first = adapter.perform(request);
+    const duplicate = adapter.perform(request);
+    await expect(
+      adapter.perform({ operationId, scope: "all", type: "sign_out" }),
+    ).rejects.toThrow("reused");
+    expect(revokeCurrentStaffSession).toHaveBeenCalledOnce();
+    revocationDeferred.resolve?.([{ code: "ok" }]);
+    await expect(Promise.all([first, duplicate])).resolves.toEqual([
+      {
+        operationId,
+        result: { kind: "sign_out_complete", scope: "local" },
+      },
+      {
+        operationId,
+        result: { kind: "sign_out_complete", scope: "local" },
+      },
+    ]);
     adapter.dispose();
   });
 });

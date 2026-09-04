@@ -424,6 +424,7 @@ export function createSupabaseStaffAuthPort(
             "content-type": "application/json",
           },
           method: "POST",
+          redirect: "error",
         });
         if (!response.ok) {
           return {
@@ -783,13 +784,11 @@ export function createSupabaseStaffAuthPort(
               : "unavailable",
           };
         }
-        const verified = snapshotExactRecord(result.data, [
-          "access_token",
-          "expires_in",
-          "refresh_token",
-          "token_type",
-          "user",
-        ]);
+        const verified = snapshotExactRecord(
+          result.data,
+          ["access_token", "expires_in", "refresh_token", "token_type", "user"],
+          ["expires_at"],
+        );
         return {
           status:
             verified !== null &&
@@ -797,6 +796,10 @@ export function createSupabaseStaffAuthPort(
             typeof verified.expires_in === "number" &&
             Number.isInteger(verified.expires_in) &&
             verified.expires_in > 0 &&
+            (verified.expires_at === undefined ||
+              (typeof verified.expires_at === "number" &&
+                Number.isInteger(verified.expires_at) &&
+                verified.expires_at > 0)) &&
             isOpaqueToken(verified.refresh_token) &&
             verified.token_type === "bearer" &&
             isNonArrayObject(verified.user)

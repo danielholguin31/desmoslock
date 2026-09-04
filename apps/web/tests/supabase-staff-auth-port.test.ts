@@ -470,6 +470,7 @@ describe("Supabase staff auth port", () => {
     const verify = vi.fn(async () => ({
       data: {
         access_token: "synthetic-access-token-must-not-escape",
+        expires_at: 1_788_303_600,
         expires_in: 3600,
         refresh_token: "synthetic-refresh-token-must-not-escape",
         token_type: "bearer",
@@ -608,6 +609,7 @@ describe("Supabase staff auth port", () => {
           "content-type": "application/json",
         },
         method: "POST",
+        redirect: "error",
       },
     );
     expect(setSession).toHaveBeenCalledWith({
@@ -709,6 +711,36 @@ describe("Supabase staff auth port", () => {
         verifier: "v".repeat(43),
       }),
     ).resolves.toEqual({ status: "rejected" });
+  });
+
+  it("refuses PKCE redirects without retrying or installing a returned session", async () => {
+    const recoveryFetch = vi.fn(
+      async (...request: [RequestInfo | URL, RequestInit?]) => {
+        void request;
+        throw new TypeError("redirect mode is error");
+      },
+    );
+    const setSession = vi.fn(async () => ({
+      data: { session: {}, user: {} },
+      error: null,
+    }));
+    const port = createPort(
+      fakeClient({ auth: { setSession } }),
+      recoveryFetch,
+    );
+
+    await expect(
+      port.exchangeRecoveryCode({
+        authorizationCode: "synthetic-authorization-code",
+        verifier: "v".repeat(43),
+      }),
+    ).resolves.toEqual({ status: "unavailable" });
+    expect(recoveryFetch).toHaveBeenCalledOnce();
+    expect(recoveryFetch.mock.calls[0]?.[1]).toMatchObject({
+      method: "POST",
+      redirect: "error",
+    });
+    expect(setSession).not.toHaveBeenCalled();
   });
 
   it("forwards auth state changes without event data and unsubscribes exactly once", () => {

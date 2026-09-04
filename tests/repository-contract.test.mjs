@@ -231,6 +231,17 @@ test("repository pins the exact Node.js, npm, type, and web client toolchain", (
     () =>
       assertToolchainManifestContract({
         ...manifestContract,
+        rootPackage: {
+          ...manifestContract.rootPackage,
+          packageManager: `npm@${expectedToolchain.npm}+sha512.${"0".repeat(128)}`,
+        },
+      }),
+    /verified Corepack integrity/u,
+  );
+  assert.throws(
+    () =>
+      assertToolchainManifestContract({
+        ...manifestContract,
         workspacePackages: {
           ...workspacePackages,
           "apps/web": {
@@ -289,34 +300,94 @@ test("repository pins the exact Node.js, npm, type, and web client toolchain", (
         ),
       /Node\.js\/npm job/u,
     );
+    assert.throws(
+      () =>
+        assertWorkflowToolchain(
+          workflow.replace(
+            "      - uses: actions/setup-node@",
+            "      - run: npm --version\n      - uses: actions/setup-node@",
+          ),
+          workflowPath,
+          expectedJobCount,
+        ),
+      /before Node\.js\/npm use/u,
+    );
+    for (const jobKey of [
+      "  'added-node-job':",
+      "  added-node-job: # hidden from a partial parser",
+    ]) {
+      assert.throws(
+        () =>
+          assertWorkflowToolchain(
+            [
+              workflow,
+              jobKey,
+              "    runs-on: ubuntu-latest",
+              "    steps:",
+              "      - run: npm --version",
+            ].join("\n"),
+            workflowPath,
+            expectedJobCount,
+          ),
+        /canonical unquoted form/u,
+      );
+    }
   }
 });
 
 test("operator docs enumerate the exact toolchain and all public web build inputs", () => {
   const documents = [
-    readText("README.md"),
-    readText("docs/product-completion/reproducible-supabase.md"),
-    readText("docs/product-completion/v2-foundation.md"),
+    {
+      exactToolchain:
+        "Use exactly Node.js 24.20.0 and npm 11.12.1 from the repository root.",
+      text: readText("README.md"),
+    },
+    {
+      exactToolchain:
+        "Use exactly Node.js 24.20.0, npm 11.12.1, Docker, and the repository-pinned\nSupabase CLI.",
+      text: readText("docs/product-completion/reproducible-supabase.md"),
+    },
+    {
+      exactToolchain:
+        "Use exactly Node.js 24.20.0 and npm 11.12.1 from the repository root.",
+      text: readText("docs/product-completion/v2-foundation.md"),
+    },
   ];
   for (const document of documents) {
-    assert.match(document, /Node(?:\.js)? 24\.20\.0/u);
-    assert.match(document, /npm 11\.12\.1/u);
+    assert.equal(document.text.includes(document.exactToolchain), true);
+    assert.doesNotMatch(
+      document.text,
+      /Node(?:\.js)? 24(?:\.20\.0)?\s+(?:or newer|and newer|or later|\+)/iu,
+    );
     for (const field of [
       "DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT",
       "DESMOSLOCK_PUBLIC_BACKEND_URL",
       "DESMOSLOCK_PUBLIC_WEB_ORIGIN",
       "DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
     ]) {
-      assert.equal(document.includes(field), true, `${field} is undocumented`);
+      assert.equal(
+        document.text.includes(field),
+        true,
+        `${field} is undocumented`,
+      );
     }
-    assert.doesNotMatch(document, /exactly two fields|two public backend/u);
+    assert.doesNotMatch(
+      document.text,
+      /exactly two fields|two public backend/u,
+    );
   }
   assert.match(
-    documents[1],
+    documents[1].text,
     /publishable key is intentionally browser-public/u,
   );
-  assert.match(documents[1], /no database URL,[\s\S]*service-role key/u);
-  assert.match(documents[1], /desktop renderer never receives/u);
+  assert.match(documents[1].text, /no database URL,[\s\S]*service-role key/u);
+  assert.match(documents[1].text, /desktop renderer never receives/u);
+
+  const rootPackage = readJson("package.json");
+  assert.equal(
+    rootPackage.scripts?.["test:web"],
+    "npm run build:packages && DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=local DESMOSLOCK_PUBLIC_BACKEND_URL=http://127.0.0.1:43174 DESMOSLOCK_PUBLIC_WEB_ORIGIN=http://127.0.0.1:43173 DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc npm run build --workspace @desmoslock/web && vitest run apps/web && npm run test:web:e2e",
+  );
 });
 
 test("v2 data plane is migration-owned and clean-start only", () => {

@@ -636,6 +636,45 @@ describe("staff auth controller", () => {
     expect(clear).toHaveBeenCalledOnce();
   });
 
+  it("fails closed with a retryable bootstrap when provider authority refresh is unavailable", async () => {
+    const clear = vi.fn();
+    let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
+    let reads = 0;
+    const adapter: StaffAuthAdapter = {
+      async read() {
+        reads += 1;
+        return access("teacher");
+      },
+      async perform() {
+        throw new Error("unexpected mutation");
+      },
+      subscribe(listener) {
+        emit = listener;
+        return () => undefined;
+      },
+    };
+    const controller = createController(adapter, { clear });
+    await controller.dispatch({ type: "bootstrap" });
+    clear.mockClear();
+
+    emit?.({
+      identityGeneration: "identity-teacher",
+      kind: "authority_unavailable",
+      sessionGeneration: "session-teacher",
+    });
+
+    expect(controller.getSnapshot()).toMatchObject({
+      code: "dependency_unavailable",
+      kind: "dependency_failure",
+      operation: "bootstrap",
+      retryable: true,
+    });
+    expect(clear).toHaveBeenCalledOnce();
+    await controller.dispatch({ type: "retry" });
+    expect(reads).toBe(2);
+    expect(controller.getSnapshot()).toMatchObject({ kind: "authenticated" });
+  });
+
   it("retries a failed bootstrap with no provider detail", async () => {
     let reads = 0;
     const adapter: StaffAuthAdapter = {

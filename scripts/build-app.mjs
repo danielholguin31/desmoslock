@@ -252,6 +252,11 @@ async function runCommandLine() {
         ),
       ),
     );
+    await fs.mkdir(path.join(outputRoot, "auth"), { recursive: true });
+    await fs.copyFile(
+      path.join(sourceRoot, "auth", "staff-auth.css"),
+      path.join(outputRoot, "auth", "staff-auth.css"),
+    );
   }
 }
 

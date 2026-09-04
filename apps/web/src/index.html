@@ -7,10 +7,28 @@
     <title>DesmosLock v2 Internal</title>
   </head>
   <body>
-    <main>
-      <p class="eyebrow">Internal v2 workspace</p>
-      <h1>DesmosLock</h1>
-      <p data-v2-status>Loading foundation status…</p>
+    <main class="app-shell">
+      <header class="app-header">
+        <div>
+          <p class="eyebrow">Secure staff workspace</p>
+          <p class="brand" aria-label="DesmosLock">DesmosLock</p>
+        </div>
+        <p
+          class="backend-status"
+          data-v2-status
+          role="status"
+          aria-live="polite"
+        >
+          Connecting securely…
+        </p>
+      </header>
+      <section
+        class="auth-surface"
+        data-staff-auth-root
+        aria-label="Staff authentication"
+        hidden
+      ></section>
+      <section data-protected-school-data hidden></section>
     </main>
     <script type="module" src="./main.js"></script>
   </body>

@@ -103,6 +103,10 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
   let pendingVerificationEmail: string | null = null;
   const challengeReceipts = new Map<string, ChallengeReceipt>();
   const enrollmentReceipts = new Map<string, EnrollmentReceipt>();
+  const invitationInspectionContinuations = new Map<
+    string,
+    InvitationInspectionContinuation
+  >();
   const invitationReceipts = new Map<string, InvitationReceipt>();
   const listeners = new Set<(event: StaffAuthAccessEvent) => void>();
   const activePresentations = new Set<RevocablePresentation>();
@@ -111,6 +115,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     string,
     {
       readonly promise: Promise<StaffAuthMutationResult>;
+      readonly requestIdentity: string | null;
       readonly type: string;
     }
   >();
@@ -167,6 +172,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     sessionGeneration = null;
     identityGeneration = null;
     identityFacts = null;
+    invitationInspectionContinuations.clear();
     challengeReceipts.clear();
     clearEnrollmentReceipts(true);
   }
@@ -300,9 +306,6 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     if (context.role === "teacher" || assurance.currentLevel === "aal2") {
       result = { ...base, secondFactor: "satisfied" };
     } else {
-      if (assurance.nextLevel !== "aal2") {
-        throw new Error("Privileged staff assurance is unavailable");
-      }
       const factors = decodeTotpFactors(
         await dependencies.port.readTotpFactors(),
       );
@@ -313,6 +316,9 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       if (verified.length === 0) {
         result = { ...base, secondFactor: "enrollment_required" };
       } else {
+        if (assurance.nextLevel !== "aal2") {
+          throw new Error("Privileged staff assurance is unavailable");
+        }
         const factor = verified.length === 1 ? verified[0] : undefined;
         if (factor === undefined) {
           throw new Error("Staff authentication factors are ambiguous");
@@ -441,6 +447,8 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       );
     } else if (request.type === "inspect_invitation") {
       result = await inspectInvitation(request.operationId, request.tokenHash);
+    } else if (request.type === "resume_invitation_inspection") {
+      result = await resumeInvitationInspection(request);
     } else if (request.type === "accept_invitation") {
       result = await acceptInvitation(request);
     } else if (request.type === "begin_totp_enrollment") {
@@ -480,24 +488,128 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
         reason: verification.status,
       };
     }
-    const invitation = decodeCurrentInvitation(
-      await dependencies.port.readCurrentInvitations(),
+    const continuationReceipt = nextGeneration();
+    const continuation: InvitationInspectionContinuation = {
+      accountId: verification.accountId,
+      continuationReceipt,
+      expiresAt: readNow(dependencies.clock) + 5 * 60 * 1000,
+      identityGeneration: nextGeneration(),
+      inspectionOperationId,
+      sessionGeneration: nextGeneration(),
+    };
+    if (invitationInspectionContinuations.has(continuationReceipt)) {
+      throw new Error("Invitation continuation generation collided");
+    }
+    invitationInspectionContinuations.set(continuationReceipt, continuation);
+    trimMap(invitationInspectionContinuations, 16);
+    sessionGeneration = continuation.sessionGeneration;
+    identityGeneration = continuation.identityGeneration;
+    identityFacts = null;
+    return continueInvitationInspection(continuation);
+  }
+
+  async function resumeInvitationInspection(
+    request: Extract<
+      StaffAuthMutation,
+      { readonly type: "resume_invitation_inspection" }
+    >,
+  ): Promise<StaffAuthBoundaryResult> {
+    const continuation = invitationInspectionContinuations.get(
+      request.continuationReceipt,
     );
+    if (
+      continuation === undefined ||
+      continuation.inspectionOperationId !== request.inspectionOperationId ||
+      continuation.continuationReceipt !== request.continuationReceipt
+    ) {
+      return { kind: "invitation_rejected", reason: "invalid" };
+    }
+    return continueInvitationInspection(continuation);
+  }
+
+  async function continueInvitationInspection(
+    continuation: InvitationInspectionContinuation,
+  ): Promise<StaffAuthBoundaryResult> {
+    const interrupted = (): StaffAuthBoundaryResult => ({
+      continuationReceipt: continuation.continuationReceipt,
+      inspectionOperationId: continuation.inspectionOperationId,
+      kind: "invitation_inspection_interrupted",
+    });
+    let now: number;
+    try {
+      now = readNow(dependencies.clock);
+    } catch {
+      return interrupted();
+    }
+    if (continuation.expiresAt <= now) {
+      invitationInspectionContinuations.delete(
+        continuation.continuationReceipt,
+      );
+      return { kind: "invitation_rejected", reason: "expired" };
+    }
+    if (
+      sessionGeneration !== continuation.sessionGeneration ||
+      identityGeneration !== continuation.identityGeneration
+    ) {
+      invitationInspectionContinuations.delete(
+        continuation.continuationReceipt,
+      );
+      return { kind: "invitation_rejected", reason: "invalid" };
+    }
+
+    let rawSession: unknown;
+    let rawAccount: unknown;
+    try {
+      rawSession = await dependencies.port.readSession();
+      rawAccount = await dependencies.port.readAccount();
+    } catch {
+      return interrupted();
+    }
+    const session = decodeStatus(rawSession, ["authenticated", "signed_out"]);
+    if (session === null || rawAccount === null) {
+      return interrupted();
+    }
+    const account = decodeAccount(rawAccount);
+    if (
+      session !== "authenticated" ||
+      account === null ||
+      !account.emailVerified ||
+      account.accountId !== continuation.accountId
+    ) {
+      clearAuthorityState();
+      return { kind: "invitation_rejected", reason: "invalid" };
+    }
+
+    let invitation: CurrentInvitationResult;
+    try {
+      invitation = decodeCurrentInvitation(
+        await dependencies.port.readCurrentInvitations(),
+      );
+    } catch {
+      return interrupted();
+    }
     if (invitation.kind !== "ready") {
+      invitationInspectionContinuations.delete(
+        continuation.continuationReceipt,
+      );
       return { kind: "invitation_rejected", reason: invitation.reason };
     }
-    if (invitation.expiresAtMilliseconds <= readNow(dependencies.clock)) {
+    if (invitation.expiresAtMilliseconds <= now) {
+      invitationInspectionContinuations.delete(
+        continuation.continuationReceipt,
+      );
       return { kind: "invitation_rejected", reason: "expired" };
     }
     const acceptanceReceipt = nextGeneration();
     if (invitationReceipts.has(acceptanceReceipt)) {
       throw new Error("Invitation receipt generation collided");
     }
+    invitationInspectionContinuations.delete(continuation.continuationReceipt);
     invitationReceipts.set(acceptanceReceipt, {
-      accountId: verification.accountId,
-      email: verification.email,
+      accountId: account.accountId,
+      email: account.email,
       expiresAt: invitation.expiresAtMilliseconds,
-      inspectionOperationId,
+      inspectionOperationId: continuation.inspectionOperationId,
       invitationId: invitation.invitationId,
       role: invitation.role,
       schoolId: invitation.schoolId,
@@ -507,9 +619,9 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     return {
       acceptanceReceipt,
       expiresAt: invitation.expiresAt,
-      inspectionOperationId,
-      intendedAccountId: verification.accountId,
-      intendedEmail: verification.email,
+      inspectionOperationId: continuation.inspectionOperationId,
+      intendedAccountId: account.accountId,
+      intendedEmail: account.email,
       kind: "invitation_ready",
       role: invitation.role,
       school: { id: invitation.schoolId, label: invitation.schoolLabel },
@@ -1051,6 +1163,14 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
         try {
           authority = await readAuthority({ rotateSession: true });
         } catch {
+          if (!disposed) {
+            clearAuthorityState();
+            emitEvent({
+              identityGeneration: previousIdentityGeneration,
+              kind: "authority_unavailable",
+              sessionGeneration: previousSessionGeneration,
+            });
+          }
           return;
         }
         if (disposed) {
@@ -1095,6 +1215,8 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     if (disposed) {
       return;
     }
+    invitationInspectionContinuations.clear();
+    invitationReceipts.clear();
     eventRevision += 1;
     scheduleAuthorityEventRead();
   });
@@ -1119,9 +1241,13 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       if (!isCanonicalUuid(request.operationId)) {
         throw new Error("Staff authentication operation is invalid");
       }
+      const requestIdentity = operationRequestIdentity(request);
       const completed = completedOperations.get(request.operationId);
       if (completed !== undefined) {
-        if (completed.type !== request.type) {
+        if (
+          completed.type !== request.type ||
+          completed.requestIdentity !== requestIdentity
+        ) {
           throw new Error("Staff authentication operation was reused");
         }
         if (completed.result === null) {
@@ -1131,7 +1257,11 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       }
       const inFlight = inFlightOperations.get(request.operationId);
       if (inFlight !== undefined) {
-        if (inFlight.type !== request.type) {
+        if (
+          inFlight.type !== request.type ||
+          inFlight.requestIdentity !== requestIdentity ||
+          requestIdentity === null
+        ) {
           throw new Error("Staff authentication operation was reused");
         }
         return inFlight.promise;
@@ -1145,9 +1275,12 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
             throw new Error("Staff authentication adapter is disposed");
           }
           completedOperations.set(operationId, {
-            result: requiresCredentialReentry(result.result)
-              ? null
-              : result.result,
+            requestIdentity,
+            result:
+              requestIdentity === null ||
+              requiresCredentialReentry(result.result)
+                ? null
+                : result.result,
             type: operationType,
           });
           trimMap(completedOperations, 64);
@@ -1160,6 +1293,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
         });
       inFlightOperations.set(operationId, {
         promise,
+        requestIdentity,
         type: operationType,
       });
       return promise;
@@ -1190,6 +1324,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       challengeReceipts.clear();
       clearEnrollmentReceipts(true);
       invitationReceipts.clear();
+      invitationInspectionContinuations.clear();
       pendingVerificationEmail = null;
       for (const presentation of [...activePresentations]) {
         revokePresentation(presentation);
@@ -1217,6 +1352,7 @@ interface EnrollmentReceipt extends ChallengeReceipt {
 }
 
 interface CompletedOperation {
+  readonly requestIdentity: string | null;
   readonly result: StaffAuthBoundaryResult | null;
   readonly type: StaffAuthMutation["type"];
 }
@@ -1230,6 +1366,15 @@ interface InvitationReceipt {
   readonly role: "admin" | "teacher";
   readonly schoolId: string;
   readonly schoolLabel: string;
+}
+
+interface InvitationInspectionContinuation {
+  readonly accountId: string;
+  readonly continuationReceipt: string;
+  readonly expiresAt: number;
+  readonly identityGeneration: string;
+  readonly inspectionOperationId: string;
+  readonly sessionGeneration: string;
 }
 
 type CurrentInvitationResult =
@@ -1489,9 +1634,53 @@ function sameAccessAuthority(
   );
 }
 
+/**
+ * Returns a non-secret canonical identity only for commands that are safe to
+ * coalesce or replay. Credential/PII-bearing commands deliberately return
+ * null: a reused operation ID then requires fresh user input and the adapter
+ * never retains either plaintext credentials or a credential-derived tag.
+ */
+function operationRequestIdentity(request: StaffAuthMutation): string | null {
+  switch (request.type) {
+    case "resend_email_verification":
+    case "begin_totp_enrollment":
+      return JSON.stringify([request.type]);
+    case "resume_invitation_inspection":
+      return JSON.stringify([
+        request.type,
+        request.continuationReceipt,
+        request.inspectionOperationId,
+      ]);
+    case "sign_out":
+      return JSON.stringify([request.type, request.scope]);
+    case "revoke_staff_invitation":
+      return JSON.stringify([
+        request.type,
+        request.schoolId,
+        request.invitationId,
+      ]);
+    case "revoke_staff_membership":
+      return JSON.stringify([
+        request.type,
+        request.schoolId,
+        request.profileId,
+      ]);
+    case "sign_in":
+    case "verify_totp":
+    case "request_password_recovery":
+    case "inspect_invitation":
+    case "accept_invitation":
+    case "exchange_recovery_code":
+    case "complete_password_recovery":
+    case "create_staff_invitation":
+      return null;
+  }
+}
+
 function requiresCredentialReentry(result: StaffAuthBoundaryResult): boolean {
   return (
     result.kind === "access_granted" ||
+    result.kind === "invitation_inspection_interrupted" ||
     result.kind === "invitation_ready" ||
     result.kind === "totp_enrollment_ready" ||
     result.kind === "staff_invitation_created" ||

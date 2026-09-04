@@ -172,6 +172,19 @@ function readWorkflowJobs(workflow) {
   const remainder = workflow.slice(jobsStart);
   const nextTopLevel = /^\S[^:\n]*:\s*$/mu.exec(remainder);
   const jobsSection = remainder.slice(0, nextTopLevel?.index);
+  for (const line of jobsSection.split("\n")) {
+    if (
+      line.startsWith("  ") &&
+      !line.startsWith("    ") &&
+      line.trim() !== "" &&
+      !/^\s*#/u.test(line) &&
+      !/^ {2}[a-zA-Z0-9_-]+:\s*$/u.test(line)
+    ) {
+      fail(
+        "Workflow job keys must use the canonical unquoted form without comments",
+      );
+    }
+  }
   const matches = [...jobsSection.matchAll(/^ {2}([a-zA-Z0-9_-]+):\s*$/gmu)];
   return matches.map((match, index) => {
     const bodyStart = (match.index ?? 0) + match[0].length;

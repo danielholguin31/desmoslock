@@ -1,6 +1,10 @@
+@import "./auth/staff-auth.css";
+
 :root {
-  color: #18212f;
-  background: #f6f8fb;
+  color: #172033;
+  background:
+    radial-gradient(circle at 12% 8%, rgb(99 102 241 / 12%), transparent 32rem),
+    linear-gradient(160deg, #f7f8ff 0%, #f2f5fb 48%, #eef3f8 100%);
   font-family:
     Inter,
     ui-sans-serif,
@@ -9,23 +13,111 @@
     BlinkMacSystemFont,
     "Segoe UI",
     sans-serif;
+  font-synthesis: none;
 }
 
 body {
   min-height: 100vh;
   margin: 0;
-  display: grid;
-  place-items: center;
 }
 
-main {
-  width: min(36rem, calc(100% - 3rem));
+.app-shell {
+  box-sizing: border-box;
+  display: grid;
+  gap: clamp(1.5rem, 4vw, 3rem);
+  margin-inline: auto;
+  min-height: 100vh;
+  padding: clamp(1rem, 3vw, 2.5rem);
+  width: min(100%, 74rem);
+}
+
+.app-header {
+  align-items: center;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+}
+
+.app-header p {
+  margin: 0;
 }
 
 .eyebrow {
-  color: #45617f;
-  font-size: 0.75rem;
-  font-weight: 700;
-  letter-spacing: 0.12em;
+  color: #56647a;
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
+}
+
+.brand {
+  font-size: clamp(1.35rem, 4vw, 1.8rem);
+  font-weight: 780;
+  letter-spacing: -0.035em;
+}
+
+.backend-status {
+  background: rgb(255 255 255 / 72%);
+  border: 1px solid #d6dce8;
+  border-radius: 999px;
+  color: #506078;
+  font-size: 0.78rem;
+  padding: 0.55rem 0.8rem;
+}
+
+.backend-status[data-backend-status="ready"] {
+  border-color: #a8d4bf;
+  color: #17603d;
+}
+
+.backend-status[data-backend-status="unavailable"] {
+  border-color: #e7bbb7;
+  color: #8b2c25;
+}
+
+.auth-surface {
+  align-self: center;
+  background: rgb(255 255 255 / 88%);
+  border: 1px solid rgb(207 214 226 / 88%);
+  border-radius: clamp(1rem, 3vw, 1.5rem);
+  box-shadow:
+    0 1.5rem 4rem rgb(25 41 73 / 10%),
+    0 0.2rem 0.8rem rgb(25 41 73 / 6%);
+  justify-self: center;
+  overflow: hidden;
+  width: min(100%, 44rem);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+@media (max-width: 38rem) {
+  .app-shell {
+    gap: 1.25rem;
+    padding: 1rem;
+  }
+
+  .app-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .backend-status {
+    border-radius: 0.65rem;
+    max-width: calc(100% - 1.6rem);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .auth-surface {
+    animation: auth-surface-enter 180ms ease-out;
+  }
+
+  @keyframes auth-surface-enter {
+    from {
+      opacity: 0;
+      transform: translateY(0.4rem);
+    }
+  }
 }
