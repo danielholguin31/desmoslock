@@ -36,13 +36,27 @@ const sensitiveCallbackKeys = new Set([
   "error_description",
   "flow",
   "refresh_token",
+  "sb_flow_id",
   "state",
   "token",
   "token_hash",
   "type",
 ]);
 
-export type DetectedStaffAuthCallback = "invite" | "recovery";
+const sensitiveSerializedCallbackParameter =
+  /(?:^|[?&#])(?:access_token|auth|code|error(?:_code|_description)?|flow|refresh_token|sb_flow_id|state|token(?:_hash)?|type)(?:=|&|$)/iu;
+
+function containsSensitiveSerializedCallbackParameter(value: string): boolean {
+  if (sensitiveSerializedCallbackParameter.test(value)) return true;
+  try {
+    return sensitiveSerializedCallbackParameter.test(decodeURIComponent(value));
+  } catch {
+    return false;
+  }
+}
+
+export type DetectedStaffAuthCallback =
+  "email-verification" | "invite" | "recovery";
 
 export interface StaffAuthApplicationAdapter extends StaffAuthAdapter {
   dispose(): void;
@@ -107,26 +121,33 @@ export function detectStaffAuthCallback(
   try {
     url = new URL(callbackUrl);
   } catch {
-    return /(?:^|[?&])(?:access_token|auth|code|error(?:_code|_description)?|flow|refresh_token|state|token(?:_hash)?|type)=/u.test(
-      callbackUrl,
-    )
+    return containsSensitiveSerializedCallbackParameter(callbackUrl)
       ? "recovery"
       : null;
   }
 
-  let sensitive = false;
+  let sensitive = containsSensitiveSerializedCallbackParameter(url.hash);
   let invite = false;
+  let emailVerification = false;
   for (const key of url.searchParams.keys()) {
-    if (!sensitiveCallbackKeys.has(key)) continue;
+    const normalizedKey = key.toLowerCase();
+    if (!sensitiveCallbackKeys.has(normalizedKey)) continue;
     sensitive = true;
-    if (key === "token" || key === "token_hash") {
+    if (normalizedKey === "token" || normalizedKey === "token_hash") {
       invite = true;
     }
   }
   for (const auth of url.searchParams.getAll("auth")) {
     if (auth === "invite") invite = true;
+    if (auth === "email-verification") emailVerification = true;
   }
-  return sensitive ? (invite ? "invite" : "recovery") : null;
+  return sensitive
+    ? invite
+      ? "invite"
+      : emailVerification
+        ? "email-verification"
+        : "recovery"
+    : null;
 }
 
 /**
@@ -138,6 +159,26 @@ export function startStaffAuthApplication(
   dependencies: StaffAuthApplicationDependencies,
   factories: StaffAuthApplicationFactories,
 ): StartedStaffAuthApplication {
+  const callback = detectStaffAuthCallback(dependencies.callbackUrl);
+  let callbackHistory = dependencies.history;
+  if (callback !== null) {
+    try {
+      dependencies.history.replaceState(null, "", "/");
+    } catch {
+      // A callback credential that cannot be removed from the address bar must
+      // never coexist with provider construction, rendering, or network work.
+      try {
+        dependencies.elements.authRoot.replaceChildren();
+        dependencies.elements.authRoot.hidden = true;
+        dependencies.elements.protectedSchoolDataRoot.replaceChildren();
+        dependencies.elements.protectedSchoolDataRoot.hidden = true;
+      } catch {
+        // The document starts hidden; cleanup remains best-effort fail-closed.
+      }
+      return { dispose() {}, ready: Promise.resolve() };
+    }
+    callbackHistory = { replaceState() {} };
+  }
   const parsedConfiguration = parsePublicWebConfiguration(
     dependencies.configuration,
   );
@@ -169,7 +210,7 @@ export function startStaffAuthApplication(
     adapter,
     callback: {
       flows,
-      history: dependencies.history,
+      history: callbackHistory,
       route: { origin: routeOrigin, pathname: "/" },
     },
     clock: dependencies.clock,
@@ -181,7 +222,6 @@ export function startStaffAuthApplication(
       },
     },
   });
-  const callback = detectStaffAuthCallback(dependencies.callbackUrl);
   const initialization = controller.dispatch(
     callback === "invite"
       ? {
@@ -193,7 +233,12 @@ export function startStaffAuthApplication(
             callbackUrl: dependencies.callbackUrl,
             type: "consume_recovery_callback",
           }
-        : { type: "bootstrap" },
+        : callback === "email-verification"
+          ? {
+              callbackUrl: dependencies.callbackUrl,
+              type: "consume_email_verification_callback",
+            }
+          : { type: "bootstrap" },
   );
 
   let disposed = false;

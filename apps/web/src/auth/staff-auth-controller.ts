@@ -1,6 +1,7 @@
 import { parseStaffDisplayName } from "@desmoslock/contracts";
 
 import {
+  consumeStaffEmailVerificationCallback,
   consumeStaffInvitationCallback,
   consumeStaffRecoveryCallback,
   type StaffAuthCallbackHistory,
@@ -125,6 +126,7 @@ export type StaffAuthBoundaryResult =
   | { readonly kind: "sign_in_rejected" }
   | { readonly kind: "email_verification_required" }
   | { readonly kind: "email_verification_sent" }
+  | { readonly kind: "email_verification_callback_rejected" }
   | { readonly kind: "recovery_request_received" }
   | {
       readonly kind: "invitation_rejected";
@@ -224,6 +226,11 @@ export type StaffAuthMutation = MutationWithOperationId &
       }
     | { readonly type: "resend_email_verification" }
     | {
+        readonly authorizationCode: string;
+        readonly flowId: string;
+        readonly type: "exchange_email_verification_code";
+      }
+    | {
         readonly codeChallenge: string;
         readonly email: string;
         readonly flowId: string;
@@ -248,6 +255,7 @@ export type StaffAuthMutation = MutationWithOperationId &
       }
     | { readonly type: "begin_totp_enrollment" }
     | { readonly scope: "all" | "local"; readonly type: "sign_out" }
+    | { readonly type: "reset_to_sign_in" }
     | {
         readonly authorizationCode: string;
         readonly type: "exchange_recovery_code";
@@ -354,6 +362,10 @@ export type StaffAuthSnapshot =
       readonly revision: number;
     }
   | { readonly kind: "sending_email_verification"; readonly revision: number }
+  | {
+      readonly kind: "processing_email_verification_callback";
+      readonly revision: number;
+    }
   | { readonly kind: "email_verification_sent"; readonly revision: number }
   | { readonly kind: "requesting_recovery"; readonly revision: number }
   | { readonly kind: "recovery_notice"; readonly revision: number }
@@ -494,6 +506,10 @@ export type StaffAuthAction =
   | { readonly code: string; readonly type: "verify_totp" }
   | { readonly type: "cancel_totp" }
   | { readonly type: "resend_email_verification" }
+  | {
+      readonly callbackUrl: string;
+      readonly type: "consume_email_verification_callback";
+    }
   | { readonly email: string; readonly type: "request_password_recovery" }
   | { readonly callbackUrl: string; readonly type: "inspect_invitation" }
   | {
@@ -504,6 +520,7 @@ export type StaffAuthAction =
   | { readonly type: "begin_totp_enrollment" }
   | { readonly type: "sign_out_local" }
   | { readonly type: "revoke_all_sessions" }
+  | { readonly type: "back_to_sign_in" }
   | { readonly type: "retry" }
   | { readonly callbackUrl: string; readonly type: "consume_recovery_callback" }
   | { readonly password: string; readonly type: "complete_password_recovery" }
@@ -538,7 +555,7 @@ export interface StaffAuthController {
 type RetryableMutation = Extract<
   StaffAuthMutation,
   {
-    type: "resend_email_verification" | "sign_out";
+    type: "resend_email_verification" | "reset_to_sign_in" | "sign_out";
   }
 >;
 
@@ -554,6 +571,13 @@ type RetryPlan =
   | {
       readonly kind: "sign_out";
       readonly request: Extract<RetryableMutation, { type: "sign_out" }>;
+    }
+  | {
+      readonly kind: "reset_to_sign_in";
+      readonly request: Extract<
+        RetryableMutation,
+        { type: "reset_to_sign_in" }
+      >;
     }
   | {
       readonly continuationReceipt: string;
@@ -1285,6 +1309,31 @@ export function createStaffAuthController(dependencies: {
     }
   }
 
+  async function executeResetToSignIn(
+    existingRequest?: Extract<RetryableMutation, { type: "reset_to_sign_in" }>,
+  ): Promise<void> {
+    const epoch = beginOperation({ kind: "signing_out", scope: "local" });
+    activeGrant = null;
+    clearProtectedSchoolData();
+    const operationId =
+      existingRequest?.operationId ?? allocateOperationId("local_logout");
+    if (operationId === null || !isCurrent(epoch)) return;
+    const request = existingRequest ?? {
+      operationId,
+      type: "reset_to_sign_in" as const,
+    };
+    const result = await performMutation(request, epoch, "local_logout", {
+      kind: "reset_to_sign_in",
+      request,
+    });
+    if (result === null || !isCurrent(epoch)) return;
+    if (result.kind === "sign_out_complete" && result.scope === "local") {
+      transition({ kind: "signed_out", notice: null });
+    } else if (!applyAccessLoss(result)) {
+      rejectBoundaryResult("local_logout", result);
+    }
+  }
+
   async function executeRevokeMembership(
     request: Extract<StaffAuthMutation, { type: "revoke_staff_membership" }>,
     expectedActor: StaffAuthAccessGrant,
@@ -1387,6 +1436,9 @@ export function createStaffAuthController(dependencies: {
         return;
       case "sign_out":
         await executeSignOut(plan.request.scope, plan.request);
+        return;
+      case "reset_to_sign_in":
+        await executeResetToSignIn(plan.request);
         return;
       case "invitation_inspection":
         await executeResumeInvitationInspection(plan);
@@ -1886,6 +1938,91 @@ export function createStaffAuthController(dependencies: {
         await executeSignOut(
           action.type === "sign_out_local" ? "local" : "all",
         );
+        return snapshot;
+      }
+      case "consume_email_verification_callback": {
+        if (
+          snapshot.kind !== "bootstrapping" &&
+          snapshot.kind !== "signed_out" &&
+          snapshot.kind !== "email_verification_required" &&
+          snapshot.kind !== "email_verification_sent" &&
+          snapshot.kind !== "callback_rejected"
+        ) {
+          return snapshot;
+        }
+        operationEpoch += 1;
+        retryPlan = null;
+        activeGrant = null;
+        clearTotpCeremony();
+        clearInvitation();
+        clearInvitationRevocation();
+        clearMembershipRevocation();
+        const epoch = operationEpoch;
+        let operationId: string | null = null;
+        let operationAllocationFailed = false;
+        let consumeResponse: StaffAuthMutationResult | null = null;
+        const callbackWork = consumeStaffEmailVerificationCallback(
+          action.callbackUrl,
+          {
+            exchange: async ({ authorizationCode, flowId }) => {
+              const allocatedOperationId =
+                allocateOperationId("email_verification");
+              if (allocatedOperationId === null || !isCurrent(epoch)) {
+                operationAllocationFailed = allocatedOperationId === null;
+                throw new Error("operation unavailable");
+              }
+              operationId = allocatedOperationId;
+              transition({ kind: "processing_email_verification_callback" });
+              if (!clearProtectedSchoolData() || !isCurrent(epoch)) {
+                operationEpoch += 1;
+                fail("email_verification", "dependency_unavailable");
+                throw new Error("protected data unavailable");
+              }
+              const response = await dependencies.adapter.perform({
+                authorizationCode,
+                flowId,
+                operationId: allocatedOperationId,
+                type: "exchange_email_verification_code",
+              });
+              if (!isCurrent(epoch)) {
+                discardMutationResponse(response);
+                throw new Error("stale operation");
+              }
+              consumeResponse = response;
+            },
+            history: dependencies.callback.history,
+            route: dependencies.callback.route,
+          },
+        );
+        const receipt = await callbackWork;
+        if (!isCurrent(epoch)) return snapshot;
+        if (receipt.status === "rejected") {
+          if (operationAllocationFailed) return snapshot;
+          transition({ code: receipt.code, kind: "callback_rejected" });
+          return snapshot;
+        }
+        if (operationId === null) {
+          fail("email_verification", "invalid_backend_result");
+          return snapshot;
+        }
+        const result = decodeMutationResponse(consumeResponse, operationId);
+        if (result === null) {
+          discardMutationResponse(consumeResponse);
+          fail("email_verification", "invalid_backend_result");
+          return snapshot;
+        }
+        if (result.kind === "email_verification_callback_rejected") {
+          transition({ code: "invalid_callback", kind: "callback_rejected" });
+        } else if (result.kind === "signed_out") {
+          transition({ kind: "signed_out", notice: null });
+        } else if (!applyEntryResult(result, null, false)) {
+          rejectBoundaryResult("email_verification", result);
+        }
+        return snapshot;
+      }
+      case "back_to_sign_in": {
+        if (snapshot.kind === "authenticated") return snapshot;
+        await executeResetToSignIn();
         return snapshot;
       }
       case "consume_recovery_callback": {
@@ -2733,6 +2870,7 @@ function decodeBoundaryResult(value: unknown): StaffAuthBoundaryResult | null {
     switch (record.kind) {
       case "email_verification_required":
       case "email_verification_sent":
+      case "email_verification_callback_rejected":
       case "membership_inactive":
       case "password_recovery_ready":
       case "password_recovery_rejected":

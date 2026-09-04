@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  consumeStaffEmailVerificationCallback,
   consumeStaffInvitationCallback,
   consumeStaffRecoveryCallback,
   type StaffRecoveryFlowConsumeResult,
@@ -13,6 +14,7 @@ const flowId = "f".repeat(22);
 const state = "s".repeat(43);
 const verifier = "v".repeat(43);
 const tokenHash = "a".repeat(56);
+const sdkFlowId = "0123456789abcdef0123456789abcdef";
 
 function history(order: string[] = []) {
   return {
@@ -161,6 +163,119 @@ describe("staff invitation callback", () => {
       ),
     ).resolves.toEqual({ code: "invalid_callback", status: "rejected" });
     expect(inspect).not.toHaveBeenCalled();
+  });
+});
+
+describe("staff email-verification callback", () => {
+  const authorizationCode = "synthetic-email-verification-code";
+  const callbackUrl = `${origin}/?sb_flow_id=${sdkFlowId}&code=${authorizationCode}&auth=email-verification`;
+
+  it("scrubs synchronously before exchanging the exact SDK-owned verifier slot", async () => {
+    const order: string[] = [];
+    let release: () => void = () => undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const receipt = consumeStaffEmailVerificationCallback(callbackUrl, {
+      async exchange(input) {
+        order.push(`exchange:${input.authorizationCode}:${input.flowId}`);
+        await blocked;
+      },
+      history: history(order),
+      route,
+    });
+
+    expect(order).toEqual([
+      "scrub:/",
+      `exchange:${authorizationCode}:${sdkFlowId}`,
+    ]);
+    release();
+    await expect(receipt).resolves.toEqual({
+      code: "accepted",
+      kind: "email-verification",
+      status: "accepted",
+    });
+    expect(JSON.stringify(await receipt)).not.toContain(authorizationCode);
+  });
+
+  it.each([
+    ["bare code", `${origin}/?code=${authorizationCode}`],
+    [
+      "missing flow",
+      `${origin}/?auth=email-verification&code=${authorizationCode}`,
+    ],
+    [
+      "duplicate flow",
+      `${origin}/?auth=email-verification&code=${authorizationCode}&sb_flow_id=${sdkFlowId}&sb_flow_id=${sdkFlowId}`,
+    ],
+    [
+      "duplicate auth",
+      `${origin}/?auth=email-verification&auth=email-verification&code=${authorizationCode}&sb_flow_id=${sdkFlowId}`,
+    ],
+    [
+      "extra key",
+      `${origin}/?auth=email-verification&code=${authorizationCode}&sb_flow_id=${sdkFlowId}&next=/school`,
+    ],
+    [
+      "mixed recovery",
+      `${origin}/?auth=email-verification&code=${authorizationCode}&sb_flow_id=${sdkFlowId}&flow=${flowId}&state=${state}`,
+    ],
+    [
+      "mixed invitation",
+      `${origin}/?auth=email-verification&code=${authorizationCode}&sb_flow_id=${sdkFlowId}&token_hash=${tokenHash}`,
+    ],
+    [
+      "wrong auth",
+      `${origin}/?auth=recovery&code=${authorizationCode}&sb_flow_id=${sdkFlowId}`,
+    ],
+    [
+      "short flow",
+      `${origin}/?auth=email-verification&code=${authorizationCode}&sb_flow_id=short`,
+    ],
+    [
+      "invalid flow",
+      `${origin}/?auth=email-verification&code=${authorizationCode}&sb_flow_id=${"!".repeat(32)}`,
+    ],
+    [
+      "oversize code",
+      `${origin}/?auth=email-verification&code=${"x".repeat(2049)}&sb_flow_id=${sdkFlowId}`,
+    ],
+    [
+      "wrong path",
+      `${origin}/auth/callback?auth=email-verification&code=${authorizationCode}&sb_flow_id=${sdkFlowId}`,
+    ],
+    [
+      "wrong origin",
+      `https://evil.example/?auth=email-verification&code=${authorizationCode}&sb_flow_id=${sdkFlowId}`,
+    ],
+    ["fragment", `${callbackUrl}#credential`],
+  ])("scrubs and rejects %s before exchange", async (_label, url) => {
+    const order: string[] = [];
+    const exchange = vi.fn(async () => undefined);
+    const receipt = await consumeStaffEmailVerificationCallback(url, {
+      exchange,
+      history: history(order),
+      route,
+    });
+    expect(order).toEqual(["scrub:/"]);
+    expect(receipt.status).toBe("rejected");
+    expect(exchange).not.toHaveBeenCalled();
+  });
+
+  it("sanitizes a consumed or missing SDK verifier without retaining credentials", async () => {
+    const receipt = await consumeStaffEmailVerificationCallback(callbackUrl, {
+      async exchange() {
+        throw new Error(`provider leaked ${authorizationCode}`);
+      },
+      history: history(),
+      route,
+    });
+    expect(receipt).toEqual({
+      code: "token_consumption_unavailable",
+      status: "rejected",
+    });
+    expect(JSON.stringify(receipt)).not.toContain(authorizationCode);
+    expect(JSON.stringify(receipt)).not.toContain(sdkFlowId);
   });
 });
 

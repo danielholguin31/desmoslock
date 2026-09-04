@@ -27,6 +27,7 @@ function port(
     beginPasswordRecovery: unavailable,
     challengeTotp: unavailable,
     enrollTotp: unavailable,
+    exchangeEmailVerificationCode: unavailable,
     exchangeRecoveryCode: unavailable,
     finishPasswordRecovery: unavailable,
     invokeInvitation: unavailable,
@@ -117,6 +118,82 @@ describe("Supabase staff auth adapter", () => {
     await expect(adapter.read()).resolves.toEqual({ kind: "signed_out" });
     adapter.dispose();
   });
+
+  it("accepts the exact inactive-membership context with its bound profile ID", async () => {
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => {
+        throw new Error("not used");
+      },
+      operationIds: operationIdSource(),
+      port: port({
+        readAccount: async () => ({
+          accountId,
+          email: "teacher@example.test",
+          emailVerified: true,
+        }),
+        readCurrentContext: async () => [
+          {
+            code: "membership_inactive",
+            display_name: null,
+            membership_role: null,
+            profile_id: profileId,
+            role_revision: null,
+            school_id: null,
+            school_name: null,
+            school_slug: null,
+          },
+        ],
+        readSession: async () => ({ status: "authenticated" }),
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+
+    await expect(adapter.read()).resolves.toEqual({
+      kind: "membership_inactive",
+    });
+    adapter.dispose();
+  });
+
+  it.each([
+    ["membership_inactive", "not-a-profile-id"],
+    ["session_revoked", profileId],
+  ] as const)(
+    "rejects malformed %s context failure identity data",
+    async (code, returnedProfileId) => {
+      const adapter = createSupabaseStaffAuthAdapter({
+        clock: { now: () => 1_788_300_000_000 },
+        createBlobUrl: () => {
+          throw new Error("not used");
+        },
+        operationIds: operationIdSource(),
+        port: port({
+          readAccount: async () => ({
+            accountId,
+            email: "teacher@example.test",
+            emailVerified: true,
+          }),
+          readCurrentContext: async () => [
+            {
+              code,
+              display_name: null,
+              membership_role: null,
+              profile_id: returnedProfileId,
+              role_revision: null,
+              school_id: null,
+              school_name: null,
+              school_slug: null,
+            },
+          ],
+          readSession: async () => ({ status: "authenticated" }),
+        }),
+        revokeBlobUrl: () => undefined,
+      });
+
+      await expect(adapter.read()).rejects.toThrow("malformed");
+      adapter.dispose();
+    },
+  );
 
   it("builds Teacher access only from a verified account and exact live DB context", async () => {
     const identifiers = [firstOperationId, secondOperationId];
@@ -421,6 +498,68 @@ describe("Supabase staff auth adapter", () => {
       operationId: secondOperationId,
       result: { kind: "email_verification_sent" },
     });
+    adapter.dispose();
+  });
+
+  it("re-reads authoritative access after an SDK-owned email verification exchange", async () => {
+    const exchangeEmailVerificationCode = vi.fn(async () => ({
+      status: "ready",
+    }));
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => {
+        throw new Error("not used");
+      },
+      operationIds: operationIdSource(),
+      port: port({
+        exchangeEmailVerificationCode,
+        readAccount: async () => ({
+          accountId,
+          email: "teacher@example.test",
+          emailVerified: true,
+        }),
+        readAssurance: async () => ({
+          currentLevel: "aal1",
+          nextLevel: "aal1",
+        }),
+        readCurrentContext: async () => [
+          {
+            code: "ok",
+            display_name: "Taylor Teacher",
+            membership_role: "teacher",
+            profile_id: profileId,
+            role_revision: 1,
+            school_id: schoolId,
+            school_name: "Example School",
+            school_slug: "example-school",
+          },
+        ],
+        readSession: async () => ({ status: "authenticated" }),
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+    const authorizationCode = "synthetic-email-verification-code";
+    const flowId = "0123456789abcdef0123456789abcdef";
+
+    await expect(
+      adapter.perform({
+        authorizationCode,
+        flowId,
+        operationId: firstOperationId,
+        type: "exchange_email_verification_code",
+      }),
+    ).resolves.toMatchObject({
+      operationId: firstOperationId,
+      result: {
+        identity: { accountId, school: { id: schoolId } },
+        kind: "access_granted",
+      },
+    });
+    expect(exchangeEmailVerificationCode).toHaveBeenCalledWith({
+      authorizationCode,
+      flowId,
+    });
+    expect(JSON.stringify(adapter)).not.toContain(authorizationCode);
     adapter.dispose();
   });
 
@@ -771,6 +910,79 @@ describe("Supabase staff auth adapter", () => {
     adapter.dispose();
   });
 
+  it("keeps the opaque invitation continuation after one malformed DB response", async () => {
+    const continuationReceipt = "10000000-0000-4000-8000-000000000003";
+    const identifiers = [
+      continuationReceipt,
+      "10000000-0000-4000-8000-000000000004",
+      "10000000-0000-4000-8000-000000000005",
+      "10000000-0000-4000-8000-000000000006",
+    ];
+    let invitationReads = 0;
+    const verifyInvitationToken = vi.fn(async () => ({
+      accountId,
+      email: "invitee@example.test",
+      status: "verified",
+    }));
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => Date.parse("2026-09-03T20:00:00.000Z") },
+      createBlobUrl: () => {
+        throw new Error("not used");
+      },
+      operationIds: {
+        next: () => identifiers.shift() ?? "identifier-exhausted",
+      },
+      port: port({
+        readAccount: async () => ({
+          accountId,
+          email: "invitee@example.test",
+          emailVerified: true,
+        }),
+        readCurrentInvitations: async () => {
+          invitationReads += 1;
+          return invitationReads === 1
+            ? [{ malformed: true }]
+            : [
+                {
+                  code: "ok",
+                  expires_at: "2026-09-04T12:00:00+00:00",
+                  invitation_id: invitationId,
+                  invited_role: "teacher",
+                  school_id: schoolId,
+                  school_name: "Example School",
+                },
+              ];
+        },
+        readSession: async () => ({ status: "authenticated" }),
+        verifyInvitationToken,
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+
+    await expect(
+      adapter.perform({
+        operationId: firstOperationId,
+        tokenHash: "a".repeat(56),
+        type: "inspect_invitation",
+      }),
+    ).resolves.toMatchObject({
+      result: {
+        continuationReceipt,
+        kind: "invitation_inspection_interrupted",
+      },
+    });
+    await expect(
+      adapter.perform({
+        continuationReceipt,
+        inspectionOperationId: firstOperationId,
+        operationId: secondOperationId,
+        type: "resume_invitation_inspection",
+      }),
+    ).resolves.toMatchObject({ result: { kind: "invitation_ready" } });
+    expect(verifyInvitationToken).toHaveBeenCalledOnce();
+    adapter.dispose();
+  });
+
   it("invalidates an interrupted invitation inspection when the account changes", async () => {
     const continuationReceipt = "10000000-0000-4000-8000-000000000003";
     const identifiers = [
@@ -1064,6 +1276,44 @@ describe("Supabase staff auth adapter", () => {
     adapter.dispose();
   });
 
+  it("treats an inactive membership target as a rejected target, not actor access loss", async () => {
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => "blob:not-used",
+      operationIds: operationIdSource(),
+      port: ownerPort({
+        readManageableStaff: async () => [
+          {
+            code: "ok",
+            display_name: "Ada Admin",
+            email: "ada@example.test",
+            membership_role: "admin",
+            profile_id: targetProfileId,
+            school_id: schoolId,
+          },
+        ],
+        revokeMembership: async () => [{ code: "membership_inactive" }],
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+    await adapter.read();
+
+    await expect(
+      adapter.perform({
+        operationId: "90000000-0000-4000-8000-000000000006",
+        profileId: targetProfileId,
+        schoolId,
+        type: "revoke_staff_membership",
+      }),
+    ).resolves.toMatchObject({
+      result: {
+        actor: { identity: { profile: { id: profileId } } },
+        kind: "staff_membership_revocation_rejected",
+      },
+    });
+    adapter.dispose();
+  });
+
   it.each(["local", "all"] as const)(
     "completes %s sign-out only after application and provider revocation",
     async (scope) => {
@@ -1103,6 +1353,37 @@ describe("Supabase staff auth adapter", () => {
       adapter.dispose();
     },
   );
+
+  it("returns to sign in by clearing the provider locally without an application RPC", async () => {
+    const signOut = vi.fn(async () => ({ status: "signed_out" }));
+    const revokeAllStaffSessions = vi.fn(async () => [{ code: "ok" }]);
+    const revokeCurrentStaffSession = vi.fn(async () => [{ code: "ok" }]);
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => "blob:not-used",
+      operationIds: operationIdSource(),
+      port: port({
+        revokeAllStaffSessions,
+        revokeCurrentStaffSession,
+        signOut,
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+
+    await expect(
+      adapter.perform({
+        operationId: "90000000-0000-4000-8000-000000000007",
+        type: "reset_to_sign_in",
+      }),
+    ).resolves.toEqual({
+      operationId: "90000000-0000-4000-8000-000000000007",
+      result: { kind: "sign_out_complete", scope: "local" },
+    });
+    expect(signOut).toHaveBeenCalledWith("local");
+    expect(revokeCurrentStaffSession).not.toHaveBeenCalled();
+    expect(revokeAllStaffSessions).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
 
   it("keeps an uncertain global sign-out pending and safely retries a DB-confirmed revocation", async () => {
     let attempts = 0;
@@ -1614,6 +1895,59 @@ describe("Supabase staff auth adapter", () => {
         result: { kind: "sign_out_complete", scope: "local" },
       },
     ]);
+    await expect(
+      adapter.perform({ operationId, scope: "all", type: "sign_out" }),
+    ).rejects.toThrow("reused");
+    adapter.dispose();
+  });
+
+  it("rejects same-type operation reuse with a different School or target tuple", async () => {
+    const revokeDeferred: { resolve?: (value: unknown) => void } = {};
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => "blob:not-used",
+      operationIds: operationIdSource(),
+      port: ownerPort({
+        readManageableStaff: async () => [
+          {
+            code: "ok",
+            display_name: "Ada Admin",
+            email: "ada@example.test",
+            membership_role: "admin",
+            profile_id: targetProfileId,
+            school_id: schoolId,
+          },
+        ],
+        revokeMembership: async () =>
+          new Promise((resolve) => {
+            revokeDeferred.resolve = resolve;
+          }),
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+    await adapter.read();
+    const operationId = "90000000-0000-4000-8000-000000000016";
+    const first = adapter.perform({
+      operationId,
+      profileId: targetProfileId,
+      schoolId,
+      type: "revoke_staff_membership",
+    });
+    await expect(
+      adapter.perform({
+        operationId,
+        profileId: "21000000-0000-4000-8000-000000000003",
+        schoolId: "11000000-0000-4000-8000-000000000002",
+        type: "revoke_staff_membership",
+      }),
+    ).rejects.toThrow("reused");
+    await vi.waitFor(() =>
+      expect(revokeDeferred.resolve).toBeTypeOf("function"),
+    );
+    revokeDeferred.resolve?.([{ code: "membership_revoked" }]);
+    await expect(first).resolves.toMatchObject({
+      result: { kind: "staff_membership_revoked" },
+    });
     adapter.dispose();
   });
 });

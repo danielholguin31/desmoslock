@@ -549,6 +549,29 @@ describe("staff auth controller", () => {
     },
   );
 
+  it("clears a terminal provider session before returning to sign in", async () => {
+    const clear = vi.fn();
+    const requests: StaffAuthMutation[] = [];
+    const controller = createController(
+      createAdapter({ kind: "membership_inactive" }, async (request) => {
+        requests.push(request);
+        return { kind: "sign_out_complete", scope: "local" };
+      }),
+      { clear },
+    );
+    await controller.dispatch({ type: "bootstrap" });
+    clear.mockClear();
+    await controller.dispatch({ type: "back_to_sign_in" });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ type: "reset_to_sign_in" });
+    expect(controller.getSnapshot()).toMatchObject({
+      kind: "signed_out",
+      notice: null,
+    });
+    expect(clear).toHaveBeenCalledOnce();
+  });
+
   it("rejects a generic or wrong-scope logout result", async () => {
     const clear = vi.fn();
     const controller = createController(
@@ -1165,6 +1188,67 @@ describe("staff auth controller", () => {
       verifier: "v".repeat(43),
     });
   });
+
+  it("consumes a cold email-verification callback before publishing fresh authority", async () => {
+    const history = vi.fn();
+    const clear = vi.fn();
+    const requests: StaffAuthMutation[] = [];
+    const controller = createController(
+      createAdapter({ kind: "signed_out" }, async (request) => {
+        requests.push(request);
+        return access("teacher");
+      }),
+      { clear, history },
+    );
+    const authorizationCode = "SENTINEL-email-verification-code";
+    const flowId = "0123456789abcdef0123456789abcdef";
+
+    await controller.dispatch({
+      callbackUrl: `https://app.example.test/?auth=email-verification&sb_flow_id=${flowId}&code=${authorizationCode}`,
+      type: "consume_email_verification_callback",
+    });
+
+    expect(history).toHaveBeenCalledWith("/");
+    expect(clear).toHaveBeenCalledOnce();
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      authorizationCode,
+      flowId,
+      type: "exchange_email_verification_code",
+    });
+    expect(controller.getSnapshot()).toMatchObject({ kind: "authenticated" });
+    expect(JSON.stringify(controller.getSnapshot())).not.toContain(
+      authorizationCode,
+    );
+  });
+
+  it.each([
+    `https://app.example.test/?code=bare-provider-code`,
+    `https://app.example.test/?auth=email-verification&code=provider-code&sb_flow_id=short`,
+    `https://app.example.test/?auth=email-verification&auth=recovery&code=provider-code&sb_flow_id=0123456789abcdef0123456789abcdef`,
+  ])(
+    "scrubs and rejects malformed email-verification callback %s",
+    async (callbackUrl) => {
+      const history = vi.fn();
+      const perform = vi.fn(async () => ({
+        kind: "email_verification_callback_rejected" as const,
+      }));
+      const controller = createController(
+        createAdapter({ kind: "signed_out" }, perform),
+        { history },
+      );
+      await controller.dispatch({
+        callbackUrl,
+        type: "consume_email_verification_callback",
+      });
+
+      expect(history).toHaveBeenCalledWith("/");
+      expect(perform).not.toHaveBeenCalled();
+      expect(controller.getSnapshot()).toMatchObject({
+        kind: "callback_rejected",
+      });
+    },
+  );
 
   it.each([
     { kind: "password_recovery_complete" },

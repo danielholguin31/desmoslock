@@ -762,6 +762,45 @@ describe("staff auth view", () => {
     expect(document.activeElement?.tabIndex).toBe(-1);
   });
 
+  it("dispatches an explicit provider-session reset from Back to sign in", () => {
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    const intents: StaffAuthViewIntent[] = [];
+    renderStaffAuthView(
+      root as unknown as HTMLElement,
+      { kind: "session_expired", revision: 1 },
+      (intent) => {
+        intents.push(intent);
+      },
+    );
+    const form = descendants(root).find(({ tagName }) => tagName === "form");
+    form?.listeners.get("submit")?.({ preventDefault() {} } as Event);
+
+    expect(intents).toEqual([{ type: "back_to_sign_in" }]);
+  });
+
+  it("returns from authenticated management feedback without signing out", () => {
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    const intents: StaffAuthViewIntent[] = [];
+    renderStaffAuthView(
+      root as unknown as HTMLElement,
+      {
+        kind: "staff_membership_revoked",
+        revision: 1,
+        schoolLabel: "North High",
+        targetRole: "teacher",
+      },
+      (intent) => {
+        intents.push(intent);
+      },
+    );
+    const form = descendants(root).find(({ tagName }) => tagName === "form");
+    form?.listeners.get("submit")?.({ preventDefault() {} } as Event);
+
+    expect(intents).toEqual([{ type: "bootstrap" }]);
+  });
+
   it("renders a closed authentication view without actions", () => {
     expect(
       createStaffAuthViewModel({ kind: "disposed", revision: 2 }),

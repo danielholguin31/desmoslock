@@ -9,6 +9,17 @@ import { publicWebConfiguration } from "./public-config.js";
 
 export const internalWorkspacePreview: readonly WorkspaceSummary[] = [];
 
+export function registerWebApplicationLifecycle(
+  runtime: Window,
+  dispose: () => void,
+): () => void {
+  const handlePageHide = (event: PageTransitionEvent) => {
+    if (!event.persisted) dispose();
+  };
+  runtime.addEventListener("pagehide", handlePageHide);
+  return () => runtime.removeEventListener("pagehide", handlePageHide);
+}
+
 export function mountWebApplication(
   documentRoot: Document,
   runtime: Window,
@@ -39,10 +50,8 @@ export function mountWebApplication(
       fetch: fetchImplementation,
       history: runtime.history,
       lifecycle: {
-        register(dispose) {
-          runtime.addEventListener("pagehide", dispose, { once: true });
-          return () => runtime.removeEventListener("pagehide", dispose);
-        },
+        register: (dispose) =>
+          registerWebApplicationLifecycle(runtime, dispose),
       },
       operationIds: { next: () => runtime.crypto.randomUUID() },
       recoveryCrypto: runtime.crypto,

@@ -151,9 +151,11 @@ describe("staff auth application composition", () => {
   it.each([
     [
       "invite",
+      "invite",
       "http://localhost:43173/?auth=invite&token_hash=" + "a".repeat(56),
     ],
     [
+      "recovery",
       "recovery",
       "http://localhost:43173/?auth=recovery&flow=" +
         "A".repeat(22) +
@@ -161,15 +163,109 @@ describe("staff auth application composition", () => {
         "B".repeat(43) +
         "&code=provider-code",
     ],
-    ["legacy", "http://localhost:43173/?token=legacy-provider-value"],
-    ["mixed", "http://localhost:43173/?auth=invite&code=x&token_hash=y"],
-  ])("detects a %s callback without exposing its credential", (kind, url) => {
-    const detected = detectStaffAuthCallback(url);
+    [
+      "email verification",
+      "email-verification",
+      "http://localhost:43173/?auth=email-verification&sb_flow_id=0123456789abcdef0123456789abcdef&code=provider-code",
+    ],
+    ["legacy", "invite", "http://localhost:43173/?token=legacy-provider-value"],
+    [
+      "mixed",
+      "invite",
+      "http://localhost:43173/?auth=invite&code=x&token_hash=y",
+    ],
+    [
+      "legacy implicit fragment",
+      "recovery",
+      "http://localhost:43173/#access_token=fragment-access&refresh_token=fragment-refresh&type=recovery",
+    ],
+    [
+      "encoded sensitive fragment",
+      "recovery",
+      "http://localhost:43173/#%61ccess_token=fragment-access",
+    ],
+    [
+      "uppercase unsupported fragment",
+      "recovery",
+      "http://localhost:43173/#ACCESS_TOKEN=fragment-access",
+    ],
+    [
+      "valueless sensitive fragment",
+      "recovery",
+      "http://localhost:43173/#refresh_token",
+    ],
+  ])(
+    "detects a %s callback without exposing its credential",
+    (_label, kind, url) => {
+      const detected = detectStaffAuthCallback(url);
 
-    expect(detected).not.toBeNull();
-    expect(detected).toBe(kind === "recovery" ? "recovery" : "invite");
-    expect(JSON.stringify(detected)).not.toContain("provider");
-    expect(JSON.stringify(detected)).not.toContain("legacy");
+      expect(detected).not.toBeNull();
+      expect(detected).toBe(kind);
+      expect(JSON.stringify(detected)).not.toContain("provider");
+      expect(JSON.stringify(detected)).not.toContain("legacy");
+    },
+  );
+
+  it("scrubs an unsupported sensitive fragment before provider, render, or health work", async () => {
+    const perform = vi.fn(async () => {
+      throw new Error("unsupported callbacks must not reach the provider");
+    });
+    const { adapter } = createAdapter({ perform });
+    const history = { replaceState: vi.fn() };
+    const harness = createHarness({
+      adapter,
+      callbackUrl:
+        "http://localhost:43173/#access_token=fragment-access&refresh_token=fragment-refresh&type=recovery",
+      history,
+    });
+
+    expect(history.replaceState).toHaveBeenCalledWith(null, "", "/");
+    expect(perform).not.toHaveBeenCalled();
+    expect(harness.bindView).not.toHaveBeenCalled();
+    expect(harness.observeHealth).not.toHaveBeenCalled();
+
+    await harness.application.ready;
+
+    expect(harness.bindView).toHaveBeenCalledOnce();
+    expect(harness.observeHealth).toHaveBeenCalledOnce();
+  });
+
+  it("scrubs an email-verification callback before SDK exchange, render, or health", async () => {
+    let resolveMutation:
+      ((result: StaffAuthMutationResult) => void) | undefined;
+    const perform = vi.fn(
+      (request: StaffAuthMutation) =>
+        new Promise<StaffAuthMutationResult>((resolve) => {
+          void request;
+          resolveMutation = resolve;
+        }),
+    );
+    const { adapter } = createAdapter({ perform });
+    const history = { replaceState: vi.fn() };
+    const flowId = "0123456789abcdef0123456789abcdef";
+    const harness = createHarness({
+      adapter,
+      callbackUrl: `http://localhost:43173/?auth=email-verification&sb_flow_id=${flowId}&code=one-shot-code`,
+      history,
+    });
+
+    expect(history.replaceState).toHaveBeenCalledWith(null, "", "/");
+    expect(perform).toHaveBeenCalledOnce();
+    expect(perform.mock.calls[0]?.[0]).toMatchObject({
+      authorizationCode: "one-shot-code",
+      flowId,
+      type: "exchange_email_verification_code",
+    });
+    expect(harness.bindView).not.toHaveBeenCalled();
+    expect(harness.observeHealth).not.toHaveBeenCalled();
+
+    resolveMutation?.({
+      operationId,
+      result: { kind: "membership_inactive" },
+    });
+    await harness.application.ready;
+    expect(harness.bindView).toHaveBeenCalledOnce();
+    expect(harness.observeHealth).toHaveBeenCalledOnce();
   });
 
   it("scrubs an invitation callback synchronously before provider completion, render, or health", async () => {
@@ -281,6 +377,32 @@ describe("staff auth application composition", () => {
     expect(harness.elements.status.textContent).toContain(
       "configuration_invalid",
     );
+  });
+
+  it("does no provider, render, or network work when synchronous callback scrubbing fails", async () => {
+    const history = {
+      replaceState: vi.fn(() => {
+        throw new Error("synthetic history denial");
+      }),
+    };
+    const harness = createHarness({
+      callbackUrl: `http://localhost:43173/?auth=invite&token_hash=${"a".repeat(56)}`,
+      history,
+    });
+
+    expect(history.replaceState).toHaveBeenCalledOnce();
+    expect(harness.createAdapterFactory).not.toHaveBeenCalled();
+    expect(harness.bindView).not.toHaveBeenCalled();
+    expect(harness.observeHealth).not.toHaveBeenCalled();
+    expect(harness.elements.authRoot.hidden).toBe(true);
+    expect(harness.elements.protectedSchoolDataRoot.hidden).toBe(true);
+
+    await harness.application.ready;
+    harness.application.dispose();
+
+    expect(harness.createAdapterFactory).not.toHaveBeenCalled();
+    expect(harness.bindView).not.toHaveBeenCalled();
+    expect(harness.observeHealth).not.toHaveBeenCalled();
   });
 
   it("clears protected School data before publishing the bootstrapped view", async () => {

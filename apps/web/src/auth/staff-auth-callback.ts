@@ -1,4 +1,5 @@
-export type StaffAuthCallbackKind = "invite" | "recovery";
+export type StaffAuthCallbackKind =
+  "email-verification" | "invite" | "recovery";
 
 export type StaffRecoveryFlowConsumeResult =
   | {
@@ -73,6 +74,72 @@ export function consumeStaffInvitationCallback(
     options.inspect,
     options,
   );
+}
+
+/**
+ * Scrubs one SDK-owned email-verification PKCE callback before handing its
+ * transient code and flow slot to Supabase Auth. The SDK owns and atomically
+ * consumes the verifier stored for the exact flow ID.
+ */
+export function consumeStaffEmailVerificationCallback(
+  callbackUrl: string,
+  options: {
+    readonly exchange: (input: {
+      readonly authorizationCode: string;
+      readonly flowId: string;
+    }) => Promise<void>;
+    readonly history: StaffAuthCallbackHistory;
+    readonly route: StaffAuthCallbackRoute;
+  },
+): Promise<StaffAuthCallbackReceipt> {
+  const route = scrubAndParseRoute(callbackUrl, options);
+  if (route.status === "rejected") return Promise.resolve(route);
+  const { url } = route;
+  const entries = [...url.searchParams.entries()];
+  if (
+    entries.length !== 3 ||
+    url.searchParams.getAll("auth").length !== 1 ||
+    url.searchParams.getAll("code").length !== 1 ||
+    url.searchParams.getAll("sb_flow_id").length !== 1 ||
+    entries.some(
+      ([key]) => key !== "auth" && key !== "code" && key !== "sb_flow_id",
+    ) ||
+    url.searchParams.get("auth") !== "email-verification"
+  ) {
+    return Promise.resolve(rejected("malformed_callback"));
+  }
+  const authorizationCode = url.searchParams.get("code");
+  const flowId = url.searchParams.get("sb_flow_id");
+  if (
+    authorizationCode === null ||
+    authorizationCode.length === 0 ||
+    authorizationCode !== authorizationCode.trim() ||
+    encodedByteLength(authorizationCode) > 2048 ||
+    hasControlText(authorizationCode) ||
+    flowId === null ||
+    !/^[A-Za-z0-9_-]{8,64}$/u.test(flowId)
+  ) {
+    return Promise.resolve(rejected("malformed_callback"));
+  }
+  return consumeEmailVerificationCode(authorizationCode, flowId, options);
+}
+
+async function consumeEmailVerificationCode(
+  authorizationCode: string,
+  flowId: string,
+  options: {
+    readonly exchange: (input: {
+      readonly authorizationCode: string;
+      readonly flowId: string;
+    }) => Promise<void>;
+  },
+): Promise<StaffAuthCallbackReceipt> {
+  try {
+    await options.exchange({ authorizationCode, flowId });
+  } catch {
+    return rejected("token_consumption_unavailable");
+  }
+  return { code: "accepted", kind: "email-verification", status: "accepted" };
 }
 
 /**

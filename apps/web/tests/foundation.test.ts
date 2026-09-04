@@ -1,16 +1,44 @@
 import { parsePublicBackendConfiguration } from "@desmoslock/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   observeWebBackend,
   publicWebBackendConfiguration,
   updateWebBackendStatus,
 } from "../src/backend-status.js";
-import { internalWorkspacePreview } from "../src/main.js";
+import {
+  internalWorkspacePreview,
+  registerWebApplicationLifecycle,
+} from "../src/main.js";
 
 describe("web v2 foundation", () => {
   it("starts with no imported legacy product rows", () => {
     expect(internalWorkspacePreview).toEqual([]);
+  });
+
+  it("preserves the live application for BFCache and disposes on a terminal page hide", () => {
+    const handlers: {
+      pageHide?: (event: PageTransitionEvent) => void;
+    } = {};
+    const runtime = {
+      addEventListener(_type: string, listener: EventListener) {
+        handlers.pageHide = listener as (event: PageTransitionEvent) => void;
+      },
+      removeEventListener: vi.fn(),
+    } as unknown as Window;
+    const dispose = vi.fn();
+    const unregister = registerWebApplicationLifecycle(runtime, dispose);
+
+    handlers.pageHide?.({ persisted: true } as PageTransitionEvent);
+    expect(dispose).not.toHaveBeenCalled();
+    handlers.pageHide?.({ persisted: false } as PageTransitionEvent);
+    expect(dispose).toHaveBeenCalledOnce();
+
+    unregister();
+    expect(runtime.removeEventListener).toHaveBeenCalledWith(
+      "pagehide",
+      expect.any(Function),
+    );
   });
 
   it("has no implicit loopback backend when build configuration is absent", () => {

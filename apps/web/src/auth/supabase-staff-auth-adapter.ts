@@ -47,6 +47,10 @@ export interface SupabaseStaffAuthPort {
   beginPasswordRecovery(operationId: string): Promise<unknown>;
   challengeTotp(factorId: string): Promise<unknown>;
   enrollTotp(): Promise<unknown>;
+  exchangeEmailVerificationCode(input: {
+    readonly authorizationCode: string;
+    readonly flowId: string;
+  }): Promise<unknown>;
   exchangeRecoveryCode(input: {
     readonly authorizationCode: string;
     readonly verifier: string;
@@ -399,6 +403,28 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
         throw new Error("Email verification result is unavailable");
       }
       result = { kind: "email_verification_sent" };
+    } else if (request.type === "exchange_email_verification_code") {
+      if (
+        !validOpaqueCredential(request.authorizationCode, 2048) ||
+        !/^[A-Za-z0-9_-]{8,64}$/u.test(request.flowId)
+      ) {
+        result = { kind: "email_verification_callback_rejected" };
+      } else {
+        const response = decodeStatus(
+          await dependencies.port.exchangeEmailVerificationCode({
+            authorizationCode: request.authorizationCode,
+            flowId: request.flowId,
+          }),
+          ["ready", "rejected"],
+        );
+        if (response === null) {
+          throw new Error("Email verification callback is unavailable");
+        }
+        result =
+          response === "rejected"
+            ? { kind: "email_verification_callback_rejected" }
+            : await readAuthority({ rotateSession: true });
+      }
     } else if (request.type === "request_password_recovery") {
       const recoveryRequest = parseRequestStaffPasswordRecoveryRequest({
         codeChallenge: request.codeChallenge,
@@ -457,6 +483,8 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       result = await verifyTotpMutation(request);
     } else if (request.type === "sign_out") {
       result = await signOut(request.scope);
+    } else if (request.type === "reset_to_sign_in") {
+      result = await resetToSignIn();
     } else if (request.type === "create_staff_invitation") {
       result = await createStaffInvitation(request);
     } else if (request.type === "revoke_staff_invitation") {
@@ -888,6 +916,20 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     return { kind: "sign_out_complete", scope };
   }
 
+  async function resetToSignIn(): Promise<StaffAuthBoundaryResult> {
+    const providerResult = decodeStatus(
+      await dependencies.port.signOut("local"),
+      ["signed_out"],
+    );
+    if (providerResult !== "signed_out") {
+      throw new Error("Provider sign-out is unavailable");
+    }
+    clearAuthorityState();
+    invitationReceipts.clear();
+    pendingVerificationEmail = null;
+    return { kind: "sign_out_complete", scope: "local" };
+  }
+
   async function createStaffInvitation(
     request: Extract<
       StaffAuthMutation,
@@ -1016,6 +1058,12 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       return refreshed;
     }
     if (!response.ok) {
+      if (response.code === "authorization_denied") {
+        return {
+          actor: refreshed,
+          kind: "staff_membership_revocation_rejected",
+        };
+      }
       const loss = boundaryFailure(response.code);
       return (
         loss ?? {
@@ -1644,6 +1692,7 @@ function operationRequestIdentity(request: StaffAuthMutation): string | null {
   switch (request.type) {
     case "resend_email_verification":
     case "begin_totp_enrollment":
+    case "reset_to_sign_in":
       return JSON.stringify([request.type]);
     case "resume_invitation_inspection":
       return JSON.stringify([
@@ -1666,6 +1715,7 @@ function operationRequestIdentity(request: StaffAuthMutation): string | null {
         request.profileId,
       ]);
     case "sign_in":
+    case "exchange_email_verification_code":
     case "verify_totp":
     case "request_password_recovery":
     case "inspect_invitation":
@@ -1896,10 +1946,13 @@ function decodeCurrentContext(value: unknown): CurrentContextResult {
     throw new Error("Staff authentication context is unavailable");
   }
   if (row.code !== "ok") {
+    const profileIdIsValidFailureValue =
+      row.profile_id === null ||
+      (row.code === "membership_inactive" && isCanonicalUuid(row.profile_id));
     if (
       row.display_name !== null ||
       row.membership_role !== null ||
-      row.profile_id !== null ||
+      !profileIdIsValidFailureValue ||
       row.role_revision !== null ||
       row.school_id !== null ||
       row.school_name !== null ||

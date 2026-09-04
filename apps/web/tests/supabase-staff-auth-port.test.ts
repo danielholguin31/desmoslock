@@ -12,6 +12,28 @@ const profileId = "21000000-0000-4000-8000-000000000001";
 const invitationId = "41000000-0000-4000-8000-000000000001";
 const operationId = "51000000-0000-4000-8000-000000000001";
 const accountId = "a1000000-0000-4000-8000-000000000001";
+const recoveryTokenUrl = `${backendUrl}/auth/v1/token?grant_type=pkce`;
+
+function recoveryResponse(
+  body: BodyInit | null,
+  init: ResponseInit,
+  options: { readonly redirected?: boolean; readonly url?: string } = {},
+): Response {
+  const response = new Response(body, init);
+  Object.defineProperty(response, "url", {
+    configurable: false,
+    enumerable: true,
+    value: options.url ?? recoveryTokenUrl,
+  });
+  if (options.redirected !== undefined) {
+    Object.defineProperty(response, "redirected", {
+      configurable: false,
+      enumerable: true,
+      value: options.redirected,
+    });
+  }
+  return response;
+}
 
 function authError(code: string): object {
   const error = { code };
@@ -48,6 +70,7 @@ function fakeClient(
     ...mfaOverrides,
   };
   const auth: SupabaseStaffAuthClient["auth"] = {
+    exchangeCodeForSession: async () => externalFailure(),
     getSession: async () => externalFailure(),
     getUser: async () => externalFailure(),
     mfa,
@@ -81,6 +104,7 @@ function createPort(
   return createSupabaseStaffAuthPort({
     client,
     fetch: recoveryFetch,
+    origin: "https://app.example.test",
     publishableKey,
     url: backendUrl,
   });
@@ -351,6 +375,9 @@ describe("Supabase staff auth port", () => {
     ).resolves.toEqual({ status: "sent" });
     expect(resend).toHaveBeenCalledWith({
       email: "teacher@example.test",
+      options: {
+        emailRedirectTo: "https://app.example.test/?auth=email-verification",
+      },
       type: "signup",
     });
     await expect(port.verifyInvitationToken(tokenHash)).resolves.toEqual({
@@ -371,6 +398,48 @@ describe("Supabase staff auth port", () => {
       token_hash: tokenHash,
       type: "invite",
     });
+  });
+
+  it("exchanges email verification through the exact SDK-owned PKCE flow slot", async () => {
+    const authorizationCode = "synthetic-email-verification-code";
+    const flowId = "0123456789abcdef0123456789abcdef";
+    const exchangeCodeForSession = vi
+      .fn<SupabaseStaffAuthClient["auth"]["exchangeCodeForSession"]>()
+      .mockResolvedValueOnce({
+        data: { redirectType: null, session: {}, user: { id: accountId } },
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: { redirectType: null, session: null, user: null },
+        error: authError("flow_state_already_used"),
+      })
+      .mockResolvedValueOnce({
+        data: { redirectType: null, session: null, user: null },
+        error: authError("pkce_code_verifier_not_found"),
+      })
+      .mockResolvedValueOnce({
+        data: { redirectType: null, session: null, user: null },
+        error: authError("unexpected_failure"),
+      });
+    const port = createPort(fakeClient({ auth: { exchangeCodeForSession } }));
+
+    await expect(
+      port.exchangeEmailVerificationCode({ authorizationCode, flowId }),
+    ).resolves.toEqual({ status: "ready" });
+    await expect(
+      port.exchangeEmailVerificationCode({ authorizationCode, flowId }),
+    ).resolves.toEqual({ status: "rejected" });
+    await expect(
+      port.exchangeEmailVerificationCode({ authorizationCode, flowId }),
+    ).resolves.toEqual({ status: "rejected" });
+    await expect(
+      port.exchangeEmailVerificationCode({ authorizationCode, flowId }),
+    ).resolves.toEqual({ status: "unavailable" });
+    expect(exchangeCodeForSession).toHaveBeenNthCalledWith(
+      1,
+      authorizationCode,
+      { flowId },
+    );
   });
 
   it("maps password updates and sign-out scopes without exposing auth failures", async () => {
@@ -564,22 +633,21 @@ describe("Supabase staff auth port", () => {
     const refreshToken = "synthetic-refresh-token";
     const authorizationCode = "synthetic-authorization-code";
     const verifier = "v".repeat(43);
-    const recoveryFetch = vi.fn(
-      async () =>
-        new Response(
-          JSON.stringify({
-            access_token: accessToken,
-            expires_at: 1_788_303_600,
-            expires_in: 3600,
-            refresh_token: refreshToken,
-            token_type: "bearer",
-            user: { id: accountId },
-          }),
-          {
-            headers: { "content-type": "application/json" },
-            status: 200,
-          },
-        ),
+    const recoveryFetch = vi.fn(async () =>
+      recoveryResponse(
+        JSON.stringify({
+          access_token: accessToken,
+          expires_at: 1_788_303_600,
+          expires_in: 3600,
+          refresh_token: refreshToken,
+          token_type: "bearer",
+          user: { id: accountId },
+        }),
+        {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        },
+      ),
     );
     const setSession = vi.fn(async () => ({
       data: {
@@ -629,13 +697,19 @@ describe("Supabase staff auth port", () => {
     const recoveryFetch = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ code: "bad_code_verifier" }), {
-          headers: { "content-type": "application/json" },
-          status: 400,
-        }),
+        recoveryResponse(
+          JSON.stringify({
+            error_code: "bad_code_verifier",
+            msg: "synthetic",
+          }),
+          {
+            headers: { "content-type": "application/json" },
+            status: 400,
+          },
+        ),
       )
       .mockResolvedValueOnce(
-        new Response(
+        recoveryResponse(
           JSON.stringify({ ...validTokenBody, provider_debug: "not allowed" }),
           {
             headers: { "content-type": "application/json" },
@@ -644,12 +718,23 @@ describe("Supabase staff auth port", () => {
         ),
       )
       .mockResolvedValueOnce(
-        new Response(JSON.stringify(validTokenBody), {
+        recoveryResponse(JSON.stringify(validTokenBody), {
           headers: { "content-type": "application/json" },
           status: 200,
         }),
       )
-      .mockResolvedValueOnce(new Response(null, { status: 503 }));
+      .mockResolvedValueOnce(
+        recoveryResponse(
+          JSON.stringify({
+            error_code: "unexpected_failure",
+            msg: "synthetic",
+          }),
+          {
+            headers: { "content-type": "application/json" },
+            status: 503,
+          },
+        ),
+      );
     const setSession = vi.fn(async () => ({
       data: { session: {}, user: {} },
       debug: "unexpected SDK field",
@@ -679,22 +764,125 @@ describe("Supabase staff auth port", () => {
     expect(setSession).toHaveBeenCalledTimes(1);
   });
 
-  it("maps stable setSession authentication failures without retaining returned tokens", async () => {
-    const recoveryFetch = vi.fn(
-      async () =>
-        new Response(
-          JSON.stringify({
-            access_token: "synthetic-access-token",
-            expires_in: 3600,
-            refresh_token: "synthetic-refresh-token",
-            token_type: "bearer",
-            user: { id: accountId },
-          }),
-          {
-            headers: { "content-type": "application/json" },
-            status: 200,
-          },
+  it.each([
+    ["flow_state_not_found", 404],
+    ["flow_state_expired", 422],
+    ["flow_state_already_used", 400],
+  ] as const)(
+    "treats stable %s PKCE failures as terminal regardless of HTTP status",
+    async (errorCode, status) => {
+      const recoveryFetch = vi.fn(async () =>
+        recoveryResponse(
+          JSON.stringify({ error_code: errorCode, msg: "synthetic" }),
+          { headers: { "content-type": "application/json" }, status },
         ),
+      );
+      const setSession = vi.fn(async () => ({
+        data: { session: {}, user: {} },
+        error: null,
+      }));
+      const port = createPort(
+        fakeClient({ auth: { setSession } }),
+        recoveryFetch,
+      );
+
+      await expect(
+        port.exchangeRecoveryCode({
+          authorizationCode: "synthetic-authorization-code",
+          verifier: "v".repeat(43),
+        }),
+      ).resolves.toEqual({ status: "rejected" });
+      expect(recoveryFetch).toHaveBeenCalledOnce();
+      expect(setSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [JSON.stringify({ error_code: "unknown_failure", msg: "synthetic" }), 400],
+    [JSON.stringify({ code: "flow_state_expired" }), 422],
+    ["not-json", 404],
+    [
+      JSON.stringify({
+        error_code: "flow_state_expired",
+        msg: "x".repeat(4_097),
+      }),
+      422,
+    ],
+  ] as const)(
+    "keeps malformed or unknown PKCE failure payloads retryable",
+    async (body, status) => {
+      const port = createPort(
+        fakeClient(),
+        vi.fn(async () =>
+          recoveryResponse(body, {
+            headers: { "content-type": "application/json" },
+            status,
+          }),
+        ),
+      );
+      await expect(
+        port.exchangeRecoveryCode({
+          authorizationCode: "synthetic-authorization-code",
+          verifier: "v".repeat(43),
+        }),
+      ).resolves.toEqual({ status: "unavailable" });
+    },
+  );
+
+  it.each([
+    { url: "https://redirected.example.test/auth/v1/token?grant_type=pkce" },
+    { redirected: true },
+  ])(
+    "rejects a PKCE response outside the exact final URL boundary",
+    async (options) => {
+      const setSession = vi.fn(async () => ({
+        data: { session: {}, user: {} },
+        error: null,
+      }));
+      const port = createPort(
+        fakeClient({ auth: { setSession } }),
+        vi.fn(async () =>
+          recoveryResponse(
+            JSON.stringify({
+              access_token: "synthetic-access-token",
+              expires_in: 3600,
+              refresh_token: "synthetic-refresh-token",
+              token_type: "bearer",
+              user: { id: accountId },
+            }),
+            {
+              headers: { "content-type": "application/json" },
+              status: 200,
+            },
+            options,
+          ),
+        ),
+      );
+      await expect(
+        port.exchangeRecoveryCode({
+          authorizationCode: "synthetic-authorization-code",
+          verifier: "v".repeat(43),
+        }),
+      ).resolves.toEqual({ status: "unavailable" });
+      expect(setSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it("maps stable setSession authentication failures without retaining returned tokens", async () => {
+    const recoveryFetch = vi.fn(async () =>
+      recoveryResponse(
+        JSON.stringify({
+          access_token: "synthetic-access-token",
+          expires_in: 3600,
+          refresh_token: "synthetic-refresh-token",
+          token_type: "bearer",
+          user: { id: accountId },
+        }),
+        {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        },
+      ),
     );
     const setSession = vi.fn(async () => ({
       data: { session: null, user: null },

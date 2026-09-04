@@ -46,6 +46,10 @@ export interface SupabaseStaffAuthClient {
         readonly factorId: string;
       }): PromiseLike<SupabaseExternalResult>;
     };
+    exchangeCodeForSession(
+      authorizationCode: string,
+      options: { readonly flowId: string },
+    ): PromiseLike<SupabaseExternalResult>;
     getSession(): PromiseLike<SupabaseExternalResult>;
     getUser(): PromiseLike<SupabaseExternalResult>;
     onAuthStateChange(listener: (event: unknown, session: unknown) => void): {
@@ -55,6 +59,7 @@ export interface SupabaseStaffAuthClient {
     };
     resend(input: {
       readonly email: string;
+      readonly options: { readonly emailRedirectTo: string };
       readonly type: "signup";
     }): PromiseLike<SupabaseExternalResult>;
     setSession(input: {
@@ -219,6 +224,88 @@ function decodeDirectPkceTokens(value: unknown): {
   };
 }
 
+async function readBoundedJson(
+  response: Response,
+  maximumBytes: number,
+): Promise<unknown | null> {
+  const contentType = response.headers
+    .get("content-type")
+    ?.split(";", 1)[0]
+    ?.trim()
+    .toLowerCase();
+  if (contentType !== "application/json") {
+    return null;
+  }
+  const declaredLength = response.headers.get("content-length");
+  if (
+    declaredLength !== null &&
+    (!/^\d+$/u.test(declaredLength) || Number(declaredLength) > maximumBytes)
+  ) {
+    return null;
+  }
+  const reader = response.body?.getReader();
+  if (reader === undefined) return null;
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    totalBytes += chunk.value.byteLength;
+    if (totalBytes > maximumBytes) {
+      try {
+        await reader.cancel();
+      } catch {
+        // The response is already rejected; cancellation is best-effort.
+      }
+      return null;
+    }
+    chunks.push(chunk.value);
+  }
+  const body = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(body),
+    ) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function decodeDirectPkceFailureCode(value: unknown): string | null {
+  const current = snapshotExactRecord(value, ["code", "message"]);
+  if (
+    current !== null &&
+    typeof current.code === "string" &&
+    typeof current.message === "string"
+  ) {
+    return current.code;
+  }
+  const legacy = snapshotExactRecord(value, ["error_code", "msg"]);
+  return legacy !== null &&
+    typeof legacy.error_code === "string" &&
+    typeof legacy.msg === "string"
+    ? legacy.error_code
+    : null;
+}
+
+function isRejectedDirectPkceCode(code: string | null): boolean {
+  return (
+    code === "bad_code_verifier" ||
+    code === "flow_state_already_used" ||
+    code === "flow_state_expired" ||
+    code === "flow_state_not_found"
+  );
+}
+
+function isExpectedDirectResponse(response: Response, url: string): boolean {
+  return response.redirected === false && response.url === url;
+}
+
 function isSignedOutAuthError(code: string | null): boolean {
   return (
     code === "refresh_token_already_used" ||
@@ -266,6 +353,19 @@ function isRejectedSessionInstallError(code: string | null): boolean {
   );
 }
 
+function isRejectedEmailVerificationExchangeError(
+  code: string | null,
+): boolean {
+  return (
+    code === "bad_code_verifier" ||
+    code === "flow_state_already_used" ||
+    code === "flow_state_expired" ||
+    code === "flow_state_not_found" ||
+    code === "pkce_code_verifier_not_found" ||
+    code === "otp_expired"
+  );
+}
+
 function decodeSetSessionResult(
   value: unknown,
 ): "ready" | "rejected" | "unavailable" {
@@ -302,6 +402,7 @@ function invitationFailureStatus(
 export interface SupabaseStaffAuthPortDependencies {
   readonly client: SupabaseStaffAuthClient;
   readonly fetch: RecoveryFetch;
+  readonly origin: string;
   readonly publishableKey: string;
   readonly url: string;
 }
@@ -405,6 +506,50 @@ export function createSupabaseStaffAuthPort(
         return { status: "unavailable" };
       }
     },
+    async exchangeEmailVerificationCode(input: {
+      readonly authorizationCode: string;
+      readonly flowId: string;
+    }) {
+      try {
+        const result = externalResult(
+          await dependencies.client.auth.exchangeCodeForSession(
+            input.authorizationCode,
+            { flowId: input.flowId },
+          ),
+        );
+        if (result === null) return { status: "unavailable" };
+        if (result.error !== null) {
+          return {
+            status: isRejectedEmailVerificationExchangeError(
+              authErrorCode(result.error),
+            )
+              ? "rejected"
+              : "unavailable",
+          };
+        }
+        const data = snapshotExactRecord(result.data, [
+          "redirectType",
+          "session",
+          "user",
+        ]);
+        return {
+          status:
+            data !== null &&
+            (data.redirectType === null ||
+              typeof data.redirectType === "string") &&
+            isNonArrayObject(data.session) &&
+            isNonArrayObject(data.user)
+              ? "ready"
+              : "unavailable",
+        };
+      } catch (error: unknown) {
+        return {
+          status: isRejectedEmailVerificationExchangeError(authErrorCode(error))
+            ? "rejected"
+            : "unavailable",
+        };
+      }
+    },
     async exchangeRecoveryCode(input: {
       readonly authorizationCode: string;
       readonly verifier: string;
@@ -426,24 +571,23 @@ export function createSupabaseStaffAuthPort(
           method: "POST",
           redirect: "error",
         });
-        if (!response.ok) {
-          return {
-            status:
-              response.status === 400 || response.status === 401
-                ? "rejected"
-                : "unavailable",
-          };
-        }
-        if (
-          response.status !== 200 ||
-          !response.headers
-            .get("content-type")
-            ?.toLowerCase()
-            .startsWith("application/json")
-        ) {
+        if (!isExpectedDirectResponse(response, tokenUrl)) {
           return { status: "unavailable" };
         }
-        const tokens = decodeDirectPkceTokens(await response.json());
+        if (!response.ok) {
+          const code = decodeDirectPkceFailureCode(
+            await readBoundedJson(response, 4_096),
+          );
+          return {
+            status: isRejectedDirectPkceCode(code) ? "rejected" : "unavailable",
+          };
+        }
+        if (response.status !== 200) {
+          return { status: "unavailable" };
+        }
+        const tokens = decodeDirectPkceTokens(
+          await readBoundedJson(response, 65_536),
+        );
         if (tokens === null) return { status: "unavailable" };
         const installed = decodeSetSessionResult(
           await dependencies.client.auth.setSession({
@@ -624,7 +768,13 @@ export function createSupabaseStaffAuthPort(
     async resendEmailVerification(email: string) {
       try {
         const result = externalResult(
-          await dependencies.client.auth.resend({ email, type: "signup" }),
+          await dependencies.client.auth.resend({
+            email,
+            options: {
+              emailRedirectTo: `${dependencies.origin}/?auth=email-verification`,
+            },
+            type: "signup",
+          }),
         );
         if (result?.error === null) return { status: "sent" };
         const code = result === null ? null : authErrorCode(result.error);
@@ -818,17 +968,25 @@ export function createSupabaseStaffAuthPort(
 }
 
 export function createProductionSupabaseStaffAuthPort(
-  configuration: Pick<PublicWebConfiguration, "publishableKey" | "url">,
+  configuration: Pick<
+    PublicWebConfiguration,
+    "origin" | "publishableKey" | "url"
+  >,
   fetchImplementation: RecoveryFetch = globalThis.fetch,
 ): SupabaseStaffAuthPort {
   const client = createClient(configuration.url, configuration.publishableKey, {
-    auth: { detectSessionInUrl: false, flowType: "pkce" },
+    auth: {
+      detectSessionInUrl: false,
+      experimental: { appendPkceFlowIdToRedirects: true },
+      flowType: "pkce",
+    },
     db: { schema: "desmoslock_v2" },
     global: { fetch: fetchImplementation },
   });
   return createSupabaseStaffAuthPort({
     client: client as unknown as SupabaseStaffAuthClient,
     fetch: fetchImplementation,
+    origin: configuration.origin,
     publishableKey: configuration.publishableKey,
     url: configuration.url,
   });

@@ -11,6 +11,7 @@ export type StaffAuthViewActionId =
   | "begin_totp_enrollment"
   | "cancel_totp"
   | "complete_password_recovery"
+  | "continue_authenticated"
   | "create_administrator_invitation"
   | "create_teacher_invitation"
   | "confirm_staff_invitation_revocation"
@@ -108,6 +109,7 @@ export type StaffAuthViewIntent =
   | { readonly type: "revoke_all_sessions" }
   | { readonly type: "retry" }
   | { readonly type: "bootstrap" }
+  | { readonly type: "back_to_sign_in" }
   | { readonly password: string; readonly type: "complete_password_recovery" }
   | {
       readonly email: string;
@@ -511,7 +513,7 @@ export function createStaffAuthViewModel(
     const created = snapshot.kind === "staff_invitation_created";
     const revokedInvitation = snapshot.kind === "staff_invitation_revoked";
     return {
-      actions: [{ id: "back_to_sign_in", label: "Continue" }],
+      actions: [{ id: "continue_authenticated", label: "Continue" }],
       fields: [],
       heading: created
         ? "Invitation created"
@@ -537,7 +539,7 @@ export function createStaffAuthViewModel(
     const invitationRevocation =
       snapshot.kind === "staff_invitation_revocation_rejected";
     return {
-      actions: [{ id: "back_to_sign_in", label: "Continue" }],
+      actions: [{ id: "continue_authenticated", label: "Continue" }],
       fields: [],
       heading: invitationCreation
         ? "Invitation not created"
@@ -619,6 +621,7 @@ export function createStaffAuthViewModel(
     snapshot.kind === "signing_in" ||
     snapshot.kind === "signing_out" ||
     snapshot.kind === "sending_email_verification" ||
+    snapshot.kind === "processing_email_verification_callback" ||
     snapshot.kind === "requesting_recovery" ||
     snapshot.kind === "inspecting_invitation" ||
     snapshot.kind === "accepting_invitation" ||
@@ -646,6 +649,8 @@ export function createStaffAuthViewModel(
                   bootstrapping: "Checking staff access",
                   enrolling_totp: "Preparing authenticator",
                   inspecting_invitation: "Checking invitation",
+                  processing_email_verification_callback:
+                    "Checking verification link",
                   processing_recovery_callback: "Checking recovery link",
                   requesting_recovery: "Requesting recovery",
                   sending_email_verification: "Sending verification email",
@@ -905,6 +910,8 @@ function createIntent(
     case "retry":
       return { type: "retry" };
     case "back_to_sign_in":
+      return { type: "back_to_sign_in" };
+    case "continue_authenticated":
       return { type: "bootstrap" };
     case "complete_password_recovery":
       return {
