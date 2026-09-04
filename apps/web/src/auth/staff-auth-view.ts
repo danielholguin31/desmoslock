@@ -254,7 +254,7 @@ export function createStaffAuthViewModel(
       fields: [],
       heading: "Authentication link unavailable",
       message:
-        "This authentication link could not be accepted. Request a new one.",
+        "This authentication link could not be accepted. Return to sign in to request a new one.",
       status: snapshot.kind,
       tone: "danger",
     };

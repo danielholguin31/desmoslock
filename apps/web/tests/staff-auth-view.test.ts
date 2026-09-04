@@ -324,7 +324,7 @@ describe("staff auth view", () => {
       actions: [{ id: "back_to_sign_in", label: "Back to sign in" }],
       heading: "Authentication link unavailable",
       message:
-        "This authentication link could not be accepted. Request a new one.",
+        "This authentication link could not be accepted. Return to sign in to request a new one.",
       tone: "danger",
     });
     expect(JSON.stringify([notice, rejectedCallback])).not.toContain(
