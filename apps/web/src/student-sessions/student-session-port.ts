@@ -2,6 +2,7 @@ import {
   parseIssueTestJoinCodeRequest,
   parsePrepareStudentReadmissionRequest,
   parseReadSchoolTestRequest,
+  parseReadStudentProtectionEventsRequest,
   parseReadStudentSessionsRequest,
   parseRemoveStudentSessionRequest,
   parseStudentUuid,
@@ -10,6 +11,7 @@ import type {
   IssueTestJoinCodeRequest,
   PrepareStudentReadmissionRequest,
   ReadSchoolTestRequest,
+  ReadStudentProtectionEventsRequest,
   ReadStudentSessionsRequest,
   RemoveStudentSessionRequest,
 } from "@desmoslock/contracts";
@@ -26,6 +28,10 @@ export interface StudentSessionPort {
   ): Promise<unknown>;
   readStudentSessions(
     request: ReadStudentSessionsRequest,
+    authorityHandle: string,
+  ): Promise<unknown>;
+  readStudentProtectionEvents(
+    request: ReadStudentProtectionEventsRequest,
     authorityHandle: string,
   ): Promise<unknown>;
   issueTestJoinCode(
@@ -73,6 +79,14 @@ export interface StudentSessionTransport {
     args: TargetArguments & {
       readonly before_created_at: string | null;
       readonly before_session_id: string | null;
+    },
+  ): Promise<unknown>;
+  currentStudentProtectionEvents(
+    authorityHandle: string,
+    args: TargetArguments & {
+      readonly student_session_id: string;
+      readonly before_received_at: string | null;
+      readonly before_event_id: string | null;
     },
   ): Promise<unknown>;
   issueTestJoinCode(
@@ -131,6 +145,21 @@ export function createStudentSessionPort(
               test_id: request.testId,
               before_created_at: request.before?.createdAt ?? null,
               before_session_id: request.before?.sessionId ?? null,
+            }),
+          );
+    },
+    async readStudentProtectionEvents(value, handle) {
+      const request = parseReadStudentProtectionEventsRequest(value);
+      return request === null || !validHandle(handle)
+        ? null
+        : transport.currentStudentProtectionEvents(
+            handle,
+            Object.freeze({
+              workspace_id: request.schoolId,
+              test_id: request.testId,
+              student_session_id: request.studentSessionId,
+              before_received_at: request.before?.receivedAt ?? null,
+              before_event_id: request.before?.eventId ?? null,
             }),
           );
     },

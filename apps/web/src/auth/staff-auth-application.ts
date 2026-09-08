@@ -628,7 +628,10 @@ function startScrubbedStaffAuthApplication(
     const key = `${selected.schoolId}/${selected.id}/${selected.lifecycle}`;
     const changed = key !== generation.studentTargetKey;
     generation.studentTargetKey = key;
-    if (changed && selected.lifecycle === "open")
+    if (
+      changed &&
+      (selected.lifecycle === "open" || selected.lifecycle === "ended")
+    )
       scheduleVisibleRefresh(generation, false);
   }
 
@@ -1231,6 +1234,7 @@ export function createProductionStaffAuthApplicationFactories(dependencies: {
           releaseStudentSessionAuthority: port.releaseStudentSessionAuthority,
           readStudentTarget: port.readStudentTarget,
           readStudentSessions: port.readStudentSessions,
+          readStudentProtectionEvents: port.readStudentProtectionEvents,
           issueTestJoinCode: port.issueTestJoinCode,
           removeStudentSession: port.removeStudentSession,
           prepareStudentReadmission: port.prepareStudentReadmission,
@@ -1284,6 +1288,7 @@ function createUnavailableStudentSessionPort(): StudentSessionPort {
     releaseStudentSessionAuthority() {},
     readStudentTarget: unavailable,
     readStudentSessions: unavailable,
+    readStudentProtectionEvents: unavailable,
     issueTestJoinCode: unavailable,
     removeStudentSession: unavailable,
     prepareStudentReadmission: unavailable,

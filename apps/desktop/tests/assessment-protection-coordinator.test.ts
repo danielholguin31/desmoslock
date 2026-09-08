@@ -75,6 +75,7 @@ function fakeStudent(events: string[], now: () => number) {
   let observationSequence = 0;
   let receipt: FreshStudentAdmission | null = null;
   let protection: StoredNativeProtection | null = null;
+  let delivery: "none" | "pending" | "acknowledged" | "blocked" = "none";
   let readGate: Promise<void> | null = null;
   let externalRead: Promise<void> | null = null;
   let view: StudentSessionViewState = {
@@ -238,6 +239,7 @@ function fakeStudent(events: string[], now: () => number) {
     >(async () => undefined),
     retryPending: vi.fn(async () => undefined),
     refresh: vi.fn(async () => undefined),
+    flushEvidence: vi.fn(async () => undefined),
     forfeit: vi.fn<(revision: number) => Promise<void>>(async () => {
       events.push("student.forfeit");
     }),
@@ -251,6 +253,7 @@ function fakeStudent(events: string[], now: () => number) {
       freshAdmission: receipt,
       observationSequence,
       protection,
+      delivery,
     }),
     readFreshAdmission,
     isCurrentAdmission: (value: FreshStudentAdmission) =>
@@ -281,6 +284,10 @@ function fakeStudent(events: string[], now: () => number) {
     commands,
     setProtection(value: StoredNativeProtection) {
       protection = value;
+    },
+    setDelivery(value: typeof delivery) {
+      delivery = value;
+      for (const listener of publicListeners) listener(view);
     },
     holdCommit(kind: ProtectionTransition["kind"], promise: Promise<void>) {
       gates.set(kind, promise);
@@ -662,6 +669,39 @@ afterEach(() => {
 });
 
 describe("assessment protection coordinator authority and containment", () => {
+  it("keeps Start capacity independent of an acknowledgment projection", async () => {
+    const fake = fakeStudent([], () => 0);
+    fake.setProtection(previousJournal(25));
+    fake.setDelivery("acknowledged");
+    const h = harness({ student: fake.student });
+    expect(h.coordinator.readView().protection.evidence).toBe("full");
+    await h.coordinator.start(h.coordinator.readView().revision, current);
+    expect(h.native.begin).not.toHaveBeenCalled();
+    expect(fake.commands).toHaveLength(0);
+  });
+
+  it("projects only current delivery state and never renews the native receipt from acknowledgment", async () => {
+    const h = harness();
+    await h.coordinator.start(h.coordinator.readView().revision, current);
+    h.emit("did_begin", 1);
+    await settle();
+    expect(h.coordinator.readView().protection.phase).toBe("locked");
+    const reads = h.fake.student.readFreshAdmission.mock.calls.length;
+    for (const state of ["acknowledged", "blocked", "pending"] as const) {
+      h.fake.setDelivery(state);
+      expect(h.coordinator.readView().protection.evidence).toBe(
+        state === "pending" ? "queued" : state,
+      );
+      expect(parseDesktopStudentView(h.coordinator.readView())).not.toBeNull();
+      expect(h.coordinator.readView().protection.phase).toBe("locked");
+      expect(h.student.readFreshAdmission).toHaveBeenCalledTimes(reads);
+    }
+    h.fake.setDelivery("acknowledged");
+    await h.advance(30_000);
+    expect(h.coordinator.readView().protection.phase).not.toBe("locked");
+    expect(h.displayed()).toBe(false);
+  });
+
   it("latches unreadable protection recovery through Student repair without inventing a retained native attempt", async () => {
     const fake = fakeStudent([], () => 0);
     fake.setPhase("recovery_required");

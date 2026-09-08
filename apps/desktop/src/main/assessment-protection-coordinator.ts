@@ -158,6 +158,7 @@ export function createAssessmentProtectionCoordinator(
   const listeners = new Set<(view: DesktopStudentView) => void>();
   let studentView = options.student.readView();
   let protection: Readonly<StoredNativeProtection> | null = null;
+  let delivery: "none" | "pending" | "acknowledged" | "blocked" = "none";
   let unreadableRecovery = false;
   let attempt: Attempt | null = null;
   let review: {
@@ -199,7 +200,9 @@ export function createAssessmentProtectionCoordinator(
             protectionFactCapacity - protectionFactReservation
           ? "full"
           : (protection?.facts.length ?? 0) > 0
-            ? "queued"
+            ? delivery === "acknowledged" || delivery === "blocked"
+              ? delivery
+              : "queued"
             : "none";
     const projected: DesktopStudentView["protection"] =
       t === null
@@ -367,13 +370,17 @@ export function createAssessmentProtectionCoordinator(
       )
         return;
       try {
-        protection = options.student.readProtectionContext().protection;
+        const before = options.student.readProtectionContext();
+        protection = before.protection;
+        delivery = before.delivery;
         const outcome = await options.student.commitProtectionTransition({
           ...body,
           attemptId: t.id,
           expectedProtectionRevision: protection?.revision ?? 0,
         } as ProtectionTransition);
-        protection = options.student.readProtectionContext().protection;
+        const after = options.student.readProtectionContext();
+        protection = after.protection;
+        delivery = after.delivery;
         t.engaged ||= protection?.latestAttempt?.attemptId === t.id;
         if (outcome.status !== "committed") {
           markPersistenceFailure(t);
@@ -838,6 +845,7 @@ export function createAssessmentProtectionCoordinator(
   function synchronizeContext(): void {
     const context = options.student.readProtectionContext();
     protection = context.protection;
+    delivery = context.delivery;
     // An unreadable journal cannot prove prior native cleanup. Targeted repair
     // and a new protection attempt remain blocked until operator recovery.
     if (

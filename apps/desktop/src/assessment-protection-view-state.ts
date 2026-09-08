@@ -27,7 +27,8 @@ export interface DesktopStudentView {
     readonly failure: LocalEndCause | null;
     readonly nativeEndObserved: boolean;
     readonly cleanup: CleanupState;
-    readonly evidence: "none" | "queued" | "full" | "unconfirmed";
+    readonly evidence:
+      "none" | "queued" | "acknowledged" | "blocked" | "full" | "unconfirmed";
     readonly emergencyReview: boolean;
   };
 }
@@ -132,6 +133,8 @@ export function parseDesktopStudentView(
         cleanup !== "unconfirmed") ||
       (evidence !== "none" &&
         evidence !== "queued" &&
+        evidence !== "acknowledged" &&
+        evidence !== "blocked" &&
         evidence !== "full" &&
         evidence !== "unconfirmed")
     )

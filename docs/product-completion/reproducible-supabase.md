@@ -3,11 +3,12 @@
 ## Scope and safety boundary
 
 This is the generation-4 internal-release backend for local development and
-approved synthetic staging. Its eleven versioned migrations include the staff
+approved synthetic staging. Its twelve versioned migrations include the staff
 authentication lifecycle, Membership administration, School display-name settings,
 the draft/open/ended Test workspace, and the accountless
-[StudentSession admission source contract](student-session-admission.md).
-The current StudentSession candidate has no new real provider or SQL receipt. Native
+[StudentSession admission source contract](student-session-admission.md), plus
+authenticated historical native-protection evidence and its shared device proof counter.
+This twelve-migration source checkpoint supplies no new provider or SQL receipt. Native
 assessment protection and protected calculator eligibility remain separate gates.
 
 Generation 4 preserves the synthetic fixture across these follow-on migrations.
@@ -60,6 +61,7 @@ health function, and operator modules in this repository are the authority.
 - `supabase/migrations/20260908000100_school_display_name.sql`
 - `supabase/migrations/20260908000200_test_workspace.sql`
 - `supabase/migrations/20260908000300_student_session_admission.sql`
+- `supabase/migrations/20260908000400_student_protection_evidence.sql`
 - `supabase/seed.sql`
 - `supabase/config.toml`
 - `supabase/functions/deno.json`
@@ -75,6 +77,9 @@ health function, and operator modules in this repository are the authority.
 - `supabase/functions/student-session-read/index.ts`
 - `supabase/functions/student-session-reconnect/index.ts`
 - `supabase/functions/student-session-forfeit/index.ts`
+- `supabase/functions/_shared/student-protection-evidence-proof.ts`
+- `supabase/functions/_shared/student-protection-evidence.ts`
+- `supabase/functions/student-session-evidence/index.ts`
 - `scripts/synthetic-backup/operator.mjs`
 - `scripts/synthetic-backup/publication-worker.mjs`
 - `scripts/synthetic-backup/postgres-adapter.mjs`
@@ -82,8 +87,8 @@ health function, and operator modules in this repository are the authority.
 The fixture contract is generation `4`, version `internal-baseline-v2`, with
 SHA-256
 `f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201`.
-The selected eleven-file candidate has normalized SHA-256
-`aa32ed754c87e7987199dbd6c5f685ae65236ba3f94921157fc6cb07ce67b308`.
+The selected twelve-file candidate has normalized SHA-256
+`b6357a2882075f41e309ce14c8c6c2313a0336c6f5cdaa0f910906d6e4df5ca2`.
 The published generation-3 migration retains its contemporaneous digest
 `06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49`;
 the original generation-4 migration likewise retains
@@ -112,12 +117,16 @@ The Test workspace migration retains its ten-file digest
 `5cf17174bf44e491a6bd78fe540326d8bdee169518d75c8082e5bd9b833f3f62`
 and raw SHA-256
 `233123dd9038740ef724432715cc17e32a5adc2be68160466fa11f5b2dfb865c`.
-Only the StudentSession migration records the current aggregate. Its verified
-raw SHA-256 is
+The StudentSession admission migration retains its eleven-file digest
+`aa32ed754c87e7987199dbd6c5f685ae65236ba3f94921157fc6cb07ce67b308`
+and raw SHA-256
 `448d7697885eae07f04cc3b89531b7b3711e71fa67d56d80ac891df63458fb06`.
+Only the native-protection evidence migration records the current aggregate.
+Its raw SHA-256 is
+`caf89e51eee3aac9332a27146b86038d466740da49a1ba327a9534bbd51b81b4`.
 The repository contract pins each attested migration's raw SHA-256 and literal
-independently, then zeroes only those nine delimited self-references when deriving
-the eleven-file aggregate. The follow-on migration updates the existing singleton
+independently, then zeroes only those ten delimited self-references when deriving
+the twelve-file aggregate. The follow-on migration updates the existing singleton
 attestation without changing schema generation `4` or the seven-table fixture;
 the upgrade path does not depend on rewriting or replaying historical migrations.
 The seed takes a transaction advisory lock, refuses altered or partial targets,
@@ -150,9 +159,12 @@ is null. Exact order, arity, nullability and each pristine value are required
 before the unchanged fixture framing/digest can be accepted; runtime admission
 state cannot enter an archive.
 
-The four Student runtime stores are `student_join_materials`,
+The six Student runtime stores are `student_join_materials`,
 `student_device_bindings`, `student_bootstrap_challenges`, and
-`student_bootstrap_limits`. All must be empty in a pristine export source and an
+`student_bootstrap_limits`, plus migration 12's `student_device_proof_state`
+and `student_protection_events`. The latter retain shared proof counters and
+immutable received evidence; they add no synthetic archive tables or fixture fields.
+All must be empty in a pristine export source and an
 empty or restored target. They are observed and rejected when nonempty, never
 exported. Even a lazily created bootstrap-limit row is runtime state.
 
@@ -381,14 +393,15 @@ unknown fields, hash mismatches, links, oversized files, unexpected archive
 entries or rows, a changed migration set, a target that fails the exact
 database/system-identifier/server-side-local-marker attestation, source/target
 system-identifier collisions, and targets whose seven managed tables or any of
-the nine runtime-only staff and Student tables are nonempty. The five staff tables
+the eleven runtime-only staff and Student tables are nonempty. The five staff tables
 are `application_session_revocation_cutoffs`,
 `application_session_revocations`, `staff_audit_events`, `staff_invitations`,
-and `staff_password_recovery_operations`. They remain excluded, together with all four
+and `staff_password_recovery_operations`. They remain excluded, together with all six
 Student runtime stores named above. The archive allowlist is exactly the
 seven synthetic tables, including `foundation_seed`; Auth, invitation,
 application revocation, password-recovery, audit, join-material, device-binding,
-bootstrap-challenge and bootstrap-limit data are never added. The
+bootstrap-challenge, bootstrap-limit, device-proof-counter and native-evidence data
+are never added. The
 PostgreSQL adapter rejects every archive-rendered statement except an exact
 allowlist of harmless dump scaffolding and the seven validated `COPY` blocks.
 The generation-4 profile and Membership layouts accept PostgreSQL null markers
@@ -400,7 +413,7 @@ It rebuilds a private dependency-ordered `COPY` plan from those validated rows;
 raw `pg_restore` SQL is never executed. The adapter then rechecks the cluster
 system identifier, exact database name, server-side local marker, normalized
 migration-set digest attestation, exact migration versions, and emptiness of the
-seven managed and nine runtime-only tables, and applies the plan in one
+seven managed and eleven runtime-only tables, and applies the plan in one
 serializable transaction. It verifies the
 fixture and foundation marker before commit. Immediately before restore, the
 operator re-hashes the held archive bytes. After commit, it directly re-observes
@@ -448,9 +461,10 @@ restored-target staff suite and 599 fresh SQL assertions on
 [source `6939c59`](https://github.com/danielholguin31/desmoslock/actions/runs/34194857958),
 then merged as [`d8fadca`](https://github.com/danielholguin31/desmoslock/commit/d8fadcafe8aa5fbc7ef6ca6717d61899677b49fc).
 The ten-migration Test extension was runtime-pending at the inherited checkpoint;
-that historical status is not evidence for the current eleven-migration
-StudentSession candidate. The current candidate requires its own exact-commit
-roundtrip and complete staff suite, including StudentSession acceptance, without
+that historical status and the inherited eleven-migration StudentSession source
+checkpoint are not evidence for the current twelve-migration native-evidence
+candidate. The current candidate requires its own exact-commit
+roundtrip and complete staff suite, including StudentSession and evidence acceptance, without
 reset/reseed. Source, restored-target and post-marker-retirement checks now
 require exact Student metadata and empty runtime stores, with static receipt
 flags `studentMetadataPreserved` and `studentRuntimeStoresEmpty`. Neither flag

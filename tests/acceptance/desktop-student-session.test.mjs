@@ -44,6 +44,8 @@ async function fixture(t) {
   const requests = [];
   const failures = [];
   const receipts = new Map();
+  const evidenceReceipts = new Map();
+  const bindings = new Map();
   const challenges = new Map();
   const drops = new Set();
   const holds = new Set();
@@ -53,7 +55,8 @@ async function fixture(t) {
   let api;
   let origin;
   let crypto;
-  let highestCounter = 0;
+  const highestCounters = new Map();
+  let omitEvidenceAck = false;
   t.after(async () => {
     for (const child of children) await child.kill();
     if (server?.listening) {
@@ -247,16 +250,163 @@ async function fixture(t) {
     } else {
       check(
         proof.counter === record.lastReservedCounter &&
-          proof.counter > highestCounter,
+          proof.counter >
+            (highestCounters.get(record.device.keyThumbprint) ?? 0),
         "Actual HTTP preceded durable greater-counter reservation",
       );
-      highestCounter = proof.counter;
+      highestCounters.set(record.device.keyThumbprint, proof.counter);
       same(
         body.scope,
         record.current?.scope,
         "Maintenance scope differs from durable authority",
       );
     }
+  }
+  function acceptEvidence(body, record) {
+    check(
+      api.parseStudentEvidenceRequest(body) !== null,
+      "Evidence request failed exact finite parsing",
+    );
+    const key = createHash("sha256")
+      .update(Buffer.from(body.publicKey, "base64url"))
+      .digest("base64url");
+    const signer =
+      record.device.keyThumbprint === key
+        ? {
+            device: record.device,
+            lastReservedCounter: record.lastReservedCounter,
+          }
+        : record.evidence.retiredSigners.find(
+            (entry) => entry.device.keyThumbprint === key,
+          );
+    check(
+      signer !== undefined,
+      "Evidence egress lacks its durably retained original signer",
+    );
+    const binding = bindings.get(key);
+    check(
+      binding !== undefined,
+      "Evidence signer has no prior admitted binding",
+    );
+    same(body.scope, binding.scope, "Evidence changed original admitted scope");
+    same(
+      body.publicKey,
+      binding.publicKey,
+      "Evidence changed original binding key",
+    );
+    const attemptId = body.facts[0].attemptId;
+    const originEntry = record.evidence.origins.find(
+      (entry) => entry.attemptId === attemptId,
+    );
+    check(
+      originEntry?.originalKeyThumbprint === key,
+      "Evidence relabeled the attempt signer",
+    );
+    same(
+      body.originBuild,
+      originEntry.originBuild,
+      "Evidence replaced original build provenance",
+    );
+    const pending = record.evidence.pendingBatches.find(
+      (entry) => entry.originalKeyThumbprint === key,
+    );
+    check(
+      pending !== undefined && pending.attemptId === attemptId,
+      "Evidence preceded immutable pending publication",
+    );
+    const retained = record.nativeProtection.facts
+      .filter((fact) => fact.attemptId === attemptId)
+      .slice(0, pending.events.length);
+    same(
+      body.facts,
+      retained,
+      "Evidence did not use the exact coordinator-authored immutable prefix",
+    );
+    const digested = crypto.digestEvidence(signer.device, {
+      scope: body.scope,
+      originBuild: body.originBuild,
+      facts: body.facts,
+    });
+    same(
+      body.batchDigest,
+      digested.batchDigest,
+      "Evidence batch digest differs from canonical original content",
+    );
+    same(
+      body.batchDigest,
+      pending.batchDigest,
+      "Evidence changed the durable pending digest",
+    );
+    same(
+      pending.events,
+      body.facts.map((fact, index) => ({
+        eventId: fact.eventId,
+        contentDigest: digested.contentDigests[index],
+      })),
+      "Evidence pending references differ from exact content digests",
+    );
+    const counter = body.deviceProof.counter;
+    check(
+      counter === signer.lastReservedCounter &&
+        counter > (highestCounters.get(key) ?? 0),
+      "Evidence HTTP preceded durable greater common-counter reservation",
+    );
+    check(
+      record.evidence.lastAttemptedSigner === key,
+      "Evidence fairness cursor was not durable before HTTP",
+    );
+    const bytes = api.encodeStudentEvidenceProof({
+      apiOrigin: origin,
+      originalKeyThumbprint: key,
+      scope: body.scope,
+      batchDigest: body.batchDigest,
+      counter,
+    });
+    check(bytes !== null, "Evidence proof bytes were not canonical");
+    const publicKey = createPublicKey({
+      key: Buffer.concat([
+        Buffer.from("302a300506032b6570032100", "hex"),
+        Buffer.from(body.publicKey, "base64url"),
+      ]),
+      type: "spki",
+      format: "der",
+    });
+    check(
+      verify(
+        null,
+        bytes,
+        publicKey,
+        Buffer.from(body.deviceProof.signature, "base64url"),
+      ),
+      "Original device Ed25519 evidence signature failed actual verification",
+    );
+    for (const [index, fact] of body.facts.entries()) {
+      const existing = evidenceReceipts.get(fact.eventId);
+      if (existing)
+        same(
+          existing.contentDigest,
+          digested.contentDigests[index],
+          "Retry changed previously committed event content",
+        );
+    }
+    const acknowledged = body.facts.map(
+      (fact, index) =>
+        evidenceReceipts.get(fact.eventId) ?? {
+          eventId: fact.eventId,
+          contentDigest: digested.contentDigests[index],
+          receivedAt: "2026-09-08T14:00:00.123456Z",
+        },
+    );
+    highestCounters.set(key, counter);
+    acknowledged.forEach((ack) => evidenceReceipts.set(ack.eventId, ack));
+    return {
+      status: "accepted",
+      code: "STUDENT_EVIDENCE_ACCEPTED",
+      scope: body.scope,
+      batchDigest: body.batchDigest,
+      acceptedProofCounter: counter,
+      acknowledged,
+    };
   }
   server = createServer((request, response) => {
     void (async () => {
@@ -265,15 +415,18 @@ async function fixture(t) {
           request.url?.startsWith("/functions/v1/student-session-"),
         "Unexpected loopback request",
       );
+      const route = request.url.slice("/functions/v1/student-session-".length);
       let size = 0;
       const parts = [];
       for await (const part of request) {
         size += part.length;
-        check(size <= 8192, "Loopback request exceeded contract bound");
+        check(
+          size <= (route === "evidence" ? 16384 : 8192),
+          "Loopback request exceeded contract bound",
+        );
         parts.push(part);
       }
       const body = JSON.parse(Buffer.concat(parts).toString());
-      const route = request.url.slice("/functions/v1/student-session-".length);
       const record = await readRecord();
       const now = 1_000_000 + elapsed;
       let result;
@@ -299,6 +452,9 @@ async function fixture(t) {
           expiresAtMs: result.expiresAtMs,
           device: body.deviceSessionId,
         });
+      } else if (route === "evidence") {
+        result = acceptEvidence(body, record);
+        digest = result.batchDigest;
       } else {
         digest = logical(route, body, record);
         verifyProof(route, body, record, digest);
@@ -358,6 +514,20 @@ async function fixture(t) {
               : {}),
           };
           if (!prior) receipts.set(key, { result: issued, digest });
+          if (route === "join") {
+            const binding = {
+              scope: issued.scope,
+              publicKey: record.device.publicKey,
+            };
+            const previous = bindings.get(record.device.keyThumbprint);
+            if (previous)
+              same(
+                previous,
+                binding,
+                "Join receipt changed original device binding",
+              );
+            bindings.set(record.device.keyThumbprint, binding);
+          }
         } else if (route === "forfeit") {
           result = {
             status: "accepted",
@@ -390,7 +560,15 @@ async function fixture(t) {
             "content-type": "application/json",
             connection: "close",
           });
-          response.end(JSON.stringify(result));
+          if (route === "evidence" && omitEvidenceAck) {
+            omitEvidenceAck = false;
+            response.end(
+              JSON.stringify({
+                ...result,
+                acknowledged: result.acknowledged.slice(1),
+              }),
+            );
+          } else response.end(JSON.stringify(result));
         }
       };
       if (drops.delete(route)) response.destroy();
@@ -417,10 +595,10 @@ async function fixture(t) {
     environment: "local",
     url: origin,
   });
-  async function launch(mode = "normal") {
+  async function launch(mode = "normal", buildIdentity = "original-build") {
     const processChild = spawn(
       process.execPath,
-      [bundle, "--worker", directory, origin, mode],
+      [bundle, "--worker", directory, origin, mode, buildIdentity],
       {
         stdio: ["pipe", "pipe", "pipe"],
         env: {
@@ -488,12 +666,16 @@ async function fixture(t) {
     directory,
     requests,
     receipts,
+    evidenceReceipts,
     failures,
     readRecord,
     launch,
     drop: (route) => drops.add(route),
     hold: (route) => holds.add(route),
     release: () => held.splice(0).forEach((respond) => respond()),
+    omitNextEvidenceAck: () => {
+      omitEvidenceAck = true;
+    },
     async advance(child, ms) {
       elapsed += ms;
       await child.command("advance", { ms });
@@ -664,8 +846,19 @@ test(
     const uncertain = await f.readRecord();
     assert.equal(uncertain.lastReservedCounter, 1);
     assert.equal((await child.command("retry")).view.phase, "active");
-    const sent = f.requests.at(-1);
+    const sent = f.requests.findLast(
+      (request) => request.route === "reconnect",
+    );
+    check(
+      sent !== undefined,
+      "Controlled retry did not perform the required renewal",
+    );
     assert.equal(sent.route, "reconnect");
+    assert.equal(
+      f.requests.at(-1).route,
+      "read",
+      "Renewal did not issue the required fresh state read",
+    );
     check(
       sent.body.deviceProof.counter > uncertain.lastReservedCounter,
       "Readback cleared uncertainty without a greater durable reservation",
@@ -675,7 +868,7 @@ test(
 );
 
 test(
-  "real quarantine crash gap maps to targeted-only recovery and preserves old bytes",
+  "real quarantine crash gap preserves native uncertainty and old bytes without a replacement admission",
   macOnly,
   async (t) => {
     const f = await fixture(t);
@@ -700,11 +893,12 @@ test(
     );
     assert.equal(
       (await child.command("targeted", { code })).view.phase,
-      "active",
+      "recovery_required",
     );
     assert.equal(
-      f.requests.find((request) => request.route === "join").body.admissionMode,
-      "readmission",
+      f.requests.length,
+      0,
+      "Unreadable prior native state permitted a replacement admission",
     );
     assert.equal(
       await fs.readFile(
@@ -713,6 +907,387 @@ test(
       ),
       "EXPLICIT_SYNTHETIC_CORRUPT_RECORD",
     );
+    assert.deepEqual(f.failures, []);
+  },
+);
+
+async function engageEvidence(child) {
+  const start = await child.command("engaging");
+  assert.equal(start.result.status, "committed");
+  assert.equal((await child.command("began")).result.status, "committed");
+  assert.equal((await child.command("failure")).result.status, "committed");
+  return start.result.attemptId;
+}
+
+test(
+  "real native evidence survives lost reply and restart with original content, signer, receipts and greater shared counter",
+  macOnly,
+  async (t) => {
+    const f = await fixture(t);
+    let child = await f.launch();
+    await child.command("initialize");
+    await child.command("join", { code });
+    const attemptId = await engageEvidence(child);
+    const original = await f.readRecord();
+    f.drop("evidence");
+    await child.command("flush");
+    const pending = await f.readRecord();
+    assert.equal(pending.evidence.pendingBatches.length, 1);
+    assert.equal(pending.evidence.acknowledgments.length, 0);
+    assert.equal(f.evidenceReceipts.size, 3);
+    await child.kill();
+    child = await f.launch("normal", "replacement-build");
+    await child.command("initialize");
+    await child.command("flush");
+    const accepted = await f.readRecord();
+    const exchanges = f.requests.filter(
+      (request) => request.route === "evidence",
+    );
+    assert.equal(exchanges.length, 2);
+    same(
+      exchanges[0].body.facts,
+      exchanges[1].body.facts,
+      "Restart changed original immutable prefix",
+    );
+    same(
+      exchanges[0].body.originBuild,
+      exchanges[1].body.originBuild,
+      "Uploader upgrade relabeled original build",
+    );
+    same(
+      exchanges[1].body.originBuild,
+      original.evidence.origins[0].originBuild,
+      "Original engaging build was not retained",
+    );
+    same(
+      exchanges[0].body.publicKey,
+      exchanges[1].body.publicKey,
+      "Retry replaced the original signer",
+    );
+    same(
+      exchanges[0].body.batchDigest,
+      exchanges[1].body.batchDigest,
+      "Counter-only retry changed batch identity",
+    );
+    check(
+      exchanges[1].body.deviceProof.counter >
+        exchanges[0].body.deviceProof.counter,
+      "Retry reused common counter",
+    );
+    same(
+      exchanges[0].result.acknowledged,
+      exchanges[1].result.acknowledged,
+      "Lost reply recovery replaced receipt times",
+    );
+    assert.equal(accepted.evidence.pendingBatches.length, 0);
+    assert.equal(accepted.evidence.acknowledgments.length, 3);
+    same(
+      accepted.nativeProtection.facts,
+      original.nativeProtection.facts,
+      "Acknowledgment pruned retained latest facts",
+    );
+    assert.equal(accepted.nativeProtection.latestAttempt.attemptId, attemptId);
+    assert.equal(f.evidenceReceipts.size, 3);
+    await child.kill();
+    child = await f.launch();
+    await child.command("initialize");
+    await child.command("flush");
+    assert.equal(
+      f.requests.filter((request) => request.route === "evidence").length,
+      2,
+      "Durable ACK was lost on restart",
+    );
+    assert.deepEqual(f.failures, []);
+  },
+);
+
+test(
+  "real native evidence retains the frozen prefix on partial ACK and authors later terminal facts outside it",
+  macOnly,
+  async (t) => {
+    const f = await fixture(t);
+    const child = await f.launch();
+    await child.command("initialize");
+    await child.command("join", { code });
+    await engageEvidence(child);
+    f.omitNextEvidenceAck();
+    await child.command("flush");
+    const unconfirmed = await f.readRecord();
+    assert.equal(unconfirmed.evidence.acknowledgments.length, 0);
+    const frozen = unconfirmed.evidence.pendingBatches[0];
+    assert.equal((await child.command("terminal")).result.status, "committed");
+    assert.equal((await child.command("cleanup")).result.status, "committed");
+    const extended = await f.readRecord();
+    same(
+      extended.evidence.pendingBatches[0],
+      frozen,
+      "Late native facts replaced a pending prefix",
+    );
+    assert.equal(extended.nativeProtection.facts.length, 5);
+    await f.advance(child, 15_000);
+    await child.command("refresh");
+    await child.command("flush");
+    let exchanges = f.requests.filter(
+      (request) => request.route === "evidence",
+    );
+    assert.equal(exchanges.length, 2);
+    assert.equal(exchanges[1].body.facts.length, 3);
+    same(
+      exchanges[1].body.batchDigest,
+      exchanges[0].body.batchDigest,
+      "Partial ACK retry changed frozen content",
+    );
+    await f.advance(child, 15_000);
+    await child.command("refresh");
+    await child.command("flush");
+    exchanges = f.requests.filter((request) => request.route === "evidence");
+    assert.equal(exchanges.length, 3);
+    assert.equal(exchanges[2].body.facts.length, 5);
+    assert.equal((await f.readRecord()).evidence.acknowledgments.length, 5);
+    assert.equal(f.evidenceReceipts.size, 5);
+    assert.deepEqual(f.failures, []);
+  },
+);
+
+test(
+  "real targeted replacement retains the old evidence owner and binds new facts to the new admitted device",
+  macOnly,
+  async (t) => {
+    const f = await fixture(t);
+    let child = await f.launch();
+    await child.command("initialize");
+    await child.command("join", { code });
+    const oldAttempt = await engageEvidence(child);
+    await child.command("terminal");
+    await child.command("cleanup");
+    await child.command("forfeit");
+    const old = await f.readRecord();
+    await child.command("targeted", { code });
+    const replaced = await f.readRecord();
+    check(
+      replaced.device.deviceSessionId !== old.device.deviceSessionId,
+      "Targeted recovery reused old device",
+    );
+    same(
+      replaced.evidence.retiredSigners[0].device,
+      old.device,
+      "Targeted replacement lost original encrypted signer",
+    );
+    assert.equal(
+      replaced.evidence.retiredSigners[0].lastReservedCounter,
+      old.lastReservedCounter,
+    );
+    await child.kill();
+    child = await f.launch("normal", "replacement-build");
+    await child.command("initialize");
+    await child.command("retry");
+    const newAttempt = await engageEvidence(child);
+    await child.command("flush");
+    await f.advance(child, 15_000);
+    await child.command("refresh");
+    await child.command("flush");
+    const exchanges = f.requests.filter(
+      (request) => request.route === "evidence",
+    );
+    assert.equal(exchanges.length, 2);
+    const oldReport = exchanges.find(
+      (request) => request.body.facts[0].attemptId === oldAttempt,
+    );
+    const newReport = exchanges.find(
+      (request) => request.body.facts[0].attemptId === newAttempt,
+    );
+    check(
+      oldReport !== undefined && newReport !== undefined,
+      "Bounded signer scheduling starved an original owner",
+    );
+    same(
+      oldReport.body.publicKey,
+      old.device.publicKey,
+      "Replacement key signed historical facts",
+    );
+    same(
+      oldReport.body.scope,
+      old.nativeProtection.latestAttempt.scope,
+      "Old evidence adopted replacement scope",
+    );
+    same(
+      oldReport.body.originBuild,
+      old.evidence.origins[0].originBuild,
+      "Old evidence adopted replacement build",
+    );
+    same(
+      newReport.body.publicKey,
+      replaced.device.publicKey,
+      "New facts did not use current admitted key",
+    );
+    check(
+      newReport.body.scope.epoch !== oldReport.body.scope.epoch,
+      "Readmission did not separate evidence epochs",
+    );
+    check(
+      newReport.body.originBuild.identity.buildId !==
+        oldReport.body.originBuild.identity.buildId,
+      "Fresh attempt did not capture current build",
+    );
+    const final = await f.readRecord();
+    assert.equal(final.nativeProtection.latestAttempt.attemptId, newAttempt);
+    check(
+      final.nativeProtection.facts.every(
+        (fact) => fact.attemptId === newAttempt,
+      ),
+      "Exactly acknowledged completed history was not wholly pruned",
+    );
+    assert.deepEqual(f.failures, []);
+  },
+);
+
+test(
+  "real native lost ACK publication is reconciled after restart without losing receipts or latest facts",
+  macOnly,
+  async (t) => {
+    const f = await fixture(t);
+    let child = await f.launch();
+    await child.command("initialize");
+    await child.command("join", { code });
+    await engageEvidence(child);
+    const original = await f.readRecord();
+    f.hold("evidence");
+    const uploading = child.command("flush");
+    await eventually(async () =>
+      f.requests.some((request) => request.route === "evidence"),
+    );
+    await child.command("fail-next-write");
+    f.release();
+    await uploading;
+    const published = await f.readRecord();
+    assert.equal(published.evidence.acknowledgments.length, 3);
+    assert.equal(published.evidence.pendingBatches.length, 0);
+    same(
+      published.nativeProtection.facts,
+      original.nativeProtection.facts,
+      "Uncertain ACK write altered latest facts",
+    );
+    check(
+      (await child.command("state")).view.phase !== "active",
+      "Unknown native return was presented as successful authority",
+    );
+    await child.kill();
+    child = await f.launch();
+    await child.command("initialize");
+    await child.command("flush");
+    assert.equal(
+      f.requests.filter((request) => request.route === "evidence").length,
+      1,
+      "Published exact ACK was not recovered",
+    );
+    same(
+      (await f.readRecord()).evidence.acknowledgments,
+      published.evidence.acknowledgments,
+      "Restart altered original receipts",
+    );
+    assert.deepEqual(f.failures, []);
+  },
+);
+
+test(
+  "evidence waits for the actual native return barrier and a held upload preserves queued terminal facts",
+  macOnly,
+  async (t) => {
+    const f = await fixture(t);
+    const child = await f.launch();
+    await child.command("initialize");
+    await child.command("join", { code });
+    await engageEvidence(child);
+    const count = f.requests.length;
+    await child.command("block-next-write");
+    f.hold("evidence");
+    const uploading = child.command("flush");
+    await child.event("published-return-blocked");
+    const reserved = await f.readRecord();
+    assert.equal(reserved.evidence.pendingBatches.length, 1);
+    assert.equal(
+      f.requests.length,
+      count,
+      "Physical publication without native return permitted evidence HTTP",
+    );
+    const contender = await f.launch();
+    assert.equal(
+      (await contender.command("initialize")).view.phase,
+      "unavailable",
+    );
+    await child.command("release-write");
+    await eventually(async () => f.requests.length === count + 1);
+    const terminal = child.command("terminal");
+    await child.command("state");
+    same(
+      (await f.readRecord()).nativeProtection.facts,
+      reserved.nativeProtection.facts,
+      "Queued terminal transition overwrote the active evidence owner",
+    );
+    f.release();
+    await uploading;
+    assert.equal((await terminal).result.status, "committed");
+    const after = await f.readRecord();
+    assert.equal(after.evidence.acknowledgments.length, 3);
+    assert.equal(after.evidence.pendingBatches.length, 0);
+    assert.equal(after.nativeProtection.facts.at(-1).nativeEvent, "did_end");
+    assert.equal(after.nativeProtection.facts.length, 4);
+    assert.equal(after.lastReservedCounter, reserved.lastReservedCounter);
+    assert.deepEqual(f.failures, []);
+  },
+);
+
+test(
+  "held real evidence upload keeps the native owner through timeout, queued terminal work and failed shutdown drain",
+  macOnly,
+  async (t) => {
+    const f = await fixture(t);
+    const child = await f.launch("ignore-abort");
+    await child.command("initialize");
+    await child.command("join", { code });
+    await engageEvidence(child);
+    f.hold("evidence");
+    const uploading = child.command("flush");
+    await eventually(async () =>
+      f.requests.some((request) => request.route === "evidence"),
+    );
+    const reserved = await f.readRecord();
+    const terminal = child.command("terminal");
+    assert.equal((await child.command("state")).closes, 0);
+    const contender = await f.launch();
+    assert.equal(
+      (await contender.command("initialize")).view.phase,
+      "unavailable",
+    );
+    assert.equal((await child.command("dispose")).result, false);
+    await uploading;
+    assert.equal((await terminal).result.status, "unavailable");
+    assert.equal((await child.command("state")).closes, 0);
+    same(
+      await f.readRecord(),
+      reserved,
+      "Stopped upload published ACK or queued terminal facts",
+    );
+    f.release();
+    await eventually(async () => (await child.command("state")).idle);
+    assert.equal(
+      (await child.command("state")).closes,
+      0,
+      "Failed drain released ownership after a late response",
+    );
+    same(
+      await f.readRecord(),
+      reserved,
+      "Late settled response published after disposal",
+    );
+    await child.kill();
+    const successor = await f.launch();
+    assert.equal(
+      (await successor.command("initialize")).view.phase,
+      "unconfirmed",
+    );
+    await successor.command("flush");
+    assert.equal((await f.readRecord()).evidence.pendingBatches.length, 0);
     assert.deepEqual(f.failures, []);
   },
 );

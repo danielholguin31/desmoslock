@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   IssueTestJoinCodeRequest,
   ReadStudentSessionsRequest,
+  ReadStudentProtectionEventsRequest,
 } from "@desmoslock/contracts";
 import { createStudentSessionPort } from "../src/student-sessions/student-session-port.js";
 import type { StudentSessionTransport } from "../src/student-sessions/student-session-port.js";
@@ -32,6 +33,9 @@ function harness() {
     currentTestStudentSessions: vi.fn<
       StudentSessionTransport["currentTestStudentSessions"]
     >(async () => []),
+    currentStudentProtectionEvents: vi.fn<
+      StudentSessionTransport["currentStudentProtectionEvents"]
+    >(async () => []),
     issueTestJoinCode: vi.fn<StudentSessionTransport["issueTestJoinCode"]>(
       async () => [],
     ),
@@ -45,6 +49,96 @@ function harness() {
   return { transport, port: createStudentSessionPort(transport) };
 }
 describe("StudentSession named purpose port", () => {
+  it("maps and snapshots history scope and the exact six-digit receipt cursor", async () => {
+    const h = harness();
+    const request = {
+      ...scope,
+      studentSessionId: removal.studentSessionId,
+      before: {
+        receivedAt: "2026-09-08T12:00:00.123456Z",
+        eventId: "71000000-0000-4000-8000-000000000001",
+      },
+    };
+    const operation = h.port.readStudentProtectionEvents(request, handle);
+    request.before.receivedAt = "2026-09-08T12:00:00.999999Z";
+    request.studentSessionId = scope.testId;
+    await operation;
+    expect(h.transport.currentStudentProtectionEvents).toHaveBeenCalledWith(
+      handle,
+      {
+        workspace_id: scope.schoolId,
+        test_id: scope.testId,
+        student_session_id: removal.studentSessionId,
+        before_received_at: "2026-09-08T12:00:00.123456Z",
+        before_event_id: "71000000-0000-4000-8000-000000000001",
+      },
+    );
+    expect(
+      Object.isFrozen(
+        h.transport.currentStudentProtectionEvents.mock.calls[0]?.[1],
+      ),
+    ).toBe(true);
+    await h.port.readStudentProtectionEvents(
+      {
+        ...scope,
+        studentSessionId: removal.studentSessionId,
+        before: null,
+      },
+      handle,
+    );
+    expect(
+      h.transport.currentStudentProtectionEvents.mock.calls[1]?.[1],
+    ).toMatchObject({
+      before_received_at: null,
+      before_event_id: null,
+    });
+  });
+  it("rejects malformed or accessor history fields and empty handles before authority-bearing transport", async () => {
+    const h = harness();
+    const request = {
+      ...scope,
+      studentSessionId: removal.studentSessionId,
+      before: null,
+    };
+    const getter = vi.fn(() => removal.studentSessionId);
+    const hostile = [
+      { ...request, purpose: "staff_management" },
+      {
+        ...request,
+        before: {
+          receivedAt: "2026-09-08T12:00:00.123Z",
+          eventId: removal.studentSessionId,
+        },
+      },
+      {
+        ...request,
+        before: {
+          receivedAt: "2026-09-08T12:00:00.123456Z",
+          eventId: "not-a-uuid",
+        },
+      },
+      Object.defineProperty({ ...scope, before: null }, "studentSessionId", {
+        get: getter,
+        enumerable: true,
+      }),
+      Object.create(request),
+      new Proxy(request, {
+        ownKeys() {
+          throw new Error("Hostile reflection");
+        },
+      }),
+    ];
+    for (const value of hostile)
+      expect(
+        await h.port.readStudentProtectionEvents(
+          value as ReadStudentProtectionEventsRequest,
+          handle,
+        ),
+      ).toBeNull();
+    expect(await h.port.readStudentProtectionEvents(request, "")).toBeNull();
+    expect(getter).not.toHaveBeenCalled();
+    expect(h.transport.currentStudentProtectionEvents).not.toHaveBeenCalled();
+  });
   it("maps five fixed named seams, preserving scope, original revisions and full cursor precision", async () => {
     const h = harness();
     await h.port.readStudentTarget(scope, handle);

@@ -49,7 +49,7 @@ select results_eq(
     select id, schema_generation, migration_set_sha256
     from desmoslock_v2.internal_release_attestation
   $$,
-  $$values (1::smallint, 4, 'aa32ed754c87e7987199dbd6c5f685ae65236ba3f94921157fc6cb07ce67b308')$$,
+  $$values (1::smallint, 4, 'b6357a2882075f41e309ce14c8c6c2313a0336c6f5cdaa0f910906d6e4df5ca2')$$,
   'the database records the exact versioned migration attestation'
 );
 select is_empty(
@@ -163,8 +163,10 @@ select ok(
   not exists (select 1 from desmoslock_v2.student_join_materials)
     and not exists (select 1 from desmoslock_v2.student_device_bindings)
     and not exists (select 1 from desmoslock_v2.student_bootstrap_challenges)
-    and not exists (select 1 from desmoslock_v2.student_bootstrap_limits),
-  'all four runtime StudentSession authority stores start empty'
+    and not exists (select 1 from desmoslock_v2.student_bootstrap_limits)
+    and not exists (select 1 from desmoslock_v2.student_device_proof_state)
+    and not exists (select 1 from desmoslock_v2.student_protection_events),
+  'all six runtime StudentSession authority and evidence stores start empty'
 );
 
 select results_eq(
@@ -172,7 +174,7 @@ select results_eq(
     select schema_generation, fixture_version, fixture_digest, migration_set_sha256, fixture_valid
     from desmoslock_v2.internal_baseline_status()
   $$,
-  $$values (4, 'internal-baseline-v2', 'f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201', 'aa32ed754c87e7987199dbd6c5f685ae65236ba3f94921157fc6cb07ce67b308', true)$$,
+  $$values (4, 'internal-baseline-v2', 'f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201', 'b6357a2882075f41e309ce14c8c6c2313a0336c6f5cdaa0f910906d6e4df5ca2', true)$$,
   'service baseline status verifies the pinned fixture digest'
 );
 

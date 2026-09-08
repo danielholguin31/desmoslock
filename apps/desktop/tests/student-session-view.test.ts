@@ -883,6 +883,8 @@ describe("Student desktop protection presentation", () => {
     ["engaging", {}, false],
     ["locked", {}, false],
     ["ending", {}, false],
+    ["idle", { evidence: "acknowledged" }, true],
+    ["idle", { evidence: "blocked" }, true],
     ["idle", { evidence: "full" }, false],
     ["idle", { evidence: "unconfirmed" }, false],
     ["idle", { emergencyReview: true }, false],
@@ -1225,6 +1227,45 @@ describe("Student desktop protection presentation", () => {
     );
     expect(view.text()).toContain("Server receipt is not confirmed");
     expect(view.heading()).toBe("Session confirmed");
+  });
+
+  it("limits acknowledgment to current saved reports and replaces it when new reports are queued", async () => {
+    const view = setup(nativeState("idle", 3, { evidence: "acknowledged" }));
+    await settle();
+    expect(view.text()).toContain(
+      "The server acknowledged the reports currently saved on this device. This does not confirm native protection or release.",
+    );
+    expect(view.root.attributes["data-protection-phase"]).toBe("idle");
+    expect(view.text()).not.toContain("Assessment protected");
+    expect(view.bridge.startAssessment).not.toHaveBeenCalled();
+    view.publish(nativeState("idle", 4, { evidence: "queued" }));
+    expect(view.text()).toContain("Server receipt is not confirmed");
+    expect(view.text()).not.toContain("The server acknowledged");
+  });
+
+  it("shows a current delivery block without claiming permanent denial or resolving native recovery", async () => {
+    const view = setup(
+      nativeState("recovery_required", 3, { evidence: "blocked" }),
+    );
+    await settle();
+    expect(view.text()).toContain(
+      "Reports cannot currently be delivered. Saved reports remain on this device.",
+    );
+    expect(view.root.attributes["data-protection-phase"]).toBe(
+      "recovery_required",
+    );
+    expect(view.text()).not.toMatch(
+      /permanent|server rejected|cleanup is complete/u,
+    );
+    expect(view.action("start-assessment").disabled).toBe(true);
+    view.publish(
+      nativeState("recovery_required", 4, { evidence: "acknowledged" }),
+    );
+    expect(view.root.attributes["data-protection-phase"]).toBe(
+      "recovery_required",
+    );
+    expect(view.action("start-assessment").disabled).toBe(true);
+    expect(view.text()).not.toContain("Reports cannot currently be delivered");
   });
 
   it.each(["admission_changed", "backend_unavailable"] as const)(

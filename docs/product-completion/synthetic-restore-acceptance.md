@@ -6,7 +6,8 @@ restore checks and full staff suite on both source `5b5722b` and merged main
 `73d8b8a`; exact run links and the sanitized receipt are recorded below.
 The nine-migration School extension also passed on source `6939c59`, merged as
 `d8fadca`. The ten-migration Test extension was runtime-pending at the inherited
-checkpoint. The current eleven-migration StudentSession candidate requires its
+checkpoint. The eleven-migration StudentSession source checkpoint below remains
+historical. The current twelve-migration native-evidence candidate requires its
 own exact-commit runtime run; this source-only update supplies no new test or
 runtime result.
 The existing hosted staging project and legacy deployment restrictions remain
@@ -27,11 +28,17 @@ template. Only the copied project ID and five ports differ. At the original
 integration checkpoint the source was the eight-migration Membership baseline,
 whose migration-set SHA256 was
 `7c3e7403b61d5c66123b15d2fe4de28ee2259d71a304ce8695d16630f5353a56`.
-The imported `CURRENT_MIGRATION_FILES` now propagates all eleven migrations.
+The imported `CURRENT_MIGRATION_FILES` now propagates all twelve migrations.
 The selected current aggregate is
-`aa32ed754c87e7987199dbd6c5f685ae65236ba3f94921157fc6cb07ce67b308`;
+`b6357a2882075f41e309ce14c8c6c2313a0336c6f5cdaa0f910906d6e4df5ca2`;
 the [versioned input contract](reproducible-supabase.md#versioned-inputs)
-retains all historical pins and the nine delimited self-reference normalization.
+retains all historical pins and the ten delimited self-reference normalization.
+The eleventh migration preserves its historical aggregate
+`aa32ed754c87e7987199dbd6c5f685ae65236ba3f94921157fc6cb07ce67b308`
+and raw SHA-256
+`448d7697885eae07f04cc3b89531b7b3711e71fa67d56d80ac891df63458fb06`.
+Migration 12's raw SHA-256 is
+`caf89e51eee3aac9332a27146b86038d466740da49a1ba327a9534bbd51b81b4`.
 Schema generation `4`, fixture digest and seven-table archive remain unchanged.
 
 The existing operator and default bounded adapter run on host Node/Python.
@@ -78,9 +85,10 @@ retirement. The current Student `COPY` has exactly 25 columns; creation time is
 allowance is an empty timestamp array, and every added name/device/credential/
 receipt field is null. Source and target use distinct session timezones; explicit
 UTC export and the restored local timestamp are both required. The target must
-have no StudentSession rows before restore. All four runtime stores
+have no StudentSession rows before restore. All six runtime stores
 (`student_join_materials`, `student_device_bindings`,
-`student_bootstrap_challenges`, `student_bootstrap_limits`) must be empty in
+`student_bootstrap_challenges`, `student_bootstrap_limits`,
+`student_device_proof_state`, `student_protection_events`) must be empty in
 source and target, after restore, and after marker retirement. These tables
 never enter the archive. New static receipt fields
 `studentMetadataPreserved: true` and `studentRuntimeStoresEmpty: true` are
@@ -285,11 +293,16 @@ checkpoints remain historical.
 At the inherited Test checkpoint, new exact-commit ten-migration evidence was
 still required for its strict eleven-column Test archive and timezone roundtrip.
 That statement and every receipt above describe their recorded source versions.
-The current eleven-migration StudentSession candidate adds the exact 25-column
-Student archive and four empty runtime-store checks. Its real roundtrip and
-complete restored-target staff/Student suite remain unverified at this
-source-only checkpoint. No historical receipt acquires the new Boolean fields
-retroactively. None of these local/source CI gates proves hosted staging
+The inherited eleven-migration StudentSession source checkpoint added the exact
+25-column Student archive and four empty runtime-store checks, with real roundtrip
+and complete restored-target staff/Student acceptance still unverified at that
+recorded checkpoint. Migration 12 adds two runtime-only tables,
+`student_device_proof_state` and `student_protection_events`, to every empty-source
+and target guard. The seven archived tables, COPY layouts, fixture framing and
+fixture digest remain unchanged. The twelve-migration candidate requires its own
+real roundtrip and complete restored-target staff/Student/evidence suite.
+No historical receipt acquires new checks or Boolean fields retroactively.
+None of these local/source CI gates proves hosted staging
 migration/export, delivered hosted email or packaged desktop staging acceptance.
 
 Primary implementation references: [pinned CLI image list](https://raw.githubusercontent.com/supabase/cli/v2.115.0/apps/cli-go/pkg/config/templates/Dockerfile),

@@ -14,6 +14,7 @@ const generatedDirectories = [
   "packages/test-support/dist",
 ];
 const expectedOutputs = [
+  "apps/desktop/dist/build-identity.json",
   "apps/desktop/dist/calculator/host.js",
   "apps/desktop/dist/calculator/index.html",
   "apps/desktop/dist/calculator/styles.css",

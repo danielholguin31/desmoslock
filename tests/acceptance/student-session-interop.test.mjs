@@ -70,6 +70,8 @@ export async function runStudentSessionInterop(t, runtime) {
           "student_device_bindings",
           "student_bootstrap_challenges",
           "student_bootstrap_limits",
+          "student_device_proof_state",
+          "student_protection_events",
         ]) {
           let result;
           try {
@@ -476,6 +478,7 @@ export async function runStudentSessionInterop(t, runtime) {
                 "epoch",
                 "session_revision",
                 "created_at",
+                "evidence_summary",
               ]
                 .sort()
                 .join(","),
@@ -531,6 +534,300 @@ export async function runStudentSessionInterop(t, runtime) {
         );
       },
     );
+    await t.test(
+      "Evidence: original-key reports and live maintenance serialize one counter with separate allowances",
+      async () => {
+        const target = await harness.test();
+        const joined = await harness.join(await harness.issue(target));
+        accepted(joined.result);
+        const intent = harness.evidence(joined, 1);
+        const initial = accepted(
+          await harness.sendEvidence(intent),
+          "STUDENT_EVIDENCE_ACCEPTED",
+        );
+        const beforeReplay = harness.snapshot(target);
+        deniedResult(
+          await harness.send(joined, harness.maintenance(joined, "read", 1)),
+        );
+        same(
+          harness.snapshot(target),
+          beforeReplay,
+          "Shared-counter denial mutated proof, report or live tuple",
+        );
+        accepted(
+          await harness.send(joined, harness.maintenance(joined, "read", 2)),
+          "STUDENT_SESSION_CURRENT",
+        );
+        const retry = harness.evidence(joined, 3, {
+          facts: intent.request.facts,
+        });
+        const replay = accepted(
+          await harness.sendEvidence(retry),
+          "STUDENT_EVIDENCE_ACCEPTED",
+        );
+        same(
+          initial.acknowledged,
+          replay.acknowledged,
+          "Duplicate report changed original receipt time or content",
+        );
+        const state = harness.snapshot(target);
+        const proof = state.proofs[0];
+        const session = currentSession(
+          state,
+          joined.result.scope.studentSessionId,
+        );
+        check(
+          state.evidence.length === 1 &&
+            proof.last_accepted_proof_counter === 3 &&
+            proof.maintenance_accepted_at.length === 1 &&
+            proof.evidence_accepted_at.length === 2 &&
+            session.last_accepted_proof_counter === 3 &&
+            session.maintenance_accepted_at.length === 1 &&
+            session.revision === 1,
+          "Evidence and live maintenance diverged common counter, quota or compatibility mirror",
+        );
+        const first = intent.request.facts[0];
+        const failure = {
+          ...first,
+          eventId: randomUUID(),
+          sequence: 2,
+          slot: "failure",
+          phase: "failed",
+          categories: {
+            ...first.categories,
+            aac: { status: "unavailable", code: "native_unavailable" },
+          },
+          cause: "native_failure",
+        };
+        const append = harness.evidence(joined, 4, { facts: [first, failure] });
+        const appended = accepted(
+          await harness.sendEvidence(append),
+          "STUDENT_EVIDENCE_ACCEPTED",
+        );
+        same(
+          appended.acknowledged.find((ack) => ack.eventId === first.eventId),
+          initial.acknowledged[0],
+          "Late original-attempt fact rewrote acknowledged prefix",
+        );
+        const beforeConflict = harness.snapshot(target);
+        const conflict = harness.evidence(joined, 5, {
+          facts: [first, { ...failure, cause: "backend_unavailable" }],
+        });
+        deniedResult(await harness.sendEvidence(conflict));
+        same(
+          harness.snapshot(target),
+          beforeConflict,
+          "Content conflict committed a partial batch or consumed shared counter/quota",
+        );
+        const historyArgs = {
+          workspace_id: target.schoolId,
+          test_id: target.testId,
+          student_session_id: joined.result.scope.studentSessionId,
+          before_received_at: null,
+          before_event_id: null,
+        };
+        const history = await rpcRows(
+          harness.teacher.client,
+          "current_student_protection_events",
+          historyArgs,
+        );
+        check(
+          history.length === 2 &&
+            history.every(
+              (row) =>
+                Object.keys(row).sort().join(",") ===
+                  [
+                    "code",
+                    "fact",
+                    "origin_build",
+                    "content_digest",
+                    "received_at",
+                  ]
+                    .sort()
+                    .join(",") &&
+                row.code === "ok" &&
+                row.fact.scope.epoch === 1 &&
+                row.origin_build.kind === "unverified_build" &&
+                /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/u.test(
+                  row.received_at,
+                ),
+            ),
+          "Teacher history lost closed historical report metadata or timestamp precision",
+        );
+        code(
+          await rpc(
+            harness.foreignTeacher.client,
+            "current_student_protection_events",
+            historyArgs,
+          ),
+          "membership_inactive",
+        );
+        const roster = await rpcRows(
+          harness.teacher.client,
+          "current_test_student_sessions",
+          {
+            workspace_id: target.schoolId,
+            test_id: target.testId,
+            before_created_at: null,
+            before_session_id: null,
+          },
+        );
+        const summary = roster[0]?.evidence_summary;
+        check(
+          summary?.reportCount === 2 &&
+            summary.failureCount === 1 &&
+            summary.latestReportedEpoch === 1 &&
+            summary.latestReceivedAt === history[0].received_at,
+          "Teacher summary treated historical reports as current authority or lost failure accounting",
+        );
+      },
+    );
+
+    await t.test(
+      "Evidence: an actual committed lost HTTP response recovers exact receipts without retry inside the transport",
+      async () => {
+        const target = await harness.test();
+        const joined = await harness.join(await harness.issue(target));
+        accepted(joined.result);
+        const intent = harness.evidence(joined, 1);
+        let observed;
+        let calls = 0;
+        const losing = harness.transport(async (input, init) => {
+          calls += 1;
+          const response = await fetch(input, init);
+          if (response.status === 200) observed = await response.clone().json();
+          throw new Error("Synthetic post-commit response loss");
+        });
+        unavailableResult(await harness.sendEvidence(intent, losing));
+        check(
+          calls === 1 && observed?.code === "STUDENT_EVIDENCE_ACCEPTED",
+          "Lost response fixture never observed the actual committed evidence result or retried",
+        );
+        const retry = harness.evidence(joined, 2, {
+          facts: intent.request.facts,
+        });
+        const result = accepted(
+          await harness.sendEvidence(retry),
+          "STUDENT_EVIDENCE_ACCEPTED",
+        );
+        same(
+          result.acknowledged,
+          observed.acknowledged,
+          "Lost response recovery invented fresh receipt timestamps",
+        );
+        const state = harness.snapshot(target);
+        check(
+          state.evidence.length === 1 &&
+            state.proofs[0].last_accepted_proof_counter === 2 &&
+            state.proofs[0].evidence_accepted_at.length === 2,
+          "Exact recovery duplicated reports or failed to advance common counter",
+        );
+      },
+    );
+
+    for (const transition of ["removed", "forfeited", "ended", "rebound"]) {
+      await t.test(
+        `Evidence: ${transition} keeps original report-only permission without renewed admission`,
+        async () => {
+          const target = await harness.test();
+          const joined = await harness.join(await harness.issue(target));
+          accepted(joined.result);
+          const intent = harness.evidence(joined, 2);
+          let successor;
+          if (transition === "ended") await harness.end(target);
+          else if (transition === "forfeited")
+            accepted(
+              await harness.send(
+                joined,
+                harness.maintenance(joined, "forfeit", 1),
+              ),
+              "STUDENT_SESSION_FORFEITED",
+            );
+          else {
+            const removed = await harness.remove(target, joined);
+            if (transition === "rebound") {
+              const material = await harness.prepare(
+                target,
+                joined,
+                removed.session_revision,
+              );
+              successor = await harness.join(material, { mode: "readmission" });
+              accepted(successor.result);
+            }
+          }
+          const before = harness.snapshot(target);
+          const result = accepted(
+            await harness.sendEvidence(intent),
+            "STUDENT_EVIDENCE_ACCEPTED",
+          );
+          check(
+            result.scope.epoch === joined.result.scope.epoch &&
+              result.scope.deviceSessionId === joined.device.deviceSessionId,
+            "Historical report was relabeled to uploader or current admission",
+          );
+          const after = harness.snapshot(target);
+          same(
+            after.audit,
+            before.audit,
+            "Report ingestion mutated staff admission audit",
+          );
+          same(
+            after.bindings,
+            before.bindings,
+            "Report ingestion changed immutable admission binding",
+          );
+          const originalBefore = currentSession(
+            before,
+            joined.result.scope.studentSessionId,
+          );
+          const originalAfter = currentSession(
+            after,
+            joined.result.scope.studentSessionId,
+          );
+          for (const field of [
+            "state",
+            "epoch",
+            "revision",
+            "device_session_id",
+            "capability_digest",
+            "reconnect_digest",
+            "capability_expires_at",
+            "reconnect_expires_at",
+          ])
+            same(
+              originalAfter[field],
+              originalBefore[field],
+              "Report ingestion renewed or replaced admission authority",
+            );
+          deniedResult(
+            await harness.send(joined, harness.maintenance(joined, "read", 3)),
+          );
+          if (successor) {
+            accepted(
+              await harness.send(
+                successor,
+                harness.maintenance(successor, "read", 1),
+              ),
+              "STUDENT_SESSION_CURRENT",
+            );
+            const successorEvidence = harness.evidence(successor, 2);
+            accepted(
+              await harness.sendEvidence(successorEvidence),
+              "STUDENT_EVIDENCE_ACCEPTED",
+            );
+            const final = harness.snapshot(target);
+            check(
+              final.proofs.length === 2 &&
+                final.evidence.length === 2 &&
+                final.proofs.every(
+                  (proof) => proof.last_accepted_proof_counter === 2,
+                ),
+              "Retired original counter overwrote or blocked fresh binding counter",
+            );
+          }
+        },
+      );
+    }
   } finally {
     await harness.close();
   }

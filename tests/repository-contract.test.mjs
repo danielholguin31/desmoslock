@@ -13,6 +13,7 @@ import {
 import {
   assertPublicWebCiWorkflow,
   assertStaffAuthCiWorkflow,
+  assertUnsignedArtifactCiInvocation,
 } from "../scripts/repository-contract/ci-contract.mjs";
 import {
   assertMigrationSetAttestation,
@@ -622,9 +623,15 @@ test("generation-4 attests the exact normalized migration history", () => {
         "233123dd9038740ef724432715cc17e32a5adc2be68160466fa11f5b2dfb865c",
     },
     "20260908000300_student_session_admission.sql": {
-      migrationSetSha256: expectedMigrationSetSha256,
+      migrationSetSha256:
+        "aa32ed754c87e7987199dbd6c5f685ae65236ba3f94921157fc6cb07ce67b308",
       rawSha256:
         "448d7697885eae07f04cc3b89531b7b3711e71fa67d56d80ac891df63458fb06",
+    },
+    "20260908000400_student_protection_evidence.sql": {
+      migrationSetSha256: expectedMigrationSetSha256,
+      rawSha256:
+        "caf89e51eee3aac9332a27146b86038d466740da49a1ba327a9534bbd51b81b4",
     },
   });
   assert.doesNotThrow(() => assertMigrationSetAttestation(migrations));
@@ -653,6 +660,7 @@ test("generation-4 attests the exact normalized migration history", () => {
     "20260907000400_membership_administration.sql",
     "20260908000100_school_display_name.sql",
     "20260908000200_test_workspace.sql",
+    "20260908000300_student_session_admission.sql",
   ]) {
     assert.throws(
       () =>
@@ -689,7 +697,7 @@ test("generation-4 attests the exact normalized migration history", () => {
       assertMigrationSetAttestation(
         migrations.map(([fileName, source]) => [
           fileName,
-          fileName === "20260908000300_student_session_admission.sql"
+          fileName === "20260908000400_student_protection_evidence.sql"
             ? source.replace(expectedMigrationSetSha256, "0".repeat(64))
             : source,
         ]),
@@ -705,6 +713,8 @@ test("the runbook names every runtime-only staff and Student backup guard", () =
     "student_device_bindings",
     "student_bootstrap_challenges",
     "student_bootstrap_limits",
+    "student_device_proof_state",
+    "student_protection_events",
     "application_session_revocation_cutoffs",
     "application_session_revocations",
     "staff_audit_events",
@@ -712,7 +722,8 @@ test("the runbook names every runtime-only staff and Student backup guard", () =
     "staff_password_recovery_operations",
   ];
 
-  assert.match(runbook, /nine runtime-only staff and Student tables/u);
+  assert.match(runbook, /eleven runtime-only staff and Student tables/u);
+  assert.doesNotMatch(runbook, /nine runtime-only staff and Student tables/u);
   assert.doesNotMatch(runbook, /three staff lifecycle tables/u);
   for (const table of runtimeLifecycleTables) {
     assert.equal(
@@ -720,6 +731,75 @@ test("the runbook names every runtime-only staff and Student backup guard", () =
       true,
       `${table} must remain explicit in the operator runbook`,
     );
+  }
+});
+
+test("unsigned artifact Node suites remain invoked by required static CI", () => {
+  const rootPackage = readJson("package.json");
+  const workflow = readText(".github/workflows/ci.yml");
+  assert.doesNotThrow(() =>
+    assertUnsignedArtifactCiInvocation(rootPackage, workflow),
+  );
+  const required = [
+    "tests/acceptance/unsigned-artifact-collector.test.mjs",
+    "tests/acceptance/unsigned-artifact-evidence.test.mjs",
+    "tests/acceptance/unsigned-artifact-cli.test.mjs",
+  ];
+  for (const file of required) {
+    assert.throws(
+      () =>
+        assertUnsignedArtifactCiInvocation(
+          {
+            ...rootPackage,
+            scripts: {
+              ...rootPackage.scripts,
+              "test:repository": rootPackage.scripts["test:repository"].replace(
+                ` ${file}`,
+                "",
+              ),
+            },
+          },
+          workflow,
+        ),
+      /must execute all three unsigned artifact Node suites/u,
+      file,
+    );
+  }
+  for (const command of [
+    rootPackage.scripts["test:repository"].replace("node --test", "echo"),
+    `${rootPackage.scripts["test:repository"]} || true`,
+  ]) {
+    assert.throws(
+      () =>
+        assertUnsignedArtifactCiInvocation(
+          { ...rootPackage, scripts: { "test:repository": command } },
+          workflow,
+        ),
+      /must execute all three unsigned artifact Node suites/u,
+    );
+  }
+  assert.throws(
+    () =>
+      assertUnsignedArtifactCiInvocation(
+        rootPackage,
+        workflow.replace("      - run: npm run test:repository\n", ""),
+      ),
+    /must execute all three unsigned artifact Node suites/u,
+  );
+  for (const option of ["if: false", "continue-on-error: true"]) {
+    for (const altered of [
+      workflow.replace(
+        "      - run: npm run test:repository\n",
+        `      - run: npm run test:repository\n        ${option}\n`,
+      ),
+      workflow.replace("  static:\n", `  static:\n    ${option}\n`),
+    ]) {
+      assert.throws(
+        () => assertUnsignedArtifactCiInvocation(rootPackage, altered),
+        /must execute all three unsigned artifact Node suites/u,
+        `Repository invocation cannot be disabled or ignored: ${option}`,
+      );
+    }
   }
 });
 
@@ -766,7 +846,7 @@ test("staff Auth schema and composed journeys have a required disposable CI lane
   );
   assert.equal(
     rootPackage.scripts?.["test:edge"],
-    "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts supabase/functions/student-session-challenge/index.ts supabase/functions/student-session-join/index.ts supabase/functions/student-session-read/index.ts supabase/functions/student-session-reconnect/index.ts supabase/functions/student-session-forfeit/index.ts",
+    "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts supabase/functions/student-session-challenge/index.ts supabase/functions/student-session-join/index.ts supabase/functions/student-session-read/index.ts supabase/functions/student-session-reconnect/index.ts supabase/functions/student-session-forfeit/index.ts supabase/functions/student-session-evidence/index.ts",
     "the Edge suite must lint all sources and explicitly typecheck every deployed entrypoint",
   );
   assert.equal(

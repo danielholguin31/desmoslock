@@ -680,6 +680,48 @@ export function parseStudentForfeitResult(
     : null;
 }
 
+export interface NativeProtectionEvidenceSummary {
+  readonly reportCount: number;
+  readonly failureCount: number;
+  readonly latestReceivedAt: string | null;
+  readonly latestReportedEpoch: number | null;
+}
+export function parseNativeProtectionEvidenceSummary(
+  value: unknown,
+): NativeProtectionEvidenceSummary | null {
+  const row = parseExactRecord(value, [
+    "reportCount",
+    "failureCount",
+    "latestReceivedAt",
+    "latestReportedEpoch",
+  ]);
+  if (row === null) return null;
+  const reportCount = parseMilliseconds(row.reportCount);
+  const failureCount = parseMilliseconds(row.failureCount);
+  const latestReceivedAt =
+    row.latestReceivedAt === null
+      ? null
+      : parseStudentTimestamp(row.latestReceivedAt);
+  const latestReportedEpoch =
+    row.latestReportedEpoch === null
+      ? null
+      : parseStudentCounter(row.latestReportedEpoch);
+  if (
+    reportCount === null ||
+    failureCount === null ||
+    failureCount > reportCount ||
+    (reportCount === 0
+      ? row.latestReceivedAt !== null || row.latestReportedEpoch !== null
+      : latestReceivedAt === null || latestReportedEpoch === null)
+  )
+    return null;
+  return Object.freeze({
+    reportCount,
+    failureCount,
+    latestReceivedAt,
+    latestReportedEpoch,
+  });
+}
 export interface StaffStudentSession {
   readonly id: string;
   readonly schoolId: string;
@@ -689,6 +731,7 @@ export interface StaffStudentSession {
   readonly epoch: number;
   readonly revision: number;
   readonly createdAt: string;
+  readonly evidenceSummary: NativeProtectionEvidenceSummary;
 }
 export interface StudentSessionPageCursor {
   readonly createdAt: string;
@@ -792,6 +835,7 @@ export function parseStaffStudentSession(
     "epoch",
     "revision",
     "createdAt",
+    "evidenceSummary",
   ]);
   if (row === null) return null;
   const id = parseStudentUuid(row.id);
@@ -804,6 +848,9 @@ export function parseStaffStudentSession(
   const epoch = parseStudentCounter(row.epoch);
   const revision = parseStudentCounter(row.revision);
   const createdAt = parseStudentTimestamp(row.createdAt);
+  const evidenceSummary = parseNativeProtectionEvidenceSummary(
+    row.evidenceSummary,
+  );
   return id !== null &&
     schoolId !== null &&
     testId !== null &&
@@ -811,7 +858,10 @@ export function parseStaffStudentSession(
     state !== null &&
     epoch !== null &&
     revision !== null &&
-    createdAt !== null
+    createdAt !== null &&
+    evidenceSummary !== null &&
+    (evidenceSummary.latestReportedEpoch === null ||
+      evidenceSummary.latestReportedEpoch <= epoch)
     ? {
         id,
         schoolId,
@@ -821,6 +871,7 @@ export function parseStaffStudentSession(
         epoch,
         revision,
         createdAt,
+        evidenceSummary,
       }
     : null;
 }
@@ -939,6 +990,7 @@ const staffListKeys = [
   "epoch",
   "session_revision",
   "created_at",
+  "evidence_summary",
 ] as const;
 const staffMutationKeys = [
   "code",
@@ -1029,6 +1081,7 @@ export function parseReadStudentSessionsRpcResult(
       epoch: row.epoch,
       revision: row.session_revision,
       createdAt: row.created_at,
+      evidenceSummary: row.evidence_summary,
     });
     if (
       session === null ||

@@ -35,6 +35,26 @@ function locked() {
 }
 
 describe("closed desktop protection projection", () => {
+  it.each(["acknowledged", "blocked"])(
+    "admits finite %s delivery without weakening native lock validation",
+    (evidence) => {
+      const input = locked();
+      input.protection.evidence = evidence;
+      expect(parseDesktopStudentView(input)?.protection.evidence).toBe(
+        evidence,
+      );
+      input.protection.categories.aac.status = "pending";
+      expect(parseDesktopStudentView(input)).toBeNull();
+    },
+  );
+  it("rejects arbitrary delivery status and private receipt fields", () => {
+    const input = locked();
+    input.protection.evidence = "permanently_protected";
+    expect(parseDesktopStudentView(input)).toBeNull();
+    input.protection.evidence = "acknowledged";
+    Object.assign(input.protection, { acknowledgedEventIds: ["private"] });
+    expect(parseDesktopStudentView(input)).toBeNull();
+  });
   it("copies and freezes an exact active five-category projection", () => {
     const input = locked();
     const result = parseDesktopStudentView(input);

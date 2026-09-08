@@ -89,7 +89,8 @@
   list-style: none;
 }
 .student-sessions-list li {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
@@ -102,7 +103,64 @@
 .student-sessions-list span {
   font-size: 0.85rem;
   overflow-wrap: anywhere;
-  max-width: 40%;
+  max-width: 100%;
+}
+.student-report-summary {
+  grid-column: 1 / -1;
+  font-size: 0.85rem;
+}
+.student-reports {
+  display: grid;
+  gap: 0.85rem;
+  min-width: 0;
+  padding-top: 1rem;
+  border-top: 1px solid var(--staff-auth-border, #cbd5e1);
+}
+.student-report-list {
+  display: grid;
+  gap: 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.student-report-list > li {
+  display: grid;
+  gap: 0.6rem;
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid var(--staff-auth-border, #cbd5e1);
+  border-radius: 0.85rem;
+}
+.student-report-list h4,
+.student-report-list dl,
+.student-report-list dd {
+  margin: 0;
+}
+.student-report-list h4 {
+  font-size: 1rem;
+}
+.student-report-list dl {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.35rem 0.75rem;
+}
+.student-report-list dt {
+  font-weight: 600;
+}
+.student-report-list dt,
+.student-report-list dd,
+.student-report-list time,
+.student-report-list summary {
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.student-report-list summary {
+  cursor: pointer;
+  min-height: 44px;
+  padding-block: 0.65rem;
+}
+.student-report-list details p {
+  font-size: 0.85rem;
 }
 .student-sessions [hidden] {
   display: none !important;
@@ -112,11 +170,18 @@
     flex: 1 1 100%;
   }
   .student-sessions-list li {
+    grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
     flex-direction: column;
     gap: 0.25rem;
   }
   .student-sessions-list span {
     max-width: 100%;
+  }
+  .student-report-list dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .student-report-list dd {
+    margin-bottom: 0.4rem;
   }
 }

@@ -1,28 +1,57 @@
 # Issue 34 calculator-isolation boundary
 
-**Completion status: incomplete.** The repository implements and verifies the internal
-pre-release containment boundary with an authorized, repository-owned local graphing
-surface. Issue 34 must remain open until both external gates below are satisfied: the
-owner supplies documented Desmos embedding/redistribution rights plus the exact approved
-asset or origin manifest, and a human-bound receipt proves externally observable graphing
-behavior in the exact packaged macOS artifact. The local surface preserves expression,
-plot, removal, and zoom interactions for containment verification without importing
-recovered code or acquiring third-party calculator content; it does not satisfy either
-completion gate.
+**Completion status: incomplete.** The selected synthetic internal Test profile,
+`internal-graphing-v1`, uses the authorized repository-owned local graphing surface
+permitted by [parent issue 28](https://github.com/danielholguin31/desmoslock/issues/28).
+It has exactly seven forms: `y=x`, `y=x^2` (also `y=x²`), `y=sin(x)`, `y=cos(x)`,
+numeric horizontal `y=n`, numeric vertical `x=n`, and numeric points `(x,y)`.
+Multiple expressions, removal and bounded zoom belong to this profile. General
+expressions such as `y=2x+1`, editing, panning, tables, sliders and inequalities
+are not implemented. The profile is not full Desmos compatibility or a claim of
+suitability for every intended Test.
 
-The local surface is not the Desmos API and does not imply permission to redistribute or
-embed Desmos. Replacing it with literal Desmos content remains an external human
-gate: the project owner must provide documented API/embedding rights and the approved
-credential-delivery model. That decision must also define the exact calculator asset
-or origin manifest. The current assessment session intentionally denies every remote
-request, and no agent should weaken that boundary merely to make third-party content
-load.
+Issue 34 remains open for externally observable normal graphing through real
+Student admission and trusted Start in the exact protected packaged macOS
+artifact. A synthetic isolation fixture does not establish that journey. No
+third-party asset, credential or commercial approval is required to exercise
+this repository-owned internal profile. Parent issue 28 defers commercial API
+approval and product-name authorization to External Readiness.
 
-Native device locking and recovery remain outside this slice and belong to issue 35.
-The trusted preload exposes only a validated assessment-lock request and a version
-read. The production shell has no visible manual lock control; non-shipped Electron
-verification invokes that fixed bridge method directly. The main-process handler
-records the request without claiming or performing a native device action.
+The local surface is not the Desmos API and implies no permission to redistribute
+or embed Desmos. If actual third-party content is selected, applicable terms and
+embedding/redistribution permission for that specific use, its exact approved
+asset or origin manifest, and any required credential-delivery model become
+prerequisites. Internal acceptance is not an exemption from applicable terms.
+The current assessment session denies every remote request; loading third-party
+content cannot silently broaden that boundary.
+
+Native protection and recovery belong to the separate
+[native assessment contract](native-assessment-protection.md). The trusted shell
+exposes named, revision-bound admission, Start and reviewed Emergency actions;
+the calculator has no preload or privileged bridge. The legacy lock request
+remains denied. Production main keeps the calculator detached until the matching
+native `did_begin`, a causally later accepted backend read, durable locked state
+and all five current categories authorize attachment. The non-shipped isolation
+fixture explicitly attaches a calculator for containment testing without Student
+admission, native assessment or OS encryption. It cannot grant production Start.
+
+The graphing fixture checks all seven profile forms against finite SVG geometry
+at known visible coordinates in the `720 × 460` viewBox. It captures actual
+calculator pixels around non-overlapping quadratic samples before and after
+zoom, and around a new point after the hostile probe. Paint must contain the
+expected opaque plot color; path counts, labels and PNG byte length alone are
+insufficient. A real blank white PNG exceeding the old 1,000-byte threshold is
+explicitly rejected by the paint oracle. Pure controls also reject empty,
+degenerate, nonfinite, displaced, hidden/offscreen and unchanged zoom geometry.
+
+The deterministic synthetic sequence is: retain initial `y=x`; add `y=x^2` at
+100%; zoom once to 125%; add `y=sin(x)`, `y=cos(x)`, `y=3`, `x=-3`, `(2,3)`;
+remove only `y=x^2` and compare every surviving geometry; submit unsupported
+`y=2x+1` and require the error with unchanged plots/zoom; run the existing hostile
+containment probe; then add `(4,-2)` and require its visible point while all prior
+plots survive. Bridge, URL, window and zero HTTP/TCP/UDP sink checks remain
+independent requirements. The pure controls and fixture source do not themselves
+claim an executed Electron or packaged graphing pass.
 
 Both the trusted shell's default Electron session and the calculator's ephemeral
 session deny permissions, downloads, device selection, display capture, popups, and
@@ -37,13 +66,14 @@ That harness exercises the unpackaged production build; it uses Electron's inter
 automation channel and is not black-box package or release acceptance. Production
 assets must contain no external-dispatch call, diagnostic registry, or test API.
 
-Calculator teardown closes the owned WebContents synchronously, then independently
-attempts policy removal, protocol removal, and the storage, cache, authentication, and
-connection cleanup operations. Repeated callers observe one cached result; every cleanup
-failure is retained in an aggregate. A parent-driven cleanup failure is reported to the
-desktop lifecycle supervisor, which fails closed instead of leaving an unobserved failed
-session cleanup on macOS. Startup preserves its primary failure alongside any teardown
-failures and still clears references and destroys the window.
+Calculator teardown immediately detaches the surface and requests closure. It
+retains the owned WebContents until actual destruction acknowledgment, then
+independently attempts policy/protocol removal and storage, cache, authentication
+and connection cleanup. A closure request is not destruction proof. Repeated
+callers observe one cached result; cleanup failures remain aggregated. A
+parent-driven failure reaches the lifecycle supervisor, and startup preserves
+its primary failure alongside teardown failures. These ownership guarantees are
+covered by the separate native/surface source and runtime gates.
 
 Required Linux CI uses an explicitly non-release compatibility profile with Chromium's
 OS/process sandbox disabled by `--no-sandbox`, `--disable-setuid-sandbox`, Playwright's
@@ -105,13 +135,18 @@ adapter can provide scoped containment; it does not fall back to leader-only ter
 
 This automated evidence does not complete issue 34 and does not claim physical black-box
 calculator interaction in the package. Exact packaged, externally observable graphing
-acceptance remains a human/physical gate (tracked with issue 37): XCUITest must drive the
-exact signed/notarized `.app` or mounted-DMG application on a visible clean Mac using
+acceptance remains a human/physical gate (tracked with issue 37): the approved OS-input
+runner must drive the exact signed/notarized `.app` or mounted-DMG application on a visible clean Mac using
 OS-delivered clicks and typing, capture window screenshots, and prove visible plot
-creation, zoom change, expression removal, and plot disappearance through screenshot
-or pixel-delta receipts bound to the exact artifact. macOS Accessibility/Automation
+creation, zoom change, intended removal preserving another plot, unsupported-input
+rejection and continued graphing after the hostile probe through observations
+bound to the exact artifact. Enter through actual admission and trusted Start;
+observe graph withdrawal on negative authority/end/recovery. The fixture's
+direct attachment and injected JavaScript do not qualify. macOS Accessibility/Automation
 and likely Screen Recording approval are required human gates; no shipped diagnostic
 or test seam substitutes for them. The clean-Mac launch must use no sandbox-disabling
 control, but its UI receipt remains separate from an active Chromium-sandbox attestation.
-Until that receipt and the Desmos rights/exact-asset decision both exist, every #34
-completion receipt must report these as unmet gates.
+Until that protected exact-artifact receipt exists, every issue 34 completion
+record must report the packaged journey as unmet. Third-party rights/assets
+remain conditional on using third-party content; no issue closure follows from
+the finite profile or its synthetic regression.

@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import type { StaffStudentSession, StaffTest } from "@desmoslock/contracts";
+import type {
+  StaffStudentProtectionEvent,
+  StaffStudentSession,
+  StaffTest,
+} from "@desmoslock/contracts";
 import type {
   StudentSessionAction,
   StudentSessionController,
@@ -21,6 +25,7 @@ class Element {
   type = "";
   id = "";
   hidden = false;
+  open = false;
   readOnly = false;
   tabIndex = 0;
   selectionStart = 0;
@@ -178,6 +183,12 @@ const session: StaffStudentSession = {
   epoch: 1,
   revision: 1,
   createdAt: "2026-09-08T12:00:00.123456Z",
+  evidenceSummary: {
+    reportCount: 0,
+    failureCount: 0,
+    latestReceivedAt: null,
+    latestReportedEpoch: null,
+  },
 };
 function data(overrides: Partial<StudentSessionData> = {}): StudentSessionData {
   return {
@@ -187,6 +198,7 @@ function data(overrides: Partial<StudentSessionData> = {}): StudentSessionData {
     page: { items: [session], nextCursor: null },
     selected: session,
     disclosure: null,
+    evidence: { kind: "closed" },
     ...overrides,
   };
 }
@@ -224,8 +236,48 @@ function nodes(root: Element): Element[] {
 function visible(element: Element): boolean {
   return (
     !element.hidden &&
+    !(
+      element.parentElement?.tagName === "details" &&
+      !element.parentElement.open &&
+      element.tagName !== "summary"
+    ) &&
     (element.parentElement === null || visible(element.parentElement))
   );
+}
+function report(
+  overrides: Partial<StaffStudentProtectionEvent> = {},
+): StaffStudentProtectionEvent {
+  return {
+    fact: {
+      policyVersion: 1,
+      sequence: 7,
+      eventId: "90000000-0000-4000-8000-000000000071",
+      attemptId: "90000000-0000-4000-8000-000000000072",
+      scope: {
+        schoolId: school.schoolId,
+        testId: test.id,
+        studentSessionId: session.id,
+        deviceSessionId: "90000000-0000-4000-8000-000000000073",
+        epoch: 1,
+      },
+      slot: "failure",
+      phase: "failed",
+      nativeEvent: null,
+      nativeSequence: null,
+      cause: "application_policy",
+      categories: {
+        aac: { status: "pending", code: "awaiting_native_begin" },
+        shortcuts: { status: "confirmed", code: "none" },
+        applications: { status: "failed", code: "prohibited_application" },
+        persistence: { status: "confirmed", code: "none" },
+        windowNetwork: { status: "confirmed", code: "none" },
+      },
+    },
+    originBuild: { kind: "unverified_build" },
+    contentDigest: "a".repeat(64),
+    receivedAt: "2026-09-08T12:00:00.123456Z",
+    ...overrides,
+  };
 }
 function setup(
   initial: StudentSessionSnapshot = ready(),
@@ -290,6 +342,354 @@ async function settle() {
   await Promise.resolve();
   await Promise.resolve();
 }
+
+describe("Teacher historical client reports", () => {
+  it("shows neutral absence and never opens or reads reports automatically", () => {
+    const view = setup();
+    expect(view.text()).toContain("No client reports received");
+    expect(visible(view.action("open_evidence"))).toBe(true);
+    expect(view.text()).not.toContain(
+      "Reports from the client may arrive late",
+    );
+    expect(view.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps a late old-admission report historical and uses readable receipt time with exact detail", () => {
+    const current = {
+      ...session,
+      epoch: 2,
+      evidenceSummary: {
+        reportCount: 1,
+        failureCount: 1,
+        latestReceivedAt: report().receivedAt,
+        latestReportedEpoch: 1,
+      },
+    };
+    const view = setup(
+      ready({
+        selected: current,
+        page: { items: [current], nextCursor: null },
+        evidence: {
+          kind: "ready",
+          page: { items: [report()], nextCursor: null },
+        },
+      }),
+    );
+    expect(view.text()).toContain(
+      "1 report received · 1 reported failure · Latest received report: admission version 1",
+    );
+    expect(view.text()).toContain("Current admission version 2");
+    expect(view.text()).toContain(
+      "Original admission version 1 · Report sequence 7",
+    );
+    expect(view.text()).toContain("They do not confirm current protection");
+    expect(view.text()).toContain("Protection failure reported");
+    expect(view.text()).toContain("Prohibited application reported");
+    const received = view.find((node) => node.tagName === "time");
+    expect(received.textContent).toBe("Received 2026-09-08 12:00:00 UTC");
+    expect(received.attributes.datetime).toBe("2026-09-08T12:00:00.123456Z");
+    expect(received.attributes.title).toContain(".123456Z");
+    expect(view.text()).not.toContain(report().fact.eventId);
+    expect(view.text()).not.toContain(report().contentDigest);
+  });
+
+  it.each(["build", "unverified_build", "legacy_unknown"] as const)(
+    "keeps %s provenance in optional details without a release claim",
+    (kind) => {
+      const originBuild: StaffStudentProtectionEvent["originBuild"] =
+        kind === "build"
+          ? {
+              kind,
+              identity: {
+                schemaVersion: 1,
+                sourceRepository: "danielholguin31/desmoslock",
+                sourceCommit: "a".repeat(40),
+                sourceTree: "b".repeat(40),
+                packageLockSha256: "c".repeat(64),
+                buildId: "d".repeat(64),
+              },
+            }
+          : { kind };
+      const view = setup(
+        ready({
+          evidence: {
+            kind: "ready",
+            page: { items: [report({ originBuild })], nextCursor: null },
+          },
+        }),
+      );
+      const details = view.find((node) => node.tagName === "details");
+      expect(details.open).toBe(false);
+      expect(view.text()).not.toContain("d".repeat(64));
+      details.open = true;
+      if (kind === "build") {
+        expect(view.text()).toContain("Build ID: " + "d".repeat(64));
+        expect(view.text()).toContain("not release verification");
+      } else
+        expect(view.text()).toContain(
+          kind === "unverified_build"
+            ? "did not have a verified build identity"
+            : "original build identity is unknown",
+        );
+    },
+  );
+
+  it("uses exact revision-bound named actions and explicit open/close focus", async () => {
+    const view = setup();
+    view.dispatch.mockImplementation(async (action) => {
+      if (action.type === "open_evidence")
+        view.publish(
+          ready(
+            {
+              evidence: {
+                kind: "ready",
+                page: { items: [], nextCursor: null },
+              },
+            },
+            2,
+          ),
+        );
+      else if (action.type === "close_evidence") view.publish(ready({}, 3));
+      return ready();
+    });
+    const open = view.action("open_evidence");
+    open.focus();
+    open.fire("click");
+    await settle();
+    expect(view.dispatch).toHaveBeenNthCalledWith(1, {
+      type: "open_evidence",
+      snapshotRevision: 1,
+    });
+    expect(view.document.activeElement?.textContent).toBe("Client reports");
+    expect(view.text()).toContain(
+      "No client reports received for this session",
+    );
+    view.action("close_evidence").focus();
+    view.action("close_evidence").fire("click");
+    await settle();
+    expect(view.dispatch).toHaveBeenNthCalledWith(2, {
+      type: "close_evidence",
+      snapshotRevision: 2,
+    });
+    expect(view.document.activeElement).toBe(open);
+  });
+
+  it("retains focused details and private review through quiet history prepend and School rename", () => {
+    const event = report();
+    const initial = review("remove");
+    if (!("data" in initial)) throw Error("Data required");
+    const view = setup({
+      ...initial,
+      data: data({
+        evidence: { kind: "ready", page: { items: [event], nextCursor: null } },
+      }),
+    });
+    const build = view.find((node) => node.tagName === "details");
+    build.open = true;
+    const summary = view.find((node) => node.tagName === "summary");
+    summary.focus();
+    const newer = report({
+      fact: {
+        ...event.fact,
+        eventId: "90000000-0000-4000-8000-000000000074",
+        sequence: 8,
+      },
+      receivedAt: "2026-09-08T12:00:00.123457Z",
+    });
+    const confirm = view.action("confirm_review"),
+      transitions = confirm.disableTransitions;
+    view.publish({
+      ...initial,
+      revision: 3,
+      data: data({
+        school: {
+          ...school,
+          displayName: "Renamed School",
+          settingsRevision: 2,
+        },
+        evidence: {
+          kind: "ready",
+          page: { items: [newer, event], nextCursor: null },
+        },
+      }),
+    });
+    expect(view.document.activeElement).toBe(summary);
+    expect(summary.isConnected).toBe(true);
+    expect(build.open).toBe(true);
+    expect(confirm.disableTransitions).toBe(transitions);
+    expect(confirm.disabled).toBe(false);
+    expect(view.text()).toContain("Remove this session?");
+    expect(view.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("preserves disclosed code selection through a quiet report refresh", () => {
+    const disclosure = {
+      kind: "join" as const,
+      code: "23456789ABCD",
+      expiresAt: "2026-09-08T12:15:00.123456Z",
+      studentSessionId: null,
+    };
+    const view = setup(
+      ready({
+        disclosure,
+        evidence: { kind: "ready", page: { items: [], nextCursor: null } },
+      }),
+    );
+    const code = view.find((node) => node.tagName === "input");
+    code.focus();
+    code.selectionStart = 2;
+    code.selectionEnd = 7;
+    const writes = code.valueAssignments,
+      focusCalls = code.focusCalls.length;
+    view.publish(
+      ready(
+        {
+          disclosure,
+          school: { ...school, displayName: "Renamed", settingsRevision: 2 },
+          evidence: {
+            kind: "ready",
+            page: { items: [report()], nextCursor: null },
+          },
+        },
+        2,
+      ),
+    );
+    expect(code.valueAssignments).toBe(writes);
+    expect([code.selectionStart, code.selectionEnd]).toEqual([2, 7]);
+    expect(view.document.activeElement).toBe(code);
+    expect(code.focusCalls).toHaveLength(focusCalls);
+    expect(view.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps held history feedback separate from Student confirmation and can close immediately", async () => {
+    const initial = review("remove");
+    if (!("data" in initial)) throw Error("Data required");
+    const page = { items: [report()], nextCursor: null };
+    const view = setup({
+      ...initial,
+      data: data({ evidence: { kind: "ready", page } }),
+    });
+    let release!: (value: StudentSessionSnapshot) => void;
+    view.dispatch.mockImplementation((action) => {
+      if (action.type === "refresh_evidence")
+        return new Promise((resolve) => {
+          release = resolve;
+        });
+      if (action.type === "close_evidence")
+        view.publish({ ...initial, revision: 3, data: data() });
+      return Promise.resolve(initial);
+    });
+    const confirm = view.action("confirm_review");
+    confirm.focus();
+    const transitions = confirm.disableTransitions;
+    view.action("refresh_evidence").fire("click");
+    expect(confirm.disabled).toBe(false);
+    expect(confirm.disableTransitions).toBe(transitions);
+    expect(view.document.activeElement).toBe(confirm);
+    expect(view.action("close_evidence").disabled).toBe(false);
+    view.action("close_evidence").fire("click");
+    await settle();
+    release(initial);
+    await settle();
+    expect(view.text()).not.toContain(
+      "Reports from the client may arrive late",
+    );
+    expect(view.text()).toContain("Remove this session?");
+  });
+
+  it.each(["throw", "reject"] as const)(
+    "contains a %s history failure without clearing a Student review",
+    async (failure) => {
+      const initial = review("remove");
+      if (!("data" in initial)) throw Error("Data required");
+      const view = setup({
+        ...initial,
+        data: data({
+          evidence: {
+            kind: "ready",
+            page: { items: [report()], nextCursor: null },
+          },
+        }),
+      });
+      view.dispatch.mockImplementation(() => {
+        if (failure === "throw") throw Error("private error");
+        return Promise.reject(Error("private error"));
+      });
+      view.action("refresh_evidence").fire("click");
+      await settle();
+      expect(view.text()).toContain(
+        "Client reports unavailable. Refresh reports to try again",
+      );
+      expect(view.text()).toContain("Remove this session?");
+      expect(view.text()).not.toContain("private error");
+      expect(view.action("confirm_review").disabled).toBe(false);
+    },
+  );
+
+  it("labels unavailable retained history honestly and leaves explicit read retry usable", () => {
+    const view = setup(
+      ready({
+        evidence: {
+          kind: "unavailable",
+          page: { items: [report()], nextCursor: null },
+        },
+      }),
+    );
+    expect(view.text()).toContain("Previously received reports are shown");
+    expect(view.text()).toContain("Protection failure reported");
+    expect(view.action("refresh_evidence").disabled).toBe(false);
+    expect(view.text()).not.toContain(
+      "No client reports received for this session",
+    );
+  });
+
+  it("reads ended Test reports without enabling participation mutations", () => {
+    const view = setup(
+      ready({
+        test: {
+          ...test,
+          lifecycle: "ended",
+          endedAt: "2026-09-08T13:00:00.000000Z",
+        },
+        evidence: {
+          kind: "ready",
+          page: { items: [report()], nextCursor: null },
+        },
+      }),
+    );
+    expect(view.action("refresh_evidence").disabled).toBe(false);
+    expect(view.action("review_remove").disabled).toBe(true);
+    expect(view.action("review_issue_code").disabled).toBe(true);
+    expect(view.text()).toContain("Received");
+  });
+
+  it("discards late history UI completion after authority withdrawal", async () => {
+    const view = setup();
+    let release!: (value: StudentSessionSnapshot) => void;
+    view.dispatch.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    view.action("open_evidence").fire("click");
+    view.publish({ kind: "unavailable", revision: 2 });
+    release(
+      ready(
+        {
+          evidence: {
+            kind: "ready",
+            page: { items: [report()], nextCursor: null },
+          },
+        },
+        3,
+      ),
+    );
+    await settle();
+    expect(view.root.children).toHaveLength(0);
+    expect(view.root.hidden).toBe(true);
+  });
+});
 
 describe("Student session staff view", () => {
   it.each(["throw", "reject"] as const)(

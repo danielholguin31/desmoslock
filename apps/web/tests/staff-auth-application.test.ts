@@ -388,6 +388,7 @@ function unavailableStudentPort(): StudentSessionPort {
     releaseStudentSessionAuthority() {},
     readStudentTarget: async () => null,
     readStudentSessions: async () => null,
+    readStudentProtectionEvents: async () => null,
     issueTestJoinCode: async () => null,
     removeStudentSession: async () => null,
     prepareStudentReadmission: async () => null,
@@ -2034,6 +2035,7 @@ function studentCompositionPorts() {
     releaseStudentSessionAuthority: vi.fn(),
     readStudentTarget: vi.fn(async (): Promise<unknown> => [{ ...row }]),
     readStudentSessions: vi.fn(async (): Promise<unknown> => []),
+    readStudentProtectionEvents: vi.fn(async (): Promise<unknown> => []),
     issueTestJoinCode: vi.fn(async (): Promise<unknown> => {
       row.test_revision += 1;
       return [
@@ -2057,6 +2059,123 @@ function studentCompositionPorts() {
 }
 
 describe("Student sibling uses the selected Test and shared staff lifecycle", () => {
+  it.each(["initial selection", "open-to-ended change"])(
+    "loads an ended Test promptly on %s and enables explicit report history without a periodic tick",
+    async (transition) => {
+      const { tests, students, row } = studentCompositionPorts();
+      const end = () => {
+        row.lifecycle = "ended";
+        row.test_revision = 3;
+        Object.assign(row, { ended_at: "2026-09-08T00:03:00.123456Z" });
+      };
+      if (transition === "initial selection") end();
+      const session = {
+        code: "ok",
+        session_id: "73000000-0000-4000-8000-000000000001",
+        school_id: row.school_id,
+        test_id: row.test_id,
+        synthetic_display_name: "Student E1",
+        state: "active",
+        epoch: 1,
+        session_revision: 1,
+        created_at: "2026-09-08T00:02:00.123456Z",
+        evidence_summary: {
+          reportCount: 0,
+          failureCount: 0,
+          latestReceivedAt: null,
+          latestReportedEpoch: null,
+        },
+      };
+      students.readStudentSessions.mockResolvedValue([session]);
+      const h = createHarness({
+        adapter: createAdapter({ read: async () => settingsAccess() }).adapter,
+        testWorkspacePort: tests,
+        studentSessionPort: students,
+      });
+      try {
+        await h.application.ready;
+        const parent = h.bindTestWorkspaceView.mock.calls[0]![1];
+        const child = h.bindStudentSessionView.mock.calls[0]![1];
+        await parent.dispatch({ type: "select_test", testId: row.test_id });
+        if (transition === "open-to-ended change") {
+          await vi.waitFor(() =>
+            expect(child.getSnapshot()).toMatchObject({ kind: "ready" }),
+          );
+          end();
+          await parent.dispatch({ type: "refresh" });
+        }
+        // The harness never emits a periodic lifecycle refresh. Selection or
+        // lifecycle publication must schedule the existing visible read cycle.
+        await vi.waitFor(() => {
+          expect(students.readStudentSessions).toHaveBeenCalledTimes(
+            transition === "initial selection" ? 1 : 2,
+          );
+          expect(child.getSnapshot()).toMatchObject({
+            kind: "ready",
+            data: {
+              test: { lifecycle: "ended" },
+              page: { items: [{ id: session.session_id }] },
+            },
+          });
+        });
+        expect(students.readStudentProtectionEvents).not.toHaveBeenCalled();
+        await child.dispatch({
+          type: "select_session",
+          studentSessionId: session.session_id,
+          snapshotRevision: child.getSnapshot().revision,
+        });
+        await child.dispatch({
+          type: "open_evidence",
+          snapshotRevision: child.getSnapshot().revision,
+        });
+        expect(students.readStudentProtectionEvents).toHaveBeenCalledOnce();
+        expect(child.getSnapshot()).toMatchObject({
+          kind: "ready",
+          data: { evidence: { kind: "ready", page: { items: [] } } },
+        });
+        const reads = students.readStudentSessions.mock.calls.length;
+        row.title = "Renamed ended Test";
+        row.test_revision += 1;
+        await parent.dispatch({ type: "refresh" });
+        await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+        expect(students.readStudentSessions).toHaveBeenCalledTimes(reads);
+        expect(students.readStudentProtectionEvents).toHaveBeenCalledOnce();
+        expect(students.issueTestJoinCode).not.toHaveBeenCalled();
+        expect(students.removeStudentSession).not.toHaveBeenCalled();
+        expect(students.prepareStudentReadmission).not.toHaveBeenCalled();
+      } finally {
+        h.application.dispose();
+      }
+    },
+  );
+
+  it("does not schedule a Student read cycle for a draft Test selection", async () => {
+    const { tests, students, row } = studentCompositionPorts();
+    row.lifecycle = "draft";
+    row.test_revision = 1;
+    Object.assign(row, { opened_at: null });
+    const h = createHarness({
+      adapter: createAdapter({ read: async () => settingsAccess() }).adapter,
+      testWorkspacePort: tests,
+      studentSessionPort: students,
+    });
+    try {
+      await h.application.ready;
+      const parent = h.bindTestWorkspaceView.mock.calls[0]![1];
+      const listReads = tests.readSchoolTests.mock.calls.length;
+      await parent.dispatch({ type: "select_test", testId: row.test_id });
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+      // Selecting a Test owns its normal parent list read, without scheduling
+      // the additional visible staff/Student cycle used for readable Tests.
+      expect(tests.readSchoolTests).toHaveBeenCalledTimes(listReads + 1);
+      expect(students.captureStudentSessionAuthority).not.toHaveBeenCalled();
+      expect(students.readStudentSessions).not.toHaveBeenCalled();
+      expect(students.readStudentProtectionEvents).not.toHaveBeenCalled();
+    } finally {
+      h.application.dispose();
+    }
+  });
+
   it("queues the newly selected Test after a held prior roster read and never publishes the prior rows", async () => {
     const { tests, students, row } = studentCompositionPorts();
     const h = createHarness({
@@ -2098,6 +2217,12 @@ describe("Student sibling uses the selected Test and shared staff lifecycle", ()
       epoch: 1,
       session_revision: 1,
       created_at: "2026-09-08T00:02:00.123456Z",
+      evidence_summary: {
+        reportCount: 0,
+        failureCount: 0,
+        latestReceivedAt: null,
+        latestReportedEpoch: null,
+      },
     };
     students.readStudentSessions.mockResolvedValue([session]);
     await parent.dispatch({ type: "select_test", testId: row.test_id });

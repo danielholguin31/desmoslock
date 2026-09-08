@@ -1,24 +1,24 @@
 import assert from "node:assert/strict";
 import dgram from "node:dgram";
 import fs from "node:fs/promises";
-import { createReadStream } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-import { packager } from "@electron/packager";
 import { _electron as electron } from "@playwright/test";
 import { build } from "esbuild";
-import { statFile } from "@electron/asar";
 
 import {
-  hardenPackagedElectron,
-  verifyPackagedElectronFuses,
-} from "./electron-fuse-policy.mjs";
+  expectedDesktopDistributionFiles,
+  inspectDesktopDistribution,
+  nativeDistributionFiles,
+  packagedExecutableName,
+  packageUnsignedDesktop,
+  selectExistingElectronArchive,
+} from "./desktop-artifact.mjs";
 import { createElectronLaunchProfile } from "./electron-launch-profile.mjs";
 import { spawnIsolatedProcessTree } from "./isolated-process-tree.mjs";
 import { assertPackagedSwitchRejectionBoundary } from "./packaged-switch-rejection-boundary.mjs";
@@ -40,7 +40,6 @@ const repositoryRoot = path.resolve(
 const desktopRoot = path.join(repositoryRoot, "apps", "desktop");
 const distributionRoot = path.join(desktopRoot, "dist");
 const calculatorUrl = "desmoslock-calculator://host/index.html";
-const packagedExecutableName = "desmoslock-internal";
 const sandboxDisablingEnvironmentVariable = "ELECTRON_DISABLE_SANDBOX";
 const sandboxWeakeningOrInliningSwitchNames = Object.freeze([
   "no-sandbox",
@@ -72,21 +71,7 @@ const forbiddenPackagedSwitches = Object.freeze([
 ]);
 const diagnosticEndpointPattern =
   /(?:Debugger|DevTools) listening|ws:\/\/[^\s]+\/devtools\//i;
-const nativeDistributionFiles = [
-  "native/aac-protection.node",
-  "native/durable-record.node",
-];
-const expectedDistributionFiles = [
-  "calculator/host.js",
-  "calculator/index.html",
-  "calculator/styles.css",
-  "index.html",
-  "main.js",
-  ...(process.platform === "darwin" ? nativeDistributionFiles : []),
-  "preload.cjs",
-  "renderer.js",
-  "styles.css",
-];
+const expectedDistributionFiles = expectedDesktopDistributionFiles();
 const studentBridgeKeys = [
   "beginTargetedReadmission",
   "cancelEmergencyEnd",
@@ -162,153 +147,6 @@ function assertDetachedStudentView(
   }
 }
 
-async function selectExistingElectronArchive(electronVersion) {
-  assert.equal(
-    electronVersion,
-    "43.4.1",
-    "Packaging requires the reviewed Electron version",
-  );
-  assert.ok(
-    ["darwin", "linux", "win32"].includes(process.platform),
-    "Packaging platform is unsupported",
-  );
-  assert.ok(
-    ["arm64", "x64"].includes(process.arch),
-    "Packaging architecture is unsupported",
-  );
-  const filename = `electron-v${electronVersion}-${process.platform}-${process.arch}.zip`;
-  const checksums = JSON.parse(
-    await fs.readFile(
-      path.join(repositoryRoot, "node_modules/electron/checksums.json"),
-      "utf8",
-    ),
-  );
-  const expectedHash = checksums[filename];
-  assert.match(
-    expectedHash ?? "",
-    /^[0-9a-f]{64}$/,
-    "The installed Electron package must pin the exact archive checksum",
-  );
-  let directory = process.env.DESMOSLOCK_ELECTRON_ZIP_DIR;
-  if (directory === undefined) {
-    // Address one existing official cache entry, matching @electron/get's
-    // Cache.getCacheDirectory and env-paths('electron', { suffix: '' }).
-    // npm ci already populates this entry in CI; this verifier never downloads.
-    const defaultCacheRoot =
-      process.platform === "darwin"
-        ? path.join(os.homedir(), "Library/Caches/electron")
-        : process.platform === "win32"
-          ? path.join(
-              process.env.LOCALAPPDATA ||
-                path.join(os.homedir(), "AppData/Local"),
-              "electron/Cache",
-            )
-          : path.join(
-              process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"),
-              "electron",
-            );
-    const cacheRoot = process.env.electron_config_cache ?? defaultCacheRoot;
-    assert.equal(
-      path.isAbsolute(cacheRoot),
-      true,
-      "The selected Electron cache root must be absolute",
-    );
-    const releaseDirectory = `https://github.com/electron/electron/releases/download/v${electronVersion}`;
-    directory = path.join(
-      cacheRoot,
-      createHash("sha256").update(releaseDirectory).digest("hex"),
-    );
-  }
-  assert.equal(
-    path.isAbsolute(directory),
-    true,
-    "The selected Electron ZIP directory must be absolute",
-  );
-  const archivePath = path.join(directory, filename);
-  let status;
-  try {
-    status = await fs.lstat(archivePath);
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-    throw new Error(
-      `Required existing ${filename} is unavailable. Select its verified directory with DESMOSLOCK_ELECTRON_ZIP_DIR or retain npm ci's official Electron cache; this verifier will not download or search for it.`,
-      { cause: error },
-    );
-  }
-  assert.equal(
-    status.isFile() && !status.isSymbolicLink(),
-    true,
-    "The selected Electron ZIP must be a regular archive file",
-  );
-  const hasher = createHash("sha256");
-  let bytes = 0;
-  for await (const chunk of createReadStream(archivePath)) {
-    hasher.update(chunk);
-    bytes += chunk.length;
-  }
-  const sha256 = hasher.digest("hex");
-  assert.equal(
-    bytes,
-    status.size,
-    "The selected Electron archive changed while being verified",
-  );
-  assert.equal(
-    sha256,
-    expectedHash,
-    "The existing Electron archive does not match the installed package's checksum",
-  );
-  if (process.platform === "darwin" && process.arch === "arm64") {
-    assert.equal(
-      sha256,
-      "fe3cac8cbfd9ba1739fac6c69166cf30848741f93cbe251d800ae6ef7cebb64b",
-    );
-    assert.equal(bytes, 122_238_952);
-  }
-  return { directory: await fs.realpath(directory), filename, sha256, bytes };
-}
-
-async function inspectNativeArtifact(root, relativePath) {
-  assert.ok(nativeDistributionFiles.includes(relativePath));
-  const filename = path.join(root, relativePath);
-  const status = await fs.lstat(filename);
-  assert.equal(
-    status.isSymbolicLink(),
-    false,
-    "Native artifact must be an owned regular file",
-  );
-  assert.equal(status.isFile(), true);
-  const bytes = await fs.readFile(filename);
-  assert.ok(
-    bytes.length >= 32,
-    "Native artifact must contain a Mach-O64 header",
-  );
-  assert.equal(
-    bytes.readUInt32LE(0),
-    0xfeedfacf,
-    "Native artifact must be little-endian Mach-O64",
-  );
-  assert.ok(
-    ["arm64", "x64"].includes(process.arch),
-    "Native artifact architecture is unsupported",
-  );
-  assert.equal(
-    bytes.readUInt32LE(4),
-    process.arch === "arm64" ? 0x0100000c : 0x01000007,
-    "Native artifact CPU must match the selected runtime",
-  );
-  assert.equal(
-    bytes.readUInt32LE(12),
-    8,
-    "Native artifact must be a Mach-O bundle",
-  );
-  return {
-    path: `dist/${relativePath}`,
-    architecture: process.arch,
-    sha256: createHash("sha256").update(bytes).digest("hex"),
-    bytes: bytes.length,
-  };
-}
-
 async function run(command, arguments_, options = {}) {
   await new Promise((resolve, reject) => {
     const child = spawn(command, arguments_, {
@@ -329,44 +167,6 @@ async function run(command, arguments_, options = {}) {
       );
     });
   });
-}
-
-async function listFiles(root, relativeDirectory = "") {
-  const directory = path.join(root, relativeDirectory);
-  const entries = await fs.readdir(directory, { withFileTypes: true });
-  const files = [];
-  for (const entry of entries) {
-    const relativePath = path.posix.join(relativeDirectory, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...(await listFiles(root, relativePath)));
-    } else {
-      files.push(relativePath);
-    }
-  }
-  return files.sort();
-}
-
-async function packagedExecutable(packageDirectory) {
-  if (process.platform === "darwin") {
-    const appBundle = path.join(packageDirectory, "DesmosLock Internal.app");
-    const executableDirectory = path.join(appBundle, "Contents", "MacOS");
-    const executable = path.join(executableDirectory, packagedExecutableName);
-    await fs.access(executable, fs.constants.X_OK);
-    return Object.freeze({ appBundle, executable });
-  }
-
-  if (process.platform === "win32") {
-    const executable = path.join(
-      packageDirectory,
-      `${packagedExecutableName}.exe`,
-    );
-    await fs.access(executable);
-    return Object.freeze({ appBundle: null, executable });
-  }
-
-  const executable = path.join(packageDirectory, packagedExecutableName);
-  await fs.access(executable, fs.constants.X_OK);
-  return Object.freeze({ appBundle: null, executable });
 }
 
 function parsePackagedPolicyBoundary(output) {
@@ -1067,8 +867,10 @@ async function readCalculatorState(application) {
   }, calculatorUrl);
 }
 
-const temporaryRoot = await fs.mkdtemp(
-  path.join(os.tmpdir(), "desmoslock-production-verification-"),
+const temporaryRoot = await fs.realpath(
+  await fs.mkdtemp(
+    path.join(os.tmpdir(), "desmoslock-production-verification-"),
+  ),
 );
 let application = null;
 let backendFixture = null;
@@ -1081,9 +883,10 @@ await runWithIndependentCleanup(async () => {
       "utf8",
     ),
   );
-  const electronArchive = await selectExistingElectronArchive(
-    electronManifest.version,
-  );
+  const electronArchive = await selectExistingElectronArchive({
+    repositoryRoot,
+    electronVersion: electronManifest.version,
+  });
   backendFixture = await createBackendHealthFixture();
   const emptyBuildConfig = path.join(temporaryRoot, "empty-build-global-npmrc");
   await fs.writeFile(emptyBuildConfig, "", { mode: 0o600 });
@@ -1125,11 +928,7 @@ await runWithIndependentCleanup(async () => {
       },
     },
   );
-  assert.deepEqual(
-    await listFiles(distributionRoot),
-    expectedDistributionFiles,
-    "Production build must contain only the reviewed runtime assets and no source maps",
-  );
+  const distribution = await inspectDesktopDistribution({ distributionRoot });
   const productionRuntimeText = (
     await Promise.all(
       expectedDistributionFiles.map((relativePath) =>
@@ -1139,14 +938,7 @@ await runWithIndependentCleanup(async () => {
       ),
     )
   ).join("\n");
-  const nativeArtifacts =
-    process.platform === "darwin"
-      ? await Promise.all(
-          nativeDistributionFiles.map((relativePath) =>
-            inspectNativeArtifact(distributionRoot, relativePath),
-          ),
-        )
-      : [];
+  const nativeArtifacts = distribution.nativeArtifacts;
   for (const prohibited of [
     /authorized local fixture/i,
     /controlled calculator/i,
@@ -1175,84 +967,20 @@ await runWithIndependentCleanup(async () => {
     "Production shell must not expose a manual lock-intent control",
   );
 
-  const stagingRoot = path.join(temporaryRoot, "staging");
-  await fs.mkdir(stagingRoot, { recursive: true });
-  await fs.cp(distributionRoot, path.join(stagingRoot, "dist"), {
-    recursive: true,
-  });
-  await fs.writeFile(
-    path.join(stagingRoot, "package.json"),
-    `${JSON.stringify(
-      {
-        main: "dist/main.js",
-        name: "desmoslock-internal",
-        private: true,
-        productName: "DesmosLock Internal",
-        type: "module",
-        version: "2.0.0",
-      },
-      null,
-      2,
-    )}\n`,
-  );
-
-  const packageDirectories = await packager({
-    arch: process.arch,
-    asar:
-      process.platform === "darwin"
-        ? // ASAR matches absolute source names with matchBase. These two fixed
-          // basenames are constrained by the exact dist and unpacked inventories.
-          { unpack: "{aac-protection,durable-record}.node" }
-        : true,
-    dir: stagingRoot,
+  const packagedArtifact = await packageUnsignedDesktop({
+    repositoryRoot,
+    distributionRoot,
+    stageRoot: path.join(temporaryRoot, "staging"),
+    outputRoot: path.join(temporaryRoot, "package"),
+    temporaryRoot: path.join(temporaryRoot, "packager-tmp"),
     electronVersion: electronManifest.version,
-    electronZipDir: electronArchive.directory,
-    executableName: packagedExecutableName,
-    name: "DesmosLock Internal",
-    osxSign: false,
-    out: path.join(temporaryRoot, "package"),
-    tmpdir: path.join(temporaryRoot, "packager-tmp"),
-    overwrite: true,
-    platform: process.platform,
-    prune: false,
-    quiet: true,
+    electronArchive,
   });
-  assert.equal(packageDirectories.length, 1);
-  const packagedArtifact = await packagedExecutable(packageDirectories[0]);
-  const resourcesDirectory =
-    process.platform === "darwin"
-      ? path.join(packagedArtifact.appBundle, "Contents/Resources")
-      : path.join(packageDirectories[0], "resources");
-  if (nativeArtifacts.length > 0) {
-    assert.deepEqual(
-      await listFiles(path.join(resourcesDirectory, "app.asar.unpacked")),
-      nativeDistributionFiles.map((relativePath) => `dist/${relativePath}`),
-    );
-    for (const [index, relativePath] of nativeDistributionFiles.entries()) {
-      assert.equal(
-        statFile(
-          path.join(resourcesDirectory, "app.asar"),
-          `dist/${relativePath}`,
-        ).unpacked,
-        true,
-      );
-      assert.deepEqual(
-        await inspectNativeArtifact(
-          path.join(resourcesDirectory, "app.asar.unpacked/dist"),
-          relativePath,
-        ),
-        nativeArtifacts[index],
-      );
-    }
-  } else {
-    for (const relativePath of nativeDistributionFiles)
-      assert.throws(() =>
-        statFile(
-          path.join(resourcesDirectory, "app.asar"),
-          `dist/${relativePath}`,
-        ),
-      );
-  }
+  assert.deepEqual(
+    packagedArtifact.distribution,
+    distribution,
+    "Runtime distribution changed after production source checks",
+  );
   const executablePath = packagedArtifact.executable;
   if (process.platform === "darwin") {
     assert.equal(
@@ -1266,13 +994,6 @@ await runWithIndependentCleanup(async () => {
       "Packaged policy verification must exercise the executable inside the exact generated .app",
     );
   }
-  await hardenPackagedElectron(executablePath);
-  assert.deepEqual(await verifyPackagedElectronFuses(executablePath), {
-    EnableNodeCliInspectArguments: "DISABLE",
-    EnableNodeOptionsEnvironmentVariable: "DISABLE",
-    RunAsNode: "DISABLE",
-  });
-
   // This actual-main gate uses the production OS-encryption adapter. Authoring
   // or running the synthetic fixture does not satisfy that separate gate.
   const userDataDirectory = path.join(temporaryRoot, "actual-main-user-data");

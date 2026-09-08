@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 
 import {
   parseStudentJoinCode,
+  parseNativeEvidenceOriginBuild,
+  type NativeEvidenceOriginBuild,
+  type StudentEvidenceRequest,
   type StudentJoinAccepted,
   type StudentJoinRequest,
   type StudentSessionScope,
@@ -22,6 +25,12 @@ import {
   type StudentSessionRecord,
   type StudentSessionStore,
   type StudentSessionSuccessor,
+  type StoredNativeEvidencePendingBatch,
+  type StoredNativeEvidenceOrigin,
+  type StoredNativeEvidenceSigner,
+  emptyNativeEvidence,
+  retainNativeEvidenceSigner,
+  pruneNativeEvidence,
 } from "./student-session-store.js";
 
 export interface StudentAdmissionSnapshot {
@@ -47,6 +56,7 @@ export interface StudentProtectionAccess {
     readonly freshAdmission: FreshStudentAdmission | null;
     readonly observationSequence: number;
     readonly protection: Readonly<StoredNativeProtection> | null;
+    readonly delivery: "none" | "pending" | "acknowledged" | "blocked";
   };
   readFreshAdmission(
     expected: StudentAdmissionSnapshot,
@@ -76,6 +86,7 @@ export interface StudentSessionCoordinator extends StudentProtectionAccess {
   ): Promise<void>;
   retryPending(): Promise<void>;
   refresh(): Promise<void>;
+  flushEvidence(): Promise<void>;
   forfeit(snapshotRevision: number): Promise<void>;
   readView(): StudentSessionViewState;
   subscribe(listener: (view: StudentSessionViewState) => void): () => void;
@@ -93,6 +104,7 @@ function successor(record: StudentSessionRecord): StudentSessionSuccessor {
     lastReservedCounter: record.lastReservedCounter,
     terminal: record.terminal,
     nativeProtection: record.nativeProtection,
+    evidence: record.evidence,
   };
 }
 function sameRecord(
@@ -110,9 +122,16 @@ export function createStudentSessionCoordinator(options: {
   readonly monotonicNow?: () => number;
   readonly requestId?: () => string;
   readonly drainTimeoutMs?: number;
+  readonly originBuild?: NativeEvidenceOriginBuild;
 }): StudentSessionCoordinator {
   const now = options.monotonicNow ?? (() => performance.now());
   const requestId = options.requestId ?? randomUUID;
+  const parsedOriginBuild = parseNativeEvidenceOriginBuild(
+    options.originBuild ?? { kind: "unverified_build" },
+  );
+  if (parsedOriginBuild === null || parsedOriginBuild.kind === "legacy_unknown")
+    throw new Error("Student native evidence build origin is invalid");
+  const originBuild: NativeEvidenceOriginBuild = parsedOriginBuild;
   let record: StudentSessionRecord | null = null;
   let storeGeneration = 0;
   let initialized = false;
@@ -121,6 +140,10 @@ export function createStudentSessionCoordinator(options: {
   let stopping = false;
   let lifetime = 0;
   let active: Promise<void> | null = null;
+  let priorityWaiters = 0;
+  let lastEvidenceAt = Number.NEGATIVE_INFINITY;
+  let evidenceCapacityBlocked = false;
+  const blockedEvidenceSigners = new Set<string>();
   let abort: AbortController | null = null;
   let attemptedWrite: {
     readonly before: StudentSessionSuccessor | null;
@@ -350,6 +373,22 @@ export function createStudentSessionCoordinator(options: {
     return pending;
   }
 
+  async function runPriority(
+    work: (generation: number, signal: AbortSignal) => Promise<void>,
+    readOwner: ReadOwner | null = null,
+  ): Promise<void> {
+    priorityWaiters += 1;
+    try {
+      // Every explicit command gets its own turn and rechecks its captured state.
+      // A preceding waiter can become the owner as evidence settles, so waiting
+      // only for evidence would silently coalesce this command onto that waiter.
+      while (active !== null) await active;
+      await run(work, readOwner);
+    } finally {
+      priorityWaiters -= 1;
+    }
+  }
+
   async function write(
     next: StudentSessionSuccessor,
     generation: number,
@@ -560,6 +599,355 @@ export function createStudentSessionCoordinator(options: {
     ))
       ? counter
       : null;
+  }
+
+  function notifyDelivery(): void {
+    if (stopping) return;
+    // Delivery is private projection data. A report receipt cannot issue or
+    // invalidate admission, or change the revision captured by an admission action.
+    for (const listener of [...listeners]) {
+      try {
+        listener(view);
+      } catch {
+        /* Presentation does not own delivery. */
+      }
+    }
+  }
+
+  function evidenceSigners(): readonly StoredNativeEvidenceSigner[] {
+    if (record === null) return [];
+    return [
+      {
+        device: record.device,
+        lastReservedCounter: record.lastReservedCounter,
+      },
+      ...record.evidence.retiredSigners,
+    ];
+  }
+
+  function deliveryState(): "none" | "pending" | "acknowledged" | "blocked" {
+    const facts = record?.nativeProtection?.facts ?? [];
+    if (facts.length === 0) return "none";
+    if (record === null || evidenceCapacityBlocked) return "blocked";
+    const acknowledged = new Set(
+      record.evidence.acknowledgments.map((ack) => ack.eventId),
+    );
+    const outstanding = facts.filter((fact) => !acknowledged.has(fact.eventId));
+    if (outstanding.length === 0 && record.evidence.pendingBatches.length === 0)
+      return "acknowledged";
+    const signers = evidenceSigners();
+    for (const fact of outstanding) {
+      const origin = record.evidence.origins.find(
+        (entry) => entry.attemptId === fact.attemptId,
+      );
+      const signer = signers.find(
+        (entry) => entry.device.keyThumbprint === origin?.originalKeyThumbprint,
+      );
+      if (
+        origin == null ||
+        signer === undefined ||
+        signer.lastReservedCounter === Number.MAX_SAFE_INTEGER ||
+        blockedEvidenceSigners.has(signer.device.keyThumbprint)
+      )
+        return "blocked";
+    }
+    return "pending";
+  }
+
+  type EvidenceCandidate = {
+    readonly signer: StoredNativeEvidenceSigner;
+    readonly origin: StoredNativeEvidenceOrigin;
+    readonly pending: StoredNativeEvidencePendingBatch;
+    readonly facts: readonly ProtectionFact[];
+    readonly contentDigests: readonly string[];
+  };
+
+  function sameEvidencePending(
+    a: StoredNativeEvidencePendingBatch,
+    b: StoredNativeEvidencePendingBatch,
+  ): boolean {
+    return (
+      a.originalKeyThumbprint === b.originalKeyThumbprint &&
+      a.attemptId === b.attemptId &&
+      a.batchDigest === b.batchDigest &&
+      a.events.length === b.events.length &&
+      a.events.every(
+        (event, index) =>
+          event.eventId === b.events[index]?.eventId &&
+          event.contentDigest === b.events[index]?.contentDigest,
+      )
+    );
+  }
+
+  function evidenceCandidates(): readonly EvidenceCandidate[] {
+    if (record === null) return [];
+    const stored = record.evidence;
+    const allFacts = record.nativeProtection?.facts ?? [];
+    const acknowledged = new Set(
+      stored.acknowledgments.map((ack) => ack.eventId),
+    );
+    const candidates: EvidenceCandidate[] = [];
+    for (const signer of evidenceSigners()) {
+      const key = signer.device.keyThumbprint;
+      if (signer.lastReservedCounter === Number.MAX_SAFE_INTEGER) continue;
+      const pending = stored.pendingBatches.find(
+        (batch) => batch.originalKeyThumbprint === key,
+      );
+      const first =
+        pending === undefined
+          ? allFacts.find(
+              (fact) =>
+                !acknowledged.has(fact.eventId) &&
+                stored.origins.some(
+                  (origin) =>
+                    origin.attemptId === fact.attemptId &&
+                    origin.originalKeyThumbprint === key,
+                ),
+            )
+          : allFacts.find((fact) => fact.attemptId === pending.attemptId);
+      if (first === undefined) continue;
+      const origin = stored.origins.find(
+        (entry) =>
+          entry.attemptId === first.attemptId &&
+          entry.originalKeyThumbprint === key,
+      );
+      if (
+        origin === undefined ||
+        origin.scope.deviceSessionId !== signer.device.deviceSessionId
+      )
+        continue;
+      const facts = allFacts
+        .filter(
+          (fact) =>
+            fact.attemptId === origin.attemptId &&
+            (pending === undefined ||
+              pending.events.some((entry) => entry.eventId === fact.eventId)),
+        )
+        .sort((a, b) => a.sequence - b.sequence);
+      try {
+        const digested = options.crypto.digestEvidence(signer.device, {
+          scope: origin.scope,
+          originBuild: origin.originBuild,
+          facts,
+        });
+        const frozenPending: StoredNativeEvidencePendingBatch = {
+          originalKeyThumbprint: key,
+          attemptId: origin.attemptId,
+          batchDigest: digested.batchDigest,
+          events: facts.map((fact, index) => ({
+            eventId: fact.eventId,
+            contentDigest: digested.contentDigests[index]!,
+          })),
+        };
+        if (
+          pending !== undefined &&
+          !sameEvidencePending(pending, frozenPending)
+        ) {
+          blockedEvidenceSigners.add(key);
+          continue;
+        }
+        candidates.push({
+          signer,
+          origin,
+          pending: pending ?? frozenPending,
+          facts,
+          contentDigests: digested.contentDigests,
+        });
+      } catch {
+        // Missing legacy material or malformed retained content is not permission
+        // to relabel it with the current key, origin or a smaller prefix.
+        blockedEvidenceSigners.add(key);
+      }
+    }
+    return candidates.sort((a, b) =>
+      a.signer.device.keyThumbprint < b.signer.device.keyThumbprint ? -1 : 1,
+    );
+  }
+
+  async function pruneEvidence(generation: number): Promise<void> {
+    if (record === null || priorityWaiters !== 0) return;
+    const before = successor(record);
+    const pruned = pruneNativeEvidence(before);
+    if (!sameRecord(before, pruned) && (await write(pruned, generation))) {
+      if (record !== null && retainNativeEvidenceSigner(record) !== null)
+        evidenceCapacityBlocked = false;
+      notifyDelivery();
+    }
+  }
+
+  async function flushEvidence(): Promise<void> {
+    if (
+      stopping ||
+      active !== null ||
+      priorityWaiters !== 0 ||
+      !options.transport.isIdle() ||
+      !initialized ||
+      needsReload ||
+      recoveryLatched ||
+      record === null
+    )
+      return;
+    await run(async (generation, signal) => {
+      if (
+        record === null ||
+        needsReload ||
+        recoveryLatched ||
+        priorityWaiters !== 0
+      )
+        return;
+      await pruneEvidence(generation);
+      if (
+        !alive(generation) ||
+        record === null ||
+        priorityWaiters !== 0 ||
+        now() - lastEvidenceAt < 15_000
+      )
+        return;
+      // Due live work wins even when a caller tries this private method outside
+      // the main cycle. Terminal records remain eligible for historical reports.
+      if (
+        admissionAvailable &&
+        capabilityDeadline > now() &&
+        record.current !== null &&
+        record.pending === null &&
+        !record.terminal &&
+        now() - lastMaintenanceAt >= 15_000
+      )
+        return;
+      const candidates = evidenceCandidates();
+      const cursor = record.evidence.lastAttemptedSigner;
+      const candidate =
+        candidates.find(
+          (entry) =>
+            cursor !== null && entry.signer.device.keyThumbprint > cursor,
+        ) ?? candidates[0];
+      if (candidate === undefined) {
+        notifyDelivery();
+        return;
+      }
+      const { signer, origin, pending, facts, contentDigests } = candidate;
+      const key = signer.device.keyThumbprint;
+      const counter = signer.lastReservedCounter + 1;
+      const next = successor(record);
+      const currentSigner = record.device.keyThumbprint === key;
+      const reserved: StudentSessionSuccessor = {
+        ...next,
+        lastReservedCounter: currentSigner ? counter : next.lastReservedCounter,
+        evidence: {
+          ...next.evidence,
+          pendingBatches: [
+            ...next.evidence.pendingBatches.filter(
+              (entry) => entry.originalKeyThumbprint !== key,
+            ),
+            pending,
+          ],
+          retiredSigners: next.evidence.retiredSigners.map((entry) =>
+            entry.device.keyThumbprint === key
+              ? { ...entry, lastReservedCounter: counter }
+              : entry,
+          ),
+          lastAttemptedSigner: key,
+        },
+      };
+      if (!(await write(reserved, generation)) || !alive(generation)) return;
+      const request: StudentEvidenceRequest = {
+        version: 1,
+        scope: origin.scope,
+        originBuild: origin.originBuild,
+        facts,
+        batchDigest: pending.batchDigest,
+        publicKey: signer.device.publicKey,
+        deviceProof: options.crypto.signEvidence(signer.device, {
+          scope: origin.scope,
+          batchDigest: pending.batchDigest,
+          counter,
+        }),
+      };
+      lastEvidenceAt = now();
+      let result: Awaited<ReturnType<StudentSessionTransport["evidence"]>>;
+      try {
+        result = await options.transport.evidence(
+          request,
+          contentDigests,
+          signal,
+        );
+      } catch {
+        // Expected transport failure changes delivery only. A shared-store
+        // failure below still follows the existing uncertain-write recovery path.
+        if (alive(generation)) notifyDelivery();
+        return;
+      }
+      if (!alive(generation) || record === null) return;
+      if (result.status !== "accepted") {
+        if (result.status === "denied") blockedEvidenceSigners.add(key);
+        notifyDelivery();
+        return;
+      }
+      const livePending = record.evidence.pendingBatches.find(
+        (entry) => entry.originalKeyThumbprint === key,
+      );
+      const receivedIds = new Set(
+        result.acknowledged.map((ack) => ack.eventId),
+      );
+      const exact =
+        livePending !== undefined &&
+        sameEvidencePending(livePending, pending) &&
+        sameScope(result.scope, origin.scope) &&
+        result.batchDigest === pending.batchDigest &&
+        result.acceptedProofCounter === counter &&
+        result.acknowledged.length === pending.events.length &&
+        receivedIds.size === pending.events.length &&
+        pending.events.every((entry) =>
+          result.acknowledged.some(
+            (ack) =>
+              ack.eventId === entry.eventId &&
+              ack.contentDigest === entry.contentDigest,
+          ),
+        ) &&
+        result.acknowledged.every((ack) => {
+          const previous = record!.evidence.acknowledgments.find(
+            (entry) => entry.eventId === ack.eventId,
+          );
+          return (
+            previous === undefined ||
+            (previous.contentDigest === ack.contentDigest &&
+              previous.receivedAt === ack.receivedAt)
+          );
+        });
+      if (!exact) {
+        notifyDelivery();
+        return;
+      }
+      const existingIds = new Set(
+        record.evidence.acknowledgments.map((ack) => ack.eventId),
+      );
+      if (
+        !(await write(
+          {
+            ...successor(record),
+            evidence: {
+              ...record.evidence,
+              acknowledgments: [
+                ...record.evidence.acknowledgments,
+                ...result.acknowledged.filter(
+                  (ack) => !existingIds.has(ack.eventId),
+                ),
+              ],
+              pendingBatches: record.evidence.pendingBatches.filter(
+                (entry) => entry.originalKeyThumbprint !== key,
+              ),
+            },
+          },
+          generation,
+        ))
+      )
+        return;
+      blockedEvidenceSigners.delete(key);
+      notifyDelivery();
+      // Pruning requires ACKs already durable, and never rewrites the retained
+      // latest attempt. Higher-priority native writers may defer this next step.
+      await pruneEvidence(generation);
+    });
   }
 
   async function attemptRead(
@@ -826,7 +1214,7 @@ export function createStudentSessionCoordinator(options: {
     else await attemptMaintenance(generation, signal, true);
   }
 
-  async function readFreshAdmission(
+  async function readFreshAdmissionOwned(
     expected: StudentAdmissionSnapshot,
     afterObservationSequence?: number,
   ): Promise<FreshAdmissionResult> {
@@ -874,6 +1262,18 @@ export function createStudentSessionCoordinator(options: {
       isCurrentAdmission(owner.receipt)
       ? { status: "fresh", authority: owner.receipt }
       : { status: "unavailable" };
+  }
+
+  async function readFreshAdmission(
+    expected: StudentAdmissionSnapshot,
+    afterObservationSequence?: number,
+  ): Promise<FreshAdmissionResult> {
+    priorityWaiters += 1;
+    try {
+      return await readFreshAdmissionOwned(expected, afterObservationSequence);
+    } finally {
+      priorityWaiters -= 1;
+    }
   }
 
   function protectionSuccessor(
@@ -1116,7 +1516,7 @@ export function createStudentSessionCoordinator(options: {
     };
   }
 
-  async function commitProtectionTransition(
+  async function commitProtectionTransitionOwned(
     input: ProtectionTransition,
   ): ReturnType<StudentProtectionAccess["commitProtectionTransition"]> {
     const command = parseProtectionTransition(input);
@@ -1142,12 +1542,31 @@ export function createStudentSessionCoordinator(options: {
       // process can later prove disposal of the attempt it actually authored.
       if (command.kind === "engaging")
         ownedProtectionAttempts.add(command.attemptId);
+      let nextRecord: StudentSessionSuccessor = {
+        ...successor(record),
+        nativeProtection: next,
+      };
+      if (command.kind === "engaging" && next !== record.nativeProtection) {
+        nextRecord = {
+          ...nextRecord,
+          evidence: {
+            ...nextRecord.evidence,
+            origins: [
+              ...nextRecord.evidence.origins,
+              {
+                attemptId: command.attemptId,
+                scope: command.authority.scope,
+                originalKeyThumbprint: record.device.keyThumbprint,
+                originBuild,
+              },
+            ],
+          },
+        };
+        nextRecord = pruneNativeEvidence(nextRecord);
+      }
       if (
         next !== record.nativeProtection &&
-        !(await write(
-          { ...successor(record), nativeProtection: next },
-          generation,
-        ))
+        !(await write(nextRecord, generation))
       )
         return;
       if (
@@ -1161,13 +1580,24 @@ export function createStudentSessionCoordinator(options: {
     return result;
   }
 
+  async function commitProtectionTransition(
+    input: ProtectionTransition,
+  ): ReturnType<StudentProtectionAccess["commitProtectionTransition"]> {
+    priorityWaiters += 1;
+    try {
+      return await commitProtectionTransitionOwned(input);
+    } finally {
+      priorityWaiters -= 1;
+    }
+  }
+
   return {
     initialize: () =>
-      run(async (generation) => {
+      runPriority(async (generation) => {
         if (!initialized) await load(generation);
       }),
     joinInitial: (code) =>
-      run(async (generation, signal) => {
+      runPriority(async (generation, signal) => {
         const parsedCode = parseStudentJoinCode(code);
         if (
           !initialized ||
@@ -1177,7 +1607,7 @@ export function createStudentSessionCoordinator(options: {
         )
           return;
         const next: StudentSessionSuccessor = {
-          version: 2,
+          version: 3,
           apiOrigin: options.apiOrigin,
           device: options.crypto.createEnrollment(),
           current: null,
@@ -1191,13 +1621,14 @@ export function createStudentSessionCoordinator(options: {
           lastReservedCounter: 0,
           terminal: false,
           nativeProtection: null,
+          evidence: emptyNativeEvidence(),
         };
         publish("joining");
         if (await write(next, generation))
           await attemptJoin(generation, signal);
       }),
     beginTargetedReadmission: (code, snapshotRevision) =>
-      run(async (generation, signal) => {
+      runPriority(async (generation, signal) => {
         const parsedCode = parseStudentJoinCode(code);
         if (
           !initialized ||
@@ -1227,6 +1658,15 @@ export function createStudentSessionCoordinator(options: {
         )
           return;
         const retainedProtection = record?.nativeProtection ?? null;
+        const retainedEvidence =
+          record === null
+            ? emptyNativeEvidence()
+            : retainNativeEvidenceSigner(record);
+        if (retainedEvidence === null) {
+          evidenceCapacityBlocked = true;
+          notifyDelivery();
+          return;
+        }
         // Deliberate recovery is the only path that may replace local identity;
         // the targeted server material still selects the existing StudentSession.
         try {
@@ -1242,7 +1682,7 @@ export function createStudentSessionCoordinator(options: {
         attemptedWrite = null;
         capabilityDeadline = 0;
         const next: StudentSessionSuccessor = {
-          version: 2,
+          version: 3,
           apiOrigin: options.apiOrigin,
           device: options.crypto.createEnrollment(),
           current: null,
@@ -1256,14 +1696,15 @@ export function createStudentSessionCoordinator(options: {
           lastReservedCounter: 0,
           terminal: false,
           nativeProtection: retainedProtection,
+          evidence: retainedEvidence,
         };
         publish("joining");
         if (await write(next, generation))
           await attemptJoin(generation, signal);
       }),
-    retryPending: () => run(retry, { sequence: null, receipt: null }),
+    retryPending: () => runPriority(retry, { sequence: null, receipt: null }),
     refresh: () =>
-      run(
+      runPriority(
         async (generation, signal) => {
           if (recoveryLatched) return;
           if ((!initialized || needsReload) && !(await load(generation)))
@@ -1274,7 +1715,7 @@ export function createStudentSessionCoordinator(options: {
         { sequence: null, receipt: null },
       ),
     forfeit: (snapshotRevision) =>
-      run(async (generation, signal) => {
+      runPriority(async (generation, signal) => {
         if (
           view.revision !== snapshotRevision ||
           view.phase !== "active" ||
@@ -1292,6 +1733,7 @@ export function createStudentSessionCoordinator(options: {
           await attemptMaintenance(generation, signal, true);
       }),
     readView: () => view,
+    flushEvidence,
     readProtectionContext() {
       expireObservation();
       const admission = captureAdmission();
@@ -1304,6 +1746,7 @@ export function createStudentSessionCoordinator(options: {
             : null,
         observationSequence,
         protection: record?.nativeProtection ?? null,
+        delivery: deliveryState(),
       });
     },
     readFreshAdmission,

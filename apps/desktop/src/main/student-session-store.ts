@@ -1,13 +1,21 @@
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 
 import {
   parseStudentCounter,
+  parseStudentDigest,
+  parseStudentTimestamp,
   parseStudentJoinCode,
   parseStudentSecret,
   parseStudentSessionScope,
   parseStudentUuid,
   type StudentAdmissionMode,
   type StudentSessionScope,
+  encodeNativeProtectionFactDigestInput,
+  encodeStudentEvidenceBatchDigestInput,
+  parseNativeEvidenceOriginBuild,
+  type NativeEvidenceOriginBuild,
+  type NativeEvidenceAcknowledgment,
 } from "@desmoslock/contracts";
 
 import type {
@@ -158,7 +166,7 @@ export type PendingStudentIntent =
     };
 
 export interface StudentSessionRecord {
-  readonly version: 2;
+  readonly version: 3;
   readonly generation: number;
   readonly apiOrigin: string;
   readonly device: StudentSessionDevice;
@@ -167,6 +175,45 @@ export interface StudentSessionRecord {
   readonly lastReservedCounter: number;
   readonly terminal: boolean;
   readonly nativeProtection: StoredNativeProtection | null;
+  readonly evidence: StoredNativeEvidence;
+}
+
+export interface StoredNativeEvidenceOrigin {
+  readonly attemptId: string;
+  readonly scope: StudentSessionScope;
+  readonly originalKeyThumbprint: string | null;
+  readonly originBuild: NativeEvidenceOriginBuild;
+}
+export type StoredNativeEvidenceAcknowledgment = NativeEvidenceAcknowledgment;
+export interface StoredNativeEvidencePendingBatch {
+  readonly originalKeyThumbprint: string;
+  readonly attemptId: string;
+  readonly batchDigest: string;
+  readonly events: readonly {
+    readonly eventId: string;
+    readonly contentDigest: string;
+  }[];
+}
+export interface StoredNativeEvidenceSigner {
+  readonly device: StudentSessionDevice;
+  readonly lastReservedCounter: number;
+}
+export interface StoredNativeEvidence {
+  readonly origins: readonly StoredNativeEvidenceOrigin[];
+  readonly acknowledgments: readonly StoredNativeEvidenceAcknowledgment[];
+  readonly pendingBatches: readonly StoredNativeEvidencePendingBatch[];
+  readonly retiredSigners: readonly StoredNativeEvidenceSigner[];
+  readonly lastAttemptedSigner: string | null;
+}
+
+export function emptyNativeEvidence(): StoredNativeEvidence {
+  return Object.freeze({
+    origins: Object.freeze([]),
+    acknowledgments: Object.freeze([]),
+    pendingBatches: Object.freeze([]),
+    retiredSigners: Object.freeze([]),
+    lastAttemptedSigner: null,
+  });
 }
 export type StudentSessionSuccessor = Omit<StudentSessionRecord, "generation">;
 export type StudentSessionLoad =
@@ -239,6 +286,162 @@ function natural(value: unknown): value is number {
     value >= 0 &&
     !Object.is(value, -0)
   );
+}
+
+function array(value: unknown, maximum: number): readonly unknown[] | null {
+  if (
+    !Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Array.prototype ||
+    value.length > maximum
+  )
+    return null;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Reflect.ownKeys(descriptors).length !== value.length + 1) return null;
+  const entries: unknown[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = descriptors[String(index)];
+    if (
+      descriptor === undefined ||
+      !descriptor.enumerable ||
+      !("value" in descriptor)
+    )
+      return null;
+    entries.push(descriptor.value);
+  }
+  return entries;
+}
+
+function sameData(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function signerRequired(record: StudentSessionSuccessor, key: string): boolean {
+  const origins = record.evidence.origins.filter(
+    (origin) => origin.originalKeyThumbprint === key,
+  );
+  const latest = record.nativeProtection?.latestAttempt?.attemptId;
+  if (
+    origins.some((origin) => origin.attemptId === latest) ||
+    record.evidence.pendingBatches.some(
+      (batch) => batch.originalKeyThumbprint === key,
+    )
+  )
+    return true;
+  const acknowledged = new Set(
+    record.evidence.acknowledgments.map((ack) => ack.eventId),
+  );
+  return origins.some((origin) =>
+    record.nativeProtection?.facts.some(
+      (fact) =>
+        fact.attemptId === origin.attemptId && !acknowledged.has(fact.eventId),
+    ),
+  );
+}
+
+/** Call inside the existing writer before replacing the current device. */
+export function retainNativeEvidenceSigner(
+  record: StudentSessionRecord,
+): StoredNativeEvidence | null {
+  // Even acknowledged nonlatest origins still need their signer association
+  // until a separate durable whole-attempt prune removes those references.
+  if (
+    !record.evidence.origins.some(
+      (origin) => origin.originalKeyThumbprint === record.device.keyThumbprint,
+    )
+  )
+    return record.evidence;
+  if (
+    record.evidence.retiredSigners.some(
+      (signer) => signer.device.keyThumbprint === record.device.keyThumbprint,
+    )
+  )
+    return null;
+  if (record.evidence.retiredSigners.length >= 4) return null;
+  return Object.freeze({
+    ...record.evidence,
+    retiredSigners: Object.freeze([
+      ...record.evidence.retiredSigners,
+      Object.freeze({
+        device: record.device,
+        lastReservedCounter: record.lastReservedCounter,
+      }),
+    ]),
+  });
+}
+
+/** Whole-attempt pruning only; the caller owns and has settled all transport. */
+export function pruneNativeEvidence(
+  record: StudentSessionSuccessor,
+): StudentSessionSuccessor {
+  const protection = record.nativeProtection;
+  const acknowledged = new Set(
+    record.evidence.acknowledgments.map((ack) => ack.eventId),
+  );
+  const removable = new Set(
+    record.evidence.origins
+      .filter((origin) => {
+        if (
+          origin.attemptId === protection?.latestAttempt?.attemptId ||
+          record.evidence.pendingBatches.some(
+            (batch) => batch.attemptId === origin.attemptId,
+          )
+        )
+          return false;
+        const facts =
+          protection?.facts.filter(
+            (fact) => fact.attemptId === origin.attemptId,
+          ) ?? [];
+        return (
+          facts.length > 0 &&
+          facts.some((fact) => fact.slot === "cleanup") &&
+          facts.every((fact) => acknowledged.has(fact.eventId))
+        );
+      })
+      .map((origin) => origin.attemptId),
+  );
+  const facts =
+    protection?.facts.filter((fact) => !removable.has(fact.attemptId)) ?? [];
+  const kept = new Set(facts.map((fact) => fact.eventId));
+  const pruned: StudentSessionSuccessor = {
+    ...record,
+    nativeProtection: protection === null ? null : { ...protection, facts },
+    evidence: {
+      ...record.evidence,
+      origins: record.evidence.origins.filter(
+        (origin) => !removable.has(origin.attemptId),
+      ),
+      acknowledgments: record.evidence.acknowledgments.filter((ack) =>
+        kept.has(ack.eventId),
+      ),
+    },
+  };
+  return {
+    ...pruned,
+    evidence: {
+      ...pruned.evidence,
+      retiredSigners: pruned.evidence.retiredSigners.filter((signer) =>
+        signerRequired(pruned, signer.device.keyThumbprint),
+      ),
+    },
+  };
+}
+
+function factDigest(
+  apiOrigin: string,
+  origin: StoredNativeEvidenceOrigin,
+  fact: ProtectionFact,
+): string | null {
+  if (origin.originalKeyThumbprint === null) return null;
+  const bytes = encodeNativeProtectionFactDigestInput({
+    apiOrigin,
+    scope: origin.scope,
+    originBuild: origin.originBuild,
+    originalKeyThumbprint: origin.originalKeyThumbprint,
+    fact,
+  });
+  return bytes === null
+    ? null
+    : createHash("sha256").update(bytes).digest("hex");
 }
 
 function parseProtectionId(value: unknown): string | null {
@@ -708,10 +911,238 @@ export function createStudentSessionStore(options: {
   let generation = 0;
   let requiresRecovery = false;
   let targetedOnly = false;
+  let lastRecord: StudentSessionRecord | null = null;
+
+  function parseEvidence(
+    value: unknown,
+    device: StudentSessionDevice,
+    protection: StoredNativeProtection | null,
+    compactOrigins = false,
+  ): StoredNativeEvidence | null {
+    const row = object(value, [
+      "origins",
+      "acknowledgments",
+      "pendingBatches",
+      "retiredSigners",
+      "lastAttemptedSigner",
+    ]);
+    if (row === null) return null;
+    const originsRaw = array(row.origins, 32);
+    const acknowledgmentsRaw = array(row.acknowledgments, 32);
+    const pendingRaw = array(row.pendingBatches, 5);
+    const retiredRaw = array(row.retiredSigners, 4);
+    if (
+      originsRaw === null ||
+      acknowledgmentsRaw === null ||
+      pendingRaw === null ||
+      retiredRaw === null ||
+      (row.lastAttemptedSigner !== null &&
+        parseStudentSecret(row.lastAttemptedSigner) === null)
+    )
+      return null;
+    const signers = new Map([[device.keyThumbprint, device]]);
+    const deviceIds = new Set([device.deviceSessionId]);
+    const retiredSigners: StoredNativeEvidenceSigner[] = [];
+    for (const raw of retiredRaw) {
+      const item = object(raw, ["device", "lastReservedCounter"]);
+      if (item === null || !natural(item.lastReservedCounter)) return null;
+      const retired = options.validateDevice(item.device);
+      if (
+        retired === null ||
+        signers.has(retired.keyThumbprint) ||
+        deviceIds.has(retired.deviceSessionId)
+      )
+        return null;
+      signers.set(retired.keyThumbprint, retired);
+      deviceIds.add(retired.deviceSessionId);
+      retiredSigners.push(
+        Object.freeze({
+          device: Object.freeze(retired),
+          lastReservedCounter: item.lastReservedCounter,
+        }),
+      );
+    }
+    const facts = protection?.facts ?? [];
+    const attempts = new Map<string, readonly ProtectionFact[]>();
+    for (const fact of facts)
+      if (!attempts.has(fact.attemptId))
+        attempts.set(
+          fact.attemptId,
+          facts.filter((item) => item.attemptId === fact.attemptId),
+        );
+    const origins = new Map<string, StoredNativeEvidenceOrigin>();
+    const signerScopes = new Map<string, StudentSessionScope>();
+    for (const raw of originsRaw) {
+      const item = object(
+        raw,
+        compactOrigins
+          ? ["attemptId", "originalKeyThumbprint", "originBuild"]
+          : ["attemptId", "scope", "originalKeyThumbprint", "originBuild"],
+      );
+      if (item === null) return null;
+      const attemptId = parseProtectionId(item.attemptId);
+      const scope = compactOrigins
+        ? attemptId === null
+          ? null
+          : (attempts.get(attemptId)?.[0]?.scope ?? null)
+        : parseStudentSessionScope(item.scope);
+      const originBuild = parseNativeEvidenceOriginBuild(item.originBuild);
+      const key =
+        item.originalKeyThumbprint === null
+          ? null
+          : parseStudentSecret(item.originalKeyThumbprint);
+      if (
+        attemptId === null ||
+        scope === null ||
+        originBuild === null ||
+        origins.has(attemptId) ||
+        !sameScope(scope, attempts.get(attemptId)?.[0]?.scope ?? scope) ||
+        !attempts.has(attemptId) ||
+        (item.originalKeyThumbprint !== null && key === null) ||
+        (key === null
+          ? originBuild.kind !== "legacy_unknown"
+          : signers.get(key)?.deviceSessionId !== scope.deviceSessionId)
+      )
+        return null;
+      if (key !== null) {
+        const associated = signerScopes.get(key);
+        if (associated !== undefined && !sameScope(associated, scope))
+          return null;
+        signerScopes.set(key, scope);
+      }
+      origins.set(
+        attemptId,
+        Object.freeze({
+          attemptId,
+          scope: Object.freeze(scope),
+          originalKeyThumbprint: key,
+          originBuild,
+        }),
+      );
+    }
+    if (
+      origins.size !== attempts.size ||
+      retiredSigners.some(
+        (signer) =>
+          ![...origins.values()].some(
+            (origin) =>
+              origin.originalKeyThumbprint === signer.device.keyThumbprint,
+          ),
+      )
+    )
+      return null;
+    const digests = new Map<string, string | null>();
+    for (const fact of facts) {
+      const origin = origins.get(fact.attemptId)!;
+      const digest = factDigest(options.apiOrigin, origin, fact);
+      if (origin.originalKeyThumbprint !== null && digest === null) return null;
+      digests.set(fact.eventId, digest);
+    }
+    const acknowledgments: StoredNativeEvidenceAcknowledgment[] = [];
+    const acked = new Set<string>();
+    for (const raw of acknowledgmentsRaw) {
+      const item = object(raw, ["eventId", "contentDigest", "receivedAt"]);
+      if (item === null) return null;
+      const eventId = parseProtectionId(item.eventId);
+      const contentDigest = parseStudentDigest(item.contentDigest);
+      const receivedAt = parseStudentTimestamp(item.receivedAt);
+      if (
+        eventId === null ||
+        contentDigest === null ||
+        receivedAt === null ||
+        acked.has(eventId) ||
+        digests.get(eventId) !== contentDigest
+      )
+        return null;
+      acked.add(eventId);
+      acknowledgments.push(
+        Object.freeze({ eventId, contentDigest, receivedAt }),
+      );
+    }
+    const pendingBatches: StoredNativeEvidencePendingBatch[] = [];
+    const pendingKeys = new Set<string>();
+    for (const raw of pendingRaw) {
+      const item = object(raw, [
+        "originalKeyThumbprint",
+        "attemptId",
+        "batchDigest",
+        "events",
+      ]);
+      if (item === null) return null;
+      const key = parseStudentSecret(item.originalKeyThumbprint);
+      const attemptId = parseProtectionId(item.attemptId);
+      const batchDigest = parseStudentDigest(item.batchDigest);
+      const entries = array(item.events, 8);
+      const origin = attemptId === null ? undefined : origins.get(attemptId);
+      if (
+        key === null ||
+        attemptId === null ||
+        batchDigest === null ||
+        origin === undefined ||
+        origin.originalKeyThumbprint !== key ||
+        pendingKeys.has(key) ||
+        entries === null ||
+        entries.length === 0
+      )
+        return null;
+      const prefix = attempts.get(attemptId)!.slice(0, entries.length);
+      if (prefix.length !== entries.length) return null;
+      const events: {
+        readonly eventId: string;
+        readonly contentDigest: string;
+      }[] = [];
+      for (const [index, rawEvent] of entries.entries()) {
+        const event = object(rawEvent, ["eventId", "contentDigest"]);
+        const fact = prefix[index]!;
+        if (
+          event === null ||
+          event.eventId !== fact.eventId ||
+          event.contentDigest !== digests.get(fact.eventId) ||
+          typeof event.contentDigest !== "string"
+        )
+          return null;
+        events.push(
+          Object.freeze({
+            eventId: fact.eventId,
+            contentDigest: event.contentDigest,
+          }),
+        );
+      }
+      const encoded = encodeStudentEvidenceBatchDigestInput({
+        apiOrigin: options.apiOrigin,
+        originalKeyThumbprint: key,
+        scope: origin.scope,
+        originBuild: origin.originBuild,
+        facts: prefix,
+        contentDigests: events.map((event) => event.contentDigest),
+      });
+      if (
+        encoded === null ||
+        createHash("sha256").update(encoded).digest("hex") !== batchDigest
+      )
+        return null;
+      pendingKeys.add(key);
+      pendingBatches.push(
+        Object.freeze({
+          originalKeyThumbprint: key,
+          attemptId,
+          batchDigest,
+          events: Object.freeze(events),
+        }),
+      );
+    }
+    return Object.freeze({
+      origins: Object.freeze([...origins.values()]),
+      acknowledgments: Object.freeze(acknowledgments),
+      pendingBatches: Object.freeze(pendingBatches),
+      retiredSigners: Object.freeze(retiredSigners),
+      lastAttemptedSigner: row.lastAttemptedSigner as string | null,
+    });
+  }
 
   function parseRecord(
     value: unknown,
-    allowVersion1 = false,
+    allowLegacy = false,
   ): StudentSessionRecord | null {
     const keys = [
       "version",
@@ -723,14 +1154,23 @@ export function createStudentSessionStore(options: {
       "lastReservedCounter",
       "terminal",
     ];
-    const legacy = allowVersion1 ? object(value, keys) : null;
+    const legacy = allowLegacy ? object(value, keys) : null;
+    const v2 = allowLegacy
+      ? object(value, [...keys, "nativeProtection"])
+      : null;
     const row =
       legacy?.version === 1
         ? legacy
-        : object(value, [...keys, "nativeProtection"]);
+        : v2?.version === 2
+          ? v2
+          : object(value, [...keys, "nativeProtection", "evidence"]);
     if (
       row === null ||
-      (row === legacy ? row.version !== 1 : row.version !== 2) ||
+      (row === legacy
+        ? row.version !== 1
+        : row === v2
+          ? row.version !== 2
+          : row.version !== 3) ||
       parseStudentCounter(row.generation) === null ||
       row.apiOrigin !== options.apiOrigin ||
       !natural(row.lastReservedCounter) ||
@@ -882,17 +1322,215 @@ export function createStudentSessionStore(options: {
         : current === null && pending?.kind !== "join"
     )
       return null;
-    return {
-      version: 2,
+    const normalizedEvidence: StoredNativeEvidence = {
+      ...emptyNativeEvidence(),
+      origins: [
+        ...new Set(nativeProtection?.facts.map((fact) => fact.attemptId) ?? []),
+      ].map((attemptId) => {
+        const scope = nativeProtection!.facts.find(
+          (fact) => fact.attemptId === attemptId,
+        )!.scope;
+        return {
+          attemptId,
+          scope,
+          originalKeyThumbprint:
+            scope.deviceSessionId === device.deviceSessionId
+              ? device.keyThumbprint
+              : null,
+          originBuild: { kind: "legacy_unknown" },
+        };
+      }),
+    };
+    const evidence = parseEvidence(
+      row === legacy || row === v2 ? normalizedEvidence : row.evidence,
+      device,
+      nativeProtection,
+      allowLegacy && row !== legacy && row !== v2,
+    );
+    if (evidence === null) return null;
+    return Object.freeze({
+      version: 3,
       generation: row.generation as number,
       apiOrigin: options.apiOrigin,
-      device,
-      current,
-      pending,
+      device: Object.freeze(device),
+      current:
+        current === null
+          ? null
+          : Object.freeze({ ...current, scope: Object.freeze(current.scope) }),
+      pending: pending === null ? null : Object.freeze(pending),
       lastReservedCounter: row.lastReservedCounter,
       terminal: row.terminal,
       nativeProtection,
-    };
+      evidence,
+    });
+  }
+
+  function validEvidenceSuccessor(next: StudentSessionRecord): boolean {
+    const before = lastRecord;
+    const priorFacts = before?.nativeProtection?.facts ?? [];
+    const nextFacts = next.nativeProtection?.facts ?? [];
+    const oldOrigins = new Map(
+      before?.evidence.origins.map((origin) => [origin.attemptId, origin]) ??
+        [],
+    );
+    const nextOrigins = new Map(
+      next.evidence.origins.map((origin) => [origin.attemptId, origin]),
+    );
+    const nextAcks = new Map(
+      next.evidence.acknowledgments.map((ack) => [ack.eventId, ack]),
+    );
+    const oldAcks = new Map(
+      before?.evidence.acknowledgments.map((ack) => [ack.eventId, ack]) ?? [],
+    );
+    for (const origin of next.evidence.origins) {
+      const prior = oldOrigins.get(origin.attemptId);
+      if (
+        prior !== undefined
+          ? !sameData(prior, origin)
+          : origin.originBuild.kind === "legacy_unknown" ||
+            origin.originalKeyThumbprint !== next.device.keyThumbprint ||
+            origin.scope.deviceSessionId !== next.device.deviceSessionId
+      )
+        return false;
+    }
+    if (before === null)
+      return (
+        next.evidence.acknowledgments.length === 0 &&
+        next.evidence.retiredSigners.length === 0
+      );
+    const removable = new Set(
+      before.evidence.origins
+        .filter((origin) => {
+          if (
+            origin.attemptId ===
+              next.nativeProtection?.latestAttempt?.attemptId ||
+            before.evidence.pendingBatches.some(
+              (batch) => batch.attemptId === origin.attemptId,
+            )
+          )
+            return false;
+          const facts = priorFacts.filter(
+            (fact) => fact.attemptId === origin.attemptId,
+          );
+          return (
+            facts.some((fact) => fact.slot === "cleanup") &&
+            facts.every((fact) => oldAcks.has(fact.eventId))
+          );
+        })
+        .map((origin) => origin.attemptId),
+    );
+    for (const fact of priorFacts) {
+      const replacement = nextFacts.find(
+        (item) => item.eventId === fact.eventId,
+      );
+      if (replacement !== undefined) {
+        if (!sameData(fact, replacement) || !nextOrigins.has(fact.attemptId))
+          return false;
+      } else if (
+        !removable.has(fact.attemptId) ||
+        nextFacts.some((item) => item.attemptId === fact.attemptId) ||
+        nextOrigins.has(fact.attemptId)
+      )
+        return false;
+    }
+    if (
+      before.nativeProtection !== null &&
+      (next.nativeProtection === null ||
+        next.nativeProtection.nextFactSequence <
+          before.nativeProtection.nextFactSequence ||
+        next.nativeProtection.revision < before.nativeProtection.revision)
+    )
+      return false;
+    for (const fact of nextFacts)
+      if (
+        !priorFacts.some((prior) => prior.eventId === fact.eventId) &&
+        fact.sequence < (before.nativeProtection?.nextFactSequence ?? 1)
+      )
+        return false;
+    for (const ack of before.evidence.acknowledgments) {
+      const replacement = nextAcks.get(ack.eventId);
+      if (
+        replacement !== undefined
+          ? !sameData(ack, replacement)
+          : nextFacts.some((fact) => fact.eventId === ack.eventId)
+      )
+        return false;
+    }
+    for (const ack of next.evidence.acknowledgments)
+      if (
+        !oldAcks.has(ack.eventId) &&
+        !before.evidence.pendingBatches.some((batch) =>
+          batch.events.some(
+            (event) =>
+              event.eventId === ack.eventId &&
+              event.contentDigest === ack.contentDigest,
+          ),
+        )
+      )
+        return false;
+    for (const batch of before.evidence.pendingBatches) {
+      const replacement = next.evidence.pendingBatches.find(
+        (item) => item.originalKeyThumbprint === batch.originalKeyThumbprint,
+      );
+      if (
+        replacement !== undefined
+          ? !sameData(batch, replacement)
+          : !batch.events.every(
+              (event) =>
+                nextAcks.get(event.eventId)?.contentDigest ===
+                event.contentDigest,
+            )
+      )
+        return false;
+      if (
+        batch.events.some(
+          (event) => !oldAcks.has(event.eventId) && nextAcks.has(event.eventId),
+        ) &&
+        (replacement !== undefined ||
+          !batch.events.every((event) => nextAcks.has(event.eventId)))
+      )
+        return false;
+    }
+    const nextSigners = new Map(
+      next.evidence.retiredSigners.map((signer) => [
+        signer.device.keyThumbprint,
+        signer,
+      ]),
+    );
+    const sameDevice = sameData(before.device, next.device);
+    if (sameDevice) {
+      if (next.lastReservedCounter < before.lastReservedCounter) return false;
+    } else {
+      if (!targetedOnly) return false;
+      const retained = nextSigners.get(before.device.keyThumbprint);
+      if (
+        (retained !== undefined &&
+          (!sameData(retained.device, before.device) ||
+            retained.lastReservedCounter !== before.lastReservedCounter)) ||
+        (signerRequired(before, before.device.keyThumbprint) &&
+          retained === undefined)
+      )
+        return false;
+    }
+    for (const signer of before.evidence.retiredSigners) {
+      const replacement = nextSigners.get(signer.device.keyThumbprint);
+      if (
+        replacement === undefined
+          ? signerRequired(next, signer.device.keyThumbprint)
+          : !sameData(replacement.device, signer.device) ||
+            replacement.lastReservedCounter < signer.lastReservedCounter
+      )
+        return false;
+    }
+    for (const signer of next.evidence.retiredSigners)
+      if (
+        !before.evidence.retiredSigners.some(
+          (old) => old.device.keyThumbprint === signer.device.keyThumbprint,
+        ) &&
+        (sameDevice || !sameData(signer.device, before.device))
+      )
+        return false;
+    return true;
   }
 
   async function exclusive<T>(run: () => Promise<T>): Promise<T> {
@@ -920,6 +1558,7 @@ export function createStudentSessionStore(options: {
       try {
         return await exclusive(async (): Promise<StudentSessionLoad> => {
           loaded = false;
+          lastRecord = null;
           const native = await lockedHandle();
           if (!options.codec.isEncryptionAvailable())
             return { kind: "unavailable" };
@@ -951,6 +1590,7 @@ export function createStudentSessionStore(options: {
               throw failure();
             const record = parseRecord(JSON.parse(plaintext), true);
             if (record === null) throw failure();
+            lastRecord = record;
             generation = record.generation;
             requiresRecovery = false;
             loaded = true;
@@ -982,7 +1622,7 @@ export function createStudentSessionStore(options: {
           ...successor,
           generation: generation + 1,
         });
-        if (record === null) throw failure();
+        if (record === null || !validEvidenceSuccessor(record)) throw failure();
         if (
           targetedOnly &&
           (record.current !== null ||
@@ -990,7 +1630,19 @@ export function createStudentSessionStore(options: {
             record.pending.admissionMode !== "readmission")
         )
           throw failure();
-        const plaintext = JSON.stringify(record);
+        // The origin's exact scope already belongs to every immutable fact in
+        // the attempt. Store that association once; reconstruct it on load.
+        const plaintext = JSON.stringify({
+          ...record,
+          evidence: {
+            ...record.evidence,
+            origins: record.evidence.origins.map((origin) => ({
+              attemptId: origin.attemptId,
+              originalKeyThumbprint: origin.originalKeyThumbprint,
+              originBuild: origin.originBuild,
+            })),
+          },
+        });
         if (Buffer.byteLength(plaintext, "utf8") > maximumPlaintextBytes)
           throw failure();
         const ciphertext = options.codec.encryptString(plaintext);
@@ -1011,6 +1663,7 @@ export function createStudentSessionStore(options: {
           throw failure();
         }
         generation = record.generation;
+        lastRecord = record;
         targetedOnly = false;
         return record;
       });

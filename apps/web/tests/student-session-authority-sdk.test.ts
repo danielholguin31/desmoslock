@@ -65,6 +65,43 @@ const operations = [
       port.readStudentSessions({ ...scope, before: cursor }, handle),
   },
   {
+    name: "first client report page",
+    path: "/rest/v1/rpc/current_student_protection_events",
+    body: {
+      ...rawTarget,
+      student_session_id: studentSessionId,
+      before_received_at: null,
+      before_event_id: null,
+    },
+    invoke: (port, handle) =>
+      port.readStudentProtectionEvents(
+        { ...scope, studentSessionId, before: null },
+        handle,
+      ),
+  },
+  {
+    name: "microsecond client report page",
+    path: "/rest/v1/rpc/current_student_protection_events",
+    body: {
+      ...rawTarget,
+      student_session_id: studentSessionId,
+      before_received_at: cursor.createdAt,
+      before_event_id: "71000000-0000-4000-8000-000000000001",
+    },
+    invoke: (port, handle) =>
+      port.readStudentProtectionEvents(
+        {
+          ...scope,
+          studentSessionId,
+          before: {
+            receivedAt: cursor.createdAt,
+            eventId: "71000000-0000-4000-8000-000000000001",
+          },
+        },
+        handle,
+      ),
+  },
+  {
     name: "join code issuance",
     path: "/rest/v1/rpc/issue_test_join_code",
     body: { ...rawTarget, ...rawMaterial, expected_test_revision: 7 },

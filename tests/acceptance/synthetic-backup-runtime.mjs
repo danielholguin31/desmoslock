@@ -850,7 +850,9 @@ const EMPTY_STUDENT_RUNTIME_STORES_QUERY = `select
   not exists(select 1 from desmoslock_v2.student_join_materials)
   and not exists(select 1 from desmoslock_v2.student_device_bindings)
   and not exists(select 1 from desmoslock_v2.student_bootstrap_challenges)
-  and not exists(select 1 from desmoslock_v2.student_bootstrap_limits);`;
+  and not exists(select 1 from desmoslock_v2.student_bootstrap_limits)
+  and not exists(select 1 from desmoslock_v2.student_device_proof_state)
+  and not exists(select 1 from desmoslock_v2.student_protection_events);`;
 
 export async function operatorWorker(
   configuration,
