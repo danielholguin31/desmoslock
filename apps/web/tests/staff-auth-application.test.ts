@@ -27,6 +27,8 @@ import type {
   TestWorkspaceController,
   TestWorkspacePort,
 } from "../src/test-workspace/test-workspace-controller.js";
+import type { StudentSessionController } from "../src/student-sessions/student-session-controller.js";
+import type { StudentSessionPort } from "../src/student-sessions/student-session-port.js";
 import {
   createSupabaseStaffAuthAdapter,
   type SupabaseStaffAuthPort,
@@ -259,6 +261,11 @@ function createHarness(
     ) => () => void;
     readonly schoolSettingsPort?: SchoolSettingsPort;
     readonly testWorkspacePort?: TestWorkspacePort;
+    readonly studentSessionPort?: StudentSessionPort;
+    readonly bindStudentSessionView?: (
+      root: HTMLElement,
+      controller: StudentSessionController,
+    ) => () => void;
     readonly bindTestWorkspaceView?: (
       root: HTMLElement,
       controller: TestWorkspaceController,
@@ -286,6 +293,9 @@ function createHarness(
   const bindTestWorkspaceView = vi.fn<
     NonNullable<typeof options.bindTestWorkspaceView>
   >(options.bindTestWorkspaceView ?? (() => vi.fn()));
+  const bindStudentSessionView = vi.fn<
+    NonNullable<typeof options.bindStudentSessionView>
+  >(options.bindStudentSessionView ?? (() => vi.fn()));
   let adapterIndex = 0;
   const createAdapterFactory = vi.fn<
     (
@@ -341,6 +351,7 @@ function createHarness(
       bindView,
       bindSchoolSettingsView,
       bindTestWorkspaceView,
+      bindStudentSessionView,
       createStaffServices: (configuration, operationIds) => ({
         adapter: createAdapterFactory(configuration, operationIds),
         schoolSettingsPort: options.schoolSettingsPort ?? {
@@ -351,6 +362,8 @@ function createHarness(
           releaseSchoolSettingsAuthority() {},
         },
         testWorkspacePort: options.testWorkspacePort ?? unavailableTestPort(),
+        studentSessionPort:
+          options.studentSessionPort ?? unavailableStudentPort(),
       }),
       observeHealth,
     },
@@ -360,11 +373,24 @@ function createHarness(
     bindView,
     bindSchoolSettingsView,
     bindTestWorkspaceView,
+    bindStudentSessionView,
     createAdapterFactory,
     elements,
     lifecycleListeners,
     observeHealth,
     unregisterLifecycle,
+  };
+}
+
+function unavailableStudentPort(): StudentSessionPort {
+  return {
+    captureStudentSessionAuthority: async () => ({ status: "unavailable" }),
+    releaseStudentSessionAuthority() {},
+    readStudentTarget: async () => null,
+    readStudentSessions: async () => null,
+    issueTestJoinCode: async () => null,
+    removeStudentSession: async () => null,
+    prepareStudentReadmission: async () => null,
   };
 }
 
@@ -414,6 +440,20 @@ function createRecoveryNotificationHarness() {
     operationIds: { next: () => operationId },
     port: {
       ...unavailableTestPort(),
+      captureAuthReadAuthority: async () => ({
+        status: "ready",
+        authorityHandle: "synthetic-recovery-read",
+        account: {
+          accountId: "a1000000-0000-4000-8000-000000000001",
+          providerSessionId: "81000000-0000-4000-8000-000000000001",
+          email: "teacher@example.test",
+          emailVerified: true,
+        },
+      }),
+      isAuthReadAuthorityCurrent: async () => true,
+      releaseAuthReadAuthority() {},
+      captureMfaAuthority: unavailable,
+      releaseMfaAuthority() {},
       captureSchoolSettingsAuthority: unavailable,
       updateSchoolDisplayName: unavailable,
       releaseSchoolSettingsAuthority() {},
@@ -1981,6 +2021,245 @@ function managementGrant() {
   };
 }
 
+function studentCompositionPorts() {
+  const { port: tests, row } = testWorkspacePort();
+  row.lifecycle = "open";
+  row.test_revision = 2;
+  Object.assign(row, { opened_at: "2026-09-08T00:01:00.123456Z" });
+  const students = {
+    captureStudentSessionAuthority: vi.fn(async () => ({
+      status: "ready",
+      authorityHandle: "student-composed-handle",
+    })),
+    releaseStudentSessionAuthority: vi.fn(),
+    readStudentTarget: vi.fn(async (): Promise<unknown> => [{ ...row }]),
+    readStudentSessions: vi.fn(async (): Promise<unknown> => []),
+    issueTestJoinCode: vi.fn(async (): Promise<unknown> => {
+      row.test_revision += 1;
+      return [
+        {
+          code: "join_code_issued",
+          test_id: row.test_id,
+          session_id: null,
+          session_revision: null,
+          test_revision: row.test_revision,
+          epoch: null,
+          expires_at: "2026-09-08T01:00:00.123456Z",
+        },
+      ];
+    }),
+    removeStudentSession: vi.fn(async (): Promise<unknown> => null),
+    prepareStudentReadmission: vi.fn(async (): Promise<unknown> => null),
+  } satisfies StudentSessionPort;
+  return { tests, students, row };
+}
+
+describe("Student sibling uses the selected Test and shared staff lifecycle", () => {
+  it("queues the newly selected Test after a held prior roster read and never publishes the prior rows", async () => {
+    const { tests, students, row } = studentCompositionPorts();
+    const h = createHarness({
+      adapter: createAdapter({ read: async () => settingsAccess() }).adapter,
+      testWorkspacePort: tests,
+      studentSessionPort: students,
+    });
+    await h.application.ready;
+    const parent = h.bindTestWorkspaceView.mock.calls[0]![1];
+    const child = h.bindStudentSessionView.mock.calls[0]![1];
+    const firstTest = row.test_id;
+    await parent.dispatch({ type: "select_test", testId: firstTest });
+    await vi.waitFor(() =>
+      expect(students.readStudentSessions).toHaveBeenCalledOnce(),
+    );
+    tests.readSchoolTests.mockResolvedValue([
+      {
+        ...row,
+        test_id: "71000000-0000-4000-8000-000000000002",
+        title: "Selected Test B",
+      },
+      { ...row },
+    ]);
+    const pending = deferred<unknown>();
+    students.readStudentSessions.mockImplementationOnce(() => pending.promise);
+    const refresh = h.application.refreshMembership();
+    await vi.waitFor(() =>
+      expect(students.readStudentSessions).toHaveBeenCalledTimes(2),
+    );
+    row.test_id = "71000000-0000-4000-8000-000000000002";
+    row.title = "Selected Test B";
+    const session = {
+      code: "ok",
+      session_id: "73000000-0000-4000-8000-000000000002",
+      school_id: row.school_id,
+      test_id: row.test_id,
+      synthetic_display_name: "Student B2",
+      state: "active",
+      epoch: 1,
+      session_revision: 1,
+      created_at: "2026-09-08T00:02:00.123456Z",
+    };
+    students.readStudentSessions.mockResolvedValue([session]);
+    await parent.dispatch({ type: "select_test", testId: row.test_id });
+    expect(child.getSnapshot()).toMatchObject({
+      data: { test: { id: row.test_id } },
+    });
+    pending.resolve([
+      { ...session, test_id: firstTest, synthetic_display_name: "Student A1" },
+    ]);
+    await refresh;
+    await vi.waitFor(() =>
+      expect(students.readStudentSessions).toHaveBeenCalledTimes(3),
+    );
+    await vi.waitFor(() =>
+      expect(child.getSnapshot()).toMatchObject({
+        data: {
+          test: { id: row.test_id },
+          page: { items: [{ syntheticDisplayName: "Student B2" }] },
+        },
+      }),
+    );
+    expect(JSON.stringify(child.getSnapshot())).not.toContain("Student A1");
+    h.application.dispose();
+  });
+
+  it("loads only a selected open Test and refreshes its revision after reviewed code issuance without replacing drafts or views", async () => {
+    let grant = settingsAccess();
+    const { tests, students, row } = studentCompositionPorts();
+    const h = createHarness({
+      adapter: createAdapter({ read: async () => grant }).adapter,
+      testWorkspacePort: tests,
+      studentSessionPort: students,
+    });
+    await h.application.ready;
+    const parent = h.bindTestWorkspaceView.mock.calls[0]![1];
+    const child = h.bindStudentSessionView.mock.calls[0]![1];
+    expect(students.captureStudentSessionAuthority).not.toHaveBeenCalled();
+    await parent.dispatch({ type: "select_test", testId: row.test_id });
+    await vi.waitFor(() =>
+      expect(students.readStudentSessions).toHaveBeenCalledOnce(),
+    );
+    await parent.dispatch({
+      type: "edit_title",
+      value: "Preserved Test draft",
+    });
+    await child.dispatch({
+      type: "review_issue_code",
+      snapshotRevision: child.getSnapshot().revision,
+    });
+    expect(child.getSnapshot().kind).toBe("review");
+    expect(students.issueTestJoinCode).not.toHaveBeenCalled();
+    const beforeParentReads = tests.readSchoolTests.mock.calls.length;
+    await child.dispatch({
+      type: "confirm_review",
+      snapshotRevision: child.getSnapshot().revision,
+    });
+    await vi.waitFor(() =>
+      expect(parent.getSnapshot()).toMatchObject({
+        data: { selected: { revision: 3 }, titleDraft: "Preserved Test draft" },
+      }),
+    );
+    expect(students.issueTestJoinCode).toHaveBeenCalledOnce();
+    expect(tests.readSchoolTests.mock.calls.length).toBe(beforeParentReads + 1);
+    const disclosed = child.getSnapshot();
+    expect(disclosed).toMatchObject({
+      data: { disclosure: { kind: "join" }, test: { revision: 3 } },
+    });
+    const disclosure = "data" in disclosed ? disclosed.data.disclosure : null;
+    grant = settingsAccess("Renamed School", 2);
+    await h.application.refreshMembership();
+    expect(child.getSnapshot()).toMatchObject({
+      data: { disclosure, school: { displayName: "Renamed School" } },
+    });
+    expect(h.bindStudentSessionView).toHaveBeenCalledOnce();
+    expect(h.bindTestWorkspaceView).toHaveBeenCalledOnce();
+    h.application.dispose();
+  });
+
+  it("pauses child mutation review during the parent's End confirmation and resumes after cancellation", async () => {
+    const { tests, students, row } = studentCompositionPorts();
+    const h = createHarness({
+      adapter: createAdapter({ read: async () => settingsAccess() }).adapter,
+      testWorkspacePort: tests,
+      studentSessionPort: students,
+    });
+    await h.application.ready;
+    const parent = h.bindTestWorkspaceView.mock.calls[0]![1];
+    const child = h.bindStudentSessionView.mock.calls[0]![1];
+    await parent.dispatch({ type: "select_test", testId: row.test_id });
+    await vi.waitFor(() =>
+      expect(students.readStudentSessions).toHaveBeenCalledOnce(),
+    );
+    await parent.dispatch({
+      type: "review_end",
+      snapshotRevision: parent.getSnapshot().revision,
+    });
+    expect(parent.getSnapshot().kind).toBe("confirming_end");
+    expect(child.getSnapshot()).toMatchObject({ data: { parentBusy: true } });
+    const captures = students.captureStudentSessionAuthority.mock.calls.length;
+    await child.dispatch({
+      type: "review_issue_code",
+      snapshotRevision: child.getSnapshot().revision,
+    });
+    expect(students.captureStudentSessionAuthority).toHaveBeenCalledTimes(
+      captures,
+    );
+    expect(students.issueTestJoinCode).not.toHaveBeenCalled();
+    await parent.dispatch({
+      type: "cancel_end",
+      snapshotRevision: parent.getSnapshot().revision,
+    });
+    await child.dispatch({
+      type: "review_issue_code",
+      snapshotRevision: child.getSnapshot().revision,
+    });
+    expect(child.getSnapshot().kind).toBe("review");
+    h.application.dispose();
+  });
+
+  it.each(["suspend", "dispose"] as const)(
+    "retires a pending child read on %s despite a throwing child view disposer",
+    async (exit) => {
+      const { tests, students, row } = studentCompositionPorts();
+      const h = createHarness({
+        adapter: createAdapter({ read: async () => settingsAccess() }).adapter,
+        testWorkspacePort: tests,
+        studentSessionPort: students,
+        bindStudentSessionView: () => () => {
+          throw new Error("Synthetic child view disposal failure");
+        },
+      });
+      await h.application.ready;
+      const parent = h.bindTestWorkspaceView.mock.calls[0]![1];
+      const child = h.bindStudentSessionView.mock.calls[0]![1];
+      await parent.dispatch({ type: "select_test", testId: row.test_id });
+      await vi.waitFor(() =>
+        expect(students.readStudentSessions).toHaveBeenCalledOnce(),
+      );
+      const pending = deferred<unknown>();
+      students.readStudentSessions.mockImplementationOnce(
+        () => pending.promise,
+      );
+      const refresh = h.application.refreshMembership();
+      await vi.waitFor(() =>
+        expect(students.readStudentSessions).toHaveBeenCalledTimes(2),
+      );
+      h.application[exit]();
+      const retired = child.getSnapshot();
+      expect(retired.kind).toBe("unavailable");
+      expect(parent.getSnapshot().kind).toBe("unavailable");
+      expect(h.elements.protectedSchoolDataRoot.hidden).toBe(true);
+      pending.resolve([]);
+      await refresh;
+      expect(child.getSnapshot()).toBe(retired);
+      expect(students.releaseStudentSessionAuthority).toHaveBeenCalledTimes(2);
+      if (exit === "suspend") {
+        await h.application.resume();
+        expect(h.bindStudentSessionView.mock.calls[1]![1]).not.toBe(child);
+        h.application.dispose();
+      }
+    },
+  );
+});
+
 describe("Test workspace composed with the single auth lifecycle", () => {
   it("coalesces one visible cycle and preserves both product drafts and Membership review on rename", async () => {
     let grant = managementGrant();
@@ -2001,10 +2280,12 @@ describe("Test workspace composed with the single auth lifecycle", () => {
     const children = [...protectedRoot.children];
     expect(children.map((child) => Object.keys(child.dataset))).toEqual([
       ["testWorkspaceRoot"],
+      ["studentSessionRoot"],
       ["schoolSettingsRoot"],
     ]);
     expect(h.bindTestWorkspaceView.mock.calls[0]![0]).toBe(children[0]);
-    expect(h.bindSchoolSettingsView.mock.calls[0]![0]).toBe(children[1]);
+    expect(h.bindStudentSessionView.mock.calls[0]![0]).toBe(children[1]);
+    expect(h.bindSchoolSettingsView.mock.calls[0]![0]).toBe(children[2]);
     await tests.dispatch({ type: "select_test", testId: row.test_id });
     await tests.dispatch({
       type: "edit_create_title",

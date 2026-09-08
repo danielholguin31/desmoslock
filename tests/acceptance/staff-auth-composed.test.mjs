@@ -41,6 +41,8 @@ import {
   verifyDisposableDatabase,
 } from "./revoke-membership-lock-db.mjs";
 import { runMembershipBrowserAcceptance } from "./staff-membership-browser.mjs";
+import { runStudentSessionInterop } from "./student-session-interop.test.mjs";
+import { runStudentSessionLocks } from "./student-session-locks.test.mjs";
 
 // Source-handler integration with real GoTrue/PostgREST. Invitation mail uses an
 // in-memory transport; PKCE recovery mail reaches the disposable local SMTP sink.
@@ -565,6 +567,14 @@ commit;`);
       publishableKey,
       checkRuntimeHealth,
     });
+    const studentRuntime = {
+      admin,
+      publishableKey,
+      serviceKey,
+      checkRuntimeHealth,
+    };
+    await runStudentSessionInterop(t, studentRuntime);
+    await runStudentSessionLocks(t, studentRuntime);
     // Audit rows are deliberately append-only. This suite must run last against
     // the fresh disposable stack; CI owns unconditional shutdown and the next
     // run must reset it. Never disable production audit protections for cleanup.

@@ -616,9 +616,15 @@ test("generation-4 attests the exact normalized migration history", () => {
         "96febd78bbec6859771cb26ae095458553e19ddd75dbc438e99b54ee86549e18",
     },
     "20260908000200_test_workspace.sql": {
-      migrationSetSha256: expectedMigrationSetSha256,
+      migrationSetSha256:
+        "5cf17174bf44e491a6bd78fe540326d8bdee169518d75c8082e5bd9b833f3f62",
       rawSha256:
         "233123dd9038740ef724432715cc17e32a5adc2be68160466fa11f5b2dfb865c",
+    },
+    "20260908000300_student_session_admission.sql": {
+      migrationSetSha256: expectedMigrationSetSha256,
+      rawSha256:
+        "448d7697885eae07f04cc3b89531b7b3711e71fa67d56d80ac891df63458fb06",
     },
   });
   assert.doesNotThrow(() => assertMigrationSetAttestation(migrations));
@@ -646,6 +652,7 @@ test("generation-4 attests the exact normalized migration history", () => {
     "20260907000300_membership_revocation_authority.sql",
     "20260907000400_membership_administration.sql",
     "20260908000100_school_display_name.sql",
+    "20260908000200_test_workspace.sql",
   ]) {
     assert.throws(
       () =>
@@ -682,7 +689,7 @@ test("generation-4 attests the exact normalized migration history", () => {
       assertMigrationSetAttestation(
         migrations.map(([fileName, source]) => [
           fileName,
-          fileName === "20260908000200_test_workspace.sql"
+          fileName === "20260908000300_student_session_admission.sql"
             ? source.replace(expectedMigrationSetSha256, "0".repeat(64))
             : source,
         ]),
@@ -691,9 +698,13 @@ test("generation-4 attests the exact normalized migration history", () => {
   );
 });
 
-test("the runbook names every runtime-only staff lifecycle backup guard", () => {
+test("the runbook names every runtime-only staff and Student backup guard", () => {
   const runbook = readText("docs/product-completion/reproducible-supabase.md");
   const runtimeLifecycleTables = [
+    "student_join_materials",
+    "student_device_bindings",
+    "student_bootstrap_challenges",
+    "student_bootstrap_limits",
     "application_session_revocation_cutoffs",
     "application_session_revocations",
     "staff_audit_events",
@@ -701,7 +712,7 @@ test("the runbook names every runtime-only staff lifecycle backup guard", () => 
     "staff_password_recovery_operations",
   ];
 
-  assert.match(runbook, /five runtime-only staff lifecycle tables/u);
+  assert.match(runbook, /nine runtime-only staff and Student tables/u);
   assert.doesNotMatch(runbook, /three staff lifecycle tables/u);
   for (const table of runtimeLifecycleTables) {
     assert.equal(
@@ -755,7 +766,7 @@ test("staff Auth schema and composed journeys have a required disposable CI lane
   );
   assert.equal(
     rootPackage.scripts?.["test:edge"],
-    "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts",
+    "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts supabase/functions/student-session-challenge/index.ts supabase/functions/student-session-join/index.ts supabase/functions/student-session-read/index.ts supabase/functions/student-session-reconnect/index.ts supabase/functions/student-session-forfeit/index.ts",
     "the Edge suite must lint all sources and explicitly typecheck every deployed entrypoint",
   );
   assert.equal(
@@ -952,9 +963,14 @@ test("Electron CI acceptance includes internal isolation and external package po
 
 test("the production desktop command cannot bypass observed application retirement", () => {
   const verifier = readText("scripts/verify-production-desktop.mjs");
-  const launches = [
+  const productionLaunches = [
     ...verifier.matchAll(
       /application = await launchInternalProductionBuild\(userDataDirectory\);/g,
+    ),
+  ];
+  const syntheticLaunches = [
+    ...verifier.matchAll(
+      /application = await launchSyntheticCalculatorBuild\(\s*calculatorUserDataDirectory,\s*fixturePath,?\s*\);/g,
     ),
   ];
   const observedCloses = [
@@ -963,10 +979,11 @@ test("the production desktop command cannot bypass observed application retireme
     ),
   ];
 
-  assert.equal(launches.length, 2);
+  assert.equal(productionLaunches.length, 2);
+  assert.equal(syntheticLaunches.length, 2);
   assert.equal(
     observedCloses.length,
-    launches.length + 1,
+    productionLaunches.length + syntheticLaunches.length + 1,
     "each acquired application and the command finalizer must await observed retirement",
   );
   assert.doesNotMatch(

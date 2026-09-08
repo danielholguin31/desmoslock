@@ -1,0 +1,135 @@
+# StudentSession admission
+
+This candidate adds accountless StudentSession admission to the internal v2
+source contract: initial join, own-session maintenance, removal, targeted
+re-admission and durable exact retries. This document records the selected
+implementation and acceptance gates; it claims no new test, restored runtime,
+hosted or packaged-device result.
+
+## Authority and lifecycle
+
+Active own-School Teachers, Admins and Owners operate a Test's StudentSessions
+under existing live staff authority checks. Teachers use their verified provider
+assurance; Admins and Owners require AAL2. Every code issuance, removal and
+targeted re-admission requires review bound to the initiating account/provider
+session, selected School/Test and expected revision. Codes are generated once
+per private issuance intent and displayed only after confirmed issuance. An
+unconfirmed result retains the exact explicit retry.
+
+Admission requires an open runtime Test. Student transactions acquire the Test
+lock before the StudentSession lock and recheck live authority and server time
+after waits. Runtime states are `active`, `removed`, `readmitted` and `forfeited`;
+an ended Test is an authorized parent projection, not a native release. Every
+changed transition advances revision exactly once; stale comparison precedes
+no-op detection and overflow rolls back all effects. A targeted claim preserves
+its prepared epoch. Removal, re-admission preparation and forfeit invalidate
+prior authority through the selected epoch changes.
+
+Staff lists retain all six fractional UTC timestamp digits and order by
+`created_at DESC, id DESC`, with 50 displayed rows and one lookahead. Code
+issuance advances Test revision, so stale title/end intentions require explicit
+reconciliation. Label-only changes preserve unrelated drafts; actual actor,
+provider-session, School/Test or lifecycle changes discard affected private
+intent. The existing provider client and refresh cycle are shared.
+
+## Device and backend boundary
+
+The five named routes are `student-session-challenge`, `student-session-join`,
+`student-session-read`, `student-session-reconnect` and
+`student-session-forfeit`. Exact bounded requests bind the configured API
+origin, admission mode, operation, identity and candidate commitments. Initial
+join and targeted re-admission have explicit modes with no fallback between them.
+The database stores code/credential digests and the verified device public key;
+raw device credentials and private keys remain in trusted desktop main.
+
+Bootstrap uses a single-use 15-second challenge and a separate bounded quota.
+Admitted maintenance verifies Ed25519 proof against the stored device key
+before consuming its strictly increasing counter or allowance. Counter and
+operation commit atomically. The allowance is 12 accepted operations per rolling
+60 seconds per device/epoch; bootstrap key churn cannot debit it. Main coalesces
+visible maintenance to one 15-second cycle, with renewal at 60 seconds remaining
+replacing that cycle's read. Access/reconnect authority lasts at most 300/900
+seconds. An unseen higher-counter request may arrive while its credential is
+valid; counters do not establish a separate 15-second intent deadline.
+
+Exact retries preserve the logical request, mode, key and credential candidates;
+each maintenance attempt reserves a fresh greater counter before egress. Receipt
+recovery returns original issuance/expiry metadata without extending authority.
+Permanent Test/device bindings prevent an old device from creating a replacement
+initial identity after rebinding. Lost credentials while a grant remains live
+require staff removal followed by reviewed targeted re-admission. Public denial
+remains generic and cannot establish whether the Test ended or a grant expired.
+
+## Desktop persistence and protection state
+
+Main owns the encrypted versioned record, committed authority, one exact pending
+mutation and reserved counter. The selected macOS store uses a separate fixed
+process-lifetime advisory-lock inode, exclusive temporary writes, exact
+`F_FULLFSYNC` file and parent-directory barriers, and atomic replacement. It
+retains possibly published bytes on uncertain durability; no failed barrier may
+authorize egress, counter rollback or silent replacement. Targeted recovery
+preserves corrupt/unsupported bytes before a new pending record. Electron's
+single-instance guard complements the native store lock.
+
+The renderer receives named admission/recovery actions and sanitized view
+snapshots, with trusted-frame/generation fencing. It receives no device key,
+credential, counter, signing, arbitrary URL or storage interface. Confirmed
+backend admission still projects `protection: "unavailable"` and
+`calculatorEligible: false`; the calculator remains detached. Unsupported
+native storage fails closed. A synthetic callback or compiled addon does not
+establish assessment protection, recovery or OS-backed encryption acceptance.
+
+## Migration and synthetic restore
+
+The eleventh migration is
+`supabase/migrations/20260908000300_student_session_admission.sql`. Its selected
+aggregate is
+`aa32ed754c87e7987199dbd6c5f685ae65236ba3f94921157fc6cb07ce67b308`.
+All ten predecessors retain their bytes and historical pins; schema generation
+`4`, fixture digest and seven-table archive are unchanged. See the
+[exact inventory and normalization](reproducible-supabase.md#versioned-inputs).
+
+The Student archive has 25 columns, including 20 added fields. Both fixed seed
+sessions remain `created`, with the same IDs/School/Test/seed keys, creation time
+`2000-01-01T00:00:00.000000Z`, epoch/revision one, counter zero, empty maintenance
+allowance and null added name/device/credential/receipt fields. The four runtime
+stores `student_join_materials`, `student_device_bindings`,
+`student_bootstrap_challenges` and `student_bootstrap_limits` must be empty in
+pristine sources and targets and are never exported. The adapter must reject
+wrong order/arity/nullability, nonpristine values and runtime table content.
+
+## Required evidence
+
+After the desktop build, `npm run test:desktop:durability` runs the native store
+checks and the production coordinator/store/crypto/transport against an owned
+loopback HTTP fixture. The latter uses an explicitly synthetic codec; its server
+checks persisted pending intent, counters and Ed25519 proofs before replying or
+dropping a socket. It covers lost responses across process restarts, quarantine,
+publication failure and whole-intent shutdown. This gate does not use the SQL
+provider or the operating system's encryption service. Unsupported platforms do
+not substitute a fake native implementation.
+
+- Real Node/Edge Ed25519 interoperability and actual HTTP/SQL admission,
+  maintenance, exact lost-response retry, remove/targeted claim/forfeit/end,
+  copied-token denial, mode/origin/identity substitution and bounded failures.
+- Observed concurrent Test/session lock waits, current authority/expiry checks,
+  exact revisions/epochs/counters/allowances, and complete rollback on injected
+  transaction/audit failures.
+- Actual macOS helper build/load and owned synthetic durability/process-lock
+  tests, crash/restart at publication boundaries, retained exact pending bytes,
+  competing processes denied before record access or egress, and real desktop
+  main/frame/generation integration. OS-backed encryption, hardware power loss,
+  native assessment and packaged-device acceptance remain separately required.
+- Production-entrypoint staff and Electron UI checks for stale reviews,
+  same-document authority loss, generic denial, full entry/recovery visibility,
+  no calculator occlusion and no protection claims from admission alone.
+- The complete existing `test:staff-auth` chain, extended with Student groups,
+  on the actual restored target without reset/reseed. The
+  [restore gate](synthetic-restore-acceptance.md) requires exact Student metadata
+  and empty stores through independent marker-retirement verification, including
+  `studentMetadataPreserved` and `studentRuntimeStoresEmpty` receipt flags.
+
+Exact-candidate checks and independent source review must establish these gates.
+Historical School/Test/restore receipts and source-only checks do not establish
+StudentSession runtime completion or authorize hosted deployment or native lock
+engagement.

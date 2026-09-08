@@ -16,6 +16,26 @@ const MAX_ARCHIVE_BYTES = 8 * 1024 * 1024;
 const MAX_RESTORE_SQL_BYTES = 16 * 1024 * 1024;
 const MAX_TEXT_OUTPUT_BYTES = 256 * 1024;
 
+const PRISTINE_STUDENT_SESSION_PREDICATE = `state = 'created'
+  and created_at = '2000-01-01T00:00:00.000000Z'::timestamptz
+  and epoch = 1 and revision = 1 and last_accepted_proof_counter = 0
+  and maintenance_accepted_at = '{}'::timestamptz[]
+  and synthetic_display_name is null
+  and device_session_id is null
+  and device_public_key is null
+  and capability_digest is null
+  and capability_issued_at is null
+  and capability_expires_at is null
+  and reconnect_digest is null
+  and reconnect_expires_at is null
+  and join_request_id is null
+  and join_operation_digest is null
+  and join_admission_mode is null
+  and join_material_digest is null
+  and rotation_request_id is null
+  and rotation_operation_digest is null
+  and previous_reconnect_digest is null`;
+
 const OBSERVATION_QUERY = `
 with baseline as (
   select schema_generation, fixture_version, fixture_digest, fixture_valid
@@ -36,7 +56,12 @@ with baseline as (
     (select count(*) from desmoslock_v2.staff_audit_events)::integer as staff_audit_events,
     (select count(*) from desmoslock_v2.staff_invitations)::integer as staff_invitations,
     (select count(*) from desmoslock_v2.staff_password_recovery_operations)::integer as staff_password_recovery_operations,
+    (select count(*) from desmoslock_v2.student_join_materials)::integer as student_join_materials,
+    (select count(*) from desmoslock_v2.student_device_bindings)::integer as student_device_bindings,
+    (select count(*) from desmoslock_v2.student_bootstrap_challenges)::integer as student_bootstrap_challenges,
+    (select count(*) from desmoslock_v2.student_bootstrap_limits)::integer as student_bootstrap_limits,
     (select count(*) from desmoslock_v2.student_sessions)::integer as student_sessions,
+    (select count(*) from desmoslock_v2.student_sessions where ${PRISTINE_STUDENT_SESSION_PREDICATE})::integer as pristine_student_sessions,
     (select count(*) from desmoslock_v2.tests)::integer as tests,
     (select count(*) from desmoslock_v2.workspaces)::integer as workspaces
 )
@@ -51,7 +76,12 @@ select json_build_object(
       and counts.staff_audit_events = 0
       and counts.staff_invitations = 0
       and counts.staff_password_recovery_operations = 0
+      and counts.student_join_materials = 0
+      and counts.student_device_bindings = 0
+      and counts.student_bootstrap_challenges = 0
+      and counts.student_bootstrap_limits = 0
       and counts.student_sessions = 0
+      and counts.pristine_student_sessions = 0
       and counts.tests = 0
       and counts.workspaces = 0
       and baseline.schema_generation is null
@@ -65,7 +95,12 @@ select json_build_object(
       and counts.staff_audit_events = 0
       and counts.staff_invitations = 0
       and counts.staff_password_recovery_operations = 0
+      and counts.student_join_materials = 0
+      and counts.student_device_bindings = 0
+      and counts.student_bootstrap_challenges = 0
+      and counts.student_bootstrap_limits = 0
       and counts.student_sessions = 2
+      and counts.pristine_student_sessions = 2
       and counts.tests = 2
       and counts.workspaces = 2
       and baseline.fixture_valid is true
@@ -614,7 +649,33 @@ const COPY_COLUMNS = Object.freeze({
     "updated_at",
   ],
   profiles: ["id", "display_name", "seed_key", "auth_user_id"],
-  student_sessions: ["id", "workspace_id", "test_id", "state", "seed_key"],
+  student_sessions: [
+    "id",
+    "workspace_id",
+    "test_id",
+    "state",
+    "seed_key",
+    "synthetic_display_name",
+    "created_at",
+    "epoch",
+    "revision",
+    "device_session_id",
+    "device_public_key",
+    "last_accepted_proof_counter",
+    "maintenance_accepted_at",
+    "capability_digest",
+    "capability_issued_at",
+    "capability_expires_at",
+    "reconnect_digest",
+    "reconnect_expires_at",
+    "join_request_id",
+    "join_operation_digest",
+    "join_admission_mode",
+    "join_material_digest",
+    "rotation_request_id",
+    "rotation_operation_digest",
+    "previous_reconnect_digest",
+  ],
   tests: [
     "id",
     "workspace_id",
@@ -656,6 +717,23 @@ const NULLABLE_COPY_COLUMNS = Object.freeze({
     "updated_at",
   ]),
   profiles: Object.freeze(["auth_user_id"]),
+  student_sessions: Object.freeze([
+    "synthetic_display_name",
+    "device_session_id",
+    "device_public_key",
+    "capability_digest",
+    "capability_issued_at",
+    "capability_expires_at",
+    "reconnect_digest",
+    "reconnect_expires_at",
+    "join_request_id",
+    "join_operation_digest",
+    "join_admission_mode",
+    "join_material_digest",
+    "rotation_request_id",
+    "rotation_operation_digest",
+    "previous_reconnect_digest",
+  ]),
   tests: Object.freeze(["opened_at", "ended_at", "creation_request_id"]),
 });
 
@@ -895,10 +973,38 @@ function canonicalEntityPayload(tables, counts) {
       ),
     tables
       .get("student_sessions")
-      .map(([id, workspaceId, testId, state, seedKey]) => ({
-        parts: ["session", seedKey, id, workspaceId, testId, state],
-        seedKey,
-      })),
+      .map(([id, workspaceId, testId, state, seedKey, ...metadata]) => {
+        // Added authority fields are checked independently; the published
+        // five-column entity framing and fixed fixture digest remain unchanged.
+        const expectedMetadata = [
+          POSTGRES_NULL,
+          "2000-01-01 00:00:00+00",
+          "1",
+          "1",
+          POSTGRES_NULL,
+          POSTGRES_NULL,
+          "0",
+          "{}",
+          POSTGRES_NULL,
+          POSTGRES_NULL,
+          POSTGRES_NULL,
+          POSTGRES_NULL,
+          POSTGRES_NULL,
+          POSTGRES_NULL,
+          POSTGRES_NULL,
+          POSTGRES_NULL,
+          POSTGRES_NULL,
+          POSTGRES_NULL,
+          POSTGRES_NULL,
+          POSTGRES_NULL,
+        ];
+        if (state !== "created" || !hasExactRow(metadata, expectedMetadata))
+          archiveContentError();
+        return {
+          parts: ["session", seedKey, id, workspaceId, testId, state],
+          seedKey,
+        };
+      }),
   ];
   return [
     frameText([
@@ -1077,6 +1183,10 @@ begin
     or exists (select 1 from desmoslock_v2.staff_audit_events)
     or exists (select 1 from desmoslock_v2.staff_invitations)
     or exists (select 1 from desmoslock_v2.staff_password_recovery_operations)
+    or exists (select 1 from desmoslock_v2.student_join_materials)
+    or exists (select 1 from desmoslock_v2.student_device_bindings)
+    or exists (select 1 from desmoslock_v2.student_bootstrap_challenges)
+    or exists (select 1 from desmoslock_v2.student_bootstrap_limits)
     or exists (select 1 from desmoslock_v2.student_sessions)
     or exists (select 1 from desmoslock_v2.tests)
     or exists (select 1 from desmoslock_v2.workspaces)
@@ -1108,6 +1218,14 @@ begin
       and fixture_namespace = 'desmoslock-v2-foundation'
   ) or (select count(*) from desmoslock_v2.foundation_seed) <> 1 then
     raise exception using errcode = '55000', message = 'restored foundation verification failed';
+  end if;
+  if (select count(*) from desmoslock_v2.student_sessions where ${PRISTINE_STUDENT_SESSION_PREDICATE}) <> 2
+    or exists (select 1 from desmoslock_v2.student_join_materials)
+    or exists (select 1 from desmoslock_v2.student_device_bindings)
+    or exists (select 1 from desmoslock_v2.student_bootstrap_challenges)
+    or exists (select 1 from desmoslock_v2.student_bootstrap_limits)
+  then
+    raise exception using errcode = '55000', message = 'restored StudentSession authority verification failed';
   end if;
 end
 $desmoslock_restore_verification$;

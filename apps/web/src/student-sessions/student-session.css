@@ -1,0 +1,116 @@
+.student-sessions {
+  display: grid;
+  gap: 1rem;
+  width: min(100%, 44rem);
+  margin-inline: auto;
+  padding: clamp(1rem, 3vw, 2rem);
+  border: 1px solid var(--staff-auth-border, #cbd5e1);
+  border-radius: 1.25rem;
+  background: var(--staff-auth-control-background, #fff);
+  color: var(--staff-auth-foreground, #0f172a);
+}
+.student-sessions h2,
+.student-sessions h3,
+.student-sessions p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.student-sessions h2 {
+  font-size: 1.5rem;
+}
+.student-sessions h3 {
+  font-size: 1.1rem;
+}
+.student-sessions p {
+  line-height: 1.6;
+}
+.student-sessions-content,
+.student-sessions-content > section {
+  display: grid;
+  gap: 0.85rem;
+}
+.student-sessions-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+.student-sessions button,
+.student-sessions input {
+  font: inherit;
+  min-height: 44px;
+  max-width: 100%;
+  border: 1px solid var(--staff-auth-border, #cbd5e1);
+  border-radius: 0.65rem;
+  padding: 0.65rem 0.85rem;
+}
+.student-sessions button {
+  color: var(--staff-auth-foreground, #0f172a);
+  background: var(--staff-auth-control-background, #fff);
+  cursor: pointer;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.student-sessions button:hover:not(:disabled) {
+  border-color: var(--staff-auth-focus, #2563eb);
+}
+.student-sessions button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.student-sessions :focus-visible {
+  outline: 3px solid var(--staff-auth-focus, #2563eb);
+  outline-offset: 3px;
+}
+.student-sessions-notice {
+  padding: 1rem;
+  border: 1px solid var(--staff-auth-border, #cbd5e1);
+  border-radius: 0.85rem;
+  background: #f1f5f9;
+}
+.student-sessions-code {
+  width: 100%;
+  min-width: 0;
+  font-family: ui-monospace, monospace !important;
+  letter-spacing: 0.12em;
+  color: var(--staff-auth-foreground, #0f172a);
+  background: var(--staff-auth-control-background, #fff);
+}
+.student-sessions-list {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+.student-sessions-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.student-sessions-list button {
+  text-align: left;
+  flex: 1;
+  min-width: 0;
+}
+.student-sessions-list span {
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+  max-width: 40%;
+}
+.student-sessions [hidden] {
+  display: none !important;
+}
+@media (max-width: 480px) {
+  .student-sessions-actions > button {
+    flex: 1 1 100%;
+  }
+  .student-sessions-list li {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .student-sessions-list span {
+    max-width: 100%;
+  }
+}

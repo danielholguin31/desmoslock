@@ -70,7 +70,36 @@ const RUNTIME_LIFECYCLE_TABLES = Object.freeze([
   "staff_audit_events",
   "staff_invitations",
   "staff_password_recovery_operations",
+  "student_join_materials",
+  "student_device_bindings",
+  "student_bootstrap_challenges",
+  "student_bootstrap_limits",
 ]);
+
+const STUDENT_COPY_HEADER =
+  "COPY desmoslock_v2.student_sessions (id, workspace_id, test_id, state, seed_key, synthetic_display_name, created_at, epoch, revision, device_session_id, device_public_key, last_accepted_proof_counter, maintenance_accepted_at, capability_digest, capability_issued_at, capability_expires_at, reconnect_digest, reconnect_expires_at, join_request_id, join_operation_digest, join_admission_mode, join_material_digest, rotation_request_id, rotation_operation_digest, previous_reconnect_digest) FROM stdin;";
+const PRISTINE_STUDENT_METADATA = [
+  "\\N",
+  "2000-01-01 00:00:00+00",
+  "1",
+  "1",
+  "\\N",
+  "\\N",
+  "0",
+  "{}",
+  "\\N",
+  "\\N",
+  "\\N",
+  "\\N",
+  "\\N",
+  "\\N",
+  "\\N",
+  "\\N",
+  "\\N",
+  "\\N",
+  "\\N",
+  "\\N",
+].join("\t");
 
 function syntheticArchiveSql() {
   return Buffer.from(`
@@ -96,9 +125,9 @@ COPY desmoslock_v2.profiles (id, display_name, seed_key, auth_user_id) FROM stdi
 20000000-0000-4000-8000-000000000012\tSynthetic Beta Admin\tprofile.beta.admin\t\\N
 20000000-0000-4000-8000-000000000013\tSynthetic Beta Teacher\tprofile.beta.teacher\t\\N
 \\.
-COPY desmoslock_v2.student_sessions (id, workspace_id, test_id, state, seed_key) FROM stdin;
-40000000-0000-4000-8000-000000000001\t10000000-0000-4000-8000-000000000001\t30000000-0000-4000-8000-000000000001\tcreated\tsession.alpha.algebra
-40000000-0000-4000-8000-000000000002\t10000000-0000-4000-8000-000000000002\t30000000-0000-4000-8000-000000000002\tcreated\tsession.beta.algebra
+${STUDENT_COPY_HEADER}
+40000000-0000-4000-8000-000000000001\t10000000-0000-4000-8000-000000000001\t30000000-0000-4000-8000-000000000001\tcreated\tsession.alpha.algebra\t${PRISTINE_STUDENT_METADATA}
+40000000-0000-4000-8000-000000000002\t10000000-0000-4000-8000-000000000002\t30000000-0000-4000-8000-000000000002\tcreated\tsession.beta.algebra\t${PRISTINE_STUDENT_METADATA}
 \\.
 COPY desmoslock_v2.tests (id, workspace_id, created_by_profile_id, title, seed_key, lifecycle, revision, created_at, opened_at, ended_at, creation_request_id) FROM stdin;
 30000000-0000-4000-8000-000000000001\t10000000-0000-4000-8000-000000000001\t20000000-0000-4000-8000-000000000003\tSynthetic Alpha Algebra Test\ttest.alpha.algebra\tdraft\t1\t2000-01-01 00:00:00+00\t\\N\t\\N\t\\N
@@ -544,6 +573,31 @@ test("Postgres adapter keeps credentials out of argv and exposes only symbolic d
   assert.equal(calls[4].environment.PGSSLROOTCERT, undefined);
   const observationQuery = calls[0].arguments.at(-1);
   const transactionInput = calls[4].input.toString("utf8");
+  const studentCopyBlock = syntheticArchiveSql()
+    .toString("utf8")
+    .match(/COPY desmoslock_v2\.student_sessions [\s\S]*?\n\\\.\n/u)?.[0];
+  assert.equal(typeof studentCopyBlock, "string");
+  assert.ok(transactionInput.includes(studentCopyBlock));
+  for (const field of [
+    "synthetic_display_name",
+    "device_session_id",
+    "device_public_key",
+    "capability_digest",
+    "capability_issued_at",
+    "capability_expires_at",
+    "reconnect_digest",
+    "reconnect_expires_at",
+    "join_request_id",
+    "join_operation_digest",
+    "join_admission_mode",
+    "join_material_digest",
+    "rotation_request_id",
+    "rotation_operation_digest",
+    "previous_reconnect_digest",
+  ]) {
+    assert.ok(observationQuery.includes(`${field} is null`));
+    assert.ok(transactionInput.includes(`${field} is null`));
+  }
   const testCopyBlock = syntheticArchiveSql()
     .toString("utf8")
     .match(/COPY desmoslock_v2\.tests [\s\S]*?\n\\\.\n/u)?.[0];
@@ -717,7 +771,99 @@ test("Postgres adapter rejects hostile archive contents before any database conn
     "COPY desmoslock_v2.tests (id, workspace_id, created_by_profile_id, title, seed_key, lifecycle, revision, created_at, opened_at, ended_at, creation_request_id) FROM stdin;";
   const testRow =
     "30000000-0000-4000-8000-000000000001\t10000000-0000-4000-8000-000000000001\t20000000-0000-4000-8000-000000000003\tSynthetic Alpha Algebra Test\ttest.alpha.algebra\tdraft\t1\t2000-01-01 00:00:00+00\t\\N\t\\N\t\\N";
+  const studentHeader = STUDENT_COPY_HEADER;
+  const studentRow = validSql
+    .split("\n")
+    .find((row) => row.startsWith("40000000-0000-4000-8000-000000000001\t"));
+  assert.equal(typeof studentRow, "string");
   const hostileArchives = {
+    "stale five-column StudentSession COPY layout": validSql
+      .replace(
+        studentHeader,
+        "COPY desmoslock_v2.student_sessions (id, workspace_id, test_id, state, seed_key) FROM stdin;",
+      )
+      .replaceAll(`\t${PRISTINE_STUDENT_METADATA}\n`, "\n"),
+    "extra StudentSession COPY column": validSql.replace(
+      studentHeader,
+      studentHeader.replace(
+        "previous_reconnect_digest)",
+        "previous_reconnect_digest, unexpected)",
+      ),
+    ),
+    "reordered StudentSession COPY columns": validSql.replace(
+      studentHeader,
+      studentHeader.replace("epoch, revision", "revision, epoch"),
+    ),
+    "missing StudentSession row value": validSql.replace(
+      studentRow,
+      studentRow.slice(0, -3),
+    ),
+    "extra StudentSession row value": validSql.replace(
+      studentRow,
+      `${studentRow}\t\\N`,
+    ),
+    ...Object.fromEntries(
+      ["active", "removed", "readmitted", "forfeited", "Created"].map(
+        (value) => [
+          `runtime StudentSession state ${value}`,
+          archiveWithRowValue(validSql, studentRow, 3, value),
+        ],
+      ),
+    ),
+    ...Object.fromEntries(
+      [0, 1, 2, 3, 4].map((column) => [
+        `null required StudentSession field ${column}`,
+        archiveWithRowValue(validSql, studentRow, column, "\\N"),
+      ]),
+    ),
+    ...Object.fromEntries(
+      [5, 9, 10, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24].flatMap(
+        (column) =>
+          [
+            "NULL",
+            "",
+            "runtime-authority",
+            "a1000000-0000-4000-8000-000000000001",
+            "a".repeat(64),
+          ].map((value, index) => [
+            `nonnull StudentSession authority ${column} variant ${index + 1}`,
+            archiveWithRowValue(validSql, studentRow, column, value),
+          ]),
+      ),
+    ),
+    ...Object.fromEntries(
+      [7, 8].flatMap((column) =>
+        ["\\N", "", "0", "2", "01", "1.0", "+1", "1e0"].map((value, index) => [
+          `noncanonical StudentSession revision or epoch ${column} variant ${index + 1}`,
+          archiveWithRowValue(validSql, studentRow, column, value),
+        ]),
+      ),
+    ),
+    ...Object.fromEntries(
+      ["\\N", "", "1", "00", "0.0", "+0", "-0"].map((value, index) => [
+        `nonpristine StudentSession counter ${index + 1}`,
+        archiveWithRowValue(validSql, studentRow, 11, value),
+      ]),
+    ),
+    ...Object.fromEntries(
+      ["\\N", "", "{NULL}", "{2000-01-01}", "{ }"].map((value, index) => [
+        `nonpristine StudentSession allowance ${index + 1}`,
+        archiveWithRowValue(validSql, studentRow, 12, value),
+      ]),
+    ),
+    ...Object.fromEntries(
+      [
+        "\\N",
+        "",
+        "2000-01-01T00:00:00.000000Z",
+        "1999-12-31 19:00:00-05",
+        "2000-01-01 00:00:00.000001+00",
+      ].map((value, index) => [
+        `noncanonical StudentSession timestamp ${index + 1}`,
+        archiveWithRowValue(validSql, studentRow, 6, value),
+      ]),
+    ),
+
     "altered foundation marker": validSql.replace(
       "desmoslock-v2-foundation",
       "altered-foundation",

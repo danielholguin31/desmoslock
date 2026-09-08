@@ -1081,6 +1081,7 @@ describe("Test workspace controller", () => {
         kind: "fresh_authorized",
         access: access(),
       });
+      expect(h.controller.getSnapshot().kind).toBe("busy");
       const explicit = h.controller.dispatch({ type: "refresh" });
       pending.resolve(await response.promise);
       await Promise.all([user, quiet, explicit]);
@@ -1095,4 +1096,504 @@ describe("Test workspace controller", () => {
         );
     },
   );
+  it.each([
+    "ready",
+    "confirming_end",
+    "conflict",
+    "create_unconfirmed",
+    "read_unavailable_initial",
+    "read_unavailable_settled",
+  ] as const)(
+    "quiet lifecycle rename retains %s throughout a held read",
+    async (state) => {
+      const h = harness();
+      if (state === "read_unavailable_initial") {
+        h.list.mockResolvedValueOnce(null);
+        await h.controller.dispatch({ type: "load" });
+      } else {
+        await select(h);
+        if (state === "confirming_end") {
+          await action(h.controller, "open_test");
+          await action(h.controller, "review_end");
+        } else if (state === "conflict") {
+          await h.controller.dispatch({
+            type: "edit_title",
+            value: "Private draft",
+          });
+          h.setRows([row(1, { title: "Other title", revision: 2 })]);
+          await h.controller.dispatch({ type: "refresh" });
+        } else if (state === "create_unconfirmed") {
+          await h.controller.dispatch({
+            type: "edit_create_title",
+            value: "Maybe created",
+          });
+          h.create.mockResolvedValueOnce(null);
+          await action(h.controller, "create_test");
+        } else if (state === "read_unavailable_settled") {
+          h.list.mockResolvedValueOnce(null);
+          await h.controller.dispatch({ type: "refresh" });
+        }
+      }
+      const kind = state.startsWith("read_unavailable")
+        ? "read_unavailable"
+        : state;
+      expect(h.controller.getSnapshot().kind).toBe(kind);
+      const snapshots: string[] = [];
+      h.controller.subscribe((snapshot) => snapshots.push(snapshot.kind));
+      const pending = deferred<unknown>();
+      h.list.mockImplementationOnce(() => pending.promise);
+      const count = h.list.mock.calls.length;
+      const renamed = access(authority, 2, "Renamed School");
+      h.set({ kind: "ready", access: renamed });
+      const quiet = h.controller.refreshFromStaff({
+        kind: "fresh_authorized",
+        access: renamed,
+      });
+      await vi.waitFor(() => expect(h.list).toHaveBeenCalledTimes(count + 1));
+      expect(h.controller.getSnapshot()).toMatchObject({ kind });
+      const held = h.controller.getSnapshot();
+      expect(
+        "data" in held
+          ? held.data.school
+          : "school" in held
+            ? held.school
+            : null,
+      ).toEqual(renamed.school);
+      expect(snapshots).not.toContain("busy");
+      expect(snapshots).not.toContain("loading");
+      pending.resolve(
+        h
+          .rows()
+          .toSorted((a, b) => b.id.localeCompare(a.id))
+          .map(raw),
+      );
+      await quiet;
+      expect(h.controller.getSnapshot().kind).toBe(
+        kind === "read_unavailable" ? "ready" : kind,
+      );
+      expect(snapshots).not.toContain("busy");
+      expect(snapshots).not.toContain("loading");
+    },
+  );
+  it("quiet lifecycle reads retain typing in enabled title fields", async () => {
+    const h = harness();
+    await select(h);
+    const pending = deferred<unknown>();
+    h.list.mockImplementationOnce(() => pending.promise);
+    const quiet = h.controller.refreshFromStaff({
+      kind: "fresh_authorized",
+      access: access(),
+    });
+    await vi.waitFor(() => expect(h.list).toHaveBeenCalledTimes(3));
+    await h.controller.dispatch({
+      type: "edit_title",
+      value: "Typing during refresh",
+    });
+    await h.controller.dispatch({
+      type: "edit_create_title",
+      value: "New creation draft",
+    });
+    expect(data(h.controller)).toMatchObject({
+      titleDraft: "Typing during refresh",
+      createDraft: "New creation draft",
+    });
+    pending.resolve([raw(row())]);
+    await quiet;
+    expect(data(h.controller)).toMatchObject({
+      titleDraft: "Typing during refresh",
+      createDraft: "New creation draft",
+    });
+    expect(h.controller.getSnapshot().kind).toBe("ready");
+  });
+  it("explicit Refresh promotes the same quiet read and blocks edits and writes until settlement", async () => {
+    const h = harness();
+    await select(h);
+    const pending = deferred<unknown>();
+    h.list.mockImplementationOnce(() => pending.promise);
+    const quiet = h.controller.refreshFromStaff({
+      kind: "fresh_authorized",
+      access: access(),
+    });
+    await vi.waitFor(() => expect(h.list).toHaveBeenCalledTimes(3));
+    expect(h.controller.getSnapshot().kind).toBe("ready");
+    const explicit = h.controller.dispatch({ type: "refresh" });
+    expect(h.controller.getSnapshot().kind).toBe("busy");
+    await h.controller.dispatch({ type: "edit_title", value: "Blocked input" });
+    await action(h.controller, "open_test");
+    expect(data(h.controller).titleDraft).toBe("Test 1");
+    expect(h.open).not.toHaveBeenCalled();
+    expect(h.list).toHaveBeenCalledTimes(3);
+    const alsoQuiet = h.controller.refreshFromStaff({
+      kind: "fresh_authorized",
+      access: access(),
+    });
+    expect(h.controller.getSnapshot().kind).toBe("busy");
+    pending.resolve([raw(row())]);
+    await Promise.all([quiet, explicit, alsoQuiet]);
+    expect(h.list).toHaveBeenCalledTimes(3);
+    expect(h.controller.getSnapshot().kind).toBe("ready");
+  });
+  it("an initial quiet read still projects loading until data arrives", async () => {
+    const h = harness();
+    const pending = deferred<unknown>();
+    h.list.mockImplementationOnce(() => pending.promise);
+    const quiet = h.controller.refreshFromStaff({
+      kind: "fresh_authorized",
+      access: access(),
+    });
+    await vi.waitFor(() => expect(h.list).toHaveBeenCalledTimes(1));
+    expect(h.controller.getSnapshot().kind).toBe("loading");
+    pending.resolve([raw(row())]);
+    await quiet;
+    expect(h.controller.getSnapshot().kind).toBe("ready");
+  });
+  it("a title mutation releases the quiet read before fresh preflight and rejects its late higher facts", async () => {
+    const h = harness();
+    await select(h);
+    await h.controller.dispatch({
+      type: "edit_title",
+      value: "Captured draft",
+    });
+    const pending = deferred<unknown>();
+    h.capture.mockResolvedValueOnce({
+      status: "ready",
+      authorityHandle: "quiet-read-handle",
+    });
+    h.list.mockImplementationOnce(() => pending.promise);
+    const quiet = h.controller.refreshFromStaff({
+      kind: "fresh_authorized",
+      access: access(),
+    });
+    await vi.waitFor(() => expect(h.list).toHaveBeenCalledTimes(3));
+    const fresh = deferred<StaffProductRefreshResult>();
+    h.refresh.mockImplementationOnce(() => {
+      expect(h.release).toHaveBeenCalledWith("quiet-read-handle");
+      return fresh.promise;
+    });
+    const write = action(h.controller, "save_title");
+    expect(h.controller.getSnapshot()).toMatchObject({
+      kind: "busy",
+      operation: "save_title",
+      phase: "verifying",
+    });
+    const verifying = h.controller.getSnapshot();
+    await h.controller.dispatch({
+      type: "edit_title",
+      value: "Blocked after capture",
+    });
+    pending.resolve([
+      raw(row(1, { title: "Obsolete higher result", revision: 99 })),
+    ]);
+    await quiet;
+    expect(h.controller.getSnapshot()).toBe(verifying);
+    expect(data(h.controller).selected?.revision).toBe(1);
+    fresh.resolve({ kind: "fresh_authorized", access: access() });
+    await write;
+    expect(h.title).toHaveBeenCalledExactlyOnceWith(
+      {
+        schoolId: authority.schoolId,
+        testId: id(1),
+        title: "Captured draft",
+        expectedTestRevision: 1,
+      },
+      handle,
+    );
+    expect(data(h.controller).selected).toMatchObject({
+      title: "Captured draft",
+      revision: 2,
+    });
+    expect(
+      h.release.mock.calls.filter(([value]) => value === "quiet-read-handle"),
+    ).toHaveLength(1);
+  });
+  it("a mutation can obsolete a pending quiet capture and releases its late handle without read egress", async () => {
+    const h = harness();
+    await select(h);
+    await h.controller.dispatch({ type: "edit_title", value: "New intent" });
+    const pending = deferred<unknown>();
+    h.capture.mockImplementationOnce(() => pending.promise);
+    const quiet = h.controller.refreshFromStaff({
+      kind: "fresh_authorized",
+      access: access(),
+    });
+    await vi.waitFor(() => expect(h.capture).toHaveBeenCalledTimes(3));
+    await action(h.controller, "save_title");
+    expect(h.title).toHaveBeenCalledTimes(1);
+    const settled = h.controller.getSnapshot();
+    const listCount = h.list.mock.calls.length;
+    pending.resolve({
+      status: "ready",
+      authorityHandle: "obsolete-late-capture",
+    });
+    await quiet;
+    expect(h.controller.getSnapshot()).toBe(settled);
+    expect(h.list).toHaveBeenCalledTimes(listCount);
+    expect(
+      h.release.mock.calls.filter(
+        ([value]) => value === "obsolete-late-capture",
+      ),
+    ).toHaveLength(1);
+  });
+  it("a late cancelled quiet detail cannot replace an off-page target after its title mutation", async () => {
+    const h = harness(Array.from({ length: 51 }, (_, i) => row(i + 1)));
+    await select(h, id(51));
+    await h.controller.dispatch({ type: "next_page" });
+    await h.controller.dispatch({
+      type: "edit_title",
+      value: "Off-page draft",
+    });
+    const pending = deferred<unknown>();
+    h.capture.mockResolvedValueOnce({
+      status: "ready",
+      authorityHandle: "quiet-detail-handle",
+    });
+    h.detail.mockImplementationOnce(() => pending.promise);
+    const details = h.detail.mock.calls.length;
+    const quiet = h.controller.refreshFromStaff({
+      kind: "fresh_authorized",
+      access: access(),
+    });
+    await vi.waitFor(() => expect(h.detail).toHaveBeenCalledTimes(details + 1));
+    await action(h.controller, "save_title");
+    expect(h.release).toHaveBeenCalledWith("quiet-detail-handle");
+    expect(h.title).toHaveBeenCalledExactlyOnceWith(
+      {
+        schoolId: authority.schoolId,
+        testId: id(51),
+        title: "Off-page draft",
+        expectedTestRevision: 1,
+      },
+      handle,
+    );
+    const settled = h.controller.getSnapshot();
+    expect(data(h.controller).selected).toMatchObject({
+      id: id(51),
+      title: "Off-page draft",
+      revision: 2,
+    });
+    pending.resolve([
+      raw(row(51, { title: "Late obsolete detail", revision: 99 })),
+    ]);
+    await quiet;
+    expect(h.controller.getSnapshot()).toBe(settled);
+    await h.controller.dispatch({ type: "refresh" });
+    expect(data(h.controller).selected).toMatchObject({
+      id: id(51),
+      title: "Off-page draft",
+      revision: 2,
+    });
+    expect(h.title).toHaveBeenCalledTimes(1);
+  });
+  it("End confirmation can cancel a quiet read while retaining the exact reviewed revision", async () => {
+    const h = harness([
+      row(1, { lifecycle: "open", openedAt: "2026-09-08T11:00:00.000000Z" }),
+    ]);
+    await select(h);
+    await action(h.controller, "review_end");
+    const pending = deferred<unknown>();
+    h.list.mockImplementationOnce(() => pending.promise);
+    const listCount = h.list.mock.calls.length;
+    const quiet = h.controller.refreshFromStaff({
+      kind: "fresh_authorized",
+      access: access(),
+    });
+    await vi.waitFor(() => expect(h.list).toHaveBeenCalledTimes(listCount + 1));
+    await action(h.controller, "confirm_end");
+    expect(h.end).toHaveBeenCalledExactlyOnceWith(
+      {
+        schoolId: authority.schoolId,
+        testId: id(1),
+        expectedTestRevision: 1,
+      },
+      handle,
+    );
+    const ended = h.controller.getSnapshot();
+    pending.resolve([
+      raw(
+        row(1, { lifecycle: "open", openedAt: "2026-09-08T11:00:00.000000Z" }),
+      ),
+    ]);
+    await quiet;
+    expect(h.controller.getSnapshot()).toBe(ended);
+    expect(data(h.controller).selected?.lifecycle).toBe("ended");
+  });
+  it("provider session replacement while a quiet read is pending still rejects a new write synchronously", async () => {
+    const h = harness();
+    await select(h);
+    await h.controller.dispatch({ type: "edit_title", value: "Old SID draft" });
+    const pending = deferred<unknown>();
+    h.list.mockImplementationOnce(() => pending.promise);
+    const quiet = h.controller.refreshFromStaff({
+      kind: "fresh_authorized",
+      access: access(),
+    });
+    await vi.waitFor(() => expect(h.list).toHaveBeenCalledTimes(3));
+    const captures = h.capture.mock.calls.length;
+    const refreshes = h.refresh.mock.calls.length;
+    h.setLive({
+      kind: "ready",
+      access: access({
+        ...authority,
+        providerSessionId: "51000000-0000-4000-8000-000000000002",
+      }),
+    });
+    await action(h.controller, "save_title");
+    expect(h.refresh).toHaveBeenCalledTimes(refreshes);
+    expect(h.capture).toHaveBeenCalledTimes(captures);
+    expect(h.title).not.toHaveBeenCalled();
+    const replaced = h.controller.getSnapshot();
+    expect(replaced.kind).toBe("loading");
+    pending.resolve([raw(row(1, { title: "Old SID facts", revision: 99 }))]);
+    await quiet;
+    expect(h.controller.getSnapshot()).toBe(replaced);
+  });
+  it.each([
+    "cancel_end",
+    "use_current_test",
+    "keep_title_draft",
+    "start_new_test",
+  ] as const)(
+    "local %s remains meaningful during a quiet read without new egress",
+    async (type) => {
+      const h = harness();
+      await select(h);
+      if (type === "cancel_end") {
+        await action(h.controller, "open_test");
+        await action(h.controller, "review_end");
+      } else if (type === "start_new_test") {
+        await h.controller.dispatch({
+          type: "edit_create_title",
+          value: "Uncertain draft",
+        });
+        h.create.mockResolvedValueOnce(null);
+        await action(h.controller, "create_test");
+      } else {
+        await h.controller.dispatch({
+          type: "edit_title",
+          value: "Private title",
+        });
+        h.setRows([row(1, { title: "Current server title", revision: 2 })]);
+        await h.controller.dispatch({ type: "refresh" });
+      }
+      const stale = h.controller.getSnapshot().revision;
+      const pending = deferred<unknown>();
+      h.list.mockImplementationOnce(() => pending.promise);
+      const renamed = access(authority, 2, "New School label");
+      h.set({ kind: "ready", access: renamed });
+      const listCount = h.list.mock.calls.length;
+      const quiet = h.controller.refreshFromStaff({
+        kind: "fresh_authorized",
+        access: renamed,
+      });
+      await vi.waitFor(() =>
+        expect(h.list).toHaveBeenCalledTimes(listCount + 1),
+      );
+      const captures = h.capture.mock.calls.length;
+      const snapshot = h.controller.getSnapshot();
+      await h.controller.dispatch({ type, snapshotRevision: stale });
+      expect(h.controller.getSnapshot()).toBe(snapshot);
+      await action(h.controller, type);
+      expect(h.controller.getSnapshot().kind).toBe("ready");
+      expect(h.capture).toHaveBeenCalledTimes(captures);
+      expect(h.list).toHaveBeenCalledTimes(listCount + 1);
+      expect(h.end).not.toHaveBeenCalled();
+      expect(h.title).not.toHaveBeenCalled();
+      pending.resolve(h.rows().map(raw));
+      await quiet;
+      expect(h.controller.getSnapshot().kind).toBe("ready");
+      if (type === "keep_title_draft")
+        expect(data(h.controller).titleDraft).toBe("Private title");
+      if (type === "use_current_test")
+        expect(data(h.controller).titleDraft).toBe("Current server title");
+      if (type === "start_new_test") {
+        expect(data(h.controller).createDraft).toBe("");
+        expect(h.create).toHaveBeenCalledTimes(1);
+      }
+    },
+  );
+  it.each(["save_title", "end"] as const)(
+    "quiet reads surface a real %s target conflict only when changed facts arrive",
+    async (operation) => {
+      const original =
+        operation === "end"
+          ? row(1, {
+              lifecycle: "open",
+              openedAt: "2026-09-08T11:00:00.000000Z",
+            })
+          : row();
+      const h = harness([original]);
+      await select(h);
+      if (operation === "end") await action(h.controller, "review_end");
+      else
+        await h.controller.dispatch({
+          type: "edit_title",
+          value: "Retained draft",
+        });
+      const pending = deferred<unknown>();
+      h.list.mockImplementationOnce(() => pending.promise);
+      const listCount = h.list.mock.calls.length;
+      const quiet = h.controller.refreshFromStaff({
+        kind: "fresh_authorized",
+        access: access(),
+      });
+      await vi.waitFor(() =>
+        expect(h.list).toHaveBeenCalledTimes(listCount + 1),
+      );
+      expect(h.controller.getSnapshot().kind).toBe(
+        operation === "end" ? "confirming_end" : "ready",
+      );
+      pending.resolve([
+        raw({ ...original, revision: 2, title: "Changed target" }),
+      ]);
+      await quiet;
+      expect(h.controller.getSnapshot()).toMatchObject({
+        kind: "conflict",
+        operation,
+      });
+      if (operation === "save_title")
+        expect(data(h.controller).titleDraft).toBe("Retained draft");
+      expect(h.title).not.toHaveBeenCalled();
+      expect(h.end).not.toHaveBeenCalled();
+    },
+  );
+  it("explicit selection replaces a quiet read and its late response cannot revive the old selection", async () => {
+    const h = harness([row(1), row(2)]);
+    await select(h);
+    const pending = deferred<unknown>();
+    h.list.mockImplementationOnce(() => pending.promise);
+    const quiet = h.controller.refreshFromStaff({
+      kind: "fresh_authorized",
+      access: access(),
+    });
+    await vi.waitFor(() => expect(h.list).toHaveBeenCalledTimes(3));
+    await h.controller.dispatch({ type: "select_test", testId: id(2) });
+    const selected = h.controller.getSnapshot();
+    expect(data(h.controller).selected?.id).toBe(id(2));
+    pending.resolve([
+      raw(row(2)),
+      raw(row(1, { title: "Late selection", revision: 99 })),
+    ]);
+    await quiet;
+    expect(h.controller.getSnapshot()).toBe(selected);
+  });
+  it("synchronous access loss during explicit promotion leaves no live read or rejected dispatch", async () => {
+    const h = harness();
+    await select(h);
+    const pending = deferred<unknown>();
+    h.list.mockImplementationOnce(() => pending.promise);
+    const quiet = h.controller.refreshFromStaff({
+      kind: "fresh_authorized",
+      access: access(),
+    });
+    await vi.waitFor(() => expect(h.list).toHaveBeenCalledTimes(3));
+    h.controller.subscribe((snapshot) => {
+      if (snapshot.kind === "busy") h.set({ kind: "unavailable" });
+    });
+    const explicit = h.controller.dispatch({ type: "refresh" });
+    expect(h.controller.getSnapshot().kind).toBe("unavailable");
+    pending.resolve([raw(row())]);
+    await expect(Promise.all([quiet, explicit])).resolves.toHaveLength(2);
+    expect(h.controller.getSnapshot().kind).toBe("unavailable");
+    expect(h.list).toHaveBeenCalledTimes(3);
+  });
 });

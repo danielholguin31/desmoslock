@@ -1,3 +1,4 @@
+import { createStaffAuthSessionStorageFixture } from "./helpers/staff-auth-session-storage-fixture.js";
 import { createClient } from "@supabase/supabase-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -173,7 +174,15 @@ function session(
     expires_in: 3_600,
     refresh_token: `synthetic-test-workspace-${account}-refresh`,
     token_type: "bearer",
-    user: { id: accounts[account] },
+    user: {
+      id: accounts[account],
+      email: account === "A" ? "owner-a@example.test" : "owner-b@example.test",
+      email_confirmed_at: "2026-09-01T00:00:00.000Z",
+      aud: "authenticated",
+      app_metadata: {},
+      user_metadata: {},
+      created_at: "2026-09-01T00:00:00.000Z",
+    },
   };
 }
 
@@ -291,11 +300,13 @@ async function harness() {
     let responseBody: BodyInit = body;
     if (gate?.stage === "body") {
       let cancelled = false;
+      let finished = false;
       responseBody = new ReadableStream<Uint8Array>({
         start(controller) {
           controller.enqueue(new TextEncoder().encode(body.slice(0, 1)));
           gate.finishBody = () => {
-            if (cancelled) return;
+            if (cancelled || finished) return;
+            finished = true;
             controller.enqueue(new TextEncoder().encode(body.slice(1)));
             controller.close();
           };
@@ -314,21 +325,17 @@ async function harness() {
     Object.defineProperty(response, "url", { value: url.href });
     return response;
   };
+  const sessionStorage = createStaffAuthSessionStorageFixture(
+    storageKey,
+    storage,
+  );
   const client = createClient(backend, publishableKey, {
     auth: {
       autoRefreshToken: false,
       detectSessionInUrl: false,
       persistSession: true,
       storageKey,
-      storage: {
-        getItem: (key) => storage.get(key) ?? null,
-        setItem: (key, value) => {
-          storage.set(key, value);
-        },
-        removeItem: (key) => {
-          storage.delete(key);
-        },
-      },
+      storage: sessionStorage,
     },
     global: { fetch: intercepted },
   });
@@ -340,6 +347,7 @@ async function harness() {
   const schema = vi.spyOn(client, "schema").mockReturnValue(database);
   const invoke = vi.spyOn(client.functions, "invoke");
   const port = createSupabaseStaffAuthPort({
+    sessionStorage,
     client: client as unknown as SupabaseStaffAuthClient,
     fetch: intercepted,
     origin: "https://app.example.test",
@@ -354,13 +362,17 @@ async function harness() {
     expect(getUser).not.toHaveBeenCalled();
     expect(sdkRpc).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();
-    expect(schema).toHaveBeenCalledOnce();
+    expect(schema).not.toHaveBeenCalled();
   });
   return {
     getSession,
+    sessionStorage,
     sessions,
     replaceSession(variant: SessionVariant) {
-      storage.set(storageKey, JSON.stringify(sessions[variant]));
+      return sessionStorage.setItem(
+        storageKey,
+        JSON.stringify(sessions[variant]),
+      );
     },
     sessionUnchanged: (variant: SessionVariant) =>
       storage.get(storageKey) === JSON.stringify(sessions[variant]),
@@ -382,7 +394,10 @@ async function harness() {
       outcome = value;
     },
     replaceAccount(account: Account) {
-      storage.set(storageKey, JSON.stringify(sessions[account]));
+      return sessionStorage.setItem(
+        storageKey,
+        JSON.stringify(sessions[account]),
+      );
     },
     replacementUnchanged: () =>
       storage.get(storageKey) === JSON.stringify(sessions.B),
@@ -410,9 +425,49 @@ async function harness() {
 }
 
 describe("installed SDK Test workspace authority", () => {
+  describe.each(["A2", "B"] as const)("committed replacement %s", (variant) => {
+    it.each(["held read", "completed read"] as const)(
+      "blocks a new mutation after a %s and preserves replacement bytes/version",
+      async (timing) => {
+        const h = await harness();
+        const handle = await h.capture();
+        const gate =
+          timing === "held read" ? h.hold(operations[0].path) : undefined;
+        const pendingRead = h.port.readSchoolTests(
+          { schoolId, before: null },
+          handle,
+        );
+        if (gate !== undefined) await gate.entered.promise;
+        else await expect(pendingRead).resolves.toEqual([row]);
+        await h.sessionStorage.setItem(
+          storageKey,
+          JSON.stringify(h.sessions[variant]),
+        );
+        const replacement = await h.sessionStorage.readSessionSnapshot();
+        gate?.release();
+        if (gate !== undefined) expect.soft(await pendingRead).toBeNull();
+        expect.soft(await h.port.endTest(target, handle)).toBeNull();
+        expect
+          .soft(
+            h
+              .rpcRequests()
+              .filter(
+                ({ request }) =>
+                  new URL(request.url).pathname === operations[6].path,
+              ),
+          )
+          .toEqual([]);
+        expect(await h.sessionStorage.readSessionSnapshot()).toEqual(
+          replacement,
+        );
+        expect(h.sessionUnchanged(variant)).toBe(true);
+      },
+    );
+  });
+
   it("refuses same-account replacement S2 before capture with no read or write egress and recovers with fresh expected S2", async () => {
     const h = await harness();
-    h.replaceSession("A2");
+    await h.replaceSession("A2");
     await expect(
       h.port.captureTestWorkspaceAuthority(accounts.A, providerSessionIds.A),
     ).resolves.toEqual({ status: "unavailable" });
@@ -438,12 +493,11 @@ describe("installed SDK Test workspace authority", () => {
   });
 
   it.each(operations)(
-    "accepts renewed S1 for $name and sends only that token after storage becomes S2",
+    "accepts renewed S1 at capture and sends the exact $name request",
     async (operation) => {
       const h = await harness();
-      h.replaceSession("AR");
+      await h.replaceSession("AR");
       const handle = await h.capture();
-      h.replaceSession("A2");
       await expect(operation.invoke(h.port, handle)).resolves.toEqual(
         operation.response,
       );
@@ -456,50 +510,56 @@ describe("installed SDK Test workspace authority", () => {
         ),
       ).toBe(true);
       expect(h.rpcRequests()[0]?.body).toEqual(operation.body);
-      expect(h.sessionUnchanged("A2")).toBe(true);
+      expect(h.sessionUnchanged("AR")).toBe(true);
     },
   );
 
-  describe.each(["during verification", "after capture"] as const)(
-    "same-account S2 replaces storage %s",
-    (timing) => {
-      it.each(operations)("keeps original S1 for $name", async (operation) => {
-        const h = await harness();
-        const gate =
-          timing === "during verification"
-            ? h.hold("/auth/v1/user")
-            : undefined;
-        const capture = h.capture();
-        let handle: string;
-        if (gate !== undefined) {
-          await gate.entered.promise;
-          h.replaceSession("A2");
-          gate.release();
-          handle = await capture;
-        } else {
-          handle = await capture;
-          h.replaceSession("A2");
-        }
-        await expect(operation.invoke(h.port, handle)).resolves.toEqual(
-          operation.response,
-        );
-        expect(h.requests).toHaveLength(2);
-        expect(
-          h.requests.every(
-            ({ request }) =>
-              request.headers.get("authorization") ===
-              `Bearer ${h.sessions.A.access_token}`,
-          ),
-        ).toBe(true);
-        expect(h.rpcRequests()[0]?.body).toEqual(operation.body);
-        expect(h.sessionUnchanged("A2")).toBe(true);
-      });
+  describe.each(["A2", "B"] as const)(
+    "committed session %s replaces captured A",
+    (variant) => {
+      describe.each(["during verification", "after capture"] as const)(
+        "replacement %s",
+        (timing) => {
+          it.each(operations)(
+            "denies $name before egress",
+            async (operation) => {
+              const h = await harness();
+              if (timing === "during verification") {
+                const gate = h.hold("/auth/v1/user");
+                const capture = h.port.captureTestWorkspaceAuthority(
+                  accounts.A,
+                  providerSessionIds.A,
+                );
+                await gate.entered.promise;
+                await h.replaceSession(variant);
+                gate.release();
+                await expect(capture).resolves.toEqual({
+                  status: "unavailable",
+                });
+              } else {
+                const handle = await h.capture();
+                await h.replaceSession(variant);
+                await expect(
+                  operation.invoke(h.port, handle),
+                ).resolves.toBeNull();
+              }
+              expect(h.requests).toHaveLength(1);
+              expect(h.rpcRequests()).toEqual([]);
+              expect(h.requests[0]?.request.headers.get("authorization")).toBe(
+                `Bearer ${h.sessions.A.access_token}`,
+              );
+              expect(h.getSession).toHaveBeenCalledOnce();
+              expect(h.sessionUnchanged(variant)).toBe(true);
+            },
+          );
+        },
+      );
     },
   );
 
   it("refuses replacement B before capture without any verification, read or write egress", async () => {
     const h = await harness();
-    h.replaceAccount("B");
+    await h.replaceAccount("B");
     await expect(
       h.port.captureTestWorkspaceAuthority(accounts.A, providerSessionIds.A),
     ).resolves.toEqual({ status: "unavailable" });
@@ -508,44 +568,55 @@ describe("installed SDK Test workspace authority", () => {
     expect(h.replacementUnchanged()).toBe(true);
   });
 
-  describe.each(["during verification", "after capture"] as const)(
-    "SDK storage becomes B %s",
-    (timing) => {
-      it.each(operations)(
-        "sends the exact $name request using only captured token A",
-        async (operation) => {
-          const h = await harness();
-          let handle: string;
-          if (timing === "during verification") {
-            const gate = h.hold("/auth/v1/user");
-            const capture = h.capture();
-            await gate.entered.promise;
-            h.replaceAccount("B");
-            gate.release();
-            handle = await capture;
-          } else {
-            handle = await h.capture();
-            h.replaceAccount("B");
-          }
-          await expect(operation.invoke(h.port, handle)).resolves.toEqual(
-            operation.response,
+  describe.each(["headers", "body"] as const)(
+    "RPC already entered fetch; held %s",
+    (stage) => {
+      describe.each(["A2", "B"] as const)(
+        "replacement %s commits",
+        (variant) => {
+          it.each(operations)(
+            "keeps exact captured A for $name, discards its result and never retries",
+            async (operation) => {
+              const h = await harness();
+              vi.useFakeTimers();
+              const handle = await h.capture();
+              const gate = h.hold(operation.path, stage);
+              const pending = operation.invoke(h.port, handle);
+              if (stage === "body") await vi.advanceTimersByTimeAsync(4_000);
+              await gate.entered.promise;
+              await h.replaceSession(variant);
+              const replacement = await h.sessionStorage.readSessionSnapshot();
+              gate.release();
+              await expect(pending).resolves.toBeNull();
+              const sent = h.rpcRequests()[0]!;
+              expect(h.requests.map(({ account }) => account)).toEqual([
+                "A",
+                "A",
+              ]);
+              expect(h.rpcRequests()).toHaveLength(1);
+              expect(sent.request.url).toBe(`${backend}${operation.path}`);
+              expect(sent.body).toEqual(operation.body);
+              expect(Object.fromEntries(sent.request.headers)).toEqual({
+                apikey: publishableKey,
+                authorization: `Bearer ${h.sessions.A.access_token}`,
+                "content-profile": "desmoslock_v2",
+                "content-type": "application/json",
+              });
+              expect(sent.request.method).toBe("POST");
+              expect(sent.request.credentials).toBe("omit");
+              expect(sent.request.redirect).toBe("error");
+              expect(sent.request.referrerPolicy).toBe("no-referrer");
+              expect(h.getSession).toHaveBeenCalledOnce();
+              await expect(
+                operation.invoke(h.port, handle),
+              ).resolves.toBeNull();
+              expect(h.requests).toHaveLength(2);
+              expect(await h.sessionStorage.readSessionSnapshot()).toEqual(
+                replacement,
+              );
+              expect(h.sessionUnchanged(variant)).toBe(true);
+            },
           );
-          expect(h.requests.map(({ account }) => account)).toEqual(["A", "A"]);
-          const sent = h.rpcRequests()[0]!;
-          expect(sent.request.url).toBe(`${backend}${operation.path}`);
-          expect(sent.body).toEqual(operation.body);
-          expect(Object.fromEntries(sent.request.headers)).toEqual({
-            apikey: publishableKey,
-            authorization: `Bearer ${h.sessions.A.access_token}`,
-            "content-profile": "desmoslock_v2",
-            "content-type": "application/json",
-          });
-          expect(sent.request.method).toBe("POST");
-          expect(sent.request.credentials).toBe("omit");
-          expect(sent.request.redirect).toBe("error");
-          expect(sent.request.referrerPolicy).toBe("no-referrer");
-          expect(h.getSession).toHaveBeenCalledOnce();
-          expect(h.replacementUnchanged()).toBe(true);
         },
       );
     },
@@ -599,7 +670,6 @@ describe("installed SDK Test workspace authority", () => {
       if (kind === "expired") await vi.advanceTimersByTimeAsync(60_000);
       if (kind === "released") h.port.releaseTestWorkspaceAuthority(handle);
       if (kind === "reset") h.port.clearPrivateAuthContinuations();
-      h.replaceAccount("B");
       const args =
         kind === "missing"
           ? []
@@ -615,7 +685,7 @@ describe("installed SDK Test workspace authority", () => {
       expect(h.requests).toHaveLength(1);
       expect(h.rpcRequests()).toEqual([]);
       expect(h.getSession).toHaveBeenCalledOnce();
-      expect(h.replacementUnchanged()).toBe(true);
+      expect(h.sessionUnchanged("A")).toBe(true);
     },
   );
 
@@ -660,7 +730,6 @@ describe("installed SDK Test workspace authority", () => {
         async (operation) => {
           const h = await harness();
           const handle = await h.capture();
-          h.replaceAccount("B");
           h.setOutcome(outcome);
           // Valid JSON with unknown fields/codes stays raw for the contract parser.
           await expect(operation.invoke(h.port, handle)).resolves.toEqual(
@@ -669,6 +738,13 @@ describe("installed SDK Test workspace authority", () => {
           expect(h.rpcRequests()).toHaveLength(1);
           expect(h.rpcRequests()[0]?.account).toBe("A");
           expect(h.getSession).toHaveBeenCalledOnce();
+          await h.replaceAccount("B");
+          const replacement = await h.sessionStorage.readSessionSnapshot();
+          await expect(operation.invoke(h.port, handle)).resolves.toBeNull();
+          expect(h.rpcRequests()).toHaveLength(1);
+          expect(await h.sessionStorage.readSessionSnapshot()).toEqual(
+            replacement,
+          );
           expect(h.replacementUnchanged()).toBe(true);
         },
       );
@@ -706,7 +782,7 @@ describe("installed SDK Test workspace authority", () => {
         void pending.then(settled);
         if (stage === "body") await vi.advanceTimersByTimeAsync(4_000);
         const signal = await gate.entered.promise;
-        h.replaceAccount("B");
+        await h.replaceAccount("B");
         await vi.advanceTimersByTimeAsync(stage === "body" ? 999 : 4_999);
         expect(settled).not.toHaveBeenCalled();
         await vi.advanceTimersByTimeAsync(1);
@@ -724,7 +800,7 @@ describe("installed SDK Test workspace authority", () => {
 
         // Recovery is a new explicitly captured read, never a mutation replay.
         if (handle !== null) h.port.releaseTestWorkspaceAuthority(handle);
-        h.replaceAccount("A");
+        await h.replaceAccount("A");
         const fresh = await h.capture();
         await expect(
           h.port.readSchoolTests({ schoolId, before: null }, fresh),

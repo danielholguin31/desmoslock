@@ -3,7 +3,7 @@ begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path = extensions, public, pg_catalog;
 
-select plan(50);
+select plan(52);
 
 select has_table('desmoslock_v2', 'internal_release_attestation', 'migration attestation exists');
 select has_table('desmoslock_v2', 'local_restore_target_attestation', 'local restore attestation exists');
@@ -49,7 +49,7 @@ select results_eq(
     select id, schema_generation, migration_set_sha256
     from desmoslock_v2.internal_release_attestation
   $$,
-  $$values (1::smallint, 4, '5cf17174bf44e491a6bd78fe540326d8bdee169518d75c8082e5bd9b833f3f62')$$,
+  $$values (1::smallint, 4, 'aa32ed754c87e7987199dbd6c5f685ae65236ba3f94921157fc6cb07ce67b308')$$,
   'the database records the exact versioned migration attestation'
 );
 select is_empty(
@@ -136,12 +136,43 @@ select results_eq(
   $$,
   'each School has one deterministic synthetic Student Session'
 );
+select ok(
+  (select count(*) = 2 and coalesce(bool_and(
+    state = 'created' and created_at = '2000-01-01T00:00:00.000000Z'::timestamptz
+    and epoch = 1 and revision = 1 and last_accepted_proof_counter = 0
+    and maintenance_accepted_at = '{}'::timestamptz[]
+    and synthetic_display_name is null
+    and device_session_id is null
+    and device_public_key is null
+    and capability_digest is null
+    and capability_issued_at is null
+    and capability_expires_at is null
+    and reconnect_digest is null
+    and reconnect_expires_at is null
+    and join_request_id is null
+    and join_operation_digest is null
+    and join_admission_mode is null
+    and join_material_digest is null
+    and rotation_request_id is null
+    and rotation_operation_digest is null
+    and previous_reconnect_digest is null
+  ), false) from desmoslock_v2.student_sessions),
+  'both seeded Student Sessions have every pristine metadata field and no runtime authority'
+);
+select ok(
+  not exists (select 1 from desmoslock_v2.student_join_materials)
+    and not exists (select 1 from desmoslock_v2.student_device_bindings)
+    and not exists (select 1 from desmoslock_v2.student_bootstrap_challenges)
+    and not exists (select 1 from desmoslock_v2.student_bootstrap_limits),
+  'all four runtime StudentSession authority stores start empty'
+);
+
 select results_eq(
   $$
     select schema_generation, fixture_version, fixture_digest, migration_set_sha256, fixture_valid
     from desmoslock_v2.internal_baseline_status()
   $$,
-  $$values (4, 'internal-baseline-v2', 'f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201', '5cf17174bf44e491a6bd78fe540326d8bdee169518d75c8082e5bd9b833f3f62', true)$$,
+  $$values (4, 'internal-baseline-v2', 'f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201', 'aa32ed754c87e7987199dbd6c5f685ae65236ba3f94921157fc6cb07ce67b308', true)$$,
   'service baseline status verifies the pinned fixture digest'
 );
 

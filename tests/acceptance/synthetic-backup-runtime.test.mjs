@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import "./staff-suite-diagnostics-reporter.test.mjs";
 import {
   boundedCommand,
   connectionFromStatus,
   FixtureFailure,
   isExpectedInvalidRootCertificate,
   nativeClientWrapper,
+  requireRestoredWorkerReceipt,
+  runStaffSuite,
   sourceConfiguration,
+  StaffSuiteCommandFailure,
   withSessionTimezone,
 } from "./synthetic-backup-runtime.mjs";
 
@@ -15,6 +22,56 @@ const failure = (code) => (error) =>
   error instanceof FixtureFailure &&
   error.code === code &&
   error.message === code;
+
+test("worker receipt requires explicit metadata and empty authority-store evidence", () => {
+  const receipt = Object.freeze({
+    status: "restored",
+    tlsVerified: true,
+    distinctSessionTimezones: true,
+    testMetadataPreserved: true,
+    studentMetadataPreserved: true,
+    studentRuntimeStoresEmpty: true,
+    secondRestoreRefused: true,
+    restoreMarkerRetired: true,
+    artifactSha256: "a".repeat(64),
+    manifestSha256: "b".repeat(64),
+  });
+  assert.doesNotThrow(() => requireRestoredWorkerReceipt(receipt));
+  for (const field of [
+    "tlsVerified",
+    "distinctSessionTimezones",
+    "testMetadataPreserved",
+    "studentMetadataPreserved",
+    "studentRuntimeStoresEmpty",
+    "secondRestoreRefused",
+    "restoreMarkerRetired",
+  ]) {
+    const missing = { ...receipt };
+    delete missing[field];
+    assert.throws(
+      () => requireRestoredWorkerReceipt(missing),
+      failure("ROUNDTRIP_RECEIPT_INVALID"),
+    );
+    for (const value of [false, null, "true", 1]) {
+      assert.throws(
+        () => requireRestoredWorkerReceipt({ ...receipt, [field]: value }),
+        failure("ROUNDTRIP_RECEIPT_INVALID"),
+      );
+    }
+  }
+  for (const invalid of [
+    null,
+    undefined,
+    { ...receipt, status: "failed" },
+    { ...receipt, artifactSha256: "synthetic-private-value" },
+    { ...receipt, manifestSha256: "synthetic-private-value" },
+  ]) {
+    assert.throws(
+      () => requireRestoredWorkerReceipt(invalid),
+      failure("ROUNDTRIP_RECEIPT_INVALID"),
+    );
+  }
+});
 
 test("bounded command returns stdout without relaying stderr", async () => {
   const result = await boundedCommand(
@@ -39,6 +96,127 @@ test("nonzero subprocess output remains behind a static error", async () => {
       { timeoutMs: 5_000 },
     ),
     failure("FIXTURE_COMMAND_FAILED"),
+  );
+});
+
+test("only the real staff npm invocation returns closed failure locations after context wrapping", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "staff-failure-"));
+  try {
+    await fs.mkdir(path.join(directory, "tests/acceptance"), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(directory, "package.json"),
+      JSON.stringify({
+        private: true,
+        scripts: {
+          "test:staff-auth": "npm run test:staff-auth:composed",
+          "test:staff-auth:composed":
+            "node --test tests/acceptance/staff-auth-composed.test.mjs",
+        },
+      }),
+    );
+    await fs.writeFile(
+      path.join(directory, "tests/acceptance/staff-auth-composed.test.mjs"),
+      "import test from 'node:test';\n" +
+        "test('synthetic-private-name', () => { console.log('synthetic-private-output'); console.error('synthetic-private-stderr'); throw new Error('synthetic-private-error'); });\n",
+    );
+    await fs.writeFile(path.join(directory, "user.npmrc"), "");
+    await fs.writeFile(path.join(directory, "global.npmrc"), "");
+    const npm =
+      process.env.npm_execpath ?? path.join(path.dirname(node), "npm");
+    let executablePath = `${path.dirname(node)}:/usr/bin:/bin`;
+    if (process.env.npm_execpath) {
+      const bin = path.join(directory, "bin");
+      await fs.mkdir(bin);
+      const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+      await fs.writeFile(
+        path.join(bin, "npm"),
+        `#!/bin/sh\nexec ${shellQuote(node)} ${shellQuote(npm)} "$@"\n`,
+        { mode: 0o700 },
+      );
+      executablePath = `${bin}:${executablePath}`;
+    }
+    const environment = {
+      PATH: executablePath,
+      NODE_OPTIONS: "--max-old-space-size=128",
+      NPM_CONFIG_USERCONFIG: path.join(directory, "user.npmrc"),
+      NPM_CONFIG_GLOBALCONFIG: path.join(directory, "global.npmrc"),
+      NPM_CONFIG_CACHE: path.join(directory, "npm-cache"),
+      NPM_CONFIG_OFFLINE: "true",
+      NPM_CONFIG_UPDATE_NOTIFIER: "false",
+      NPM_CONFIG_AUDIT: "false",
+      NPM_CONFIG_FUND: "false",
+      NPM_CONFIG_LOGS_MAX: "0",
+      COREPACK_ENABLE_NETWORK: "0",
+    };
+    await assert.rejects(
+      runStaffSuite(npm, {
+        cwd: directory,
+        environment,
+        timeoutMs: 10_000,
+      }),
+      (error) => {
+        assert.ok(error instanceof StaffSuiteCommandFailure);
+        assert.equal(error.code, "FIXTURE_COMMAND_FAILED");
+        assert.equal(error.diagnostics.stage, "composed");
+        assert.deepEqual(error.diagnostics.records, [
+          {
+            file: "tests/acceptance/staff-auth-composed.test.mjs",
+            line: 2,
+            outcome: "failed",
+          },
+        ]);
+        assert.equal(error.diagnostics.eventCounters.failed, 1);
+        const afterCleanup = error
+          .withCode(`STAFF_SUITE_${error.code}`)
+          .withCode("STAFF_SUITE_FIXTURE_COMMAND_FAILED_AND_CLEANUP_FAILED");
+        assert.ok(afterCleanup instanceof StaffSuiteCommandFailure);
+        assert.equal(
+          afterCleanup.code,
+          "STAFF_SUITE_FIXTURE_COMMAND_FAILED_AND_CLEANUP_FAILED",
+        );
+        assert.deepEqual(afterCleanup.diagnostics, error.diagnostics);
+        assert.equal(
+          JSON.stringify(afterCleanup).includes("synthetic-private"),
+          false,
+        );
+        return true;
+      },
+    );
+    assert.equal(environment.NODE_OPTIONS, "--max-old-space-size=128");
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("public command options cannot enable staff failure projection", async () => {
+  await assert.rejects(
+    boundedCommand(
+      node,
+      [
+        "-e",
+        "process.stdout.write('[desmoslock-staff-suite:v1] '+JSON.stringify({file:'tests/acceptance/staff-auth-composed.test.mjs',line:2,outcome:'failed'})+'\\n');process.exit(1)",
+      ],
+      { timeoutMs: 5_000, staffSuiteDiagnostics: true },
+    ),
+    (error) => {
+      assert.ok(error instanceof FixtureFailure);
+      assert.equal(error instanceof StaffSuiteCommandFailure, false);
+      assert.equal(error.code, "FIXTURE_COMMAND_FAILED");
+      assert.equal("diagnostics" in error, false);
+      return true;
+    },
+  );
+});
+
+test("a conflicting reporter configuration fails before staff-suite egress", () => {
+  assert.throws(
+    () =>
+      runStaffSuite("/not-an-executable", {
+        environment: { NODE_OPTIONS: "--test-reporter=spec" },
+      }),
+    failure("STAFF_SUITE_REPORTER_CONFIGURATION_INVALID"),
   );
 });
 
