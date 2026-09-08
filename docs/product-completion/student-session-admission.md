@@ -86,21 +86,32 @@ establish assessment protection, recovery or OS-backed encryption acceptance.
 ## Migration and synthetic restore
 
 The eleventh migration is
-`supabase/migrations/20260908000300_student_session_admission.sql`. Its selected
-aggregate is
+`supabase/migrations/20260908000300_student_session_admission.sql`. Its historical
+aggregate remains
 `aa32ed754c87e7987199dbd6c5f685ae65236ba3f94921157fc6cb07ce67b308`.
-All ten predecessors retain their bytes and historical pins; schema generation
+Its raw SHA-256 remains
+`448d7697885eae07f04cc3b89531b7b3711e71fa67d56d80ac891df63458fb06`.
+The current twelfth migration is
+`supabase/migrations/20260908000400_student_protection_evidence.sql`, with raw
+SHA-256 `1543ee8cf236c4c43aa9331ec228eac9f99c68d4460d3023f68ce3a196fa2633`
+and current normalized aggregate
+`80c2720ff352c721298e5814715374bf9e2a9c1152bbf2d2761ad781265f8701`.
+All eleven predecessors retain their bytes and historical pins; schema generation
 `4`, fixture digest and seven-table archive are unchanged. See the
 [exact inventory and normalization](reproducible-supabase.md#versioned-inputs).
 
 The Student archive has 25 columns, including 20 added fields. Both fixed seed
 sessions remain `created`, with the same IDs/School/Test/seed keys, creation time
 `2000-01-01T00:00:00.000000Z`, epoch/revision one, counter zero, empty maintenance
-allowance and null added name/device/credential/receipt fields. The four runtime
+allowance and null added name/device/credential/receipt fields. The six runtime
 stores `student_join_materials`, `student_device_bindings`,
-`student_bootstrap_challenges` and `student_bootstrap_limits` must be empty in
+`student_bootstrap_challenges`, `student_bootstrap_limits`,
+`student_device_proof_state` and `student_protection_events` must be empty in
 pristine sources and targets and are never exported. The adapter must reject
 wrong order/arity/nullability, nonpristine values and runtime table content.
+The two evidence tables retain shared proof counters and historical client reports;
+their addition does not change the seven-table archive or fixture framing/digest.
+This source update supplies no new provider, SQL or restored-runtime receipt.
 
 ## Required evidence
 

@@ -1,4 +1,6 @@
 import fs from "node:fs/promises";
+import { constants } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,6 +12,10 @@ import {
   parsePublicBackendConfiguration,
   parsePublicStaffAuthConfiguration,
 } from "../packages/contracts/dist/index.js";
+import {
+  parseClientBuildInputs,
+  canonicalClientBuildInputs,
+} from "../packages/contracts/dist/build-identity.js";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const repositoryRoot = path.resolve(path.dirname(scriptPath), "..");
@@ -154,6 +160,90 @@ export function createAppBrowserDefine(appName, configuration) {
   };
 }
 
+/** Pure provenance serialization; the collector verifies source and tools. */
+export function createDesktopBuildContext(inputs, configuration) {
+  const browserDefine = createAppBrowserDefine("desktop", configuration);
+  let identity = null;
+  if (inputs !== null) {
+    const parsed = parseClientBuildInputs(inputs);
+    const backend = {
+      environment: JSON.parse(
+        browserDefine.__DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT__,
+      ),
+      url: JSON.parse(browserDefine.__DESMOSLOCK_PUBLIC_BACKEND_URL__),
+    };
+    const backendDigest = createHash("sha256")
+      .update(JSON.stringify(backend))
+      .digest("hex");
+    if (
+      parsed === null ||
+      parsed.backendConfigurationSha256 !== backendDigest
+    ) {
+      throw new Error("Candidate build inputs are invalid");
+    }
+    identity = Object.freeze({
+      schemaVersion: 1,
+      sourceRepository: parsed.sourceRepository,
+      sourceCommit: parsed.sourceCommit,
+      sourceTree: parsed.sourceTree,
+      packageLockSha256: parsed.packageLockSha256,
+      buildId: createHash("sha256")
+        .update(canonicalClientBuildInputs(parsed))
+        .digest("hex"),
+    });
+  }
+  const identityJson = JSON.stringify(identity);
+  return Object.freeze({
+    identity,
+    identityJson,
+    mainDefine: Object.freeze({
+      ...browserDefine,
+      __DESMOSLOCK_CLIENT_BUILD_IDENTITY__: identityJson,
+    }),
+  });
+}
+
+async function readCandidateInputs(argument) {
+  const relative = path.relative(repositoryRoot, path.resolve(argument));
+  if (
+    !/^artifacts\/unsigned-artifact-runs\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/build-inputs\.json$/u.test(
+      relative,
+    )
+  ) {
+    throw new Error("Candidate inputs must use the owned run path");
+  }
+  let current = repositoryRoot;
+  for (const part of relative.split(path.sep).slice(0, -1)) {
+    current = path.join(current, part);
+    const stat = await fs.lstat(current);
+    if (!stat.isDirectory() || stat.isSymbolicLink())
+      throw new Error("Candidate input ancestor is invalid");
+  }
+  const handle = await fs.open(
+    path.resolve(argument),
+    constants.O_RDONLY | constants.O_NOFOLLOW,
+  );
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 16384)
+      throw new Error("Candidate input file is invalid");
+    const inputs = parseClientBuildInputs(
+      JSON.parse(await handle.readFile("utf8")),
+    );
+    if (
+      inputs === null ||
+      inputs.platform !== process.platform ||
+      inputs.architecture !== process.arch ||
+      inputs.tools.node.version !== process.versions.node
+    ) {
+      throw new Error("Candidate inputs do not match the build runtime");
+    }
+    return inputs;
+  } finally {
+    await handle.close();
+  }
+}
+
 async function runCommandLine() {
   const appName = process.argv[2];
   if (appName !== "desktop" && appName !== "web") {
@@ -178,6 +268,29 @@ async function runCommandLine() {
             process.env.DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
         };
   const browserDefine = createAppBrowserDefine(appName, rawBuildConfiguration);
+  const candidateArguments = process.argv
+    .slice(3)
+    .filter((argument) => argument.startsWith("--candidate-inputs"));
+  const candidateIndex = process.argv.indexOf("--candidate-inputs", 3);
+  if (
+    candidateArguments.length > 1 ||
+    (candidateArguments.length === 1 && candidateIndex < 0) ||
+    (candidateIndex >= 0 &&
+      (appName !== "desktop" ||
+        !productionMode ||
+        process.argv[candidateIndex + 1] === undefined))
+  ) {
+    throw new Error("Candidate build arguments are invalid");
+  }
+  const desktopContext =
+    appName === "desktop"
+      ? createDesktopBuildContext(
+          candidateIndex < 0
+            ? null
+            : await readCandidateInputs(process.argv[candidateIndex + 1]),
+          rawBuildConfiguration,
+        )
+      : null;
 
   await fs.rm(outputRoot, { force: true, recursive: true });
   await fs.mkdir(outputRoot, { recursive: true });
@@ -187,7 +300,7 @@ async function runCommandLine() {
     await buildDesktopAACProtection();
     await build({
       bundle: true,
-      define: browserDefine,
+      define: desktopContext.mainDefine,
       entryPoints: [path.join(sourceRoot, "main.ts")],
       external: ["electron"],
       format: "esm",
@@ -229,6 +342,11 @@ async function runCommandLine() {
       ),
     );
     await fs.mkdir(path.join(outputRoot, "calculator"), { recursive: true });
+    await fs.writeFile(
+      path.join(outputRoot, "build-identity.json"),
+      `${desktopContext.identityJson}\n`,
+      { flag: "wx" },
+    );
     await Promise.all(
       ["index.html", "styles.css"].map((filename) =>
         fs.copyFile(

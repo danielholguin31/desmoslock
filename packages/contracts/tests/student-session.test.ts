@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   parseIssueTestJoinCodeRequest,
   parseIssueTestJoinCodeRpcResult,
+  parseNativeProtectionEvidenceSummary,
   parsePrepareStudentReadmissionRequest,
   parsePrepareStudentReadmissionRpcResult,
   parseReadStudentSessionsRequest,
@@ -160,6 +161,12 @@ const staffSession: StaffStudentSession = {
   epoch: 1,
   revision: 1,
   createdAt,
+  evidenceSummary: {
+    reportCount: 0,
+    failureCount: 0,
+    latestReceivedAt: null,
+    latestReportedEpoch: null,
+  },
 };
 const view: StudentSessionViewState = {
   revision: 0,
@@ -169,6 +176,49 @@ const view: StudentSessionViewState = {
   calculatorEligible: false,
   pendingOperation: null,
 };
+
+describe("historical native evidence summary", () => {
+  it("requires an exact honest empty or received-report summary", () => {
+    const empty = staffSession.evidenceSummary;
+    expect(parseNativeProtectionEvidenceSummary(empty)).toEqual(empty);
+    const received = {
+      reportCount: 3,
+      failureCount: 2,
+      latestReceivedAt: createdAt,
+      latestReportedEpoch: 1,
+    };
+    expect(
+      parseStaffStudentSession({
+        ...staffSession,
+        epoch: 2,
+        evidenceSummary: received,
+      })?.evidenceSummary,
+    ).toEqual(received);
+    expect(
+      parseStaffStudentSession({
+        ...staffSession,
+        evidenceSummary: { ...received, latestReportedEpoch: 2 },
+      }),
+    ).toBeNull();
+    for (const invalid of [
+      { ...empty, reportCount: -0 },
+      { ...empty, reportCount: -1 },
+      { ...empty, failureCount: 1 },
+      { ...empty, latestReceivedAt: createdAt },
+      { ...empty, latestReportedEpoch: 1 },
+      { ...received, reportCount: 0 },
+      { ...received, failureCount: 4 },
+      { ...received, reportCount: Number.MAX_SAFE_INTEGER + 1 },
+      { ...received, latestReceivedAt: null },
+      { ...received, latestReportedEpoch: null },
+      { ...received, protected: true },
+    ])
+      expect(parseNativeProtectionEvidenceSummary(invalid)).toBeNull();
+    expect(
+      parseStaffStudentSession({ ...staffSession, evidenceSummary: undefined }),
+    ).toBeNull();
+  });
+});
 
 function sqlRow(
   session: StaffStudentSession = staffSession,
@@ -183,6 +233,7 @@ function sqlRow(
     epoch: session.epoch,
     session_revision: session.revision,
     created_at: session.createdAt,
+    evidence_summary: session.evidenceSummary,
   };
 }
 function mutationRow(

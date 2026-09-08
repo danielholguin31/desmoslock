@@ -9,6 +9,9 @@ import {
   type KeyObject,
 } from "node:crypto";
 import {
+  encodeNativeProtectionFactDigestInput,
+  encodeStudentEvidenceBatchDigestInput,
+  encodeStudentEvidenceProof,
   encodeStudentLogicalOperation,
   encodeStudentMaterialDigestInput,
   encodeStudentProofEnvelope,
@@ -17,12 +20,17 @@ import {
   parseStudentSecret,
   parseStudentSessionScope,
   parseStudentUuid,
+  parseNativeEvidenceOriginBuild,
+  parseNativeProtectionFactPrefix,
   type PublicBackendConfiguration,
+  type NativeEvidenceOriginBuild,
+  type NativeProtectionFact,
   type StudentBootstrapEnvelope,
   type StudentBootstrapProof,
   type StudentLogicalOperation,
   type StudentMaintenanceEnvelope,
   type StudentMaintenanceProof,
+  type StudentSessionScope,
 } from "@desmoslock/contracts";
 
 /** Main-only material. The private key belongs exclusively in the encrypted record. */
@@ -49,6 +57,17 @@ export type StudentMaintenanceSigningInput = Omit<
   "apiOrigin" | "keyThumbprint"
 >;
 
+export interface StudentEvidenceContentInput {
+  readonly scope: StudentSessionScope;
+  readonly originBuild: NativeEvidenceOriginBuild;
+  readonly facts: readonly NativeProtectionFact[];
+}
+export interface StudentEvidenceSigningInput {
+  readonly scope: StudentSessionScope;
+  readonly batchDigest: string;
+  readonly counter: number;
+}
+
 export interface StudentSessionCrypto {
   createEnrollment(): StudentSessionDevice;
   createCandidates(): StudentSessionCandidates;
@@ -64,6 +83,17 @@ export interface StudentSessionCrypto {
   signMaintenance(
     device: StudentSessionDevice,
     envelope: StudentMaintenanceSigningInput,
+  ): StudentMaintenanceProof;
+  digestEvidence(
+    device: StudentSessionDevice,
+    input: StudentEvidenceContentInput,
+  ): {
+    readonly batchDigest: string;
+    readonly contentDigests: readonly string[];
+  };
+  signEvidence(
+    device: StudentSessionDevice,
+    input: StudentEvidenceSigningInput,
   ): StudentMaintenanceProof;
   validateDevice(device: unknown): StudentSessionDevice | null;
   validateCandidates(candidates: unknown): StudentSessionCandidates | null;
@@ -99,6 +129,8 @@ const maintenanceKeys = [
   "logicalOperationDigest",
   "counter",
 ] as const;
+const evidenceContentKeys = ["scope", "originBuild", "facts"] as const;
+const evidenceSigningKeys = ["scope", "batchDigest", "counter"] as const;
 const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 function invalidInput(): Error {
@@ -306,6 +338,80 @@ export function createStudentSessionCrypto(
         keyThumbprint: imported.device.keyThumbprint,
       });
       if (bytes === null || input.kind !== "maintenance") throw invalidInput();
+      return Object.freeze({
+        counter: Number(input.counter),
+        signature: sign(null, bytes, imported.privateKey).toString("base64url"),
+      });
+    },
+    digestEvidence(
+      device: StudentSessionDevice,
+      envelope: StudentEvidenceContentInput,
+    ) {
+      const imported = importDevice(device);
+      const input = exactSnapshot(envelope, evidenceContentKeys);
+      if (imported === null || input === null) throw invalidInput();
+      const scope = parseStudentSessionScope(input.scope);
+      const originBuild = parseNativeEvidenceOriginBuild(input.originBuild);
+      const facts = parseNativeProtectionFactPrefix(input.facts);
+      if (
+        scope === null ||
+        scope.deviceSessionId !== imported.device.deviceSessionId ||
+        originBuild === null ||
+        facts === null
+      )
+        throw invalidInput();
+      const contentDigests: string[] = [];
+      // Shared parsers snapshot the entire prefix and original build first so
+      // every content digest and the batch bind the same immutable values.
+      for (const fact of facts) {
+        contentDigests.push(
+          digest(
+            encodeNativeProtectionFactDigestInput({
+              apiOrigin,
+              originalKeyThumbprint: imported.device.keyThumbprint,
+              scope,
+              originBuild,
+              fact,
+            }),
+          ),
+        );
+      }
+      const batchDigest = digest(
+        encodeStudentEvidenceBatchDigestInput({
+          apiOrigin,
+          originalKeyThumbprint: imported.device.keyThumbprint,
+          scope,
+          originBuild,
+          facts,
+          contentDigests,
+        }),
+      );
+      return Object.freeze({
+        batchDigest,
+        contentDigests: Object.freeze(contentDigests),
+      });
+    },
+    signEvidence(
+      device: StudentSessionDevice,
+      envelope: StudentEvidenceSigningInput,
+    ) {
+      const imported = importDevice(device);
+      const input = exactSnapshot(envelope, evidenceSigningKeys);
+      if (imported === null || input === null) throw invalidInput();
+      const scope = parseStudentSessionScope(input.scope);
+      if (
+        scope === null ||
+        scope.deviceSessionId !== imported.device.deviceSessionId
+      )
+        throw invalidInput();
+      const bytes = encodeStudentEvidenceProof({
+        apiOrigin,
+        originalKeyThumbprint: imported.device.keyThumbprint,
+        scope,
+        batchDigest: input.batchDigest,
+        counter: input.counter,
+      });
+      if (bytes === null) throw invalidInput();
       return Object.freeze({
         counter: Number(input.counter),
         signature: sign(null, bytes, imported.privateKey).toString("base64url"),

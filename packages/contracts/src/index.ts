@@ -13,6 +13,56 @@ export interface RepositoryBuildIdentity {
   readonly version: string;
 }
 
+export {
+  parseClientBuildIdentity,
+  parseClientBuildInputs,
+  canonicalClientBuildIdentity,
+  canonicalClientBuildInputs,
+} from "./build-identity.js";
+export type {
+  ClientBuildIdentity,
+  ClientBuildInputs,
+} from "./build-identity.js";
+export {
+  parseNativeProtectionCategories,
+  parseNativeProtectionFact,
+  parseNativeEvidenceOriginBuild,
+  parseNativeProtectionFactPrefix,
+  parseStudentEvidenceRequest,
+  parseStudentEvidenceResult,
+  encodeNativeProtectionFactDigestInput,
+  encodeStudentEvidenceBatchDigestInput,
+  encodeStudentEvidenceProof,
+  parseStaffStudentProtectionEvent,
+  parseStudentProtectionEventPageCursor,
+  parseReadStudentProtectionEventsRequest,
+  parseStaffStudentProtectionEventPage,
+  parseReadStudentProtectionEventsRpcResult,
+} from "./native-protection-evidence.js";
+export type {
+  NativeProtectionFactSlot,
+  NativeProtectionFactPhase,
+  NativeProtectionEvent,
+  NativeProtectionCause,
+  NativeProtectionCategoryStatus,
+  NativeProtectionCategoryCode,
+  NativeProtectionCategoryObservation,
+  NativeProtectionCategories,
+  NativeProtectionFact,
+  NativeEvidenceOriginBuild,
+  StudentEvidenceRequest,
+  NativeEvidenceAcknowledgment,
+  StudentEvidenceAccepted,
+  StudentEvidenceResult,
+  StaffStudentProtectionEvent,
+  StudentProtectionEventPageCursor,
+  ReadStudentProtectionEventsRequest,
+  StaffStudentProtectionEventPage,
+  ReadStudentProtectionEventsResult,
+} from "./native-protection-evidence.js";
+export { parseNativeProtectionEvidenceSummary } from "./student-session.js";
+export type { NativeProtectionEvidenceSummary } from "./student-session.js";
+
 export interface WorkspaceSummary {
   readonly id: string;
   readonly kind: WorkspaceKind;

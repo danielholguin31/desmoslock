@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   IssueTestJoinCodeRequest,
   PrepareStudentReadmissionRequest,
+  ReadStudentProtectionEventsRequest,
   RemoveStudentSessionRequest,
+  StaffStudentProtectionEvent,
   StaffStudentSession,
   StaffTest,
 } from "@desmoslock/contracts";
@@ -58,6 +60,12 @@ function session(
     epoch: 1,
     revision: 1,
     createdAt: "2026-09-08T12:00:00.123456Z",
+    evidenceSummary: {
+      reportCount: 0,
+      failureCount: 0,
+      latestReceivedAt: null,
+      latestReportedEpoch: null,
+    },
     ...overrides,
   };
 }
@@ -101,6 +109,48 @@ function rawSession(row: StaffStudentSession) {
     epoch: row.epoch,
     session_revision: row.revision,
     created_at: row.createdAt,
+    evidence_summary: row.evidenceSummary,
+  };
+}
+function protectionEvent(n = 1): StaffStudentProtectionEvent {
+  return {
+    fact: {
+      sequence: n,
+      eventId: `71000000-0000-4000-8000-${String(n).padStart(12, "0")}`,
+      attemptId: "81000000-0000-4000-8000-000000000001",
+      scope: {
+        schoolId: authority.schoolId,
+        testId: testRow().id,
+        studentSessionId: sessionId(1),
+        deviceSessionId: "61000000-0000-4000-8000-000000000001",
+        epoch: 1,
+      },
+      policyVersion: 1,
+      slot: "engaging",
+      phase: "engaging",
+      nativeEvent: null,
+      nativeSequence: null,
+      categories: {
+        aac: { status: "pending", code: "awaiting_native_begin" },
+        shortcuts: { status: "pending", code: "none" },
+        applications: { status: "pending", code: "none" },
+        persistence: { status: "pending", code: "none" },
+        windowNetwork: { status: "pending", code: "none" },
+      },
+      cause: "none",
+    },
+    originBuild: { kind: "unverified_build" },
+    contentDigest: n.toString(16).padStart(64, "0"),
+    receivedAt: "2026-09-08T12:10:00.123456Z",
+  };
+}
+function rawEvidence(event: StaffStudentProtectionEvent) {
+  return {
+    code: "ok",
+    fact: event.fact,
+    origin_build: event.originBuild,
+    content_digest: event.contentDigest,
+    received_at: event.receivedAt,
   };
 }
 function mutationResult(code: string, fields: Record<string, unknown> = {}) {
@@ -149,6 +199,7 @@ function harness(
   let live = access();
   let test = testRow();
   let rows = initialRows;
+  let events: StaffStudentProtectionEvent[] = [];
   let serial = 0;
   let now = Date.parse("2026-09-08T12:00:00.000Z");
   const refresh = vi.fn(async (): Promise<StaffProductRefreshResult> =>
@@ -182,6 +233,24 @@ function harness(
         .map(rawSession),
   );
   const issued = new Map<string, unknown>();
+  const readEvidence = vi.fn(
+    async (request: ReadStudentProtectionEventsRequest): Promise<unknown> =>
+      events
+        .filter(
+          (event) =>
+            request.before === null ||
+            event.receivedAt < request.before.receivedAt ||
+            (event.receivedAt === request.before.receivedAt &&
+              event.fact.eventId < request.before.eventId),
+        )
+        .toSorted(
+          (a, b) =>
+            b.receivedAt.localeCompare(a.receivedAt) ||
+            b.fact.eventId.localeCompare(a.fact.eventId),
+        )
+        .slice(0, 51)
+        .map(rawEvidence),
+  );
   const issue = vi.fn(
     async (request: IssueTestJoinCodeRequest): Promise<unknown> => {
       const old = issued.get(request.issuanceRequestId);
@@ -256,6 +325,7 @@ function harness(
       releaseStudentSessionAuthority: release,
       readStudentTarget: readTarget,
       readStudentSessions: read,
+      readStudentProtectionEvents: readEvidence,
       issueTestJoinCode: issue,
       removeStudentSession: remove,
       prepareStudentReadmission: prepare,
@@ -278,6 +348,7 @@ function harness(
     release,
     readTarget,
     read,
+    readEvidence,
     issue,
     remove,
     prepare,
@@ -292,6 +363,9 @@ function harness(
     },
     setRows(next: StaffStudentSession[]) {
       rows = next;
+    },
+    setEvents(next: StaffStudentProtectionEvent[]) {
+      events = next;
     },
     setLive(next: StaffProductAccessState, publish = true) {
       live = next;
@@ -313,6 +387,470 @@ function harness(
     },
   };
 }
+
+describe("StudentSession client report history", () => {
+  it.each([
+    ["list", "first"],
+    ["list", "next"],
+    ["history", "first"],
+    ["history", "next"],
+  ] as const)(
+    "preserves an explicit %s-phase %s history page request while canceling passive work",
+    async (phase, direction) => {
+      const h = harness();
+      let captureId = 0;
+      h.capture.mockImplementation(async () => ({
+        status: "ready",
+        authorityHandle: `history-purpose-${++captureId}`,
+      }));
+      h.setEvents(Array.from({ length: 55 }, (_, i) => protectionEvent(i + 1)));
+      await h.load();
+      await h.select();
+      await action(h.controller, "review_issue_code");
+      await action(h.controller, "confirm_review");
+      await action(h.controller, "open_evidence");
+      if (direction === "first")
+        await action(h.controller, "evidence_next_page");
+      const disclosure = visible(h.controller.getSnapshot()).disclosure;
+      const gate = deferred<unknown>();
+      const reads = phase === "list" ? h.read : h.readEvidence;
+      const oldCount = reads.mock.calls.length;
+      reads.mockReturnValueOnce(gate.promise);
+      const passive = h.controller.refreshFromStaff(await h.refresh());
+      await vi.waitFor(() => expect(reads).toHaveBeenCalledTimes(oldCount + 1));
+      const canceledHandle = `history-purpose-${captureId}`;
+      const releases = h.release.mock.calls.length;
+      const displayed = visible(h.controller.getSnapshot()).evidence;
+      if (displayed.kind !== "ready")
+        throw new Error("Expected enabled report controls");
+      const clickedCursor =
+        direction === "first" ? null : displayed.page.nextCursor;
+      await action(
+        h.controller,
+        direction === "first" ? "evidence_first_page" : "evidence_next_page",
+      );
+      expect(h.release.mock.calls.slice(releases)).toContainEqual([
+        canceledHandle,
+      ]);
+      expect(h.readEvidence.mock.calls.at(-1)?.[0].before).toEqual(
+        clickedCursor,
+      );
+      const selected = h.controller.getSnapshot();
+      const reports = visible(selected).evidence;
+      expect(reports.kind === "ready" && reports.page.items).toHaveLength(
+        direction === "first" ? 50 : 5,
+      );
+      expect(visible(selected).disclosure).toBe(disclosure);
+      const historyCount = h.readEvidence.mock.calls.length;
+      const releasesAfter = h.release.mock.calls.length;
+      gate.resolve(
+        phase === "list"
+          ? h.rows().map(rawSession)
+          : [rawEvidence(protectionEvent(direction === "first" ? 5 : 55))],
+      );
+      await passive;
+      expect(h.controller.getSnapshot()).toBe(selected);
+      expect(h.readEvidence).toHaveBeenCalledTimes(historyCount);
+      expect(h.release).toHaveBeenCalledTimes(releasesAfter);
+    },
+  );
+
+  it("keeps received old-admission reports historical without inventing current protection", async () => {
+    const report = protectionEvent();
+    const summary = {
+      reportCount: 1,
+      failureCount: 0,
+      latestReceivedAt: report.receivedAt,
+      latestReportedEpoch: 1,
+    };
+    const h = harness([
+      session(1, { epoch: 3, revision: 3, evidenceSummary: summary }),
+    ]);
+    h.setEvents([report]);
+    await h.load();
+    await h.select();
+    await action(h.controller, "open_evidence");
+    const data = visible(h.controller.getSnapshot());
+    expect(data.selected?.evidenceSummary).toEqual(summary);
+    expect(
+      data.evidence.kind === "ready" &&
+        data.evidence.page.items[0]?.fact.scope.epoch,
+    ).toBe(1);
+    expect(data.selected?.epoch).toBe(3);
+    expect(JSON.stringify(data)).not.toContain('"protected"');
+  });
+
+  it("starts no history read while a Student mutation owns submission", async () => {
+    const h = harness();
+    await h.load();
+    await h.select();
+    await action(h.controller, "review_issue_code");
+    const gate = deferred<void>();
+    const issue = h.issue.getMockImplementation()!;
+    h.issue.mockImplementationOnce(async (request) => {
+      await gate.promise;
+      return issue(request);
+    });
+    const submitting = action(h.controller, "confirm_review");
+    await vi.waitFor(() => expect(h.issue).toHaveBeenCalledOnce());
+    await action(h.controller, "open_evidence");
+    expect(h.readEvidence).not.toHaveBeenCalled();
+    gate.resolve(undefined);
+    await submitting;
+    expect(visible(h.controller.getSnapshot()).evidence).toEqual({
+      kind: "closed",
+    });
+  });
+
+  it("lets explicit Student refresh supersede a held history read and rejects its late result", async () => {
+    const h = harness();
+    await h.load();
+    await h.select();
+    const gate = deferred<unknown>();
+    h.readEvidence.mockReturnValueOnce(gate.promise);
+    const reading = action(h.controller, "open_evidence");
+    await vi.waitFor(() => expect(h.readEvidence).toHaveBeenCalledOnce());
+    h.setEvents([protectionEvent(2)]);
+    await action(h.controller, "refresh");
+    expect(h.read).toHaveBeenCalledTimes(2);
+    expect(h.readEvidence).toHaveBeenCalledTimes(2);
+    const refreshed = h.controller.getSnapshot();
+    gate.resolve([rawEvidence(protectionEvent())]);
+    await reading;
+    expect(h.controller.getSnapshot()).toBe(refreshed);
+  });
+
+  it("queries only an explicitly opened selected panel and preserves exact 50+1 pagination on ended Tests", async () => {
+    const h = harness();
+    h.setTest(
+      testRow({
+        lifecycle: "ended",
+        revision: 3,
+        endedAt: "2026-09-08T12:00:00.123456Z",
+      }),
+    );
+    h.setEvents(Array.from({ length: 55 }, (_, i) => protectionEvent(i + 1)));
+    await h.load();
+    await action(h.controller, "open_evidence");
+    await h.controller.refreshFromStaff(await h.refresh());
+    expect(h.readEvidence).not.toHaveBeenCalled();
+    await h.select();
+    await action(h.controller, "open_evidence");
+    let evidence = visible(h.controller.getSnapshot()).evidence;
+    expect(evidence.kind).toBe("ready");
+    if (evidence.kind !== "ready") throw new Error("Expected history");
+    expect(evidence.page.items).toHaveLength(50);
+    expect(evidence.page.nextCursor).toEqual({
+      receivedAt: "2026-09-08T12:10:00.123456Z",
+      eventId: protectionEvent(6).fact.eventId,
+    });
+    await action(h.controller, "evidence_next_page");
+    evidence = visible(h.controller.getSnapshot()).evidence;
+    expect(evidence.kind === "ready" && evidence.page.items).toHaveLength(5);
+    const request = h.readEvidence.mock.calls.at(-1)?.[0];
+    expect(request?.before).toEqual({
+      receivedAt: "2026-09-08T12:10:00.123456Z",
+      eventId: protectionEvent(6).fact.eventId,
+    });
+    await action(h.controller, "refresh_evidence");
+    expect(h.readEvidence.mock.calls.at(-1)?.[0]).toEqual(request);
+    await h.controller.refreshFromStaff(await h.refresh());
+    expect(h.readEvidence.mock.calls.at(-1)?.[0]).toEqual(request);
+    await action(h.controller, "evidence_first_page");
+    expect(h.readEvidence.mock.calls.at(-1)?.[0].before).toBeNull();
+    await action(h.controller, "close_evidence");
+    expect(visible(h.controller.getSnapshot()).evidence).toEqual({
+      kind: "closed",
+    });
+    const count = h.readEvidence.mock.calls.length;
+    await h.controller.refreshFromStaff(await h.refresh());
+    expect(h.readEvidence).toHaveBeenCalledTimes(count);
+  });
+
+  it("preserves a private review during history and lets confirmation preempt its held read", async () => {
+    const h = harness([session(1, { state: "removed" })]);
+    await h.load();
+    await h.select();
+    await action(h.controller, "review_prepare_readmission");
+    const review = h.controller.getSnapshot();
+    const pending = deferred<unknown>();
+    h.readEvidence.mockReturnValueOnce(pending.promise);
+    const reading = action(h.controller, "open_evidence");
+    await vi.waitFor(() => expect(h.readEvidence).toHaveBeenCalledOnce());
+    const held = h.controller.getSnapshot();
+    expect(held.kind).toBe("review");
+    expect(held.kind === "review" && held.target).toEqual(
+      review.kind === "review" && review.target,
+    );
+    await action(h.controller, "confirm_review");
+    expect(h.prepare).toHaveBeenCalledOnce();
+    expect(h.code).toHaveBeenCalledOnce();
+    expect(visible(h.controller.getSnapshot()).disclosure?.code).toBe(
+      "0123456789AB",
+    );
+    pending.resolve([rawEvidence(protectionEvent())]);
+    await reading;
+    expect(visible(h.controller.getSnapshot()).evidence).toEqual({
+      kind: "closed",
+    });
+    expect(visible(h.controller.getSnapshot()).disclosure?.code).toBe(
+      "0123456789AB",
+    );
+  });
+
+  it.each(["cancel_review", "dismiss_code"] as const)(
+    "keeps %s usable while quiet history is held",
+    async (intent) => {
+      const h = harness();
+      await h.load();
+      await h.select();
+      await action(h.controller, "review_issue_code");
+      if (intent === "dismiss_code")
+        await action(h.controller, "confirm_review");
+      const disclosure = visible(h.controller.getSnapshot()).disclosure;
+      const gate = deferred<unknown>();
+      h.readEvidence.mockReturnValueOnce(gate.promise);
+      const reading = action(h.controller, "open_evidence");
+      await vi.waitFor(() => expect(h.readEvidence).toHaveBeenCalledOnce());
+      expect(visible(h.controller.getSnapshot()).disclosure).toBe(disclosure);
+      await action(h.controller, intent);
+      expect(h.controller.getSnapshot().kind).toBe("ready");
+      expect(visible(h.controller.getSnapshot()).disclosure).toBeNull();
+      const after = h.controller.getSnapshot();
+      gate.resolve([rawEvidence(protectionEvent())]);
+      await reading;
+      expect(h.controller.getSnapshot()).toBe(after);
+    },
+  );
+
+  it("joins an existing shared quiet list read instead of starting another authority operation", async () => {
+    const h = harness();
+    await h.load();
+    await h.select();
+    const gate = deferred<unknown>();
+    h.read.mockReturnValueOnce(gate.promise);
+    const shared = h.controller.refreshFromStaff(await h.refresh());
+    await vi.waitFor(() => expect(h.read).toHaveBeenCalledTimes(2));
+    const captures = h.capture.mock.calls.length;
+    const opening = action(h.controller, "open_evidence");
+    expect(h.controller.getSnapshot().kind).toBe("ready");
+    expect(h.readEvidence).not.toHaveBeenCalled();
+    gate.resolve(h.rows().map(rawSession));
+    await Promise.all([shared, opening]);
+    expect(h.capture).toHaveBeenCalledTimes(captures);
+    expect(h.readEvidence).toHaveBeenCalledOnce();
+    expect(visible(h.controller.getSnapshot()).evidence).toEqual({
+      kind: "ready",
+      page: { items: [], nextCursor: null },
+    });
+  });
+
+  it("keeps ready report controls and confirmed code stable throughout a passive history refresh", async () => {
+    const h = harness();
+    h.setEvents([protectionEvent()]);
+    await h.load();
+    await h.select();
+    await action(h.controller, "review_issue_code");
+    await action(h.controller, "confirm_review");
+    await action(h.controller, "open_evidence");
+    const disclosure = visible(h.controller.getSnapshot()).disclosure;
+    const previous = visible(h.controller.getSnapshot()).evidence;
+    const gate = deferred<unknown>();
+    h.readEvidence.mockReturnValueOnce(gate.promise);
+    const kinds: string[] = [];
+    const unsubscribe = h.controller.subscribe((snapshot) => {
+      if ("data" in snapshot) kinds.push(snapshot.data.evidence.kind);
+    });
+    const shared = h.controller.refreshFromStaff(await h.refresh());
+    await vi.waitFor(() => expect(h.readEvidence).toHaveBeenCalledTimes(2));
+    h.setLive(access(authority, "Renamed School", 2));
+    expect(h.controller.getSnapshot().kind).toBe("ready");
+    expect(visible(h.controller.getSnapshot()).evidence).toBe(previous);
+    expect(visible(h.controller.getSnapshot()).disclosure).toBe(disclosure);
+    gate.resolve([rawEvidence(protectionEvent(2))]);
+    await shared;
+    unsubscribe();
+    expect(kinds).not.toContain("loading");
+    expect(visible(h.controller.getSnapshot()).evidence.kind).toBe("ready");
+    expect(visible(h.controller.getSnapshot()).disclosure).toBe(disclosure);
+    expect(h.issue).toHaveBeenCalledOnce();
+  });
+
+  it("requires current exact action revisions and closes held history without late publication", async () => {
+    const h = harness();
+    await h.load();
+    await h.select();
+    const oldRevision = h.controller.getSnapshot().revision - 1;
+    for (const type of [
+      "open_evidence",
+      "close_evidence",
+      "evidence_first_page",
+      "evidence_next_page",
+      "refresh_evidence",
+    ] as const)
+      await h.controller.dispatch({ type, snapshotRevision: oldRevision });
+    expect(h.readEvidence).not.toHaveBeenCalled();
+    const gate = deferred<unknown>();
+    h.readEvidence.mockReturnValueOnce(gate.promise);
+    const reading = action(h.controller, "open_evidence");
+    await vi.waitFor(() => expect(h.readEvidence).toHaveBeenCalledOnce());
+    await action(h.controller, "close_evidence");
+    const closed = h.controller.getSnapshot();
+    expect(visible(closed).evidence).toEqual({ kind: "closed" });
+    gate.resolve([rawEvidence(protectionEvent())]);
+    await reading;
+    expect(h.controller.getSnapshot()).toBe(closed);
+  });
+
+  it.each(["account", "sid", "school", "pause", "dispose"] as const)(
+    "clears history and rejects a held reply after %s changes",
+    async (change) => {
+      const h = harness();
+      await h.load();
+      await h.select();
+      const gate = deferred<unknown>();
+      h.readEvidence.mockReturnValueOnce(gate.promise);
+      const reading = action(h.controller, "open_evidence");
+      await vi.waitFor(() => expect(h.readEvidence).toHaveBeenCalledOnce());
+      if (change === "account")
+        h.setLive(access({ ...authority, accountId: sessionId(2) }));
+      else if (change === "sid")
+        h.setLive(access({ ...authority, providerSessionId: sessionId(2) }));
+      else if (change === "school")
+        h.setLive(access({ ...authority, schoolId: sessionId(2) }));
+      else if (change === "pause") h.setLive({ kind: "paused", authority });
+      else h.controller.dispose();
+      const after = h.controller.getSnapshot();
+      gate.resolve([rawEvidence(protectionEvent())]);
+      await reading;
+      expect(h.controller.getSnapshot()).toBe(after);
+      expect(JSON.stringify(after)).not.toContain(
+        protectionEvent().fact.eventId,
+      );
+    },
+  );
+
+  it("clears on selected session or admission epoch changes and never adopts the old reply", async () => {
+    const h = harness([session(1), session(2)]);
+    await h.load();
+    await h.select();
+    const gate = deferred<unknown>();
+    h.readEvidence.mockReturnValueOnce(gate.promise);
+    const reading = action(h.controller, "open_evidence");
+    await vi.waitFor(() => expect(h.readEvidence).toHaveBeenCalledOnce());
+    await h.select(sessionId(2));
+    gate.resolve([rawEvidence(protectionEvent())]);
+    await reading;
+    expect(visible(h.controller.getSnapshot()).selected?.id).toBe(sessionId(2));
+    expect(visible(h.controller.getSnapshot()).evidence).toEqual({
+      kind: "closed",
+    });
+    await h.select();
+    h.setEvents([protectionEvent()]);
+    await action(h.controller, "open_evidence");
+    const count = h.readEvidence.mock.calls.length;
+    h.setRows([session(1, { epoch: 2, revision: 2 }), session(2)]);
+    await h.controller.refreshFromStaff(await h.refresh());
+    expect(visible(h.controller.getSnapshot()).evidence).toEqual({
+      kind: "closed",
+    });
+    expect(h.readEvidence).toHaveBeenCalledTimes(count);
+  });
+
+  it.each(["foreign_school", "future_epoch", "extra_field"] as const)(
+    "rejects %s history while retaining only the prior same-selection page",
+    async (malformation) => {
+      const h = harness();
+      h.setEvents([protectionEvent()]);
+      await h.load();
+      await h.select();
+      await action(h.controller, "open_evidence");
+      const previous = visible(h.controller.getSnapshot()).evidence;
+      if (previous.kind !== "ready") throw new Error("Expected history");
+      const event = protectionEvent(2);
+      const raw = rawEvidence({
+        ...event,
+        fact: {
+          ...event.fact,
+          scope: {
+            ...event.fact.scope,
+            ...(malformation === "foreign_school"
+              ? { schoolId: sessionId(2) }
+              : malformation === "future_epoch"
+                ? { epoch: 2 }
+                : {}),
+          },
+        },
+      });
+      h.readEvidence.mockResolvedValueOnce([
+        malformation === "extra_field" ? { ...raw, protected: true } : raw,
+      ]);
+      await action(h.controller, "refresh_evidence");
+      expect(visible(h.controller.getSnapshot()).evidence).toEqual({
+        kind: "unavailable",
+        page: previous.page,
+      });
+    },
+  );
+
+  it("drops previously received history on an authoritative denial and retries only when requested", async () => {
+    const h = harness();
+    h.setEvents([protectionEvent()]);
+    await h.load();
+    await h.select();
+    await action(h.controller, "open_evidence");
+    h.readEvidence.mockResolvedValueOnce([
+      {
+        code: "session_revoked",
+        fact: null,
+        origin_build: null,
+        content_digest: null,
+        received_at: null,
+      },
+    ]);
+    await action(h.controller, "refresh_evidence");
+    expect(visible(h.controller.getSnapshot()).evidence).toEqual({
+      kind: "unavailable",
+      page: null,
+    });
+    expect(h.readEvidence).toHaveBeenCalledTimes(2);
+    await action(h.controller, "refresh_evidence");
+    expect(visible(h.controller.getSnapshot()).evidence.kind).toBe("ready");
+  });
+
+  it("rechecks authority after parsing and before a reentrant publication can issue history", async () => {
+    const h = harness();
+    await h.load();
+    await h.select();
+    let close = true;
+    const unsubscribe = h.controller.subscribe((snapshot) => {
+      if (
+        close &&
+        "data" in snapshot &&
+        snapshot.data.evidence.kind === "loading"
+      ) {
+        close = false;
+        void h.controller.dispatch({
+          type: "close_evidence",
+          snapshotRevision: snapshot.revision,
+        });
+      }
+    });
+    await action(h.controller, "open_evidence");
+    unsubscribe();
+    expect(h.readEvidence).not.toHaveBeenCalled();
+    h.readEvidence.mockResolvedValueOnce([
+      new Proxy(rawEvidence(protectionEvent()), {
+        ownKeys(target) {
+          h.setLive(access({ ...authority, providerSessionId: sessionId(2) }));
+          return Reflect.ownKeys(target);
+        },
+      }),
+    ]);
+    await action(h.controller, "open_evidence");
+    expect(h.controller.getSnapshot().kind).toBe("unavailable");
+  });
+});
 
 describe("StudentSession sibling controller", () => {
   it.each(["join", "readmission"] as const)(

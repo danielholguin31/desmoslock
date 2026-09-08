@@ -2,6 +2,8 @@ import {
   parseStudentChallengeRequest,
   parseStudentChallengeResult,
   parseStudentDigest,
+  parseStudentEvidenceRequest,
+  parseStudentEvidenceResult,
   parseStudentForfeitRequest,
   parseStudentForfeitResult,
   parseStudentJoinRequest,
@@ -15,6 +17,8 @@ import {
   type PublicBackendConfiguration,
   type StudentChallengeRequest,
   type StudentChallengeResult,
+  type StudentEvidenceRequest,
+  type StudentEvidenceResult,
   type StudentForfeitRequest,
   type StudentForfeitResult,
   type StudentJoinRequest,
@@ -59,6 +63,11 @@ export interface StudentSessionTransport {
     request: StudentForfeitRequest,
     signal?: AbortSignal,
   ): Promise<StudentForfeitResult>;
+  evidence(
+    request: StudentEvidenceRequest,
+    expectedContentDigests: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<StudentEvidenceResult>;
 }
 
 const bodyLimit = 8 * 1024;
@@ -67,13 +76,38 @@ const unavailable: StudentSessionUnavailable = Object.freeze({
   status: "unavailable",
   code: "STUDENT_SESSION_UNAVAILABLE",
 });
-type Operation = "challenge" | "join" | "read" | "reconnect" | "forfeit";
+type Operation =
+  "challenge" | "join" | "read" | "reconnect" | "forfeit" | "evidence";
 type Result =
   | StudentChallengeResult
   | StudentJoinResult
   | StudentReadResult
   | StudentReconnectResult
-  | StudentForfeitResult;
+  | StudentForfeitResult
+  | StudentEvidenceResult;
+
+function snapshotEvidenceDigests(value: unknown): readonly string[] | null {
+  try {
+    if (
+      !Array.isArray(value) ||
+      value.length < 1 ||
+      value.length > 8 ||
+      Reflect.ownKeys(value).length !== value.length + 1
+    )
+      return null;
+    const result: string[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, index);
+      if (descriptor === undefined || !("value" in descriptor)) return null;
+      const digest = parseStudentDigest(descriptor.value);
+      if (digest === null) return null;
+      result.push(digest);
+    }
+    return Object.freeze(result);
+  } catch {
+    return null;
+  }
+}
 
 async function readBoundedJson(
   response: Response,
@@ -156,7 +190,8 @@ export function createStudentSessionTransport(
     let body: string;
     try {
       body = JSON.stringify(request);
-      if (Buffer.byteLength(body, "utf8") > bodyLimit) return unavailable;
+      const requestLimit = operation === "evidence" ? 16 * 1024 : bodyLimit;
+      if (Buffer.byteLength(body, "utf8") > requestLimit) return unavailable;
     } catch {
       return unavailable;
     }
@@ -320,6 +355,24 @@ export function createStudentSessionTransport(
         input,
         (value) =>
           input === null ? null : parseStudentForfeitResult(value, input),
+        signal,
+      );
+    },
+    evidence(
+      request: StudentEvidenceRequest,
+      expectedContentDigests: readonly string[],
+      signal?: AbortSignal,
+    ) {
+      const input = parseStudentEvidenceRequest(request);
+      const digests = snapshotEvidenceDigests(expectedContentDigests);
+      const valid = input !== null && digests?.length === input.facts.length;
+      return post(
+        "evidence",
+        valid ? input : null,
+        (value) =>
+          input === null || digests === null
+            ? null
+            : parseStudentEvidenceResult(value, input, digests),
         signal,
       );
     },

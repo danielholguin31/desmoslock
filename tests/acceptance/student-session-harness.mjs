@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -32,7 +33,14 @@ const root = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../..",
 );
-const operations = ["challenge", "join", "read", "reconnect", "forfeit"];
+const operations = [
+  "challenge",
+  "join",
+  "read",
+  "reconnect",
+  "forfeit",
+  "evidence",
+];
 const denied = Object.freeze({
   status: "denied",
   code: "STUDENT_SESSION_DENIED",
@@ -113,8 +121,12 @@ export async function startStudentEdge(serviceKey) {
   const dependencyModule = pathToFileURL(
     path.join(functionsRoot, "_shared/student-session-service.ts"),
   ).href;
+  const evidenceDependencyModule = pathToFileURL(
+    path.join(functionsRoot, "_shared/student-protection-evidence.ts"),
+  ).href;
   const script = `${imports}
 import { createStudentSessionDependencies } from ${JSON.stringify(dependencyModule)};
+import { createStudentEvidenceDependencies } from ${JSON.stringify(evidenceDependencyModule)};
 const reader = Deno.stdin.readable.getReader();
 let runtimeText = "";
 let runtimeBytes = 0;
@@ -135,22 +147,25 @@ if (injection === null || typeof injection !== "object" || Array.isArray(injecti
   Object.keys(injection).length !== 1 || typeof injection.serviceKey !== "string" ||
   injection.serviceKey.length < 20 || injection.serviceKey.length > 16_384) throw new Error("Invalid runtime injection");
 runtimeText = "";
-const handlers = { challenge, join, read, reconnect, forfeit };
+const handlers = { challenge, join, read, reconnect, forfeit, evidence };
 let dependencies;
+let evidenceDependencies;
 const server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen({ port }) {
   const origin = "http://127.0.0.1:" + port;
-  dependencies = createStudentSessionDependencies({
+  const configuration = {
     DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT: "local",
     DESMOSLOCK_PUBLIC_BACKEND_URL: origin,
     DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: ${JSON.stringify(API_ORIGIN)},
     SUPABASE_URL: ${JSON.stringify(API_ORIGIN)},
     SUPABASE_SERVICE_ROLE_KEY: injection.serviceKey
-  });
+  };
+  dependencies = createStudentSessionDependencies(configuration);
+  evidenceDependencies = createStudentEvidenceDependencies(configuration);
   console.log(JSON.stringify({ ready: true, origin }));
 }, onError() { return new Response("unavailable", { status: 503 }); } }, request => {
   const route = new URL(request.url).pathname;
-  const match = /^\\/functions\\/v1\\/student-session-(challenge|join|read|reconnect|forfeit)$/.exec(route);
-  return match ? handlers[match[1]](request, dependencies) : new Response("missing", { status: 404 });
+  const match = /^\\/functions\\/v1\\/student-session-(challenge|join|read|reconnect|forfeit|evidence)$/.exec(route);
+  return match ? handlers[match[1]](request, match[1] === "evidence" ? evidenceDependencies : dependencies) : new Response("missing", { status: 404 });
 });
 await server.finished;
 `;
@@ -645,6 +660,65 @@ commit;`);
         );
       return requestTransport.forfeit(intent.request);
     }
+    function evidence(joined, counter, options = {}) {
+      const scope = options.scope ?? joined.result.scope;
+      const device = options.device ?? joined.device;
+      const originBuild = options.originBuild ?? { kind: "unverified_build" };
+      const facts = options.facts ?? [
+        {
+          sequence: options.sequence ?? 1,
+          eventId: randomUUID(),
+          attemptId: randomUUID(),
+          scope,
+          policyVersion: 1,
+          slot: "engaging",
+          phase: "engaging",
+          nativeEvent: null,
+          nativeSequence: null,
+          categories: {
+            aac: { status: "pending", code: "awaiting_native_begin" },
+            shortcuts: { status: "confirmed", code: "none" },
+            applications: { status: "confirmed", code: "none" },
+            persistence: { status: "confirmed", code: "none" },
+            windowNetwork: { status: "confirmed", code: "none" },
+          },
+          cause: "none",
+        },
+      ];
+      const { batchDigest, contentDigests } = crypto.digestEvidence(device, {
+        scope,
+        originBuild,
+        facts,
+      });
+      const deviceProof = crypto.signEvidence(device, {
+        scope,
+        batchDigest,
+        counter,
+      });
+      return {
+        request: {
+          version: 1,
+          scope,
+          originBuild,
+          facts,
+          batchDigest,
+          publicKey: device.publicKey,
+          deviceProof,
+        },
+        contentDigests,
+      };
+    }
+    async function sendEvidence(
+      intent,
+      requestTransport = transport(),
+      signal,
+    ) {
+      return requestTransport.evidence(
+        intent.request,
+        intent.contentDigests,
+        signal,
+      );
+    }
     async function remove(
       target,
       joined,
@@ -702,6 +776,8 @@ commit;`);
       'sessions',coalesce((select jsonb_agg(to_jsonb(s)||jsonb_build_object('tuple',s.ctid::text) order by s.id) from desmoslock_v2.student_sessions s where s.test_id=${sqlUuid(target.testId)}),'[]'::jsonb),
       'materials',coalesce((select jsonb_agg(to_jsonb(m)||jsonb_build_object('tuple',m.ctid::text) order by m.issuance_request_id) from desmoslock_v2.student_join_materials m where m.test_id=${sqlUuid(target.testId)}),'[]'::jsonb),
       'bindings',coalesce((select jsonb_agg(to_jsonb(b)||jsonb_build_object('tuple',b.ctid::text) order by b.device_session_id) from desmoslock_v2.student_device_bindings b where b.test_id=${sqlUuid(target.testId)}),'[]'::jsonb),
+      'proofs',coalesce((select jsonb_agg(to_jsonb(p)||jsonb_build_object('tuple',p.ctid::text) order by p.device_session_id) from desmoslock_v2.student_device_proof_state p where p.test_id=${sqlUuid(target.testId)}),'[]'::jsonb),
+      'evidence',coalesce((select jsonb_agg(to_jsonb(e)||jsonb_build_object('tuple',e.ctid::text) order by e.event_id) from desmoslock_v2.student_protection_events e where e.test_id=${sqlUuid(target.testId)}),'[]'::jsonb),
       'audit',coalesce((select jsonb_agg(to_jsonb(e)||jsonb_build_object('tuple',e.ctid::text) order by e.id) from desmoslock_v2.staff_audit_events e where e.test_id=${sqlUuid(target.testId)}),'[]'::jsonb));`),
       );
     }
@@ -733,6 +809,8 @@ commit;`);
       join,
       maintenance,
       send,
+      evidence,
+      sendEvidence,
       remove,
       prepare,
       end,
@@ -765,6 +843,144 @@ export function currentSession(snapshot, id) {
 }
 export function transitionCount(snapshot, event) {
   return snapshot.audit.filter((entry) => entry.event_type === event).length;
+}
+
+/** Runs only the exact published backfill statement against owned temporary
+ * legacy projections. This is not a shared-schema downgrade or hosted upgrade. */
+export async function verifyStudentEvidenceBackfill() {
+  verifyDisposableDatabase();
+  const source = await readFile(
+    new URL(
+      "../../supabase/migrations/20260908000400_student_protection_evidence.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const begin =
+    "insert into desmoslock_v2.student_device_proof_state\n  (test_id, device_session_id, last_accepted_proof_counter, maintenance_accepted_at)";
+  const end =
+    "\n\ncreate function desmoslock_v2.internal_create_student_proof_state()";
+  const start = source.indexOf(begin);
+  const stop = source.indexOf(end);
+  check(
+    start >= 0 &&
+      stop > start &&
+      source.indexOf(begin, start + 1) === -1 &&
+      source.indexOf(end, stop + 1) === -1,
+    "Published proof backfill markers are not exact and unique",
+  );
+  const statement = source.slice(start, stop);
+  check(
+    statement.length <= 2_048 &&
+      statement.endsWith(";") &&
+      statement.split(";").length === 2 &&
+      !statement.includes("$evidence_backfill$"),
+    "Published proof backfill statement exceeded its fixed boundary",
+  );
+  const tables = [
+    "student_device_proof_state",
+    "student_device_bindings",
+    "student_sessions",
+  ];
+  let backfill = statement;
+  for (const table of tables) {
+    check(
+      backfill.split(`desmoslock_v2.${table}`).length === 2,
+      "Published backfill source table projection changed",
+    );
+    backfill = backfill.replace(
+      `desmoslock_v2.${table}`,
+      `pg_temp.evidence_legacy_${table}`,
+    );
+  }
+  check(
+    !backfill.includes("desmoslock_v2."),
+    "Backfill probe retained a live application table reference",
+  );
+  const connection = await openConnection(
+    `evidence-backfill-${randomUUID().slice(0, 8)}`,
+  );
+  const id = (value) =>
+    sqlUuid(`20000000-0000-4000-8000-${String(value).padStart(12, "0")}`);
+  try {
+    const rows = await connection.query(`begin;
+create temporary table evidence_legacy_student_sessions as
+  select id,state,device_session_id,epoch,last_accepted_proof_counter,maintenance_accepted_at
+  from desmoslock_v2.student_sessions with no data;
+create temporary table evidence_legacy_student_device_bindings as
+  select test_id,device_session_id,student_session_id,first_epoch
+  from desmoslock_v2.student_device_bindings with no data;
+create temporary table evidence_legacy_student_device_proof_state
+  (like desmoslock_v2.student_device_proof_state including all);
+insert into evidence_legacy_student_sessions values
+  (${id(1)},'active',${id(11)},1,77,array['2026-09-08T01:02:03Z'::timestamptz,'2026-09-08T01:02:04Z'::timestamptz]),
+  (${id(2)},'forfeited',null,2,0,'{}'),
+  (${id(3)},'removed',null,2,0,'{}'),
+  (${id(4)},'active',${id(15)},3,11,array['2026-09-08T01:03:04Z'::timestamptz]),
+  (${id(5)},'active',${id(16)},1,9007199254740991,'{}'),
+  (${id(6)},'active',${id(17)},3,9,'{}');
+insert into evidence_legacy_student_device_bindings values
+  (${id(100)},${id(11)},${id(1)},1),
+  (${id(100)},${id(12)},${id(2)},1),
+  (${id(100)},${id(13)},${id(3)},1),
+  (${id(100)},${id(14)},${id(4)},1),
+  (${id(100)},${id(15)},${id(4)},3),
+  (${id(100)},${id(16)},${id(5)},1),
+  (${id(100)},${id(17)},${id(6)},1);
+${backfill}
+select jsonb_agg(jsonb_build_object('device',device_session_id,'counter',last_accepted_proof_counter,
+  'maintenance',maintenance_accepted_at,'evidence',evidence_accepted_at,'tuple',ctid::text) order by device_session_id)
+  from evidence_legacy_student_device_proof_state;
+do $evidence_backfill$ begin
+  begin
+    ${backfill}
+    raise exception using errcode='P0001',message='Repeated published backfill unexpectedly succeeded';
+  exception when unique_violation then null;
+  end;
+end $evidence_backfill$;
+select jsonb_agg(jsonb_build_object('device',device_session_id,'counter',last_accepted_proof_counter,
+  'maintenance',maintenance_accepted_at,'evidence',evidence_accepted_at,'tuple',ctid::text) order by device_session_id)
+  from evidence_legacy_student_device_proof_state;
+rollback;`);
+    check(rows.length === 2, "Backfill probe returned an unexpected frame");
+    const before = parseJson(rows[0]);
+    const after = parseJson(rows[1]);
+    same(
+      after,
+      before,
+      "Rejected repeated backfill reset accepted counters or changed tuples",
+    );
+    check(
+      Array.isArray(before) && before.length === 7,
+      "Backfill did not retain every original and replacement binding",
+    );
+    same(
+      before.map((row) => row.counter),
+      [77, 0, 0, 0, 11, 9007199254740991, 0],
+      "Backfill lost active, terminal, rebound, exact-epoch or maximum counters",
+    );
+    same(
+      before.map((row) => row.maintenance.length),
+      [2, 0, 0, 0, 1, 0, 0],
+      "Backfill copied maintenance allowance to a different binding",
+    );
+    same(
+      before[0].maintenance.map((value) => new Date(value).toISOString()),
+      ["2026-09-08T01:02:03.000Z", "2026-09-08T01:02:04.000Z"],
+      "Backfill changed the original accepted maintenance timestamps",
+    );
+    same(
+      before[4].maintenance.map((value) => new Date(value).toISOString()),
+      ["2026-09-08T01:03:04.000Z"],
+      "Replacement binding did not retain its own original maintenance timestamp",
+    );
+    check(
+      before.every((row) => row.evidence.length === 0),
+      "Backfill invented historical evidence quota",
+    );
+  } finally {
+    await connection.close();
+  }
 }
 
 /** Real SQL connection holds exact rows; actual HTTP handler RPCs are waiters. */
@@ -802,6 +1018,7 @@ export async function observeStudentWait(
       "read_student_maintenance_key",
       "commit_student_session_read",
       "commit_student_session_reconnect",
+      "commit_student_protection_evidence",
     ].includes(rpcName) && ["tests", "student_sessions"].includes(relation),
     "Invalid named lock observation",
   );

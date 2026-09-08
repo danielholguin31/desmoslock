@@ -1,10 +1,17 @@
+import { createPublicKey, verify } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+import type {
+  NativeEvidenceOriginBuild,
+  StudentSessionScope,
+} from "@desmoslock/contracts";
 
 import { createStudentSessionCoordinator } from "../src/main/student-session-coordinator.js";
 import { createStudentSessionCrypto } from "../src/main/student-session-crypto.js";
 import {
   createStudentSessionStore,
   type NativeStudentRecordHandle,
+  type ProtectionFact,
   type StudentSessionRecord,
 } from "../src/main/student-session-store.js";
 import {
@@ -23,7 +30,21 @@ const unavailable = {
   code: "STUDENT_SESSION_UNAVAILABLE",
 };
 
-function harness() {
+function fixtureServer() {
+  return {
+    joins: new Map<string, Record<string, unknown>>(),
+    receipts: new Map<
+      string,
+      { eventId: string; contentDigest: string; receivedAt: string }
+    >(),
+    epoch: 0,
+  };
+}
+
+function harness(
+  server = fixtureServer(),
+  originBuild?: NativeEvidenceOriginBuild,
+) {
   const crypto = createStudentSessionCrypto(configuration);
   let bytes: Buffer | null = null;
   const preserved: Buffer[] = [];
@@ -39,6 +60,9 @@ function harness() {
   let writeLatency = 0;
   let fetchLatency = 0;
   let beforeResponse: ((route: string) => Promise<void>) | null = null;
+  const evidenceResults = new Map<string, "denied" | "unavailable" | "lost">();
+  let evidenceReply: ((reply: Record<string, unknown>) => Response) | null =
+    null;
   const events: string[] = [];
   const requests: {
     route: string;
@@ -95,7 +119,6 @@ function harness() {
     validateDevice: crypto.validateDevice,
     validateCandidates: crypto.validateCandidates,
   });
-  let joinReceipt: Record<string, unknown> | null = null;
   const fetchRequest: StudentSessionFetch = async (url, init) => {
     const route = String(url).split("-").at(-1) ?? "";
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -137,7 +160,7 @@ function harness() {
         capabilityDigest: pending.candidates.capabilityDigest,
         reconnectDigest: pending.candidates.reconnectDigest,
       });
-      joinReceipt ??= {
+      const joinReceipt = server.joins.get(pending.requestId) ?? {
         status: "accepted",
         code: "STUDENT_SESSION_ACCEPTED",
         requestId: pending.requestId,
@@ -147,7 +170,7 @@ function harness() {
           testId: "40000000-0000-4000-8000-000000000001",
           studentSessionId: "50000000-0000-4000-8000-000000000001",
           deviceSessionId: durable.device.deviceSessionId,
-          epoch: pending.admissionMode === "initial" ? 1 : 3,
+          epoch: ++server.epoch,
         },
         sessionRevision: pending.admissionMode === "initial" ? 1 : 4,
         syntheticDisplayName: "Student ABC",
@@ -157,11 +180,106 @@ function harness() {
         reconnectExpiresAtMs: serverNowMs + 900_000,
         allowedIntents: ["state.read", "session.forfeit"],
       };
+      server.joins.set(pending.requestId, joinReceipt);
       if (droppedJoin) {
         droppedJoin = false;
         return Response.json(unavailable, { status: 503 });
       }
       return Response.json({ ...joinReceipt, serverNowMs });
+    }
+    if (route === "evidence") {
+      const signer = [
+        {
+          device: durable.device,
+          lastReservedCounter: durable.lastReservedCounter,
+        },
+        ...durable.evidence.retiredSigners,
+      ].find((candidate) => candidate.device.publicKey === body.publicKey);
+      expect(signer).toBeDefined();
+      const pending = durable.evidence.pendingBatches.find(
+        (candidate) =>
+          candidate.originalKeyThumbprint === signer!.device.keyThumbprint,
+      );
+      expect(pending).toBeDefined();
+      expect(body.batchDigest).toBe(pending!.batchDigest);
+      expect(durable.evidence.lastAttemptedSigner).toBe(
+        signer!.device.keyThumbprint,
+      );
+      const facts = body.facts as ProtectionFact[];
+      expect(facts.map((fact) => fact.eventId)).toEqual(
+        pending!.events.map((event) => event.eventId),
+      );
+      const scope = body.scope as StudentSessionScope;
+      expect(scope.deviceSessionId).toBe(signer!.device.deviceSessionId);
+      const proof = body.deviceProof as { counter: number; signature: string };
+      expect(proof.counter).toBe(signer!.lastReservedCounter);
+      // Verify the real Ed25519 signature independently over the locked wire
+      // array; the synthetic responder grants no admission or native authority.
+      expect(
+        verify(
+          null,
+          Buffer.from(
+            JSON.stringify([
+              "desmoslock/student-evidence-proof/v1",
+              configuration.url,
+              "evidence.ingest",
+              [
+                scope.schoolId,
+                scope.testId,
+                scope.studentSessionId,
+                scope.deviceSessionId,
+                scope.epoch,
+              ],
+              signer!.device.keyThumbprint,
+              body.batchDigest,
+              proof.counter,
+            ]),
+          ),
+          createPublicKey({
+            key: Buffer.concat([
+              Buffer.from("302a300506032b6570032100", "hex"),
+              Buffer.from(signer!.device.publicKey, "base64url"),
+            ]),
+            format: "der",
+            type: "spki",
+          }),
+          Buffer.from(proof.signature, "base64url"),
+        ),
+      ).toBe(true);
+      const outcome = evidenceResults.get(signer!.device.keyThumbprint);
+      if (outcome === "denied")
+        return Response.json(
+          { status: "denied", code: "STUDENT_SESSION_DENIED" },
+          { status: 403 },
+        );
+      if (outcome === "unavailable")
+        return Response.json(unavailable, { status: 503 });
+      const acknowledged = pending!.events.map((event) => {
+        const prior = server.receipts.get(event.eventId);
+        if (prior !== undefined) {
+          expect(prior.contentDigest).toBe(event.contentDigest);
+          return prior;
+        }
+        const receipt = {
+          ...event,
+          receivedAt: `2026-09-08T14:00:00.${String(server.receipts.size + 1).padStart(6, "0")}Z`,
+        };
+        server.receipts.set(event.eventId, receipt);
+        return receipt;
+      });
+      if (outcome === "lost")
+        return Response.json(unavailable, { status: 503 });
+      const reply = {
+        status: "accepted",
+        code: "STUDENT_EVIDENCE_ACCEPTED",
+        scope,
+        batchDigest: body.batchDigest,
+        acceptedProofCounter: proof.counter,
+        acknowledged,
+      };
+      return evidenceReply === null
+        ? Response.json(reply)
+        : evidenceReply(reply);
     }
     const current = durable.current;
     if (current === null) throw new Error("current scope must precede HTTP");
@@ -224,11 +342,13 @@ function harness() {
     transport,
     monotonicNow: () => elapsed,
     drainTimeoutMs: 20,
+    ...(originBuild === undefined ? {} : { originBuild }),
   };
   const coordinator = createStudentSessionCoordinator(options);
   return {
     coordinator,
     options,
+    server,
     events,
     requests,
     preserved,
@@ -259,6 +379,21 @@ function harness() {
     },
     deny() {
       denied = true;
+    },
+    allow() {
+      denied = false;
+    },
+    evidenceResult(
+      signer: string,
+      result: "denied" | "unavailable" | "lost" | null,
+    ) {
+      if (result === null) evidenceResults.delete(signer);
+      else evidenceResults.set(signer, result);
+    },
+    evidenceReply(
+      callback: ((reply: Record<string, unknown>) => Response) | null,
+    ) {
+      evidenceReply = callback;
     },
     advance(ms: number) {
       elapsed += ms;
@@ -305,7 +440,104 @@ async function admitForProtection(f: ReturnType<typeof harness>) {
   return result.authority;
 }
 
+async function beginEvidenceAttempt(
+  f: ReturnType<typeof harness>,
+  id = attemptId,
+) {
+  const authority = await admitForProtection(f);
+  const revision =
+    f.coordinator.readProtectionContext().protection?.revision ?? 0;
+  expect(
+    await f.coordinator.commitProtectionTransition({
+      kind: "engaging",
+      attemptId: id,
+      expectedProtectionRevision: revision,
+      authority,
+      categories: preflightCategories,
+    }),
+  ).toEqual({ status: "committed", protectionRevision: revision + 1 });
+  return authority;
+}
+
+async function completeEvidenceAttempt(
+  f: ReturnType<typeof harness>,
+  id = attemptId,
+) {
+  await beginEvidenceAttempt(f, id);
+  let revision = f.record().nativeProtection!.revision;
+  expect(
+    await f.coordinator.commitProtectionTransition({
+      kind: "native_terminal",
+      attemptId: id,
+      expectedProtectionRevision: revision,
+      event: {
+        type: "failed_to_begin",
+        attemptId: id,
+        sequence: 1,
+        code: "native_failed_to_begin",
+      },
+    }),
+  ).toEqual({ status: "committed", protectionRevision: ++revision });
+  expect(
+    await f.coordinator.commitProtectionTransition({
+      kind: "cleanup",
+      attemptId: id,
+      expectedProtectionRevision: revision,
+      outcome: "complete",
+    }),
+  ).toEqual({ status: "committed", protectionRevision: revision + 1 });
+}
+
+async function rebindEvidenceDevice(f: ReturnType<typeof harness>) {
+  const prior = f.record().device;
+  await f.coordinator.forfeit(f.coordinator.readView().revision);
+  expect(f.record().terminal).toBe(true);
+  await f.coordinator.beginTargetedReadmission(
+    code,
+    f.coordinator.readView().revision,
+  );
+  expect(f.coordinator.readView().phase).toBe("active");
+  expect(f.record().device.keyThumbprint).not.toBe(prior.keyThumbprint);
+  return prior;
+}
+
+function evidenceRequests(f: ReturnType<typeof harness>) {
+  return f.requests.filter((request) => request.route === "evidence");
+}
+
 describe("single-writer native protection facts", () => {
+  it("durably reserves an immutable evidence prefix before upload without issuing admission", async () => {
+    const f = harness();
+    const authority = await admitForProtection(f);
+    await f.coordinator.commitProtectionTransition({
+      kind: "engaging",
+      attemptId,
+      expectedProtectionRevision: 0,
+      authority,
+      categories: preflightCategories,
+    });
+    const before = structuredClone(f.record());
+    const observed: unknown[] = [];
+    f.coordinator.subscribeAdmissionObservation((value) =>
+      observed.push(value),
+    );
+    await f.coordinator.flushEvidence();
+    const exchange = f.requests.find((request) => request.route === "evidence");
+    expect(exchange).toBeDefined();
+    expect(exchange!.durable.evidence.pendingBatches).toHaveLength(1);
+    expect(exchange!.body.facts).toEqual(before.nativeProtection!.facts);
+    expect(exchange!.durable.lastReservedCounter).toBe(
+      before.lastReservedCounter + 1,
+    );
+    expect(f.record().evidence.pendingBatches).toEqual([]);
+    expect(f.record().evidence.acknowledgments).toHaveLength(1);
+    expect(f.record().nativeProtection).toEqual(before.nativeProtection);
+    expect(f.coordinator.readProtectionContext().freshAdmission).toBe(
+      authority,
+    );
+    expect(observed).toEqual([]);
+  });
+
   it("preserves admission/counter, rejects fabricated or stale grants, and records began before locked", async () => {
     const f = harness();
     const authority = await admitForProtection(f);
@@ -779,6 +1011,734 @@ describe("single-writer native protection facts", () => {
       }),
     ).toEqual({ status: "unavailable" });
     expect(f.record().nativeProtection?.latestAttempt?.phase).toBe("engaging");
+    expect(f.coordinator.readProtectionContext().freshAdmission).toBeNull();
+  });
+});
+
+describe("single-writer evidence delivery", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("reports no delivery before any fact and never interprets absent reports as acknowledged", async () => {
+    const f = harness();
+    await admitForProtection(f);
+    expect(f.coordinator.readProtectionContext().delivery).toBe("none");
+    const before = f.storedBytes();
+    await f.coordinator.flushEvidence();
+    expect(evidenceRequests(f)).toEqual([]);
+    expect(f.storedBytes()).toEqual(before);
+    await beginEvidenceAttempt(f);
+    expect(f.coordinator.readProtectionContext().delivery).toBe("pending");
+    await f.coordinator.flushEvidence();
+    expect(f.coordinator.readProtectionContext().delivery).toBe("acknowledged");
+  });
+
+  it("pins the acknowledged latest original signer through targeted rebind and signs a permitted late fact with it", async () => {
+    const originBuild: NativeEvidenceOriginBuild = { kind: "unverified_build" };
+    const f = harness(undefined, originBuild);
+    await completeEvidenceAttempt(f);
+    const original = structuredClone(f.record());
+    await f.coordinator.flushEvidence();
+    expect(f.record().evidence.acknowledgments).toHaveLength(3);
+    expect(f.record().nativeProtection).toEqual(original.nativeProtection);
+    const oldDevice = await rebindEvidenceDevice(f);
+    const rebound = structuredClone(f.record());
+    expect(rebound.current!.scope.epoch).toBeGreaterThan(
+      original.current!.scope.epoch,
+    );
+    expect(rebound.evidence.retiredSigners).toEqual([
+      expect.objectContaining({
+        device: oldDevice,
+        lastReservedCounter: expect.any(Number),
+      }),
+    ]);
+    expect(rebound.evidence.origins).toEqual(original.evidence.origins);
+    const oldCounter = rebound.evidence.retiredSigners[0]!.lastReservedCounter;
+    // This unused finite failure slot is accepted by the real Student writer;
+    // it is not a fabricated native terminal callback or a new admission grant.
+    expect(
+      await f.coordinator.commitProtectionTransition({
+        kind: "failure",
+        attemptId,
+        expectedProtectionRevision: rebound.nativeProtection!.revision,
+        cause: "native_failure",
+      }),
+    ).toEqual({
+      status: "committed",
+      protectionRevision: rebound.nativeProtection!.revision + 1,
+    });
+    f.advance(15_000);
+    await f.coordinator.refresh();
+    const currentCounter = f.record().lastReservedCounter;
+    await f.coordinator.flushEvidence();
+    const late = evidenceRequests(f).at(-1)!;
+    expect(late.body.publicKey).toBe(oldDevice.publicKey);
+    expect(late.body.scope).toEqual(original.current!.scope);
+    expect(late.body.originBuild).toEqual(originBuild);
+    expect(late.body.deviceProof).toMatchObject({ counter: oldCounter + 1 });
+    expect(late.body.facts).toEqual(f.record().nativeProtection!.facts);
+    expect(f.record().evidence.acknowledgments).toHaveLength(4);
+    expect(f.record().lastReservedCounter).toBe(currentCounter);
+    expect(f.record().device).toEqual(rebound.device);
+    expect(f.record().evidence.retiredSigners).toHaveLength(1);
+  });
+
+  it("releases an acknowledged old signer only after durable safe superseding engaging and prunes whole old attempts", async () => {
+    const f = harness();
+    await completeEvidenceAttempt(f);
+    await f.coordinator.flushEvidence();
+    const original = structuredClone(f.record());
+    await rebindEvidenceDevice(f);
+    expect(f.record().evidence.retiredSigners).toHaveLength(1);
+    await beginEvidenceAttempt(f, "60000000-0000-4000-8000-000000000002");
+    f.advance(15_000);
+    await f.coordinator.flushEvidence();
+    const next = f.record();
+    expect(next.evidence.retiredSigners).toEqual([]);
+    expect(next.nativeProtection!.facts).toHaveLength(1);
+    expect(next.nativeProtection!.facts[0]!.sequence).toBe(
+      original.nativeProtection!.nextFactSequence,
+    );
+    expect(next.nativeProtection!.nextFactSequence).toBe(
+      original.nativeProtection!.nextFactSequence + 1,
+    );
+    expect(next.nativeProtection!.revision).toBe(
+      original.nativeProtection!.revision + 1,
+    );
+    expect(next.evidence.origins.map((origin) => origin.attemptId)).toEqual([
+      "60000000-0000-4000-8000-000000000002",
+    ]);
+  });
+
+  it("gives five signers fair bounded opportunities across denial, unavailability and a real store reopen", async () => {
+    const f = harness();
+    const signers: string[] = [];
+    for (let index = 0; index < 5; index += 1) {
+      if (index > 0) await rebindEvidenceDevice(f);
+      await completeEvidenceAttempt(
+        f,
+        `60000000-0000-4000-8000-00000000000${index + 1}`,
+      );
+      signers.push(f.record().device.keyThumbprint);
+    }
+    expect(f.record().evidence.retiredSigners).toHaveLength(4);
+    signers
+      .slice(0, 4)
+      .forEach((signer, index) =>
+        f.evidenceResult(signer, index === 0 ? "denied" : "unavailable"),
+      );
+    await f.coordinator.flushEvidence();
+    const first = evidenceRequests(f)[0]!;
+    const bytes = f.storedBytes()!;
+    expect(await f.coordinator.dispose()).toBe(true);
+    const restored = harness(f.server);
+    restored.setBytes(bytes);
+    signers
+      .slice(0, 4)
+      .forEach((signer, index) =>
+        restored.evidenceResult(signer, index === 0 ? "denied" : "unavailable"),
+      );
+    await restored.coordinator.initialize();
+    expect(restored.record().evidence.lastAttemptedSigner).toBe(
+      first.durable.evidence.lastAttemptedSigner,
+    );
+    for (let index = 0; index < 4; index += 1) {
+      restored.advance(15_000);
+      await restored.coordinator.flushEvidence();
+    }
+    const attempts = [first, ...evidenceRequests(restored)];
+    expect(attempts).toHaveLength(5);
+    expect(
+      new Set(
+        attempts.map((request) => request.durable.evidence.lastAttemptedSigner),
+      ),
+    ).toEqual(new Set(signers));
+    expect(restored.record().evidence.pendingBatches).toHaveLength(4);
+    expect(restored.record().evidence.acknowledgments).toHaveLength(3);
+    expect(restored.record().nativeProtection!.facts).toHaveLength(15);
+    expect(
+      restored.coordinator.readProtectionContext().freshAdmission,
+    ).toBeNull();
+    await restored.coordinator.retryPending();
+    await restored.coordinator.forfeit(
+      restored.coordinator.readView().revision,
+    );
+    const full = restored.storedBytes();
+    const requests = restored.requests.length;
+    await restored.coordinator.beginTargetedReadmission(
+      code,
+      restored.coordinator.readView().revision,
+    );
+    expect(restored.storedBytes()).toEqual(full);
+    expect(restored.requests).toHaveLength(requests);
+    expect(restored.preserved).toEqual([]);
+    expect(restored.coordinator.readProtectionContext().delivery).toBe(
+      "blocked",
+    );
+  });
+
+  it("freezes the uploading prefix while a real late terminal queues, then acknowledges only that exact prefix", async () => {
+    const f = harness();
+    const authority = await beginEvidenceAttempt(f);
+    await f.coordinator.commitProtectionTransition({
+      kind: "began",
+      attemptId,
+      expectedProtectionRevision: 1,
+      event: { type: "did_begin", attemptId, sequence: 1, code: "none" },
+    });
+    const entered = deferred();
+    const hold = deferred();
+    f.beforeResponse(async (route) => {
+      if (route === "evidence") {
+        entered.resolve();
+        await hold.promise;
+      }
+    });
+    const upload = f.coordinator.flushEvidence();
+    await entered.promise;
+    const frozen = structuredClone(
+      evidenceRequests(f)[0]!.durable.evidence.pendingBatches[0]!,
+    );
+    const terminal = f.coordinator.commitProtectionTransition({
+      kind: "native_terminal",
+      attemptId,
+      expectedProtectionRevision: 2,
+      event: { type: "did_end", attemptId, sequence: 2, code: "none" },
+    });
+    let settled = false;
+    void terminal.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(f.record().nativeProtection!.facts).toHaveLength(2);
+    f.advance(authority.observationDeadline - f.now());
+    expect(f.coordinator.isCurrentAdmission(authority, "sustain")).toBe(false);
+    hold.resolve();
+    await upload;
+    expect(await terminal).toEqual({
+      status: "committed",
+      protectionRevision: 3,
+    });
+    expect(evidenceRequests(f)[0]!.durable.evidence.pendingBatches[0]).toEqual(
+      frozen,
+    );
+    expect(
+      f.record().evidence.acknowledgments.map((ack) => ack.eventId),
+    ).toEqual(frozen.events.map((event) => event.eventId));
+    expect(f.record().nativeProtection!.facts).toHaveLength(3);
+    expect(f.coordinator.readProtectionContext().delivery).toBe("pending");
+    expect(f.coordinator.readProtectionContext().freshAdmission).toBeNull();
+    f.beforeResponse(null);
+    f.advance(15_000);
+    await f.coordinator.flushEvidence();
+    expect(evidenceRequests(f).at(-1)!.body.facts).toEqual(
+      f.record().nativeProtection!.facts,
+    );
+    expect(f.record().evidence.acknowledgments).toHaveLength(3);
+  });
+
+  it("coalesces upload opportunities and preserves the renewed read as the only source of freshness", async () => {
+    const f = harness();
+    await beginEvidenceAttempt(f);
+    f.latency(20, 100);
+    f.advance(225_000);
+    await f.coordinator.refresh();
+    f.advance(15_000);
+    await f.coordinator.refresh();
+    const fresh = f.coordinator.readProtectionContext().freshAdmission!;
+    const observations: unknown[] = [];
+    f.coordinator.subscribeAdmissionObservation((value) =>
+      observations.push(value),
+    );
+    const before = f.requests.length;
+    await Promise.all([
+      f.coordinator.flushEvidence(),
+      f.coordinator.flushEvidence(),
+      f.coordinator.flushEvidence(),
+    ]);
+    await f.coordinator.flushEvidence();
+    expect(f.requests.slice(before).map((request) => request.route)).toEqual([
+      "evidence",
+    ]);
+    expect(f.coordinator.readProtectionContext().freshAdmission).toBe(fresh);
+    expect(observations).toEqual([]);
+    expect(fresh.observationDeadline).toBe(fresh.readStartedAt + 30_000);
+    expect(f.requests.slice(-3).map((request) => request.route)).toEqual([
+      "reconnect",
+      "read",
+      "evidence",
+    ]);
+    f.advance(fresh.observationDeadline - f.now());
+    expect(f.coordinator.isCurrentAdmission(fresh, "sustain")).toBe(false);
+  });
+
+  it("sustains three locked maintenance cycles with upload latency and no extra read, transition or freshness publication", async () => {
+    const f = harness();
+    await beginEvidenceAttempt(f);
+    await f.coordinator.commitProtectionTransition({
+      kind: "began",
+      attemptId,
+      expectedProtectionRevision: 1,
+      event: { type: "did_begin", attemptId, sequence: 1, code: "none" },
+    });
+    const result = await f.coordinator.readFreshAdmission(
+      f.coordinator.readProtectionContext().admission!,
+    );
+    if (result.status !== "fresh")
+      throw new Error("Expected post-begin admission");
+    await f.coordinator.commitProtectionTransition({
+      kind: "locked",
+      attemptId,
+      expectedProtectionRevision: 2,
+      authority: result.authority,
+      nativeSequence: 1,
+      categories: lockedCategories,
+    });
+    const protection = structuredClone(f.record().nativeProtection);
+    f.evidenceResult(f.record().device.keyThumbprint, "unavailable");
+    f.latency(40, 100);
+    const observations: unknown[] = [];
+    f.coordinator.subscribeAdmissionObservation((value) =>
+      observations.push(value),
+    );
+    const before = f.requests.length;
+    for (let index = 0; index < 3; index += 1) {
+      f.advance(15_000);
+      await f.coordinator.refresh();
+      const fresh = f.coordinator.readProtectionContext().freshAdmission!;
+      const viewRevision = f.coordinator.readView().revision;
+      await f.coordinator.flushEvidence();
+      expect(f.coordinator.readProtectionContext().freshAdmission).toBe(fresh);
+      expect(f.coordinator.isCurrentAdmission(fresh, "sustain")).toBe(true);
+      expect(f.coordinator.readView().revision).toBe(viewRevision);
+      expect(f.record().nativeProtection).toEqual(protection);
+    }
+    expect(f.requests.slice(before).map((request) => request.route)).toEqual([
+      "read",
+      "evidence",
+      "read",
+      "evidence",
+      "read",
+      "evidence",
+    ]);
+    expect(observations).toHaveLength(3);
+  });
+
+  it("queues due same-owner renewal behind a held upload without dropping maintenance or resetting its shared counter", async () => {
+    const f = harness();
+    await beginEvidenceAttempt(f);
+    f.advance(225_000);
+    await f.coordinator.refresh();
+    const old = f.coordinator.readProtectionContext().freshAdmission!;
+    f.advance(14_000);
+    const entered = deferred();
+    const hold = deferred();
+    f.beforeResponse(async (route) => {
+      if (route === "evidence") {
+        entered.resolve();
+        await hold.promise;
+      }
+    });
+    const upload = f.coordinator.flushEvidence();
+    await entered.promise;
+    const reservation = f.record().lastReservedCounter;
+    const facts = structuredClone(f.record().nativeProtection);
+    f.advance(1_000);
+    const renewal = f.coordinator.refresh();
+    await Promise.resolve();
+    expect(f.coordinator.readProtectionContext().freshAdmission).toBe(old);
+    expect(f.coordinator.isCurrentAdmission(old, "sustain")).toBe(true);
+    expect(f.requests.at(-1)!.route).toBe("evidence");
+    hold.resolve();
+    await upload;
+    await renewal;
+    expect(f.requests.slice(-3).map((request) => request.route)).toEqual([
+      "evidence",
+      "reconnect",
+      "read",
+    ]);
+    expect(f.record().lastReservedCounter).toBe(reservation + 2);
+    expect(f.record().nativeProtection).toEqual(facts);
+    const fresh = f.coordinator.readProtectionContext().freshAdmission!;
+    expect(fresh.admissionGeneration).toBe(old.admissionGeneration);
+    expect(fresh.sessionRevision).toBe(old.sessionRevision + 1);
+    expect(f.coordinator.isCurrentAdmission(fresh, "sustain")).toBe(true);
+  });
+
+  it.each(["readmission", "forfeit"] as const)(
+    "preserves a valid %s queued after a no-op refresh behind held evidence",
+    async (action) => {
+      const f = harness();
+      await completeEvidenceAttempt(f);
+      if (action === "readmission")
+        await f.coordinator.forfeit(f.coordinator.readView().revision);
+      const original = structuredClone(f.record());
+      const revision = f.coordinator.readView().revision;
+      const entered = deferred();
+      const hold = deferred();
+      f.beforeResponse(async (route) => {
+        if (route === "evidence") {
+          entered.resolve();
+          await hold.promise;
+        }
+      });
+      const before = f.requests.length;
+      const upload = f.coordinator.flushEvidence();
+      await entered.promise;
+      const refresh = f.coordinator.refresh();
+      const command =
+        action === "readmission"
+          ? f.coordinator.beginTargetedReadmission(code, revision)
+          : f.coordinator.forfeit(revision);
+      let settled = false;
+      void command.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      expect(f.coordinator.readView().revision).toBe(revision);
+      expect(f.preserved).toEqual([]);
+      hold.resolve();
+      await Promise.all([upload, refresh, command]);
+      expect(f.record().nativeProtection).toEqual(original.nativeProtection);
+      expect(f.record().evidence.pendingBatches).toEqual([]);
+      expect(f.record().evidence.acknowledgments).toHaveLength(3);
+      if (action === "readmission") {
+        expect(f.coordinator.readView().phase).toBe("active");
+        expect(f.record().device.keyThumbprint).not.toBe(
+          original.device.keyThumbprint,
+        );
+        expect(f.record().current!.scope.epoch).toBeGreaterThan(
+          original.nativeProtection!.latestAttempt!.scope.epoch,
+        );
+        expect(f.preserved).toHaveLength(1);
+        expect(f.requests.at(-1)!.durable.pending).toMatchObject({
+          kind: "join",
+          admissionMode: "readmission",
+        });
+      } else {
+        expect(f.coordinator.readView().phase).toBe("forfeited");
+        expect(f.record().terminal).toBe(true);
+        expect(
+          f.requests.slice(before).map((request) => request.route),
+        ).toEqual(["evidence", "forfeit"]);
+        expect(f.record().lastReservedCounter).toBe(
+          original.lastReservedCounter + 2,
+        );
+      }
+    },
+  );
+
+  it("rechecks a queued forfeit revision after a due refresh takes the next writer turn", async () => {
+    const f = harness();
+    await beginEvidenceAttempt(f);
+    const entered = deferred();
+    const hold = deferred();
+    f.beforeResponse(async (route) => {
+      if (route === "evidence") {
+        entered.resolve();
+        await hold.promise;
+      }
+    });
+    const before = f.requests.length;
+    const upload = f.coordinator.flushEvidence();
+    await entered.promise;
+    f.advance(15_000);
+    const revision = f.coordinator.readView().revision;
+    const refresh = f.coordinator.refresh();
+    const forfeit = f.coordinator.forfeit(revision);
+    hold.resolve();
+    await Promise.all([upload, refresh, forfeit]);
+    expect(f.coordinator.readView().revision).toBeGreaterThan(revision);
+    expect(f.coordinator.readView().phase).toBe("active");
+    expect(f.record().terminal).toBe(false);
+    expect(f.record().pending).toBeNull();
+    expect(f.requests.slice(before).map((request) => request.route)).toEqual([
+      "evidence",
+      "read",
+    ]);
+  });
+
+  it("uploads historical facts while denied reconnect remains pending without resubmitting it or granting authority", async () => {
+    const f = harness();
+    await beginEvidenceAttempt(f);
+    f.advance(225_000);
+    await f.coordinator.refresh();
+    f.beforeResponse(async (route) => {
+      if (route === "reconnect") f.deny();
+    });
+    f.advance(15_000);
+    await f.coordinator.refresh();
+    expect(f.record().pending?.kind).toBe("reconnect");
+    expect(f.coordinator.readProtectionContext().freshAdmission).toBeNull();
+    const before = structuredClone(f.record());
+    const count = f.requests.length;
+    const observations: unknown[] = [];
+    f.coordinator.subscribeAdmissionObservation((value) =>
+      observations.push(value),
+    );
+    f.beforeResponse(null);
+    f.allow();
+    await f.coordinator.flushEvidence();
+    expect(f.requests.slice(count).map((request) => request.route)).toEqual([
+      "evidence",
+    ]);
+    expect(f.record().pending).toEqual(before.pending);
+    expect(f.record().current).toEqual(before.current);
+    expect(f.record().nativeProtection).toEqual(before.nativeProtection);
+    expect(f.record().evidence.acknowledgments).toHaveLength(1);
+    expect(f.coordinator.readProtectionContext().freshAdmission).toBeNull();
+    expect(observations).toEqual([]);
+  });
+
+  it("does not admit an upload ahead of a queued native terminal after held maintenance", async () => {
+    const f = harness();
+    await beginEvidenceAttempt(f);
+    const entered = deferred();
+    const hold = deferred();
+    f.beforeResponse(async (route) => {
+      if (route === "read") {
+        entered.resolve();
+        await hold.promise;
+      }
+    });
+    f.advance(15_000);
+    const read = f.coordinator.refresh();
+    await entered.promise;
+    const terminal = f.coordinator.commitProtectionTransition({
+      kind: "native_terminal",
+      attemptId,
+      expectedProtectionRevision: 1,
+      event: {
+        type: "failed_to_begin",
+        attemptId,
+        sequence: 1,
+        code: "native_failed_to_begin",
+      },
+    });
+    const skipped = f.coordinator.flushEvidence();
+    hold.resolve();
+    await read;
+    await skipped;
+    expect(await terminal).toEqual({
+      status: "committed",
+      protectionRevision: 2,
+    });
+    expect(evidenceRequests(f)).toEqual([]);
+    await f.coordinator.flushEvidence();
+    expect(evidenceRequests(f)).toHaveLength(1);
+    expect(evidenceRequests(f)[0]!.body.facts).toEqual(
+      f.record().nativeProtection!.facts,
+    );
+  });
+
+  it.each([false, true])(
+    "emits zero evidence when its durable reservation is uncertain (published=%s)",
+    async (published) => {
+      const f = harness();
+      await beginEvidenceAttempt(f);
+      const before = structuredClone(f.record());
+      f.failNextWrite(published);
+      await f.coordinator.flushEvidence();
+      expect(evidenceRequests(f)).toEqual([]);
+      expect(f.record().nativeProtection).toEqual(before.nativeProtection);
+      expect(f.record().evidence.acknowledgments).toEqual([]);
+      expect(f.coordinator.readProtectionContext().freshAdmission).toBeNull();
+      const retainedCounter = f.record().lastReservedCounter;
+      const bytes = f.storedBytes()!;
+      expect(await f.coordinator.dispose()).toBe(true);
+      const restored = harness(f.server);
+      restored.setBytes(bytes);
+      await restored.coordinator.initialize();
+      await restored.coordinator.flushEvidence();
+      expect(evidenceRequests(restored)[0]!.body.deviceProof).toMatchObject({
+        counter: retainedCounter + 1,
+      });
+      expect(restored.record().evidence.acknowledgments).toHaveLength(1);
+    },
+  );
+
+  it("retains legacy facts whose original signer is absent as blocked without using the replacement key", async () => {
+    const f = harness();
+    await completeEvidenceAttempt(f);
+    const { evidence, ...prior } = f.record();
+    expect(evidence.origins).toHaveLength(1);
+    const bytes = Buffer.from(
+      `synthetic:${JSON.stringify({
+        ...prior,
+        version: 2,
+        device: f.options.crypto.createEnrollment(),
+        current: null,
+        pending: null,
+        terminal: true,
+        lastReservedCounter: 0,
+      })}`,
+    );
+    const restored = harness();
+    restored.setBytes(bytes);
+    await restored.coordinator.initialize();
+    expect(restored.coordinator.readProtectionContext().delivery).toBe(
+      "blocked",
+    );
+    await restored.coordinator.flushEvidence();
+    expect(evidenceRequests(restored)).toEqual([]);
+    expect(restored.storedBytes()).toEqual(bytes);
+    expect(restored.preserved).toEqual([]);
+    expect(
+      restored.coordinator.readProtectionContext().protection!.facts,
+    ).toEqual(prior.nativeProtection!.facts);
+  });
+
+  it.each([false, true])(
+    "restarts after acknowledgment publication uncertainty (published=%s) without losing or relabeling exact receipts",
+    async (published) => {
+      const f = harness();
+      await beginEvidenceAttempt(f);
+      const original = structuredClone(f.record().nativeProtection);
+      f.beforeResponse(async (route) => {
+        if (route === "evidence") f.failNextWrite(published);
+      });
+      await f.coordinator.flushEvidence();
+      const first = evidenceRequests(f)[0]!;
+      expect(f.server.receipts.size).toBe(1);
+      expect(f.coordinator.readProtectionContext().freshAdmission).toBeNull();
+      const bytes = f.storedBytes()!;
+      expect(await f.coordinator.dispose()).toBe(true);
+      const restored = harness(f.server);
+      restored.setBytes(bytes);
+      await restored.coordinator.initialize();
+      await restored.coordinator.flushEvidence();
+      expect(restored.record().nativeProtection).toEqual(original);
+      expect(restored.record().evidence.acknowledgments).toEqual([
+        ...f.server.receipts.values(),
+      ]);
+      expect(restored.record().evidence.pendingBatches).toEqual([]);
+      expect(
+        restored.coordinator.readProtectionContext().freshAdmission,
+      ).toBeNull();
+      if (published) expect(evidenceRequests(restored)).toEqual([]);
+      else {
+        const retry = evidenceRequests(restored)[0]!;
+        expect(retry.body.batchDigest).toBe(first.body.batchDigest);
+        expect(retry.body.facts).toEqual(first.body.facts);
+        expect(retry.body.originBuild).toEqual(first.body.originBuild);
+        expect(retry.body.deviceProof).toMatchObject({
+          counter: first.durable.lastReservedCounter + 1,
+        });
+      }
+      const authority = await restored.coordinator.readFreshAdmission(
+        restored.coordinator.readProtectionContext().admission!,
+      );
+      expect(authority).toEqual({ status: "unavailable" });
+    },
+  );
+
+  it("recovers the first receipt after a committed but lost response using only a greater counter", async () => {
+    const f = harness();
+    await beginEvidenceAttempt(f);
+    f.evidenceResult(f.record().device.keyThumbprint, "lost");
+    await f.coordinator.flushEvidence();
+    const first = evidenceRequests(f)[0]!;
+    const pending = structuredClone(f.record().evidence.pendingBatches);
+    const receipt = [...f.server.receipts.values()];
+    expect(f.record().evidence.acknowledgments).toEqual([]);
+    f.evidenceResult(f.record().device.keyThumbprint, null);
+    f.advance(15_000);
+    await f.coordinator.refresh();
+    const counterBeforeRetry = f.record().lastReservedCounter;
+    await f.coordinator.flushEvidence();
+    const retry = evidenceRequests(f).at(-1)!;
+    expect(retry.durable.evidence.pendingBatches).toEqual(pending);
+    expect(retry.body.batchDigest).toBe(first.body.batchDigest);
+    expect(retry.body.facts).toEqual(first.body.facts);
+    expect(retry.body.deviceProof).toMatchObject({
+      counter: counterBeforeRetry + 1,
+    });
+    expect(f.record().evidence.acknowledgments).toEqual(receipt);
+    expect(f.server.receipts.size).toBe(1);
+  });
+
+  it("treats a success-shaped but wrong acknowledgment as unconfirmed and preserves the exact pending batch", async () => {
+    const f = harness();
+    const fresh = await beginEvidenceAttempt(f);
+    f.evidenceReply((reply) => Response.json({ ...reply, acknowledged: [] }));
+    await f.coordinator.flushEvidence();
+    expect(f.record().evidence.acknowledgments).toEqual([]);
+    expect(f.record().evidence.pendingBatches).toHaveLength(1);
+    expect(f.coordinator.readProtectionContext().freshAdmission).toBe(fresh);
+    expect(f.coordinator.readProtectionContext().delivery).toBe("pending");
+  });
+
+  it("reserves no new signer, reopens no store and emits no late acknowledgment while timed-out upload I/O still owns transport", async () => {
+    vi.useFakeTimers();
+    const f = harness();
+    await beginEvidenceAttempt(f);
+    let release!: (response: Response) => void;
+    f.blockFetch(
+      new Promise<Response>((resolve) => {
+        release = resolve;
+      }),
+    );
+    const upload = f.coordinator.flushEvidence();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await upload;
+    const before = f.storedBytes();
+    const events = [...f.events];
+    const requests = f.requests.length;
+    f.advance(15_000);
+    await f.coordinator.flushEvidence();
+    await f.coordinator.refresh();
+    await f.coordinator.retryPending();
+    expect(f.events).toEqual(events);
+    expect(f.requests).toHaveLength(requests);
+    expect(f.storedBytes()).toEqual(before);
+    const disposal = f.coordinator.dispose();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(await disposal).toBe(false);
+    expect(f.events).not.toContain("close");
+    release(Response.json(unavailable, { status: 503 }));
+    f.blockFetch(null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.storedBytes()).toEqual(before);
+    expect(f.events).not.toContain("close");
+    expect(f.record().evidence.acknowledgments).toEqual([]);
+  });
+
+  it("waits for an abort-ignoring evidence exchange before disposal releases its native store", async () => {
+    const f = harness();
+    await beginEvidenceAttempt(f);
+    let release!: (response: Response) => void;
+    f.blockFetch(
+      new Promise<Response>((resolve) => {
+        release = resolve;
+      }),
+    );
+    const upload = f.coordinator.flushEvidence();
+    await new Promise(setImmediate);
+    const before = f.storedBytes();
+    const request = evidenceRequests(f)[0]!;
+    const pending = request.durable.evidence.pendingBatches[0]!;
+    const disposal = f.coordinator.dispose();
+    await upload;
+    expect(f.events).not.toContain("close");
+    release(
+      Response.json({
+        status: "accepted",
+        code: "STUDENT_EVIDENCE_ACCEPTED",
+        scope: request.body.scope,
+        batchDigest: request.body.batchDigest,
+        acceptedProofCounter: (request.body.deviceProof as { counter: number })
+          .counter,
+        acknowledged: pending.events.map((event) => ({
+          ...event,
+          receivedAt: "2026-09-08T14:00:00.000001Z",
+        })),
+      }),
+    );
+    expect(await disposal).toBe(true);
+    expect(f.events.at(-1)).toBe("close");
+    expect(f.storedBytes()).toEqual(before);
+    expect(f.record().evidence.acknowledgments).toEqual([]);
     expect(f.coordinator.readProtectionContext().freshAdmission).toBeNull();
   });
 });

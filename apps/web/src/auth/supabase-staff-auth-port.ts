@@ -861,6 +861,7 @@ export function createSupabaseStaffAuthPort(
     name:
       | "current_school_test"
       | "current_test_student_sessions"
+      | "current_student_protection_events"
       | "issue_test_join_code"
       | "remove_student_session"
       | "prepare_student_readmission",
@@ -1229,6 +1230,8 @@ export function createSupabaseStaffAuthPort(
         studentSessionRpc(handle, "current_school_test", args),
       currentTestStudentSessions: (handle, args) =>
         studentSessionRpc(handle, "current_test_student_sessions", args),
+      currentStudentProtectionEvents: (handle, args) =>
+        studentSessionRpc(handle, "current_student_protection_events", args),
       issueTestJoinCode: (handle, args) =>
         studentSessionRpc(handle, "issue_test_join_code", args),
       removeStudentSession: (handle, args) =>

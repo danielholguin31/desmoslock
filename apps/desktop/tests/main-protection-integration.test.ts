@@ -8,7 +8,13 @@ import type { ElectronProtectionWindowOptions } from "../src/main/electron-prote
 const boundary = vi.hoisted(() => ({
   configured: true,
   electron: {} as Record<string, unknown>,
-  student: { initialize: vi.fn(), dispose: vi.fn(), refresh: vi.fn() },
+  student: {
+    initialize: vi.fn(),
+    dispose: vi.fn(),
+    refresh: vi.fn(),
+    flushEvidence: vi.fn(),
+  },
+  readBuildIdentity: vi.fn(),
   protection: {
     refresh: vi.fn(),
     requestLocalEnd: vi.fn(),
@@ -68,6 +74,9 @@ vi.mock("../src/main/student-session-ipc.js", () => ({
 }));
 vi.mock("../src/main/student-session-crypto.js", () => ({
   createStudentSessionCrypto: vi.fn(() => ({})),
+}));
+vi.mock("../src/main/build-identity.js", () => ({
+  readClientBuildIdentity: boundary.readBuildIdentity,
 }));
 vi.mock("../src/main/student-session-transport.js", () => ({
   createStudentSessionTransport: vi.fn(() => ({})),
@@ -182,6 +191,8 @@ beforeEach(() => {
     safeStorage: {},
   };
   boundary.student.initialize.mockResolvedValue(undefined);
+  boundary.student.flushEvidence.mockResolvedValue(undefined);
+  boundary.readBuildIdentity.mockReturnValue(null);
   boundary.createStudent.mockReturnValue(boundary.student);
   boundary.createNative.mockReturnValue({});
   boundary.createProtection.mockImplementation(
@@ -288,10 +299,105 @@ describe("production main protection composition with synthetic Electron", () =>
     shell.visible = false;
     await vi.advanceTimersByTimeAsync(15_000);
     expect(boundary.protection.refresh).not.toHaveBeenCalled();
+    expect(boundary.student.flushEvidence).toHaveBeenCalledOnce();
     boundary.protection.hasRetainedAttempt.mockReturnValue(true);
     await vi.advanceTimersByTimeAsync(30_000);
     expect(boundary.protection.refresh).toHaveBeenCalledTimes(2);
+    expect(boundary.student.flushEvidence).toHaveBeenCalledTimes(3);
     expect(boundary.student.refresh).not.toHaveBeenCalled();
+  });
+
+  it.each(["hidden", "closed"] as const)(
+    "keeps terminal evidence eligible on the sole timer with a %s window and no retained attempt",
+    async (state) => {
+      await boot();
+      if (state === "hidden") shell.visible = false;
+      else shell.destroy();
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(boundary.protection.refresh).not.toHaveBeenCalled();
+      expect(boundary.student.flushEvidence).toHaveBeenCalledOnce();
+      expect(boundary.student.refresh).not.toHaveBeenCalled();
+      expect(boundary.prepareCalculator).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(1);
+    },
+  );
+
+  it("does not begin evidence delivery while quit is draining or after a held refresh settles during quit", async () => {
+    await boot();
+    let releaseRefresh!: () => void;
+    boundary.protection.refresh.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        releaseRefresh = resolve;
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(15_000);
+    let releaseShutdown!: () => void;
+    boundary.protection.shutdown.mockReturnValueOnce(
+      new Promise<"complete">((resolve) => {
+        releaseShutdown = () => resolve("complete");
+      }),
+    );
+    app.emit("before-quit", { preventDefault: vi.fn() });
+    releaseRefresh();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(boundary.student.flushEvidence).not.toHaveBeenCalled();
+    expect(boundary.protection.refresh).toHaveBeenCalledOnce();
+    releaseShutdown();
+    for (let index = 0; index < 8; index++) await Promise.resolve();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(app.exit).toHaveBeenCalledExactlyOnceWith(0);
+  });
+
+  it("injects original build identity once and performs due maintenance before evidence on the same timer", async () => {
+    const identity = Object.freeze({
+      schemaVersion: 1,
+      sourceRepository: "danielholguin31/desmoslock",
+      sourceCommit: "a".repeat(40),
+      sourceTree: "b".repeat(40),
+      packageLockSha256: "c".repeat(64),
+      buildId: "d".repeat(64),
+    });
+    boundary.readBuildIdentity.mockReturnValue(identity);
+    await boot();
+    expect(boundary.createStudent).toHaveBeenCalledWith(
+      expect.objectContaining({ originBuild: { kind: "build", identity } }),
+    );
+    expect(boundary.readBuildIdentity).toHaveBeenCalledOnce();
+    boundary.protection.hasRetainedAttempt.mockReturnValue(true);
+    let release!: () => void;
+    boundary.protection.refresh.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(boundary.student.flushEvidence).not.toHaveBeenCalled();
+    release();
+    for (let index = 0; index < 8; index++) await Promise.resolve();
+    expect(boundary.student.flushEvidence).toHaveBeenCalledOnce();
+    expect(boundary.student.refresh).not.toHaveBeenCalled();
+  });
+
+  it("does not upload after a failed maintenance cycle or treat successful queue handling as native authority", async () => {
+    await boot();
+    expect(boundary.createStudent).toHaveBeenCalledWith(
+      expect.objectContaining({ originBuild: { kind: "unverified_build" } }),
+    );
+    boundary.protection.hasRetainedAttempt.mockReturnValue(true);
+    boundary.protection.refresh.mockRejectedValueOnce(
+      new Error("synthetic refresh unavailable"),
+    );
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(boundary.student.flushEvidence).not.toHaveBeenCalled();
+    expect(boundary.protection.requestLocalEnd).toHaveBeenCalledExactlyOnceWith(
+      "backend_unavailable",
+    );
+    boundary.protection.requestLocalEnd.mockClear();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(boundary.student.flushEvidence).toHaveBeenCalledOnce();
+    expect(boundary.protection.requestLocalEnd).not.toHaveBeenCalled();
+    expect(boundary.prepareCalculator).not.toHaveBeenCalled();
   });
 
   it("captures the trusted parent and private scaled bounds only for explicit preparation", async () => {

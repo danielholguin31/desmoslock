@@ -123,6 +123,43 @@ export function assertPublicWebCiWorkflow(ciWorkflow, securityWorkflow) {
   }
 }
 
+export function assertUnsignedArtifactCiInvocation(rootPackage, ciWorkflow) {
+  const command = rootPackage.scripts?.["test:repository"];
+  const prefix = "npm run test:clean-build && node --test ";
+  const files =
+    typeof command === "string" && command.startsWith(prefix)
+      ? command.slice(prefix.length).split(" ")
+      : [];
+  const required = [
+    "tests/acceptance/unsigned-artifact-collector.test.mjs",
+    "tests/acceptance/unsigned-artifact-evidence.test.mjs",
+    "tests/acceptance/unsigned-artifact-cli.test.mjs",
+  ];
+  const staticJob = readCiJob(ciWorkflow, "static");
+  const invocation = /^ {6}- run: npm run test:repository$/mu.exec(staticJob);
+  const afterInvocation =
+    invocation === null
+      ? ""
+      : staticJob.slice(invocation.index + invocation[0].length);
+  const nextStep = /^ {6}- /mu.exec(afterInvocation);
+  const invocationOptions = afterInvocation.slice(0, nextStep?.index);
+  if (
+    files.length === 0 ||
+    files.some(
+      (file) => !/^tests\/(?:[a-z0-9-]+\/)*[a-z0-9-]+\.test\.mjs$/u.test(file),
+    ) ||
+    new Set(files).size !== files.length ||
+    required.some((file) => !files.includes(file)) ||
+    invocation === null ||
+    /^ {4}(?:if|continue-on-error)\s*:/mu.test(staticJob) ||
+    /^ {8}(?:if|continue-on-error)\s*:/mu.test(invocationOptions)
+  ) {
+    fail(
+      "Required static CI must execute all three unsigned artifact Node suites through test:repository",
+    );
+  }
+}
+
 export function verifyCiContract(repositoryRoot) {
   const rootPackage = readJson(repositoryRoot, "package.json");
   const ciWorkflow = readText(repositoryRoot, ".github/workflows/ci.yml");
@@ -130,6 +167,7 @@ export function verifyCiContract(repositoryRoot) {
     repositoryRoot,
     ".github/workflows/security.yml",
   );
+  assertUnsignedArtifactCiInvocation(rootPackage, ciWorkflow);
   if (
     rootPackage.scripts?.["test:backup:roundtrip"] !==
       "node --test tests/acceptance/synthetic-backup-roundtrip.test.mjs" ||
@@ -144,7 +182,7 @@ export function verifyCiContract(repositoryRoot) {
     rootPackage.scripts?.["test:staff-auth:stack"] !==
       "node --test tests/acceptance/staff-auth-stack.test.mjs" ||
     rootPackage.scripts?.["test:edge"] !==
-      "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts supabase/functions/student-session-challenge/index.ts supabase/functions/student-session-join/index.ts supabase/functions/student-session-read/index.ts supabase/functions/student-session-reconnect/index.ts supabase/functions/student-session-forfeit/index.ts"
+      "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts supabase/functions/student-session-challenge/index.ts supabase/functions/student-session-join/index.ts supabase/functions/student-session-read/index.ts supabase/functions/student-session-reconnect/index.ts supabase/functions/student-session-forfeit/index.ts supabase/functions/student-session-evidence/index.ts"
   ) {
     fail(
       "Root package does not expose the exact staff Auth schema and composed acceptance lane",

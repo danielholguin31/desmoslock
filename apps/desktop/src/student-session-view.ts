@@ -568,6 +568,10 @@ export function bindStudentSessionView(
         : {
             queued:
               "Session evidence is saved locally and queued. Server receipt is not confirmed.",
+            acknowledged:
+              "The server acknowledged the reports currently saved on this device. This does not confirm native protection or release.",
+            blocked:
+              "Reports cannot currently be delivered. Saved reports remain on this device.",
             full: "Local evidence capacity is reached. Another assessment cannot start.",
             unconfirmed:
               "Local evidence could not be confirmed. Another assessment cannot start.",

@@ -16,6 +16,7 @@ import {
   same,
   transitionCount,
   unavailableResult,
+  verifyStudentEvidenceBackfill,
   withoutAttemptMetadata,
 } from "./student-session-harness.mjs";
 import {
@@ -30,6 +31,10 @@ import {
 export async function runStudentSessionLocks(t, runtime) {
   const harness = await createStudentHarness(runtime);
   try {
+    await t.test(
+      "Evidence backfill: exact published statement retains legacy counters without replay reset",
+      verifyStudentEvidenceBackfill,
+    );
     await t.test(
       "Student locks: parent end wins against an observed joining handler",
       async () => {
@@ -451,6 +456,139 @@ export async function runStudentSessionLocks(t, runtime) {
         }
       },
     );
+    for (const operation of ["end", "remove"]) {
+      await t.test(
+        `Evidence locks: observed ${operation} winner preserves original report permission only`,
+        async () => {
+          const target = await harness.test();
+          const joined = await harness.join(await harness.issue(target));
+          accepted(joined.result);
+          const intent = harness.evidence(joined, 1);
+          const blocker = await holdStudentLock(
+            target,
+            operation === "end" ? null : joined.result.scope.studentSessionId,
+          );
+          const pending = harness.sendEvidence(intent);
+          void pending.catch(() => {});
+          try {
+            await observeStudentWait(
+              blocker,
+              "commit_student_protection_evidence",
+              operation === "end" ? "tests" : "student_sessions",
+            );
+            await commitStaffWhileHolding(
+              blocker,
+              harness,
+              target,
+              operation,
+              joined,
+            );
+            const result = accepted(await pending, "STUDENT_EVIDENCE_ACCEPTED");
+            const state = harness.snapshot(target);
+            const session = currentSession(
+              state,
+              joined.result.scope.studentSessionId,
+            );
+            check(
+              result.scope.epoch === 1 &&
+                state.evidence.length === 1 &&
+                state.proofs[0].last_accepted_proof_counter === 1 &&
+                (operation === "end"
+                  ? state.test.lifecycle === "ended" &&
+                    session.state === "active"
+                  : session.state === "removed" && session.epoch === 2),
+              "Historical report revived admission or lost exact lock-winning transition",
+            );
+            deniedResult(
+              await harness.send(
+                joined,
+                harness.maintenance(joined, "read", 2),
+              ),
+            );
+          } finally {
+            await blocker.close();
+            await Promise.allSettled([pending]);
+          }
+        },
+      );
+    }
+    for (const operation of ["read", "reconnect", "forfeit"]) {
+      await t.test(
+        `Evidence locks: actual concurrent ${operation} and evidence consume one shared proof counter`,
+        async () => {
+          const target = await harness.test();
+          const joined = await harness.join(await harness.issue(target));
+          accepted(joined.result);
+          const maintenance = harness.maintenance(
+            joined,
+            operation,
+            1,
+            operation === "reconnect" ? { next: harness.candidates() } : {},
+          );
+          const evidence = harness.evidence(joined, 1);
+          const blocker = await holdStudentLock(
+            target,
+            joined.result.scope.studentSessionId,
+          );
+          const pending = [
+            harness.send(joined, maintenance),
+            harness.sendEvidence(evidence),
+          ];
+          for (const result of pending) void result.catch(() => {});
+          try {
+            await observeStudentWait(
+              blocker,
+              "read_student_maintenance_key",
+              "student_sessions",
+            );
+            await observeStudentWait(
+              blocker,
+              "commit_student_protection_evidence",
+              "student_sessions",
+            );
+            await blocker.query("commit;");
+            const results = await Promise.all(pending);
+            check(
+              results.filter((result) => result.status === "accepted")
+                .length === 1 &&
+                results.filter((result) => result.status === "denied")
+                  .length === 1,
+              "Concurrent live and evidence operations both spent one proof counter or both failed",
+            );
+            deniedResult(results.find((result) => result.status === "denied"));
+            const state = harness.snapshot(target);
+            const proof = state.proofs[0];
+            check(
+              proof.last_accepted_proof_counter === 1 &&
+                proof.maintenance_accepted_at.length +
+                  proof.evidence_accepted_at.length ===
+                  1 &&
+                state.evidence.length === proof.evidence_accepted_at.length,
+              "Counter or independent allowances diverged after real contention",
+            );
+            const session = currentSession(
+              state,
+              joined.result.scope.studentSessionId,
+            );
+            check(
+              session.last_accepted_proof_counter ===
+                (session.state === "active" ? 1 : 0),
+              "Current compatibility mirror violated active versus terminal contract",
+            );
+            const final = harness.snapshot(target);
+            deniedResult(await harness.sendEvidence(evidence));
+            same(
+              harness.snapshot(target),
+              final,
+              "Exact losing counter replay mutated ledger or proof state",
+            );
+          } finally {
+            await blocker.close();
+            await Promise.allSettled(pending);
+          }
+        },
+      );
+    }
   } finally {
     await harness.close();
   }

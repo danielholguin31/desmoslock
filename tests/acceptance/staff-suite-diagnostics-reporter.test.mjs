@@ -17,7 +17,7 @@ const composedFile = "tests/acceptance/staff-auth-composed.test.mjs";
 const studentInteropFile = "tests/acceptance/student-session-interop.test.mjs";
 const studentLocksFile = "tests/acceptance/student-session-locks.test.mjs";
 const edgeCommand =
-  "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts supabase/functions/student-session-challenge/index.ts supabase/functions/student-session-join/index.ts supabase/functions/student-session-read/index.ts supabase/functions/student-session-reconnect/index.ts supabase/functions/student-session-forfeit/index.ts";
+  "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts supabase/functions/student-session-challenge/index.ts supabase/functions/student-session-join/index.ts supabase/functions/student-session-read/index.ts supabase/functions/student-session-reconnect/index.ts supabase/functions/student-session-forfeit/index.ts supabase/functions/student-session-evidence/index.ts";
 const reporterPath = fileURLToPath(
   new URL("./staff-suite-diagnostics-reporter.mjs", import.meta.url),
 );
@@ -317,7 +317,7 @@ test("stage fallback accepts only the six exact current npm banner and command p
   );
 });
 
-test("Edge fallback matches the Student package command and requires all five ordered Student entrypoints", async () => {
+test("Edge fallback matches the Student package command and requires all six ordered Student entrypoints", async () => {
   const packageJson = JSON.parse(
     await fs.readFile(new URL("../../package.json", import.meta.url), "utf8"),
   );
@@ -327,7 +327,14 @@ test("Edge fallback matches the Student package command and requires all five or
     ...empty,
     stage: "edge",
   });
-  const entrypoints = ["challenge", "join", "read", "reconnect", "forfeit"].map(
+  const entrypoints = [
+    "challenge",
+    "join",
+    "read",
+    "reconnect",
+    "forfeit",
+    "evidence",
+  ].map(
     (operation) => `supabase/functions/student-session-${operation}/index.ts`,
   );
   for (const command of [
@@ -336,8 +343,8 @@ test("Edge fallback matches the Student package command and requires all five or
       edgeCommand.replace(` ${entrypoint}`, ""),
     ),
     edgeCommand.replace(
-      `${entrypoints[3]} ${entrypoints[4]}`,
-      `${entrypoints[4]} ${entrypoints[3]}`,
+      `${entrypoints[4]} ${entrypoints[5]}`,
+      `${entrypoints[5]} ${entrypoints[4]}`,
     ),
     edgeCommand.replace("student-session-join", "student-session-join-other"),
     `${edgeCommand} ${sentinel}`,

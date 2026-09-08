@@ -74,6 +74,8 @@ const RUNTIME_LIFECYCLE_TABLES = Object.freeze([
   "student_device_bindings",
   "student_bootstrap_challenges",
   "student_bootstrap_limits",
+  "student_device_proof_state",
+  "student_protection_events",
 ]);
 
 const STUDENT_COPY_HEADER =

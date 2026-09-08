@@ -81,3 +81,7 @@ verify_jwt = false
 
 [functions.student-session-forfeit]
 verify_jwt = false
+
+# Original admitted device evidence is authenticated by its retained Ed25519 proof.
+[functions.student-session-evidence]
+verify_jwt = false

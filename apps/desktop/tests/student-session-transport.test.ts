@@ -5,7 +5,10 @@ import type {
   StudentJoinRequest,
   StudentReadRequest,
   StudentReconnectRequest,
+  StudentEvidenceRequest,
+  NativeProtectionFact,
 } from "@desmoslock/contracts";
+import { createStudentSessionCrypto } from "../src/main/student-session-crypto.js";
 import {
   createStudentSessionTransport,
   type StudentSessionFetch,
@@ -100,6 +103,250 @@ function json(value: unknown, status = 200): Response {
     headers: { "content-type": "application/json" },
   });
 }
+
+function evidenceFixture() {
+  const crypto = createStudentSessionCrypto(configuration);
+  const device = crypto.createEnrollment();
+  const fact: NativeProtectionFact = {
+    sequence: 1,
+    eventId: "80000000-0000-4000-8000-000000000001",
+    attemptId: "90000000-0000-4000-8000-000000000001",
+    scope: { ...scope, deviceSessionId: device.deviceSessionId },
+    policyVersion: 1,
+    slot: "engaging",
+    phase: "engaging",
+    nativeEvent: null,
+    nativeSequence: null,
+    categories: {
+      aac: { status: "pending", code: "awaiting_native_begin" },
+      shortcuts: { status: "confirmed", code: "none" },
+      applications: { status: "confirmed", code: "none" },
+      persistence: { status: "confirmed", code: "none" },
+      windowNetwork: { status: "confirmed", code: "none" },
+    },
+    cause: "none",
+  };
+  const originBuild = { kind: "unverified_build" } as const;
+  const content = crypto.digestEvidence(device, {
+    scope: fact.scope,
+    originBuild,
+    facts: [fact],
+  });
+  const request: StudentEvidenceRequest = {
+    version: 1,
+    scope: fact.scope,
+    originBuild,
+    facts: [fact],
+    publicKey: device.publicKey,
+    batchDigest: content.batchDigest,
+    deviceProof: crypto.signEvidence(device, {
+      scope: fact.scope,
+      batchDigest: content.batchDigest,
+      counter: 11,
+    }),
+  };
+  const accepted = {
+    status: "accepted",
+    code: "STUDENT_EVIDENCE_ACCEPTED",
+    scope: fact.scope,
+    batchDigest: content.batchDigest,
+    acceptedProofCounter: 11,
+    acknowledged: [
+      {
+        eventId: fact.eventId,
+        contentDigest: content.contentDigests[0]!,
+        receivedAt: "2026-09-08T12:34:56.123456Z",
+      },
+    ],
+  } as const;
+  return { request, digests: content.contentDigests, accepted };
+}
+
+describe("historical evidence fixed transport", () => {
+  it("posts the exact original prefix to its one endpoint with no admission credential or header", async () => {
+    const fixture = evidenceFixture();
+    const fetchRequest = vi
+      .fn<StudentSessionFetch>()
+      .mockResolvedValue(json(fixture.accepted));
+    const transport = createStudentSessionTransport(
+      configuration,
+      fetchRequest,
+    );
+    expect(await transport.evidence(fixture.request, fixture.digests)).toEqual(
+      fixture.accepted,
+    );
+    expect(fetchRequest).toHaveBeenCalledWith(
+      `${configuration.url}/functions/v1/student-session-evidence`,
+      expect.objectContaining({
+        method: "POST",
+        credentials: "omit",
+        redirect: "error",
+        referrerPolicy: "no-referrer",
+        cache: "no-store",
+        keepalive: false,
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+        },
+      }),
+    );
+    expect(JSON.parse(String(fetchRequest.mock.calls[0]?.[1]?.body))).toEqual(
+      fixture.request,
+    );
+    expect(transport.isIdle()).toBe(true);
+  });
+
+  it("requires exact complete content-bound acknowledgments and never accepts absence or generic denial", async () => {
+    const fixture = evidenceFixture();
+    for (const body of [
+      { ...fixture.accepted, scope: { ...fixture.accepted.scope, epoch: 2 } },
+      { ...fixture.accepted, batchDigest: "f".repeat(64) },
+      { ...fixture.accepted, acceptedProofCounter: 10 },
+      { ...fixture.accepted, acknowledged: [] },
+      {
+        ...fixture.accepted,
+        acknowledged: [
+          ...fixture.accepted.acknowledged,
+          ...fixture.accepted.acknowledged,
+        ],
+      },
+      {
+        ...fixture.accepted,
+        acknowledged: [
+          {
+            ...fixture.accepted.acknowledged[0],
+            contentDigest: "f".repeat(64),
+          },
+        ],
+      },
+      {
+        ...fixture.accepted,
+        acknowledged: [
+          {
+            ...fixture.accepted.acknowledged[0],
+            receivedAt: "2026-09-08T12:34:56.123Z",
+          },
+        ],
+      },
+      { ...fixture.accepted, reason: "provider details" },
+      denied,
+    ]) {
+      const fetchRequest = vi
+        .fn<StudentSessionFetch>()
+        .mockResolvedValue(json(body));
+      expect(
+        await createStudentSessionTransport(
+          configuration,
+          fetchRequest,
+        ).evidence(fixture.request, fixture.digests),
+      ).toEqual(unavailable);
+    }
+    const fetchRequest = vi
+      .fn<StudentSessionFetch>()
+      .mockResolvedValue(json(denied, 403));
+    expect(
+      await createStudentSessionTransport(configuration, fetchRequest).evidence(
+        fixture.request,
+        fixture.digests,
+      ),
+    ).toEqual(denied);
+  });
+
+  it("snapshots digest expectations before an await and rejects malformed expectation lists without egress", async () => {
+    const fixture = evidenceFixture();
+    const digests = [...fixture.digests];
+    let resolve!: (response: Response) => void;
+    const fetchRequest = vi.fn<StudentSessionFetch>(
+      () =>
+        new Promise((yes) => {
+          resolve = yes;
+        }),
+    );
+    const transport = createStudentSessionTransport(
+      configuration,
+      fetchRequest,
+    );
+    const pending = transport.evidence(fixture.request, digests);
+    await Promise.resolve();
+    digests[0] = "f".repeat(64);
+    resolve(json(fixture.accepted));
+    expect(await pending).toEqual(fixture.accepted);
+    for (const wrong of [
+      [],
+      ["bad"],
+      [...fixture.digests, ...fixture.digests],
+    ]) {
+      fetchRequest.mockClear();
+      expect(await transport.evidence(fixture.request, wrong)).toEqual(
+        unavailable,
+      );
+      expect(fetchRequest).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps the shared transport occupied after the five-second evidence deadline until real settlement", async () => {
+    vi.useFakeTimers();
+    const fixture = evidenceFixture();
+    let resolve!: (response: Response) => void;
+    const fetchRequest = vi.fn<StudentSessionFetch>(
+      () =>
+        new Promise((yes) => {
+          resolve = yes;
+        }),
+    );
+    const transport = createStudentSessionTransport(
+      configuration,
+      fetchRequest,
+    );
+    const result = transport.evidence(fixture.request, fixture.digests);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(await result).toEqual(unavailable);
+    expect(transport.isIdle()).toBe(false);
+    expect(await transport.read(read, 1_300_000)).toEqual(unavailable);
+    expect(await transport.evidence(fixture.request, fixture.digests)).toEqual(
+      unavailable,
+    );
+    expect(fetchRequest).toHaveBeenCalledOnce();
+    let drained = false;
+    const drain = transport.drain().then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+    resolve(json(fixture.accepted));
+    await drain;
+    expect(drained).toBe(true);
+    expect(transport.isIdle()).toBe(true);
+    expect(await transport.evidence(fixture.request, fixture.digests)).toEqual(
+      unavailable,
+    );
+    expect(fetchRequest).toHaveBeenCalledOnce();
+  });
+
+  it("retains the eight-KiB response ceiling and rejects redirected and wrong-route responses", async () => {
+    const fixture = evidenceFixture();
+    const large = new Response(" ".repeat(8193), {
+      headers: { "content-type": "application/json" },
+    });
+    const redirected = json(fixture.accepted);
+    Object.defineProperty(redirected, "redirected", { value: true });
+    const foreign = json(fixture.accepted);
+    Object.defineProperty(foreign, "url", {
+      value: `${configuration.url}/functions/v1/student-session-read`,
+    });
+    for (const response of [large, redirected, foreign]) {
+      const fetchRequest = vi
+        .fn<StudentSessionFetch>()
+        .mockResolvedValue(response);
+      expect(
+        await createStudentSessionTransport(
+          configuration,
+          fetchRequest,
+        ).evidence(fixture.request, fixture.digests),
+      ).toEqual(unavailable);
+    }
+  });
+});
 afterEach(() => vi.useRealTimers());
 
 describe("StudentSession fixed main transport", () => {

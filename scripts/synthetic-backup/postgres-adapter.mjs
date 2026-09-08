@@ -60,6 +60,8 @@ with baseline as (
     (select count(*) from desmoslock_v2.student_device_bindings)::integer as student_device_bindings,
     (select count(*) from desmoslock_v2.student_bootstrap_challenges)::integer as student_bootstrap_challenges,
     (select count(*) from desmoslock_v2.student_bootstrap_limits)::integer as student_bootstrap_limits,
+    (select count(*) from desmoslock_v2.student_device_proof_state)::integer as student_device_proof_state,
+    (select count(*) from desmoslock_v2.student_protection_events)::integer as student_protection_events,
     (select count(*) from desmoslock_v2.student_sessions)::integer as student_sessions,
     (select count(*) from desmoslock_v2.student_sessions where ${PRISTINE_STUDENT_SESSION_PREDICATE})::integer as pristine_student_sessions,
     (select count(*) from desmoslock_v2.tests)::integer as tests,
@@ -80,6 +82,8 @@ select json_build_object(
       and counts.student_device_bindings = 0
       and counts.student_bootstrap_challenges = 0
       and counts.student_bootstrap_limits = 0
+      and counts.student_device_proof_state = 0
+      and counts.student_protection_events = 0
       and counts.student_sessions = 0
       and counts.pristine_student_sessions = 0
       and counts.tests = 0
@@ -99,6 +103,8 @@ select json_build_object(
       and counts.student_device_bindings = 0
       and counts.student_bootstrap_challenges = 0
       and counts.student_bootstrap_limits = 0
+      and counts.student_device_proof_state = 0
+      and counts.student_protection_events = 0
       and counts.student_sessions = 2
       and counts.pristine_student_sessions = 2
       and counts.tests = 2
@@ -1187,6 +1193,8 @@ begin
     or exists (select 1 from desmoslock_v2.student_device_bindings)
     or exists (select 1 from desmoslock_v2.student_bootstrap_challenges)
     or exists (select 1 from desmoslock_v2.student_bootstrap_limits)
+    or exists (select 1 from desmoslock_v2.student_device_proof_state)
+    or exists (select 1 from desmoslock_v2.student_protection_events)
     or exists (select 1 from desmoslock_v2.student_sessions)
     or exists (select 1 from desmoslock_v2.tests)
     or exists (select 1 from desmoslock_v2.workspaces)
@@ -1224,6 +1232,8 @@ begin
     or exists (select 1 from desmoslock_v2.student_device_bindings)
     or exists (select 1 from desmoslock_v2.student_bootstrap_challenges)
     or exists (select 1 from desmoslock_v2.student_bootstrap_limits)
+    or exists (select 1 from desmoslock_v2.student_device_proof_state)
+    or exists (select 1 from desmoslock_v2.student_protection_events)
   then
     raise exception using errcode = '55000', message = 'restored StudentSession authority verification failed';
   end if;

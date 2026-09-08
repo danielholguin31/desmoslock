@@ -46,6 +46,7 @@ import {
   type StudentSessionCoordinator,
 } from "./main/student-session-coordinator.js";
 import { createStudentSessionCrypto } from "./main/student-session-crypto.js";
+import { readClientBuildIdentity } from "./main/build-identity.js";
 import { createStudentSessionTransport } from "./main/student-session-transport.js";
 import {
   createStudentSessionStore,
@@ -236,6 +237,7 @@ async function initializeStudentSession(): Promise<void> {
   if (publicBackendConfiguration === null || studentCoordinator !== null)
     return;
   const crypto = createStudentSessionCrypto(publicBackendConfiguration);
+  const identity = readClientBuildIdentity();
   const ownedDirectory = path.join(app.getPath("userData"), "student-session");
   const store = createStudentSessionStore({
     apiOrigin: publicBackendConfiguration.url,
@@ -253,6 +255,10 @@ async function initializeStudentSession(): Promise<void> {
     store,
     crypto,
     transport: createStudentSessionTransport(publicBackendConfiguration),
+    originBuild:
+      identity === null
+        ? { kind: "unverified_build" }
+        : { kind: "build", identity },
   });
   await studentCoordinator.initialize();
   if (startupQuitRequested) return;
@@ -300,17 +306,37 @@ async function initializeStudentSession(): Promise<void> {
     protectionCoordinator?.requestLocalEnd("renderer_lost"),
   );
   maintenanceTimer = setInterval(() => {
-    if (
-      protectionCoordinator?.hasRetainedAttempt() ||
+    const protection = protectionCoordinator;
+    const student = studentCoordinator;
+    if (quitting || protection === null || student === null) return;
+    // Historical reports remain eligible after the trusted window closes.
+    // Live maintenance, when needed, still precedes delivery on this one timer.
+    const maintenanceNeeded =
+      protection.hasRetainedAttempt() ||
       (mainWindow !== null &&
         !mainWindow.isDestroyed() &&
-        mainWindow.isVisible())
-    )
-      void protectionCoordinator
-        ?.refresh()
-        .catch(() =>
-          protectionCoordinator?.requestLocalEnd("backend_unavailable"),
-        );
+        mainWindow.isVisible());
+    const maintenance = maintenanceNeeded
+      ? protection.refresh()
+      : Promise.resolve();
+    void maintenance.then(
+      async () => {
+        if (
+          quitting ||
+          protectionCoordinator !== protection ||
+          studentCoordinator !== student
+        )
+          return;
+        try {
+          await student.flushEvidence();
+        } catch {
+          // Expected delivery failures resolve as finite queue status. An
+          // unexpected shared-record failure cannot sustain native authority.
+          protection.requestLocalEnd("persistence_unavailable");
+        }
+      },
+      () => protection.requestLocalEnd("backend_unavailable"),
+    );
   }, 15_000);
 }
 

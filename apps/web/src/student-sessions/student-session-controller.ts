@@ -5,6 +5,7 @@ import {
   parsePrepareStudentReadmissionRequest,
   parsePrepareStudentReadmissionRpcResult,
   parseReadSchoolTestRpcResult,
+  parseReadStudentProtectionEventsRpcResult,
   parseReadStudentSessionsRpcResult,
   parseRemoveStudentSessionRpcResult,
   parseSchoolSettings,
@@ -17,7 +18,9 @@ import type {
   SchoolSettings,
   StaffStudentSession,
   StaffStudentSessionPage,
+  StaffStudentProtectionEventPage,
   StaffTest,
+  StudentProtectionEventPageCursor,
   StudentSessionPageCursor,
 } from "@desmoslock/contracts";
 import type {
@@ -40,6 +43,13 @@ export interface StudentCodeDisclosure {
   readonly expiresAt: string;
   readonly studentSessionId: string | null;
 }
+export type StudentSessionEvidence =
+  | { readonly kind: "closed" }
+  | {
+      readonly kind: "loading" | "unavailable";
+      readonly page: StaffStudentProtectionEventPage | null;
+    }
+  | { readonly kind: "ready"; readonly page: StaffStudentProtectionEventPage };
 export interface StudentSessionData {
   readonly school: SchoolSettings;
   readonly test: StaffTest;
@@ -47,6 +57,7 @@ export interface StudentSessionData {
   readonly page: StaffStudentSessionPage;
   readonly selected: StaffStudentSession | null;
   readonly disclosure: StudentCodeDisclosure | null;
+  readonly evidence: StudentSessionEvidence;
 }
 export interface StudentSessionReview {
   readonly operation: StudentSessionMutation;
@@ -105,7 +116,12 @@ export type StudentSessionAction =
         | "confirm_review"
         | "cancel_review"
         | "retry_issuance"
-        | "dismiss_code";
+        | "dismiss_code"
+        | "open_evidence"
+        | "close_evidence"
+        | "evidence_first_page"
+        | "evidence_next_page"
+        | "refresh_evidence";
       readonly snapshotRevision: number;
     };
 export interface StudentSessionController {
@@ -161,15 +177,22 @@ interface Work {
   readonly epoch: number;
   readonly authority: StaffProductAuthority;
   readonly test: StaffTest;
-  readonly kind: "read" | "review" | "mutation";
+  readonly kind: "read" | "evidence" | "review" | "mutation";
   readonly review: ReviewIntent | null;
   readonly before: StudentSessionPageCursor | null;
+  readonly evidenceBefore: StudentProtectionEventPageCursor | null;
   readonly quiet: boolean;
   readonly retry: boolean;
   handle: string | null;
   egress: boolean;
   phase: "verifying" | "submitting" | "refreshing";
   promise: Promise<StudentSessionSnapshot>;
+}
+interface EvidenceBinding {
+  readonly schoolId: string;
+  readonly testId: string;
+  readonly studentSessionId: string;
+  readonly sessionEpoch: number;
 }
 
 const emptyPage: StaffStudentSessionPage = Object.freeze({
@@ -288,7 +311,12 @@ function parseAction(value: unknown): StudentSessionAction | null {
     action.type === "confirm_review" ||
     action.type === "cancel_review" ||
     action.type === "retry_issuance" ||
-    action.type === "dismiss_code"
+    action.type === "dismiss_code" ||
+    action.type === "open_evidence" ||
+    action.type === "close_evidence" ||
+    action.type === "evidence_first_page" ||
+    action.type === "evidence_next_page" ||
+    action.type === "refresh_evidence"
   )
     return { type: action.type, snapshotRevision: action.snapshotRevision };
   return null;
@@ -316,6 +344,10 @@ export function createStudentSessionController(
   let before: StudentSessionPageCursor | null = null;
   let selected: StaffStudentSession | null = null;
   let disclosure: StudentCodeDisclosure | null = null;
+  let evidence: StudentSessionEvidence = Object.freeze({ kind: "closed" });
+  let evidenceBinding: EvidenceBinding | null = null;
+  let evidenceBefore: StudentProtectionEventPageCursor | null = null;
+  let evidenceGeneration = 0;
   let review: ReviewIntent | null = null;
   let pending: PrivateIssuance | null = null;
   let notice: StudentSessionNotice | null = null;
@@ -374,8 +406,36 @@ export function createStudentSessionController(
       }
     }
   }
+  function clearEvidence(): void {
+    evidenceGeneration += 1;
+    evidence = Object.freeze({ kind: "closed" });
+    evidenceBinding = null;
+    evidenceBefore = null;
+  }
+  function evidenceSelectionMatches(binding: EvidenceBinding): boolean {
+    return (
+      selected !== null &&
+      selected.schoolId === binding.schoolId &&
+      selected.testId === binding.testId &&
+      selected.id === binding.studentSessionId &&
+      selected.epoch === binding.sessionEpoch
+    );
+  }
+  function reconcileEvidence(): void {
+    if (evidenceBinding !== null && !evidenceSelectionMatches(evidenceBinding))
+      clearEvidence();
+  }
+  function settleEvidenceRead(): void {
+    if (evidence.kind !== "loading") return;
+    evidence = Object.freeze(
+      evidence.page === null
+        ? { kind: "unavailable", page: null }
+        : { kind: "ready", page: evidence.page },
+    );
+  }
   function invalidate(clear: boolean): void {
     epoch += 1;
+    clearEvidence();
     if (active !== null) {
       if (!clear && active.egress && active.review !== null) {
         notice = { kind: "unconfirmed", operation: active.review.operation };
@@ -407,6 +467,7 @@ export function createStudentSessionController(
       page: page ?? emptyPage,
       selected,
       disclosure,
+      evidence,
     });
   }
   function staleReview(value: ReviewIntent): boolean {
@@ -671,6 +732,7 @@ export function createStudentSessionController(
     before = cursor;
     if (selected !== null)
       selected = items.find((item) => item.id === selected?.id) ?? null;
+    reconcileEvidence();
     readUnavailable = false;
     return true;
   }
@@ -720,6 +782,64 @@ export function createStudentSessionController(
     )
       return null;
     return { test: response.test, page: sessions.page };
+  }
+  async function readEvidence(
+    work: Work,
+    cursor: StudentProtectionEventPageCursor | null,
+  ): Promise<void> {
+    const binding = evidenceBinding;
+    const generation = evidenceGeneration;
+    if (evidence.kind === "closed" || binding === null) return;
+    const previousPage = evidence.page;
+    const currentEvidence = () =>
+      checkLive(work) &&
+      evidenceGeneration === generation &&
+      evidenceBinding === binding &&
+      evidenceSelectionMatches(binding) &&
+      evidence.kind !== "closed";
+    if (!currentEvidence() || work.handle === null) return;
+    if (!work.quiet || work.kind === "evidence" || previousPage === null)
+      evidence = Object.freeze({ kind: "loading", page: previousPage });
+    project();
+    if (!currentEvidence() || work.handle === null) return;
+    const request = Object.freeze({
+      schoolId: binding.schoolId,
+      testId: binding.testId,
+      studentSessionId: binding.studentSessionId,
+      before: cursor,
+    });
+    let raw: unknown;
+    try {
+      raw = await dependencies.port.readStudentProtectionEvents(
+        request,
+        work.handle,
+      );
+    } catch {
+      raw = null;
+    }
+    if (!currentEvidence()) return;
+    const response = parseReadStudentProtectionEventsRpcResult(raw, request);
+    if (!currentEvidence()) return;
+    if (
+      response === null ||
+      !response.ok ||
+      response.page.items.some(
+        (item) => item.fact.scope.epoch > binding.sessionEpoch,
+      )
+    ) {
+      evidence = Object.freeze({
+        kind: "unavailable",
+        page:
+          response !== null &&
+          !response.ok &&
+          response.code !== "dependency_unavailable"
+            ? null
+            : previousPage,
+      });
+      return;
+    }
+    evidenceBefore = cursor;
+    evidence = Object.freeze({ kind: "ready", page: response.page });
   }
   function factsMatch(
     work: Work,
@@ -897,10 +1017,14 @@ export function createStudentSessionController(
     }
   }
   function stopQuietRead(): void {
-    if (active?.kind === "read" && active.quiet) {
+    if (
+      (active?.kind === "read" || active?.kind === "evidence") &&
+      active.quiet
+    ) {
       const old = active;
       active = null;
       release(old);
+      settleEvidenceRead();
     }
   }
   function begin(
@@ -910,6 +1034,7 @@ export function createStudentSessionController(
     fresh: StaffProductRefreshResult | null = null,
     quiet = false,
     retry = false,
+    evidenceCursor: StudentProtectionEventPageCursor | null = null,
   ): Promise<StudentSessionSnapshot> {
     if (
       disposed ||
@@ -936,6 +1061,7 @@ export function createStudentSessionController(
       kind,
       review: intent,
       before: cursor,
+      evidenceBefore: evidenceCursor,
       quiet,
       retry,
       handle: null,
@@ -954,18 +1080,36 @@ export function createStudentSessionController(
           return;
         if (!(await capture(work))) {
           if (current(work)) {
-            if (intent === null) readUnavailable = true;
-            else notice = { kind: "rejected", operation: intent.operation };
+            if (evidence.kind !== "closed")
+              evidence = Object.freeze({
+                kind: "unavailable",
+                page: evidence.page,
+              });
+            if (intent === null && kind !== "evidence") readUnavailable = true;
+            else if (intent !== null)
+              notice = { kind: "rejected", operation: intent.operation };
           }
+          return;
+        }
+        if (kind === "evidence") {
+          await readEvidence(work, work.evidenceBefore);
           return;
         }
         const facts = await readFacts(work);
         if (!current(work)) return;
         if (facts === null) {
           readUnavailable = true;
+          if (evidence.kind !== "closed")
+            evidence = Object.freeze({
+              kind: "unavailable",
+              page: evidence.page,
+            });
           return;
         }
-        if (kind === "read") return;
+        if (kind === "read") {
+          await readEvidence(work, evidenceBefore);
+          return;
+        }
         if (intent === null) return;
         // Receipt recovery is a distinct path: preserve original revisions and
         // candidates even if the prior unconfirmed commit changed the row.
@@ -1053,6 +1197,97 @@ export function createStudentSessionController(
     };
     return begin("review", intent, before);
   }
+  function evidenceWorkActive(): boolean {
+    return active?.kind === "evidence";
+  }
+  function dispatchEvidence(
+    type:
+      | "open_evidence"
+      | "close_evidence"
+      | "evidence_first_page"
+      | "evidence_next_page"
+      | "refresh_evidence",
+  ): Promise<StudentSessionSnapshot> {
+    if (type === "close_evidence") {
+      clearEvidence();
+      stopQuietRead();
+      project();
+      return Promise.resolve(snapshot);
+    }
+    if (
+      selected === null ||
+      target === null ||
+      target.parentBusy ||
+      authority === null ||
+      mode !== "ready" ||
+      selected.schoolId !== authority.schoolId ||
+      selected.testId !== target.test.id ||
+      (type !== "open_evidence" && evidence.kind === "closed")
+    )
+      return Promise.resolve(snapshot);
+    if (type === "open_evidence" && evidence.kind !== "closed")
+      return active?.promise ?? Promise.resolve(snapshot);
+    const next = evidence.kind === "closed" ? null : evidence.page?.nextCursor;
+    if (type === "evidence_next_page" && next == null)
+      return Promise.resolve(snapshot);
+    if (type === "evidence_first_page" || type === "evidence_next_page") {
+      const binding = evidenceBinding;
+      stopQuietRead();
+      if (
+        binding === null ||
+        evidenceBinding !== binding ||
+        !evidenceSelectionMatches(binding)
+      )
+        return Promise.resolve(snapshot);
+    }
+    if (
+      active !== null &&
+      !(active.kind === "read" && active.quiet && type === "open_evidence")
+    )
+      return active.kind === "evidence" ||
+        (active.kind === "read" && active.quiet)
+        ? active.promise
+        : Promise.resolve(snapshot);
+    if (type === "open_evidence") {
+      evidenceGeneration += 1;
+      evidenceBinding = Object.freeze({
+        schoolId: selected.schoolId,
+        testId: selected.testId,
+        studentSessionId: selected.id,
+        sessionEpoch: selected.epoch,
+      });
+      evidenceBefore = null;
+    }
+    const cursor =
+      type === "open_evidence" || type === "evidence_first_page"
+        ? null
+        : type === "evidence_next_page"
+          ? (next ?? null)
+          : evidenceBefore;
+    evidence = Object.freeze({
+      kind: "loading",
+      page: evidence.kind === "closed" ? null : evidence.page,
+    });
+    if (active !== null) {
+      const work = active;
+      project();
+      return work.promise;
+    }
+    const operation = begin(
+      "evidence",
+      null,
+      before,
+      null,
+      true,
+      false,
+      cursor,
+    );
+    if (!evidenceWorkActive()) {
+      settleEvidenceRead();
+      project();
+    }
+    return operation;
+  }
   setAccess(liveAccess());
   return {
     getSnapshot: () => snapshot,
@@ -1085,13 +1320,25 @@ export function createStudentSessionController(
       )
         return Promise.resolve(snapshot);
       if (
+        action.type === "open_evidence" ||
+        action.type === "close_evidence" ||
+        action.type === "evidence_first_page" ||
+        action.type === "evidence_next_page" ||
+        action.type === "refresh_evidence"
+      )
+        return dispatchEvidence(action.type);
+      if (
         action.type === "load" ||
         action.type === "refresh" ||
         action.type === "first_page" ||
         action.type === "next_page"
       ) {
         if (target?.parentBusy) return Promise.resolve(snapshot);
-        if (action.type === "first_page" || action.type === "next_page")
+        if (
+          action.type === "first_page" ||
+          action.type === "next_page" ||
+          active?.kind === "evidence"
+        )
           stopQuietRead();
         if (active?.kind === "read") return active.promise;
         if (action.type === "next_page" && page?.nextCursor == null)
@@ -1115,6 +1362,7 @@ export function createStudentSessionController(
         );
         if (item !== undefined) {
           selected = item;
+          reconcileEvidence();
           notice = null;
           project();
         }
@@ -1134,6 +1382,7 @@ export function createStudentSessionController(
         stopQuietRead();
         return begin("mutation", review, before);
       } else if (action.type === "cancel_review") {
+        stopQuietRead();
         if (active === null) {
           review = null;
           notice = null;
@@ -1167,6 +1416,7 @@ export function createStudentSessionController(
           true,
         );
       } else if (action.type === "dismiss_code") {
+        stopQuietRead();
         if (active === null) {
           disclosure = null;
           project();

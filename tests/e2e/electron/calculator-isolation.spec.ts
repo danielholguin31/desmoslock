@@ -26,6 +26,18 @@ import {
   waitForResourceAcquisition,
 } from "../../../scripts/production-desktop-resource-safety.mjs";
 import { runHostileCalculatorProbe } from "./support/hostile-calculator-probe.mjs";
+import {
+  assertGraphGeometry,
+  assertGraphRestoredAfterNavigation,
+  assertPlotPaint,
+  assertZoomGeometryChanged,
+  graphScreenPoint,
+  plotGeometry,
+  type ExpectedPlot,
+  type GraphPoint,
+  type GraphSnapshot,
+  type GraphRecoveryEvent,
+} from "./support/calculator-graph-oracle.js";
 
 const calculatorUrl = "desmoslock-calculator://host/index.html";
 
@@ -152,6 +164,11 @@ async function typeCalculatorExpression(
         .getAllWebContents()
         .find((contents) => contents.getURL() === input.calculatorUrl);
       if (calculator === undefined) throw new Error("Calculator is missing");
+      const modifiers: Array<"meta" | "control"> = [
+        process.platform === "darwin" ? "meta" : "control",
+      ];
+      calculator.sendInputEvent({ type: "keyDown", keyCode: "A", modifiers });
+      calculator.sendInputEvent({ type: "keyUp", keyCode: "A", modifiers });
       await calculator.insertText(input.expression);
     },
     { calculatorUrl, expression },
@@ -169,6 +186,212 @@ async function typeCalculatorExpression(
     .toBe(expression);
   await clickCalculatorControl(application, "[data-expression-form] button");
 }
+
+async function readGraph(
+  application: ElectronApplication,
+): Promise<GraphSnapshot> {
+  return callCalculator(
+    application,
+    () => {
+      const graph = document.querySelector<SVGSVGElement>("[data-graph]");
+      if (graph === null) throw new Error("Graph is missing");
+      const visible = (element: Element): boolean => {
+        for (
+          let current: Element | null = element;
+          current !== null;
+          current = current.parentElement
+        ) {
+          const style = getComputedStyle(current);
+          if (
+            style.display === "none" ||
+            style.visibility !== "visible" ||
+            Number(style.opacity) === 0
+          )
+            return false;
+        }
+        return true;
+      };
+      const bounds = graph.getBoundingClientRect();
+      const matrix = graph.getScreenCTM();
+      if (matrix === null) throw new Error("Graph transform is missing");
+      const box = graph.viewBox.baseVal;
+      return {
+        document: { url: location.href, timeOrigin: performance.timeOrigin },
+        expressions: Array.from(
+          document.querySelectorAll<HTMLElement>("[data-expression]"),
+          (element) => element.dataset.expression ?? "",
+        ),
+        plots: Array.from(
+          graph.querySelectorAll<SVGPathElement | SVGCircleElement>(
+            ".expression-path,.expression-point",
+          ),
+          (element) => {
+            const style = getComputedStyle(element);
+            if (element.tagName.toLowerCase() === "path")
+              return {
+                kind: "path" as const,
+                d: element.getAttribute("d") ?? "",
+                painted:
+                  visible(element) &&
+                  style.stroke !== "none" &&
+                  Number(style.strokeOpacity) > 0 &&
+                  Number.parseFloat(style.strokeWidth) > 0,
+              };
+            return {
+              kind: "point" as const,
+              cx: Number(element.getAttribute("cx")),
+              cy: Number(element.getAttribute("cy")),
+              radius: Number(element.getAttribute("r")),
+              painted:
+                visible(element) &&
+                style.fill !== "none" &&
+                Number(style.fillOpacity) > 0,
+            };
+          },
+        ),
+        zoom: document.querySelector("[data-zoom-label]")?.textContent ?? "",
+        visible: visible(graph),
+        width: bounds.width,
+        height: bounds.height,
+        viewport: [innerWidth, innerHeight] as const,
+        viewBox: [box.x, box.y, box.width, box.height],
+        matrix: [matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f],
+      };
+    },
+    null,
+  );
+}
+
+async function assertCapturedPlot(
+  application: ElectronApplication,
+  snapshot: GraphSnapshot,
+  points: readonly GraphPoint[],
+  color: readonly [number, number, number],
+  name: string,
+): Promise<void> {
+  const captured = await application.evaluate(
+    async ({ nativeImage, webContents }, input) => {
+      const calculator = webContents
+        .getAllWebContents()
+        .find((contents) => contents.getURL() === input.calculatorUrl);
+      if (calculator === undefined) throw new Error("Calculator is missing");
+      const image = await calculator.capturePage();
+      const { width, height } = image.getSize(1);
+      const bitmap = image.toBitmap({ scaleFactor: 1 });
+      if (width <= 0 || height <= 0 || bitmap.length !== width * height * 4)
+        throw new Error("Unexpected capture bitmap");
+      const patches = input.points.map(([x, y]) => {
+        const pixelX = Math.round((x * width) / input.viewport[0]);
+        const pixelY = Math.round((y * height) / input.viewport[1]);
+        if (
+          pixelX < 3 ||
+          pixelY < 3 ||
+          pixelX + 3 >= width ||
+          pixelY + 3 >= height
+        )
+          throw new Error("Plot patch is outside capture");
+        const patch: number[] = [];
+        for (let dy = -3; dy <= 3; dy += 1)
+          for (let dx = -3; dx <= 3; dx += 1) {
+            const offset = ((pixelY + dy) * width + pixelX + dx) * 4;
+            patch.push(...bitmap.subarray(offset, offset + 4));
+          }
+        return patch;
+      });
+      const blank = nativeImage.createFromBitmap(
+        Buffer.alloc(width * height * 4, 255),
+        { width, height, scaleFactor: 1 },
+      );
+      return {
+        patches,
+        png: image.toPNG({ scaleFactor: 1 }).toString("base64"),
+        blankPngBytes: blank.toPNG().byteLength,
+        blankPatch: [
+          ...blank.toBitmap({ scaleFactor: 1 }).subarray(0, 7 * 7 * 4),
+        ],
+      };
+    },
+    {
+      calculatorUrl,
+      points: points.map((point) => graphScreenPoint(snapshot, point)),
+      viewport: snapshot.viewport,
+    },
+  );
+  for (const patch of captured.patches) assertPlotPaint(patch, color);
+  // A real, entirely white PNG also clears the old 1,000-byte threshold.
+  // Even with valid DOM geometry, it must fail the mandatory paint oracle.
+  expect(captured.blankPngBytes).toBeGreaterThan(1_000);
+  expect(() => assertPlotPaint(captured.blankPatch, color)).toThrow(
+    "plot pixels",
+  );
+  await test.info().attach(name, {
+    body: Buffer.from(captured.png, "base64"),
+    contentType: "image/png",
+  });
+}
+
+const diagonal: ExpectedPlot = {
+  expression: "y=x",
+  kind: "path",
+  points: [
+    [216, 374],
+    [360, 230],
+    [504, 86],
+  ],
+};
+const quadratic100: ExpectedPlot = {
+  expression: "y=x^2",
+  kind: "path",
+  points: [
+    [288, 86],
+    [360, 230],
+    [432, 86],
+  ],
+};
+const quadratic125: ExpectedPlot = {
+  expression: "y=x^2",
+  kind: "path",
+  points: [
+    [270, 50],
+    [360, 230],
+    [450, 50],
+  ],
+};
+const otherProfileForms125: readonly ExpectedPlot[] = [
+  {
+    expression: "y=sin(x)",
+    kind: "path",
+    points: [
+      [270, 270.9184],
+      [450, 189.0816],
+    ],
+  },
+  {
+    expression: "y=cos(x)",
+    kind: "path",
+    points: [
+      [360, 185],
+      [450, 248.7266],
+    ],
+  },
+  {
+    expression: "y=3",
+    kind: "path",
+    points: [
+      [150, 95],
+      [600, 95],
+    ],
+  },
+  {
+    expression: "x=-3",
+    kind: "path",
+    points: [
+      [225, 30],
+      [225, 430],
+    ],
+  },
+  { expression: "(2,3)", kind: "point", points: [[450, 95]] },
+];
 
 test.describe
   .serial("synthetic fixture exercising the production calculator surface", () => {
@@ -416,7 +639,7 @@ test.describe
     expect(isolation.preload).toBeUndefined();
   });
 
-  test("supports controlled expression and zoom interactions", async () => {
+  test("plots the finite internal profile with visible geometry, zoom, removal and rejection", async () => {
     await expect(
       callCalculator(
         application,
@@ -424,50 +647,86 @@ test.describe
         null,
       ),
     ).resolves.toBe("Graphing calculator");
+    const initial = await readGraph(application);
+    assertGraphGeometry(initial, [diagonal]);
+    expect(initial.zoom).toBe("100%");
     await typeCalculatorExpression(application, "y=x^2");
-    await clickCalculatorControl(application, "[data-zoom-in]");
-
     await expect
-      .poll(() =>
-        callCalculator(
-          application,
-          () => ({
-            expressions: Array.from(
-              document.querySelectorAll<HTMLElement>("[data-expression]"),
-              (element) => element.dataset.expression,
-            ),
-            graphVisible:
-              document
-                .querySelector<SVGElement>("[data-graph]")
-                ?.getBoundingClientRect().height !== 0,
-            pathCount: document.querySelectorAll(".expression-path").length,
-            zoom: document.querySelector("[data-zoom-label]")?.textContent,
-          }),
-          null,
-        ),
-      )
-      .toEqual({
-        expressions: ["y=x", "y=x^2"],
-        graphVisible: true,
-        pathCount: 2,
-        zoom: "125%",
-      });
-    const screenshotBytes = await application.evaluate(
-      async ({ webContents }, url) => {
-        const calculator = webContents
-          .getAllWebContents()
-          .find((contents) => contents.getURL() === url);
-        if (calculator === undefined) throw new Error("Calculator is missing");
-        return (await calculator.capturePage()).toPNG().byteLength;
-      },
-      calculatorUrl,
+      .poll(async () => (await readGraph(application)).expressions)
+      .toEqual(["y=x", "y=x^2"]);
+    const beforeZoom = await readGraph(application);
+    assertGraphGeometry(beforeZoom, [diagonal, quadratic100]);
+    await assertCapturedPlot(
+      application,
+      beforeZoom,
+      [
+        [288, 86],
+        [432, 86],
+      ],
+      [209, 73, 91],
+      "quadratic-at-100-percent",
     );
 
-    expect(screenshotBytes).toBeGreaterThan(1_000);
+    await clickCalculatorControl(application, "[data-zoom-in]");
+    await expect
+      .poll(async () => (await readGraph(application)).zoom)
+      .toBe("125%");
+    const afterZoom = await readGraph(application);
+    assertGraphGeometry(afterZoom, [diagonal, quadratic125]);
+    assertZoomGeometryChanged(beforeZoom, afterZoom, "y=x^2");
+    await assertCapturedPlot(
+      application,
+      afterZoom,
+      [
+        [270, 50],
+        [450, 50],
+      ],
+      [209, 73, 91],
+      "quadratic-at-125-percent",
+    );
+
+    for (const form of otherProfileForms125)
+      await typeCalculatorExpression(application, form.expression);
+    const allForms = await readGraph(application);
+    assertGraphGeometry(allForms, [
+      diagonal,
+      quadratic125,
+      ...otherProfileForms125,
+    ]);
+    await clickCalculatorControl(
+      application,
+      "[data-expression='y=x^2'] button",
+    );
+    await expect
+      .poll(async () => (await readGraph(application)).expressions)
+      .toEqual(
+        [diagonal, ...otherProfileForms125].map((form) => form.expression),
+      );
+    const removed = await readGraph(application);
+    assertGraphGeometry(removed, [diagonal, ...otherProfileForms125]);
+    expect(plotGeometry(removed)).toEqual(
+      plotGeometry(allForms).filter((_plot, index) => index !== 1),
+    );
+
+    await typeCalculatorExpression(application, "y=2x+1");
+    await expect(
+      callCalculator(
+        application,
+        () => document.querySelector("[data-expression-error]")?.textContent,
+        null,
+      ),
+    ).resolves.toBe("Use y=x, y=x^2, y=sin(x), y=cos(x), x=n, y=n, or (x,y).");
+    const rejected = await readGraph(application);
+    assertGraphGeometry(rejected, [diagonal, ...otherProfileForms125]);
+    expect(plotGeometry(rejected)).toEqual(plotGeometry(removed));
+    expect(rejected.zoom).toBe(removed.zoom);
   });
 
   test("blocks hostile desktop, network, popup, navigation, download, and permission attempts", async () => {
-    await application.evaluate(({ webContents }, url) => {
+    const beforeAttack = await readGraph(application);
+    assertGraphGeometry(beforeAttack, [diagonal, ...otherProfileForms125]);
+    expect(beforeAttack.zoom).toBe("125%");
+    const calculatorId = await application.evaluate(({ webContents }, url) => {
       const calculator = webContents
         .getAllWebContents()
         .find((contents) => contents.getURL() === url);
@@ -475,6 +734,46 @@ test.describe
       const tracked = calculator as typeof calculator & {
         blockedDownloadEvents?: number;
         productionDownloadDenialObserved?: boolean;
+        graphRecoveryEvents?: GraphRecoveryEvent[];
+        stopGraphRecoveryObservation?: () => void;
+      };
+      tracked.graphRecoveryEvents = [];
+      const failed = (
+        _event: Electron.Event,
+        errorCode: number,
+        _description: string,
+        failedUrl: string,
+        isMainFrame: boolean,
+      ): void => {
+        tracked.graphRecoveryEvents?.push({
+          kind: "failed-load",
+          url: failedUrl,
+          isMainFrame,
+          errorCode,
+        });
+      };
+      const navigated = (
+        _event: Electron.Event,
+        committedUrl: string,
+      ): void => {
+        tracked.graphRecoveryEvents?.push({
+          kind: "navigated",
+          url: committedUrl,
+        });
+      };
+      const finished = (): void => {
+        tracked.graphRecoveryEvents?.push({
+          kind: "finished-load",
+          url: calculator.getURL(),
+        });
+      };
+      calculator.on("did-fail-load", failed);
+      calculator.on("did-navigate", navigated);
+      calculator.on("did-finish-load", finished);
+      tracked.stopGraphRecoveryObservation = () => {
+        calculator.removeListener("did-fail-load", failed);
+        calculator.removeListener("did-navigate", navigated);
+        calculator.removeListener("did-finish-load", finished);
       };
       tracked.blockedDownloadEvents = 0;
       tracked.productionDownloadDenialObserved = false;
@@ -489,85 +788,158 @@ test.describe
           }
         },
       );
+      return calculator.id;
     }, calculatorUrl);
 
-    const hostile = await callCalculator(
-      application,
-      runHostileCalculatorProbe,
-      {
-        httpOrigin: sinkOrigin,
-        tcpPort: tcpSinkPort,
-        udpPort: udpSinkPort,
-      },
-    );
-
-    expect(hostile).toMatchObject({
-      bridge: "undefined",
-      externalProtocol: "denied",
-      fetch: "blocked",
-      nodeProcess: "undefined",
-      nodeRequire: "undefined",
-      permission: "denied",
-      popup: "blocked",
-      rtcPeerConnection: "NotAllowedError",
-      webTransport: "rejected",
-    });
-
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    const afterAttack = await application.evaluate(
-      ({ BrowserWindow, webContents }, url) => {
-        const calculator = webContents
-          .getAllWebContents()
-          .find((contents) => contents.getURL() === url);
-        if (calculator === undefined) {
-          throw new Error(
-            `Calculator is missing; active URLs: ${webContents
-              .getAllWebContents()
-              .map((contents) => contents.getURL())
-              .join(", ")}`,
-          );
-        }
-        return {
-          blockedDownloadEvents:
-            (
-              calculator as typeof calculator & {
-                blockedDownloadEvents?: number;
-              }
-            ).blockedDownloadEvents ?? 0,
-          productionDownloadDenialObserved:
-            (
-              calculator as typeof calculator & {
-                productionDownloadDenialObserved?: boolean;
-              }
-            ).productionDownloadDenialObserved ?? false,
-          calculatorUrl: calculator.getURL(),
-          windowCount: BrowserWindow.getAllWindows().length,
-        };
-      },
-      calculatorUrl,
-    );
-
-    expect(afterAttack).toEqual({
-      blockedDownloadEvents: 1,
-      calculatorUrl,
-      productionDownloadDenialObserved: true,
-      windowCount: 1,
-    });
-    expect(sinkRequests).toBe(0);
-    expect(tcpSinkConnections).toBe(0);
-    expect(udpSinkRequests).toBe(0);
-    await expect(shell.locator("[data-isolation-fixture]")).toHaveText(
-      "Synthetic calculator isolation fixture",
-    );
-
-    await typeCalculatorExpression(application, "(2,3)");
-    await expect(
-      callCalculator(
+    try {
+      const hostile = await callCalculator(
         application,
-        () => document.querySelector("[data-expression='(2,3)']") !== null,
-        null,
-      ),
-    ).resolves.toBe(true);
+        runHostileCalculatorProbe,
+        {
+          httpOrigin: sinkOrigin,
+          tcpPort: tcpSinkPort,
+          udpPort: udpSinkPort,
+        },
+      );
+
+      expect(hostile).toMatchObject({
+        bridge: "undefined",
+        externalProtocol: "denied",
+        fetch: "blocked",
+        nodeProcess: "undefined",
+        nodeRequire: "undefined",
+        permission: "denied",
+        popup: "blocked",
+        rtcPeerConnection: "NotAllowedError",
+        webTransport: "rejected",
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const afterAttack = await application.evaluate(
+        ({ BrowserWindow, webContents }, url) => {
+          const calculator = webContents
+            .getAllWebContents()
+            .find((contents) => contents.getURL() === url);
+          if (calculator === undefined) {
+            throw new Error(
+              `Calculator is missing; active URLs: ${webContents
+                .getAllWebContents()
+                .map((contents) => contents.getURL())
+                .join(", ")}`,
+            );
+          }
+          return {
+            blockedDownloadEvents:
+              (
+                calculator as typeof calculator & {
+                  blockedDownloadEvents?: number;
+                }
+              ).blockedDownloadEvents ?? 0,
+            productionDownloadDenialObserved:
+              (
+                calculator as typeof calculator & {
+                  productionDownloadDenialObserved?: boolean;
+                }
+              ).productionDownloadDenialObserved ?? false,
+            calculatorUrl: calculator.getURL(),
+            windowCount: BrowserWindow.getAllWindows().length,
+          };
+        },
+        calculatorUrl,
+      );
+
+      expect(afterAttack).toEqual({
+        blockedDownloadEvents: 1,
+        calculatorUrl,
+        productionDownloadDenialObserved: true,
+        windowCount: 1,
+      });
+      expect(sinkRequests).toBe(0);
+      expect(tcpSinkConnections).toBe(0);
+      expect(udpSinkRequests).toBe(0);
+      await expect(shell.locator("[data-isolation-fixture]")).toHaveText(
+        "Synthetic calculator isolation fixture",
+      );
+
+      const readRecoveryEvents = (): Promise<GraphRecoveryEvent[]> =>
+        application.evaluate(({ webContents }, id) => {
+          const calculator = webContents.fromId(id);
+          if (calculator === undefined)
+            throw new Error("Original calculator is missing");
+          return (
+            (
+              calculator as typeof calculator & {
+                graphRecoveryEvents?: GraphRecoveryEvent[];
+              }
+            ).graphRecoveryEvents ?? []
+          );
+        }, calculatorId);
+      // Wait for the actual production recovery; never reload or re-seed the graph.
+      await expect
+        .poll(async () => {
+          const events = await readRecoveryEvents();
+          return events.some(
+            (event) =>
+              event.kind === "finished-load" && event.url === calculatorUrl,
+          );
+        })
+        .toBe(true);
+      const afterProbe = await readGraph(application);
+      const recovery = {
+        calculatorUrl,
+        attemptedUrl: `${sinkOrigin}/navigation`,
+        events: await readRecoveryEvents(),
+        beforePlots: [diagonal, ...otherProfileForms125],
+        initialPlots: [diagonal],
+      };
+      await test.info().attach("hostile-navigation-recovery", {
+        body: JSON.stringify({ beforeAttack, afterProbe, recovery }),
+        contentType: "application/json",
+      });
+      assertGraphRestoredAfterNavigation(beforeAttack, afterProbe, recovery);
+      await typeCalculatorExpression(application, "(4,-2)");
+      await expect
+        .poll(async () => (await readGraph(application)).expressions.at(-1))
+        .toBe("(4,-2)");
+      const afterGraph = await readGraph(application);
+      assertGraphGeometry(afterGraph, [
+        diagonal,
+        { expression: "(4,-2)", kind: "point", points: [[504, 302]] },
+      ]);
+      expect(plotGeometry(afterGraph).slice(0, -1)).toEqual(
+        plotGeometry(afterProbe),
+      );
+      expect(afterGraph.zoom).toBe("100%");
+      expect(afterGraph.document).toEqual(afterProbe.document);
+      await assertCapturedPlot(
+        application,
+        afterGraph,
+        [[504, 302]],
+        [209, 73, 91],
+        "supported-point-after-hostile-probe",
+      );
+      expect(sinkRequests).toBe(0);
+      expect(tcpSinkConnections).toBe(0);
+      expect(udpSinkRequests).toBe(0);
+    } finally {
+      const events = await application.evaluate(({ webContents }, id) => {
+        const calculator = webContents.fromId(id);
+        if (calculator === undefined) return [];
+        const tracked = calculator as typeof calculator & {
+          stopGraphRecoveryObservation?: () => void;
+          graphRecoveryEvents?: GraphRecoveryEvent[];
+        };
+        tracked.stopGraphRecoveryObservation?.();
+        const observed = tracked.graphRecoveryEvents ?? [];
+        delete tracked.stopGraphRecoveryObservation;
+        delete tracked.graphRecoveryEvents;
+        return observed;
+      }, calculatorId);
+      await test.info().attach("hostile-navigation-events", {
+        body: JSON.stringify(events),
+        contentType: "application/json",
+      });
+    }
   });
 
   test("does not let the synthetic fixture claim native protection through the legacy bridge", async () => {

@@ -70,11 +70,11 @@ receipt or native end when either result is unknown.
 
 ## Durable recovery
 
-The encrypted version-2 record retains the existing admission and counter owner.
-Exact version-1 decoding normalizes in memory without an implicit write. Native
-facts occupy a bounded immutable journal of 32 slots, with eight reserved before
-engaging; there is no pruning, upload acknowledgment or second record writer.
-Unknown durability preserves possibly published bytes and blocks promotion.
+The encrypted version-3 record retains one admission, counter and evidence writer.
+Exact version-1 and version-2 decoding normalizes in memory without an implicit
+write. Native facts occupy a bounded immutable journal of 32 slots, with eight
+reserved before engaging. Plaintext remains limited to 48 KiB and ciphertext to
+64 KiB. Unknown durability preserves possibly published bytes and blocks promotion.
 
 Cleanup completion requires confirmed native quiescence, detached/destroyed
 calculator content, owned window/shortcut restoration and durable completion.
@@ -89,6 +89,36 @@ before quarantine, writes or egress, preserving uncertainty across quit/restart.
 No operator reset is implemented here. An ownerless process may quit after
 Student drain without clearing that barrier or claiming native end; an owned
 unfinished native attempt retains its cleanup responsibility.
+
+## Historical report delivery
+
+Engaging captures the original attempt's build identity and device signer. An
+ordinary build without a verified identity records `unverified_build`; imported
+older facts retain `legacy_unknown`. A later uploader never relabels either with
+its own build. Reports remain client statements about historical local events,
+not proof of OS enforcement, renewed admission or Teacher release.
+
+The same durable record retains the current signer and at most four retired
+signers. The latest attempt pins its original signer even when its current prefix
+has been acknowledged. Each signer has at most one immutable pending batch of
+one to eight facts. Evidence and maintenance share that signer's durable proof
+counter; the counter and fair scheduling position commit before HTTP egress.
+
+The existing 15-second timer gives due live maintenance priority, then permits
+one eligible report exchange, including after a terminal attempt's window closes.
+One actual transport owner remains held through late settlement after the
+five-second deadline. Requests are bounded to 16 KiB and responses to 8 KiB.
+Replacement admission, expiry or a denied report does not authorize deleting
+unacknowledged original facts or signing them as the replacement device.
+
+An exact content-bound server receipt becomes an acknowledgment only after its
+durable merge. Whole completed, nonlatest attempts may then be pruned after all
+their facts are durably acknowledged; the latest attempt remains retained.
+Lost responses and uncertain writes retain pending reports. Bounded fair retries
+prevent one blocked signer from permanently starving the others. A displayed
+acknowledgment applies only to the currently saved fact set; blocked means
+delivery is currently unavailable. Neither status extends the native freshness
+deadline, changes Start capacity checks or promises future completeness.
 
 ## Evidence boundaries
 

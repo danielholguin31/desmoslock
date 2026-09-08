@@ -1,9 +1,11 @@
 import { createHash, createPublicKey, verify, webcrypto } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   parseStudentJoinCode,
   parseStudentSecret,
   type StudentLogicalOperation,
+  type NativeProtectionFact,
+  type NativeEvidenceOriginBuild,
 } from "@desmoslock/contracts";
 import {
   createStudentSessionCrypto,
@@ -26,6 +28,251 @@ const scope = {
   deviceSessionId: fixedDeviceId,
   epoch: 3,
 };
+
+function evidenceFact(deviceSessionId: string): NativeProtectionFact {
+  return {
+    sequence: 1,
+    eventId: "80000000-0000-4000-8000-000000000001",
+    attemptId: "90000000-0000-4000-8000-000000000001",
+    scope: { ...scope, deviceSessionId },
+    policyVersion: 1,
+    slot: "engaging",
+    phase: "engaging",
+    nativeEvent: null,
+    nativeSequence: null,
+    categories: {
+      aac: { status: "pending", code: "awaiting_native_begin" },
+      shortcuts: { status: "confirmed", code: "none" },
+      applications: { status: "confirmed", code: "none" },
+      persistence: { status: "confirmed", code: "none" },
+      windowNetwork: { status: "confirmed", code: "none" },
+    },
+    cause: "none",
+  };
+}
+
+describe("original-binding evidence crypto", () => {
+  it("matches independent v2 fact and batch arrays for each original build variant", () => {
+    const device = crypto.createEnrollment();
+    const fact = evidenceFact(device.deviceSessionId);
+    const scopeArray = [
+      scope.schoolId,
+      scope.testId,
+      scope.studentSessionId,
+      device.deviceSessionId,
+      scope.epoch,
+    ];
+    const origins: readonly NativeEvidenceOriginBuild[] = [
+      { kind: "unverified_build" },
+      { kind: "legacy_unknown" },
+      {
+        kind: "build",
+        identity: {
+          schemaVersion: 1,
+          sourceRepository: "danielholguin31/desmoslock",
+          sourceCommit: "a".repeat(40),
+          sourceTree: "b".repeat(40),
+          packageLockSha256: "c".repeat(64),
+          buildId: "d".repeat(64),
+        },
+      },
+    ];
+    const digests = new Set<string>();
+    for (const originBuild of origins) {
+      const build =
+        originBuild.kind === "build"
+          ? [
+              "build",
+              1,
+              "danielholguin31/desmoslock",
+              "a".repeat(40),
+              "b".repeat(40),
+              "c".repeat(64),
+              "d".repeat(64),
+            ]
+          : [originBuild.kind];
+      const contentDigest = createHash("sha256")
+        .update("desmoslock/native-protection-fact/v1\0")
+        .update(
+          JSON.stringify([
+            1,
+            configuration.url,
+            device.keyThumbprint,
+            scopeArray,
+            build,
+            [
+              1,
+              1,
+              fact.eventId,
+              fact.attemptId,
+              "engaging",
+              "engaging",
+              null,
+              null,
+              [
+                ["pending", "awaiting_native_begin"],
+                ["confirmed", "none"],
+                ["confirmed", "none"],
+                ["confirmed", "none"],
+                ["confirmed", "none"],
+              ],
+              "none",
+            ],
+          ]),
+        )
+        .digest("hex");
+      const batchDigest = createHash("sha256")
+        .update("desmoslock/native-protection-batch/v1\0")
+        .update(
+          JSON.stringify([
+            1,
+            configuration.url,
+            device.keyThumbprint,
+            scopeArray,
+            build,
+            fact.attemptId,
+            [[fact.eventId, contentDigest]],
+          ]),
+        )
+        .digest("hex");
+      const result = crypto.digestEvidence(device, {
+        scope: fact.scope,
+        originBuild,
+        facts: [fact],
+      });
+      expect(result).toEqual({ batchDigest, contentDigests: [contentDigest] });
+      expect(Object.isFrozen(result.contentDigests)).toBe(true);
+      digests.add(result.batchDigest);
+    }
+    expect(digests.size).toBe(3);
+  });
+
+  it("signs only the original device's domain-separated batch and advances proof independently of content", async () => {
+    const device = crypto.createEnrollment();
+    const fact = evidenceFact(device.deviceSessionId);
+    const input = {
+      scope: fact.scope,
+      originBuild: { kind: "unverified_build" } as const,
+      facts: [fact],
+    };
+    const content = crypto.digestEvidence(device, input);
+    const publicKey = createPublicKey({
+      key: Buffer.concat([
+        Buffer.from("302a300506032b6570032100", "hex"),
+        Buffer.from(device.publicKey, "base64url"),
+      ]),
+      format: "der",
+      type: "spki",
+    });
+    let firstSignature = "";
+    for (const counter of [1, 2, Number.MAX_SAFE_INTEGER]) {
+      const proof = crypto.signEvidence(device, {
+        scope: fact.scope,
+        batchDigest: content.batchDigest,
+        counter,
+      });
+      const bytes = Buffer.from(
+        JSON.stringify([
+          "desmoslock/student-evidence-proof/v1",
+          configuration.url,
+          "evidence.ingest",
+          [
+            scope.schoolId,
+            scope.testId,
+            scope.studentSessionId,
+            device.deviceSessionId,
+            scope.epoch,
+          ],
+          device.keyThumbprint,
+          content.batchDigest,
+          counter,
+        ]),
+      );
+      expect(
+        verify(
+          null,
+          bytes,
+          publicKey,
+          Buffer.from(proof.signature, "base64url"),
+        ),
+      ).toBe(true);
+      const key = await webcrypto.subtle.importKey(
+        "raw",
+        Buffer.from(device.publicKey, "base64url"),
+        { name: "Ed25519" },
+        false,
+        ["verify"],
+      );
+      expect(
+        await webcrypto.subtle.verify(
+          "Ed25519",
+          key,
+          Buffer.from(proof.signature, "base64url"),
+          bytes,
+        ),
+      ).toBe(true);
+      expect(
+        verify(
+          null,
+          Buffer.concat([Buffer.from([0]), bytes]),
+          publicKey,
+          Buffer.from(proof.signature, "base64url"),
+        ),
+      ).toBe(false);
+      if (firstSignature === "") firstSignature = proof.signature;
+      else expect(proof.signature).not.toBe(firstSignature);
+      expect(crypto.digestEvidence(device, input)).toEqual(content);
+    }
+    const replacement = crypto.createEnrollment();
+    expect(() =>
+      crypto.signEvidence(replacement, {
+        scope: fact.scope,
+        batchDigest: content.batchDigest,
+        counter: 3,
+      }),
+    ).toThrow("input is invalid");
+    expect(() => crypto.digestEvidence(replacement, input)).toThrow(
+      "input is invalid",
+    );
+    for (const counter of [0, -0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])
+      expect(() =>
+        crypto.signEvidence(device, {
+          scope: fact.scope,
+          batchDigest: content.batchDigest,
+          counter,
+        }),
+      ).toThrow("input is invalid");
+  });
+
+  it("rejects nonfinite content and accessor-backed prefixes without signing or invoking getters", () => {
+    const device = crypto.createEnrollment();
+    const fact = evidenceFact(device.deviceSessionId);
+    const input = {
+      scope: fact.scope,
+      originBuild: { kind: "unverified_build" } as const,
+      facts: [fact],
+    };
+    const getter = vi.fn(() => fact);
+    const accessor = [fact];
+    Object.defineProperty(accessor, 0, { get: getter });
+    for (const facts of [
+      [],
+      [fact, fact],
+      accessor,
+      Object.assign([fact], { extra: true }),
+    ])
+      expect(() => crypto.digestEvidence(device, { ...input, facts })).toThrow(
+        "input is invalid",
+      );
+    expect(getter).not.toHaveBeenCalled();
+    expect(() =>
+      crypto.digestEvidence(device, {
+        ...input,
+        facts: [{ ...fact, phase: "locked" }],
+      }),
+    ).toThrow("input is invalid");
+  });
+});
 
 describe("StudentSession main crypto", () => {
   it("generates and reloads an actual canonical Ed25519 keypair without changing identity", () => {

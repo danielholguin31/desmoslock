@@ -1,8 +1,17 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import {
+  encodeNativeProtectionFactDigestInput,
+  encodeStudentEvidenceBatchDigestInput,
+  type NativeEvidenceOriginBuild,
+} from "@desmoslock/contracts";
 
 import { createStudentSessionCrypto } from "../src/main/student-session-crypto.js";
 import {
   createStudentSessionStore,
+  emptyNativeEvidence,
+  retainNativeEvidenceSigner,
+  pruneNativeEvidence,
   parseProtectionTransition,
   protectionFactCapacity,
   protectionFactReservation,
@@ -13,6 +22,9 @@ import {
   type StoredNativeProtection,
   type StoredNativeProtectionAttempt,
   type StudentSessionSuccessor,
+  type StudentSessionRecord,
+  type StoredNativeEvidence,
+  type StoredNativeEvidencePendingBatch,
 } from "../src/main/student-session-store.js";
 import type { FreshStudentAdmission } from "../src/main/student-session-coordinator.js";
 
@@ -25,7 +37,7 @@ const requestId = "10000000-0000-4000-8000-000000000001";
 
 function pending(): StudentSessionSuccessor {
   return {
-    version: 2,
+    version: 3,
     apiOrigin: configuration.url,
     device: crypto.createEnrollment(),
     current: null,
@@ -39,6 +51,7 @@ function pending(): StudentSessionSuccessor {
     lastReservedCounter: 0,
     terminal: false,
     nativeProtection: null,
+    evidence: emptyNativeEvidence(),
   };
 }
 
@@ -228,11 +241,115 @@ function withProtection(
   return {
     ...record,
     nativeProtection: protection(record.current.scope, phase),
+    evidence: evidenceFor(record, protection(record.current.scope, phase)),
+  };
+}
+
+const originBuild: NativeEvidenceOriginBuild = {
+  kind: "build",
+  identity: {
+    schemaVersion: 1,
+    sourceRepository: "danielholguin31/desmoslock",
+    sourceCommit: "a".repeat(40),
+    sourceTree: "b".repeat(40),
+    packageLockSha256: "c".repeat(64),
+    buildId: "d".repeat(64),
+  },
+};
+
+const longestCategories = {
+  aac: { status: "unavailable", code: "native_unavailable" },
+  shortcuts: { status: "unavailable", code: "emergency_shortcut_unavailable" },
+  applications: {
+    status: "unavailable",
+    code: "application_observation_unavailable",
+  },
+  persistence: { status: "unavailable", code: "durability_unavailable" },
+  windowNetwork: { status: "unavailable", code: "network_policy_unavailable" },
+} as const;
+
+function evidenceFor(
+  record: StudentSessionSuccessor,
+  journal: StoredNativeProtection,
+): StoredNativeEvidence {
+  return {
+    ...emptyNativeEvidence(),
+    origins: [...new Set(journal.facts.map((fact) => fact.attemptId))].map(
+      (attemptId) => ({
+        attemptId,
+        scope: journal.facts.find((fact) => fact.attemptId === attemptId)!
+          .scope,
+        originalKeyThumbprint: record.device.keyThumbprint,
+        originBuild,
+      }),
+    ),
+  };
+}
+
+function batchFor(
+  record: StudentSessionSuccessor,
+  attemptId: string,
+  length = 8,
+): StoredNativeEvidencePendingBatch {
+  const origin = record.evidence.origins.find(
+    (item) => item.attemptId === attemptId,
+  )!;
+  const facts = record
+    .nativeProtection!.facts.filter((fact) => fact.attemptId === attemptId)
+    .slice(0, length);
+  if (origin.originalKeyThumbprint === null)
+    throw new Error("Synthetic signer required");
+  const context = {
+    apiOrigin: record.apiOrigin,
+    originalKeyThumbprint: origin.originalKeyThumbprint,
+    scope: origin.scope,
+    originBuild: origin.originBuild,
+  };
+  const contentDigests = facts.map((fact) => {
+    const bytes = encodeNativeProtectionFactDigestInput({ ...context, fact });
+    if (bytes === null) throw new Error("Synthetic canonical fact rejected");
+    return createHash("sha256").update(bytes).digest("hex");
+  });
+  const bytes = encodeStudentEvidenceBatchDigestInput({
+    ...context,
+    facts,
+    contentDigests,
+  });
+  if (bytes === null) throw new Error("Synthetic canonical batch rejected");
+  return {
+    originalKeyThumbprint: origin.originalKeyThumbprint,
+    attemptId,
+    batchDigest: createHash("sha256").update(bytes).digest("hex"),
+    events: facts.map((fact, index) => ({
+      eventId: fact.eventId,
+      contentDigest: contentDigests[index]!,
+    })),
   };
 }
 
 function persisted(value: unknown): Buffer {
-  return Buffer.from(`synthetic:${JSON.stringify(value)}`);
+  let disk = value;
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "version" in value &&
+    value.version === 3 &&
+    "evidence" in value
+  ) {
+    const record = value as StudentSessionRecord;
+    disk = {
+      ...record,
+      evidence: {
+        ...record.evidence,
+        origins: record.evidence.origins.map((origin) => ({
+          attemptId: origin.attemptId,
+          originalKeyThumbprint: origin.originalKeyThumbprint,
+          originBuild: origin.originBuild,
+        })),
+      },
+    };
+  }
+  return Buffer.from(`synthetic:${JSON.stringify(disk)}`);
 }
 
 function fixture() {
@@ -309,6 +426,874 @@ function fixture() {
     },
   };
 }
+
+function worstEvidenceRecord(attemptCount: number): StudentSessionRecord {
+  const base = admitted();
+  if (base.current === null) throw new Error("fixture");
+  const devices = [
+    base.device,
+    ...Array.from({ length: 4 }, () => crypto.createEnrollment()),
+  ];
+  const scope = base.current.scope;
+  const counts = Array.from({ length: attemptCount }, () => 2);
+  let spare = 32 - attemptCount * 2;
+  for (let i = 0; i < counts.length && spare > 0; i += 1) {
+    const extra = Math.min(6, spare);
+    counts[i]! += extra;
+    spare -= extra;
+  }
+  const allowed: Record<number, readonly FactSlot[]> = {
+    2: ["engaging", "cleanup"],
+    3: ["engaging", "native_terminal", "cleanup"],
+    4: ["engaging", "began", "native_terminal", "cleanup"],
+    5: ["engaging", "began", "locked", "native_terminal", "cleanup"],
+    6: ["engaging", "began", "locked", "failure", "native_terminal", "cleanup"],
+    7: [
+      "engaging",
+      "began",
+      "locked",
+      "end_requested",
+      "failure",
+      "native_terminal",
+      "cleanup",
+    ],
+    8: [
+      "engaging",
+      "began",
+      "locked",
+      "abandoned",
+      "end_requested",
+      "failure",
+      "native_terminal",
+      "cleanup",
+    ],
+  };
+  const facts: ProtectionFact[] = [];
+  const origins: StoredNativeEvidence["origins"][number][] = [];
+  let latest: StoredNativeProtectionAttempt | null = null;
+  for (let index = 0; index < attemptCount; index += 1) {
+    const device = devices[index % 5]!;
+    const attemptId = identifier(index + 1_000);
+    const attemptScope = {
+      ...scope,
+      deviceSessionId: device.deviceSessionId,
+      epoch: Number.MAX_SAFE_INTEGER,
+    };
+    const count = counts[index]!;
+    const selected = completeJournal(attemptScope).facts.filter((fact) =>
+      allowed[count]!.includes(fact.slot),
+    );
+    for (const fact of selected) {
+      const sequence = Number.MAX_SAFE_INTEGER - 32 + facts.length;
+      facts.push({
+        ...fact,
+        sequence,
+        eventId: identifier(facts.length + 10_000),
+        attemptId,
+        phase:
+          fact.slot === "engaging"
+            ? "engaging"
+            : fact.slot === "locked"
+              ? "locked"
+              : "recovery_required",
+        cause: "persistence_unavailable",
+        categories:
+          fact.slot === "locked" ? confirmedCategories : longestCategories,
+        nativeSequence:
+          fact.nativeSequence === null
+            ? null
+            : fact.nativeSequence === 1
+              ? Number.MAX_SAFE_INTEGER - 1
+              : Number.MAX_SAFE_INTEGER,
+        ...(count === 2
+          ? {
+              phase:
+                fact.slot === "cleanup"
+                  ? ("failed" as const)
+                  : ("engaging" as const),
+              nativeSequence: null,
+            }
+          : {}),
+      });
+    }
+    origins.push({
+      attemptId,
+      scope: attemptScope,
+      originalKeyThumbprint: device.keyThumbprint,
+      originBuild,
+    });
+    latest = {
+      attemptId,
+      scope: attemptScope,
+      phase: count === 2 ? "failed" : "ended",
+      nativeDisposition:
+        count === 2 ? "disposed_without_terminal_observation" : "ended",
+      nativeSequence: count === 2 ? null : Number.MAX_SAFE_INTEGER,
+      cleanup: "complete",
+      abandonment: count === 8 ? "requested" : "none",
+    };
+  }
+  let record: StudentSessionRecord = {
+    ...base,
+    generation: Number.MAX_SAFE_INTEGER - 1,
+    lastReservedCounter: Number.MAX_SAFE_INTEGER,
+    current: {
+      ...base.current,
+      scope: { ...scope, epoch: Number.MAX_SAFE_INTEGER },
+      sessionRevision: Number.MAX_SAFE_INTEGER,
+      syntheticDisplayName: "Student AAAAAAAAAAAAAAAAAAAAAAAA",
+      serverNowMs: Number.MAX_SAFE_INTEGER - 1,
+      capabilityIssuedAtMs: Number.MAX_SAFE_INTEGER - 900_000,
+      capabilityExpiresAtMs: Number.MAX_SAFE_INTEGER - 600_000,
+      reconnectExpiresAtMs: Number.MAX_SAFE_INTEGER,
+    },
+    pending: {
+      kind: "reconnect",
+      requestId,
+      expectedSessionRevision: Number.MAX_SAFE_INTEGER,
+      candidates: crypto.createCandidates(),
+    },
+    nativeProtection: {
+      policyVersion: 1,
+      revision: Number.MAX_SAFE_INTEGER,
+      latestAttempt: latest,
+      nextFactSequence: Number.MAX_SAFE_INTEGER,
+      facts,
+    },
+    evidence: {
+      ...emptyNativeEvidence(),
+      origins,
+      retiredSigners: devices.slice(1).map((device) => ({
+        device,
+        lastReservedCounter: Number.MAX_SAFE_INTEGER,
+      })),
+      lastAttemptedSigner: devices[4]!.keyThumbprint,
+    },
+  };
+  const allBatches = origins.map((origin) =>
+    batchFor(record, origin.attemptId),
+  );
+  record = {
+    ...record,
+    evidence: {
+      ...record.evidence,
+      pendingBatches: devices.map(
+        (device) =>
+          allBatches
+            .filter(
+              (batch) => batch.originalKeyThumbprint === device.keyThumbprint,
+            )
+            .sort((a, b) => b.events.length - a.events.length)[0]!,
+      ),
+      acknowledgments: allBatches.flatMap((batch) =>
+        batch.events.map((event) => ({
+          ...event,
+          receivedAt: "9999-12-31T23:59:59.999999Z",
+        })),
+      ),
+    },
+  };
+  return record;
+}
+
+describe("version 3 bounded native evidence retention", () => {
+  it("fits 32 facts, five signers/pending prefixes and all ACKs across worst origin-count shapes without raising byte limits", async () => {
+    const sizes: number[] = [];
+    for (let attempts = 5; attempts <= 16; attempts += 1) {
+      const f = fixture();
+      const record = worstEvidenceRecord(attempts);
+      const bytes = persisted(record);
+      sizes.push(bytes.byteLength - Buffer.byteLength("synthetic:"));
+      expect(record.nativeProtection?.facts).toHaveLength(32);
+      expect(record.evidence.pendingBatches).toHaveLength(5);
+      expect(record.evidence.retiredSigners).toHaveLength(4);
+      expect(record.evidence.acknowledgments).toHaveLength(32);
+      expect(sizes.at(-1)).toBeLessThan(48 * 1024);
+      expect(bytes.byteLength).toBeLessThan(64 * 1024);
+      f.setBytes(bytes);
+      expect(await f.store.load()).toEqual({ kind: "ready", record });
+      expect(f.events).not.toContain("write");
+      const committed = await f.store.commitDurably(record.generation, record);
+      expect(committed.generation).toBe(Number.MAX_SAFE_INTEGER);
+      expect(f.getBytes()?.byteLength).toBeLessThan(64 * 1024);
+    }
+    expect(Math.max(...sizes), JSON.stringify(sizes)).toBeLessThan(48 * 1024);
+  });
+
+  it.each([false, true])(
+    "normalizes v2 origins without disk rewrite, with missing old signer=%s",
+    async (missing) => {
+      const record = withProtection("locked");
+      const v2: Record<string, unknown> = { ...record };
+      delete v2.evidence;
+      const device = missing ? crypto.createEnrollment() : record.device;
+      const legacy = {
+        ...v2,
+        version: 2,
+        generation: 9,
+        device,
+        current: null,
+        pending: null,
+        terminal: true,
+      };
+      const f = fixture();
+      const bytes = persisted(legacy);
+      f.setBytes(bytes);
+      const loaded = await f.store.load();
+      if (loaded.kind !== "ready")
+        throw new Error("Expected legacy normalization");
+      expect(loaded.record.version).toBe(3);
+      expect(loaded.record.nativeProtection).toEqual(record.nativeProtection);
+      expect(loaded.record.lastReservedCounter).toBe(
+        record.lastReservedCounter,
+      );
+      expect(loaded.record.evidence.origins).toEqual([
+        {
+          attemptId: record.nativeProtection!.latestAttempt!.attemptId,
+          scope: record.nativeProtection!.latestAttempt!.scope,
+          originalKeyThumbprint: missing ? null : record.device.keyThumbprint,
+          originBuild: { kind: "legacy_unknown" },
+        },
+      ]);
+      expect(f.getBytes()).toEqual(bytes);
+      expect(f.events).toEqual(["lock", "load", "decrypt"]);
+      const committed = await f.store.commitDurably(9, loaded.record);
+      expect(committed.evidence).toEqual(loaded.record.evidence);
+      expect(f.getBytes()).toEqual(persisted(committed));
+    },
+  );
+
+  it("accepts only compact v3 disk origins and reconstructs exact immutable scope from retained facts", async () => {
+    const record = { ...withProtection(), generation: 7 };
+    const f = fixture();
+    const inflated = Buffer.from(`synthetic:${JSON.stringify(record)}`);
+    f.setBytes(inflated);
+    expect((await f.store.load()).kind).toBe("recovery_required");
+    expect(f.getBytes()).toEqual(inflated);
+    const valid = fixture();
+    valid.setBytes(persisted(record));
+    const loaded = await valid.store.load();
+    if (loaded.kind !== "ready") throw new Error("Expected compact v3 record");
+    expect(loaded.record).toEqual(record);
+    expect(Object.isFrozen(loaded.record.evidence.origins[0]!.scope)).toBe(
+      true,
+    );
+    expect(valid.events).not.toContain("write");
+  });
+
+  it("retains 16 unacknowledged origins with an unfinished latest attempt without pruning or dropping its signer", async () => {
+    const full = worstEvidenceRecord(16);
+    const latest = full.nativeProtection!.latestAttempt!;
+    const facts = full.nativeProtection!.facts.map((fact): ProtectionFact =>
+      fact.attemptId === latest.attemptId && fact.slot === "cleanup"
+        ? {
+            ...fact,
+            slot: "began",
+            nativeEvent: "did_begin",
+            nativeSequence: Number.MAX_SAFE_INTEGER,
+            phase: "engaging",
+          }
+        : fact,
+    );
+    const record: StudentSessionRecord = {
+      ...full,
+      generation: 7,
+      nativeProtection: {
+        ...full.nativeProtection!,
+        facts,
+        latestAttempt: {
+          ...latest,
+          phase: "engaging",
+          nativeDisposition: "active",
+          nativeSequence: Number.MAX_SAFE_INTEGER,
+          cleanup: "not_requested",
+        },
+      },
+      evidence: { ...full.evidence, acknowledgments: [], pendingBatches: [] },
+    };
+    const f = fixture();
+    const bytes = persisted(record);
+    expect(bytes.byteLength - 10).toBeLessThan(48 * 1024);
+    f.setBytes(bytes);
+    expect(await f.store.load()).toEqual({ kind: "ready", record });
+    expect(pruneNativeEvidence(record).nativeProtection!.facts).toEqual(facts);
+    expect(pruneNativeEvidence(record).evidence.retiredSigners).toHaveLength(4);
+    expect(retainNativeEvidenceSigner(record)).toBeNull();
+    expect(f.getBytes()).toEqual(bytes);
+  });
+
+  it("preserves the original parser gate against starting another attempt before previous cleanup", async () => {
+    const record = withProtection();
+    const first = record.nativeProtection!.facts[0]!;
+    const facts = [
+      first,
+      {
+        ...first,
+        attemptId: identifier(999),
+        eventId: identifier(998),
+        sequence: 2,
+      },
+    ];
+    const malformed = {
+      ...record,
+      nativeProtection: {
+        ...record.nativeProtection!,
+        facts,
+        nextFactSequence: 3,
+        latestAttempt: {
+          ...record.nativeProtection!.latestAttempt!,
+          attemptId: identifier(999),
+        },
+      },
+    };
+    const value = {
+      ...malformed,
+      evidence: evidenceFor(malformed, malformed.nativeProtection),
+    };
+    const f = fixture();
+    await f.store.load();
+    await expect(f.store.commitDurably(0, value)).rejects.toThrow();
+    expect(f.getBytes()).toBeNull();
+    expect(f.events).not.toContain("write");
+  });
+
+  it("preserves origin/build/content, exact ACK time and pending prefix through restart and counter-only retries", async () => {
+    const f = fixture();
+    await f.store.load();
+    const initial = withProtection("locked");
+    const batch = batchFor(
+      initial,
+      initial.nativeProtection!.latestAttempt!.attemptId,
+    );
+    const reserved = await f.store.commitDurably(0, {
+      ...initial,
+      lastReservedCounter: 20,
+      evidence: {
+        ...initial.evidence,
+        pendingBatches: [batch],
+        lastAttemptedSigner: initial.device.keyThumbprint,
+      },
+    });
+    const restarted = createStudentSessionStore(f.options);
+    expect(await restarted.load()).toEqual({ kind: "ready", record: reserved });
+    const retried = await restarted.commitDurably(1, {
+      ...reserved,
+      lastReservedCounter: 21,
+    });
+    expect(retried.evidence.pendingBatches[0]).toEqual(batch);
+    const accepted = await restarted.commitDurably(2, {
+      ...retried,
+      evidence: {
+        ...retried.evidence,
+        pendingBatches: [],
+        acknowledgments: batch.events.map((event) => ({
+          ...event,
+          receivedAt: "2026-09-08T12:34:56.123456Z",
+        })),
+      },
+    });
+    expect(pruneNativeEvidence(accepted).nativeProtection).toEqual(
+      accepted.nativeProtection,
+    );
+    expect(retainNativeEvidenceSigner(accepted)?.retiredSigners).toEqual([
+      { device: accepted.device, lastReservedCounter: 21 },
+    ]);
+    const oldBytes = f.getBytes();
+    for (const evidence of [
+      {
+        ...accepted.evidence,
+        origins: accepted.evidence.origins.map((origin) => ({
+          ...origin,
+          originBuild: { kind: "unverified_build" as const },
+        })),
+      },
+      {
+        ...accepted.evidence,
+        acknowledgments: accepted.evidence.acknowledgments.map((ack) => ({
+          ...ack,
+          receivedAt: "2026-09-08T12:34:56.123457Z",
+        })),
+      },
+      { ...accepted.evidence, acknowledgments: [] },
+    ]) {
+      await expect(
+        restarted.commitDurably(3, { ...accepted, evidence }),
+      ).rejects.toThrow();
+      expect(f.getBytes()).toEqual(oldBytes);
+    }
+  });
+
+  it.each(["before", "after"] as const)(
+    "never acknowledges an uncertain %s-publication barrier and recovers exact pending or ACK bytes",
+    async (stage) => {
+      const f = fixture();
+      await f.store.load();
+      const initial = withProtection();
+      const batch = batchFor(
+        initial,
+        initial.nativeProtection!.latestAttempt!.attemptId,
+      );
+      const reserved = await f.store.commitDurably(0, {
+        ...initial,
+        evidence: { ...initial.evidence, pendingBatches: [batch] },
+      });
+      const successor = {
+        ...reserved,
+        evidence: {
+          ...reserved.evidence,
+          pendingBatches: [],
+          acknowledgments: batch.events.map((event) => ({
+            ...event,
+            receivedAt: "2026-09-08T12:34:56.000001Z",
+          })),
+        },
+      };
+      f.fail(stage);
+      await expect(f.store.commitDurably(1, successor)).rejects.toThrow();
+      await expect(f.store.commitDurably(1, successor)).rejects.toThrow();
+      const loaded = await f.store.load();
+      expect(loaded).toEqual({
+        kind: "ready",
+        record: stage === "before" ? reserved : { ...successor, generation: 2 },
+      });
+    },
+  );
+
+  it("rejects cleared, replaced, reordered or forged pending references without exact acknowledgment", async () => {
+    const f = fixture();
+    await f.store.load();
+    const initial = withProtection("locked");
+    const batch = batchFor(
+      initial,
+      initial.nativeProtection!.latestAttempt!.attemptId,
+    );
+    const reserved = await f.store.commitDurably(0, {
+      ...initial,
+      evidence: { ...initial.evidence, pendingBatches: [batch] },
+    });
+    const bytes = f.getBytes();
+    const variants = [
+      [],
+      [{ ...batch, batchDigest: "0".repeat(64) }],
+      [{ ...batch, events: [...batch.events].reverse() }],
+      [batchFor(initial, batch.attemptId, 1)],
+      [batch, batch],
+    ];
+    for (const pendingBatches of variants) {
+      await expect(
+        f.store.commitDurably(1, {
+          ...reserved,
+          evidence: { ...reserved.evidence, pendingBatches },
+        }),
+      ).rejects.toThrow();
+      expect(f.getBytes()).toEqual(bytes);
+    }
+    await expect(
+      f.store.commitDurably(1, {
+        ...reserved,
+        evidence: {
+          ...reserved.evidence,
+          acknowledgments: [
+            { ...batch.events[0]!, receivedAt: "2026-09-08T12:34:56.123456Z" },
+          ],
+        },
+      }),
+    ).rejects.toThrow();
+    expect(f.getBytes()).toEqual(bytes);
+  });
+
+  it.each([
+    "missing-origin",
+    "extra-origin",
+    "duplicate-origin",
+    "orphan-origin",
+    "origin-scope",
+    "legacy-null-key",
+    "duplicate-signer",
+    "unknown-cursor",
+    "ack-extra",
+    "ack-digest",
+    "ack-timestamp",
+    "duplicate-ack",
+    "pending-extra",
+    "pending-accessor",
+    "pending-sparse",
+  ])(
+    "rejects malformed v3 %s without changing the retained encrypted record",
+    async (mutation) => {
+      const record = worstEvidenceRecord(5);
+      const evidence = structuredClone(record.evidence) as unknown as Record<
+        string,
+        unknown
+      >;
+      const origins = evidence.origins as Record<string, unknown>[];
+      const acks = evidence.acknowledgments as Record<string, unknown>[];
+      const pendingBatches = evidence.pendingBatches as Record<
+        string,
+        unknown
+      >[];
+      if (mutation === "missing-origin") origins.pop();
+      if (mutation === "extra-origin") origins[0]!.unexpected = true;
+      if (mutation === "duplicate-origin") origins[1] = origins[0]!;
+      if (mutation === "orphan-origin")
+        origins[0]!.attemptId = identifier(123456);
+      if (mutation === "origin-scope")
+        origins[0]!.scope = { ...record.evidence.origins[0]!.scope, epoch: 1 };
+      if (mutation === "legacy-null-key")
+        origins[0]!.originalKeyThumbprint = null;
+      if (mutation === "duplicate-signer")
+        evidence.retiredSigners = [
+          { device: record.device, lastReservedCounter: 0 },
+        ];
+      if (mutation === "unknown-cursor")
+        evidence.lastAttemptedSigner = "not-a-thumbprint";
+      if (mutation === "ack-extra") acks[0]!.extra = null;
+      if (mutation === "ack-digest") acks[0]!.contentDigest = "0".repeat(64);
+      if (mutation === "ack-timestamp")
+        acks[0]!.receivedAt = "2026-09-08T00:00:00.000Z";
+      if (mutation === "duplicate-ack") acks[1] = acks[0]!;
+      if (mutation === "pending-extra")
+        pendingBatches[0]!.facts = record.nativeProtection!.facts;
+      if (mutation === "pending-accessor")
+        Object.defineProperty(pendingBatches, "0", {
+          enumerable: true,
+          get() {
+            throw new Error("must not access");
+          },
+        });
+      if (mutation === "pending-sparse") delete pendingBatches[0];
+      const f = fixture();
+      f.setBytes(persisted(record));
+      await f.store.load();
+      await expect(
+        f.store.commitDurably(record.generation, {
+          ...record,
+          evidence,
+        } as unknown as StudentSessionSuccessor),
+      ).rejects.toThrow();
+      expect(f.getBytes()).toEqual(persisted(record));
+      expect(f.events).not.toContain("write");
+    },
+  );
+
+  it("prunes only durably acknowledged whole nonlatest attempts and keeps latest signer pinned", async () => {
+    const f = fixture();
+    const full = worstEvidenceRecord(5);
+    const record = {
+      ...full,
+      generation: 1,
+      lastReservedCounter: 22,
+      evidence: { ...full.evidence, pendingBatches: [] },
+    };
+    f.setBytes(persisted(record));
+    expect(await f.store.load()).toEqual({ kind: "ready", record });
+    const latest = record.nativeProtection!.latestAttempt!;
+    const retained = record.nativeProtection!.facts.filter(
+      (fact) => fact.attemptId === latest.attemptId,
+    );
+    const pruned = pruneNativeEvidence(record);
+    expect(pruned.nativeProtection!.facts).toEqual(retained);
+    expect(pruned.nativeProtection!.revision).toBe(
+      record.nativeProtection!.revision,
+    );
+    expect(pruned.nativeProtection!.nextFactSequence).toBe(
+      record.nativeProtection!.nextFactSequence,
+    );
+    expect(pruned.evidence.origins.map((origin) => origin.attemptId)).toEqual([
+      latest.attemptId,
+    ]);
+    expect(pruned.evidence.retiredSigners).toHaveLength(1);
+    expect(pruned.evidence.retiredSigners[0]!.device.deviceSessionId).toBe(
+      latest.scope.deviceSessionId,
+    );
+    const committed = await f.store.commitDurably(1, pruned);
+    expect(committed.device).toEqual(record.device);
+    expect(committed.lastReservedCounter).toBe(22);
+    const bytes = f.getBytes();
+    await expect(
+      f.store.commitDurably(2, {
+        ...committed,
+        evidence: { ...committed.evidence, retiredSigners: [] },
+      }),
+    ).rejects.toThrow();
+    expect(f.getBytes()).toEqual(bytes);
+  });
+
+  it("keeps every fact of an incompletely acknowledged or still-pending attempt and refuses partial pruning", async () => {
+    const full = worstEvidenceRecord(5);
+    const partial: StudentSessionRecord = {
+      ...full,
+      generation: 1,
+      evidence: {
+        ...full.evidence,
+        pendingBatches: [],
+        acknowledgments: full.evidence.acknowledgments.slice(1),
+      },
+    };
+    const first = partial.nativeProtection!.facts[0]!;
+    const pruned = pruneNativeEvidence(partial);
+    expect(
+      pruned.nativeProtection!.facts.filter(
+        (fact) => fact.attemptId === first.attemptId,
+      ),
+    ).toHaveLength(8);
+    expect(pruneNativeEvidence(full).nativeProtection!.facts).toHaveLength(32);
+    const f = fixture();
+    f.setBytes(persisted(partial));
+    await f.store.load();
+    await expect(
+      f.store.commitDurably(1, {
+        ...partial,
+        nativeProtection: {
+          ...partial.nativeProtection!,
+          facts: partial.nativeProtection!.facts.slice(1),
+        },
+      }),
+    ).rejects.toThrow();
+    expect(f.getBytes()).toEqual(persisted(partial));
+  });
+
+  it("retains the exact acknowledged latest signer/counter across replacement and late original facts", async () => {
+    const f = fixture();
+    await f.store.load();
+    const initial = withProtection();
+    const batch = batchFor(
+      initial,
+      initial.nativeProtection!.latestAttempt!.attemptId,
+    );
+    const first = await f.store.commitDurably(0, {
+      ...initial,
+      evidence: { ...initial.evidence, pendingBatches: [batch] },
+    });
+    const accepted = await f.store.commitDurably(1, {
+      ...first,
+      evidence: {
+        ...first.evidence,
+        pendingBatches: [],
+        acknowledgments: batch.events.map((event) => ({
+          ...event,
+          receivedAt: "2026-09-08T12:34:56.000001Z",
+        })),
+      },
+    });
+    const evidence = retainNativeEvidenceSigner(accepted);
+    expect(evidence?.retiredSigners).toEqual([
+      { device: accepted.device, lastReservedCounter: 19 },
+    ]);
+    if (evidence === null) throw new Error("Expected signer retention");
+    const replacement = pending();
+    if (replacement.pending?.kind !== "join") throw new Error("fixture");
+    const generation = await f.store.preserveForTargetedRecovery(2);
+    const replaced = await f.store.commitDurably(generation, {
+      ...replacement,
+      pending: { ...replacement.pending, admissionMode: "readmission" },
+      nativeProtection: accepted.nativeProtection,
+      evidence,
+    });
+    const late = protection(
+      accepted.nativeProtection!.latestAttempt!.scope,
+      "locked",
+    );
+    const appended = await f.store.commitDurably(replaced.generation, {
+      ...replaced,
+      nativeProtection: late,
+    });
+    expect(appended.evidence.origins).toEqual(accepted.evidence.origins);
+    expect(appended.evidence.retiredSigners[0]!.device).toEqual(
+      accepted.device,
+    );
+    expect(batchFor(appended, batch.attemptId).originalKeyThumbprint).toBe(
+      accepted.device.keyThumbprint,
+    );
+    expect(appended.device.keyThumbprint).not.toBe(
+      accepted.device.keyThumbprint,
+    );
+    expect(await f.store.load()).toEqual({ kind: "ready", record: appended });
+  });
+
+  it("refuses fifth retired signer retention before replacement and persists fairness/counter reservations per original signer", async () => {
+    const full = worstEvidenceRecord(5);
+    const record: StudentSessionRecord = {
+      ...full,
+      generation: 1,
+      lastReservedCounter: 30,
+      evidence: {
+        ...full.evidence,
+        retiredSigners: full.evidence.retiredSigners.map((signer) => ({
+          ...signer,
+          lastReservedCounter: 20,
+        })),
+      },
+    };
+    expect(retainNativeEvidenceSigner(record)).toBeNull();
+    const f = fixture();
+    f.setBytes(persisted(record));
+    await f.store.load();
+    const nextKey = record.evidence.retiredSigners[1]!.device.keyThumbprint;
+    const reserved = await f.store.commitDurably(1, {
+      ...record,
+      evidence: {
+        ...record.evidence,
+        lastAttemptedSigner: nextKey,
+        retiredSigners: record.evidence.retiredSigners.map((signer) =>
+          signer.device.keyThumbprint === nextKey
+            ? { ...signer, lastReservedCounter: 21 }
+            : signer,
+        ),
+      },
+    });
+    const restarted = createStudentSessionStore(f.options);
+    expect(await restarted.load()).toEqual({ kind: "ready", record: reserved });
+    expect(reserved.evidence.pendingBatches).toEqual(
+      record.evidence.pendingBatches,
+    );
+    expect(reserved.lastReservedCounter).toBe(30);
+    const bytes = f.getBytes();
+    await expect(
+      restarted.commitDurably(2, {
+        ...reserved,
+        evidence: {
+          ...reserved.evidence,
+          retiredSigners: record.evidence.retiredSigners,
+        },
+      }),
+    ).rejects.toThrow();
+    expect(f.getBytes()).toEqual(bytes);
+  });
+
+  it("refuses replacement before quarantine when acknowledged nonlatest origins still reference the current signer at capacity", async () => {
+    const full = worstEvidenceRecord(5);
+    const record = {
+      ...full,
+      generation: 7,
+      evidence: { ...full.evidence, pendingBatches: [] },
+    };
+    expect(
+      record.nativeProtection!.latestAttempt!.scope.deviceSessionId,
+    ).not.toBe(record.device.deviceSessionId);
+    const f = fixture();
+    f.setBytes(persisted(record));
+    const loaded = await f.store.load();
+    if (loaded.kind !== "ready")
+      throw new Error("Expected valid decoded evidence record");
+    expect(retainNativeEvidenceSigner(loaded.record) === null).toBe(true);
+    expect(f.getBytes()).toEqual(persisted(record));
+    expect(f.events).not.toContain("quarantine");
+    expect(f.events).not.toContain("write");
+    const pruned = await f.store.commitDurably(
+      7,
+      pruneNativeEvidence(loaded.record),
+    );
+    expect(
+      pruned.evidence.origins.some(
+        (origin) =>
+          origin.originalKeyThumbprint === pruned.device.keyThumbprint,
+      ),
+    ).toBe(false);
+    expect(retainNativeEvidenceSigner(pruned)).toEqual(pruned.evidence);
+  });
+
+  it("retains an acknowledged nonlatest original signer below capacity with its exact high-water counter", async () => {
+    const full = worstEvidenceRecord(5);
+    const removedOrigin = full.evidence.origins[1]!;
+    const facts = full.nativeProtection!.facts.filter(
+      (fact) => fact.attemptId !== removedOrigin.attemptId,
+    );
+    const kept = new Set(facts.map((fact) => fact.eventId));
+    const record: StudentSessionRecord = {
+      ...full,
+      generation: 1,
+      lastReservedCounter: 22,
+      nativeProtection: { ...full.nativeProtection!, facts },
+      evidence: {
+        ...full.evidence,
+        pendingBatches: [],
+        origins: full.evidence.origins.filter(
+          (origin) => origin !== removedOrigin,
+        ),
+        acknowledgments: full.evidence.acknowledgments.filter((ack) =>
+          kept.has(ack.eventId),
+        ),
+        retiredSigners: full.evidence.retiredSigners.filter(
+          (signer) =>
+            signer.device.keyThumbprint !== removedOrigin.originalKeyThumbprint,
+        ),
+      },
+    };
+    const f = fixture();
+    f.setBytes(persisted(record));
+    const loaded = await f.store.load();
+    if (loaded.kind !== "ready")
+      throw new Error("Expected decoded referenced signer");
+    const retained = retainNativeEvidenceSigner(loaded.record);
+    expect(retained?.retiredSigners.at(-1)?.lastReservedCounter).toBe(22);
+    if (retained === null) throw new Error("Expected available retention slot");
+    const replacement = pending();
+    if (replacement.pending?.kind !== "join") throw new Error("fixture");
+    const generation = await f.store.preserveForTargetedRecovery(1);
+    const next = {
+      ...replacement,
+      pending: {
+        ...replacement.pending,
+        admissionMode: "readmission" as const,
+      },
+      nativeProtection: record.nativeProtection,
+      evidence: retained,
+    };
+    await expect(
+      f.store.commitDurably(generation, {
+        ...next,
+        evidence: {
+          ...retained,
+          retiredSigners: retained.retiredSigners.map((signer) =>
+            signer.device.keyThumbprint === record.device.keyThumbprint
+              ? { ...signer, lastReservedCounter: 21 }
+              : signer,
+          ),
+        },
+      }),
+    ).rejects.toThrow();
+    expect(f.getBytes()).toBeNull();
+    expect(f.preserved).toEqual([persisted(record)]);
+    const written = await f.store.commitDurably(generation, next);
+    expect(written.evidence.retiredSigners.at(-1)?.lastReservedCounter).toBe(
+      22,
+    );
+    expect(await f.store.load()).toEqual({ kind: "ready", record: written });
+  });
+
+  it("rejects an over-limit encrypted successor without replacing the prior record", async () => {
+    const f = fixture();
+    const original = pending();
+    f.setBytes(persisted({ ...original, generation: 1 }));
+    const store = createStudentSessionStore({
+      ...f.options,
+      codec: {
+        ...f.options.codec,
+        encryptString: () => Buffer.alloc(64 * 1024 + 1),
+      },
+    });
+    await store.load();
+    await expect(store.commitDurably(1, original)).rejects.toThrow();
+    expect(f.getBytes()).toEqual(persisted({ ...original, generation: 1 }));
+    expect(f.events).not.toContain("write");
+  });
+
+  it("enforces the plaintext ceiling before encryption even with an oversized injected configuration", async () => {
+    const f = fixture();
+    // The production configuration parser is stricter. The storage boundary
+    // independently bounds even a caller-supplied configuration of this size.
+    const apiOrigin = `https://${"a".repeat(48 * 1024)}.invalid`;
+    const store = createStudentSessionStore({ ...f.options, apiOrigin });
+    await store.load();
+    await expect(
+      store.commitDurably(0, { ...pending(), apiOrigin }),
+    ).rejects.toThrow();
+    expect(f.getBytes()).toBeNull();
+    expect(f.events).not.toContain("encrypt");
+    expect(f.events).not.toContain("write");
+  });
+});
 
 describe("private Student record durability adapter (synthetic codec/native)", () => {
   it("locks before loading or decrypting, writes one bounded encrypted successor, and reloads exact private intent", async () => {
@@ -426,7 +1411,7 @@ describe("private Student record durability adapter (synthetic codec/native)", (
       const base = { ...pending(), generation: 1 };
       const mutated =
         kind === "version"
-          ? { ...base, version: 3 }
+          ? { ...base, version: 4 }
           : kind === "origin"
             ? { ...base, apiOrigin: "https://other.example" }
             : kind === "key"
@@ -515,6 +1500,7 @@ describe("versioned native protection record (synthetic codec/native)", () => {
         generation: 41,
       };
       delete legacy.nativeProtection;
+      delete legacy.evidence;
       const original = persisted(legacy);
       f.setBytes(original);
       const loaded = await f.store.load();
@@ -543,7 +1529,7 @@ describe("versioned native protection record (synthetic codec/native)", () => {
         record.extra = false;
       }
       if (kind === "v2-missing-native") delete record.nativeProtection;
-      if (kind === "future") record.version = 3;
+      if (kind === "future") record.version = 4;
       const original = persisted(record);
       f.setBytes(original);
       expect(await f.store.load()).toEqual({
@@ -596,6 +1582,7 @@ describe("versioned native protection record (synthetic codec/native)", () => {
     const prior = await f.store.commitDurably(0, {
       ...admittedRecord,
       nativeProtection: journal,
+      evidence: evidenceFor(admittedRecord, journal),
     });
     const terminal = await f.store.commitDurably(prior.generation, {
       ...prior,
@@ -613,6 +1600,7 @@ describe("versioned native protection record (synthetic codec/native)", () => {
         scope: { ...admittedRecord.current.scope, epoch: 2 },
       },
       nativeProtection: journal,
+      evidence: prior.evidence,
     });
     expect(newer.current?.scope.epoch).toBe(2);
     expect(newer.nativeProtection?.facts[0]?.scope.epoch).toBe(1);
@@ -689,6 +1677,7 @@ describe("versioned native protection record (synthetic codec/native)", () => {
     const written = await f.store.commitDurably(0, {
       ...record,
       nativeProtection: journal,
+      evidence: evidenceFor(record, journal),
     });
     expect(written.nativeProtection?.facts).toHaveLength(32);
     expect(Buffer.byteLength(JSON.stringify(written), "utf8")).toBeLessThan(
