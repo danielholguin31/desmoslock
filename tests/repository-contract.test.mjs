@@ -631,7 +631,7 @@ test("generation-4 attests the exact normalized migration history", () => {
     "20260908000400_student_protection_evidence.sql": {
       migrationSetSha256: expectedMigrationSetSha256,
       rawSha256:
-        "5caa57745a0fec6ab4291e9a254b6d1e77090d6298b57f6f8d739bd71c5fdc07",
+        "1543ee8cf236c4c43aa9331ec228eac9f99c68d4460d3023f68ce3a196fa2633",
     },
   });
   assert.doesNotThrow(() => assertMigrationSetAttestation(migrations));

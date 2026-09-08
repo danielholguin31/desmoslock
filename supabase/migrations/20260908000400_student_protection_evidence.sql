@@ -315,7 +315,7 @@ declare
   target_test desmoslock_v2.tests%rowtype;
   target_session desmoslock_v2.student_sessions%rowtype;
   proof desmoslock_v2.student_device_proof_state%rowtype;
-  bound_scope jsonb; thumb text; fact jsonb; digest text; attempt uuid; checked_at timestamptz;
+  bound_scope jsonb; thumb text; submitted_fact jsonb; digest text; attempt uuid; checked_at timestamptz;
   allowance timestamptz[]; existing desmoslock_v2.student_protection_events%rowtype;
   acknowledgments jsonb := '[]'; new_count integer := 0; total_count integer; attempt_count integer;
   prior_max bigint; requested_max bigint; is_existing_attempt boolean;
@@ -356,24 +356,24 @@ begin
           (select 1 from jsonb_array_elements($8) f where f->>'eventId' = e.event_id::text)))) then
     raise exception using errcode = 'PSE01', message = 'student session denied';
   end if;
-  for fact in select value from jsonb_array_elements($8) loop
-    digest := desmoslock_v2.internal_student_evidence_content_digest($1,thumb,bound_scope,$7,fact);
-    select e.* into existing from desmoslock_v2.student_protection_events e where e.event_id = (fact->>'eventId')::uuid;
+  for submitted_fact in select value from jsonb_array_elements($8) loop
+    digest := desmoslock_v2.internal_student_evidence_content_digest($1,thumb,bound_scope,$7,submitted_fact);
+    select e.* into existing from desmoslock_v2.student_protection_events e where e.event_id = (submitted_fact->>'eventId')::uuid;
     if existing.event_id is not null then
-      if existing.content_digest <> digest or existing.fact <> fact or existing.origin_build <> $7
+      if existing.content_digest <> digest or existing.fact <> submitted_fact or existing.origin_build <> $7
         or existing.workspace_id <> $2 or existing.test_id <> $3 or existing.student_session_id <> $4
         or existing.device_session_id <> $5 or existing.epoch <> $6 then
         raise exception using errcode = 'PSE01', message = 'student session denied';
       end if;
     else
-      if (fact->>'sequence')::numeric::bigint <= prior_max then
+      if (submitted_fact->>'sequence')::numeric::bigint <= prior_max then
         raise exception using errcode = 'PSE01', message = 'student session denied';
       end if;
       insert into desmoslock_v2.student_protection_events
         (event_id,workspace_id,test_id,student_session_id,device_session_id,epoch,attempt_id,fact_sequence,slot,
           api_origin,key_thumbprint,origin_build,fact,content_digest,received_at)
-      values ((fact->>'eventId')::uuid,$2,$3,$4,$5,$6,attempt,(fact->>'sequence')::numeric::bigint,fact->>'slot',
-        $1,thumb,$7,fact,digest,checked_at) returning * into existing;
+      values ((submitted_fact->>'eventId')::uuid,$2,$3,$4,$5,$6,attempt,(submitted_fact->>'sequence')::numeric::bigint,submitted_fact->>'slot',
+        $1,thumb,$7,submitted_fact,digest,checked_at) returning * into existing;
       new_count := new_count + 1;
     end if;
     acknowledgments := acknowledgments || jsonb_build_array(jsonb_build_object('eventId',existing.event_id,
@@ -691,7 +691,7 @@ grant execute on function desmoslock_v2.current_student_protection_events(uuid,u
 -- desmoslock-migration-set-sha256:begin
 create or replace function desmoslock_v2.expected_migration_set_sha256()
 returns text language sql immutable set search_path = '' as $$
-  select 'a1c671760f91c131241216daae7df908a42f4b26a867efdc8676169d9b2df778'::text;
+  select '80c2720ff352c721298e5814715374bf9e2a9c1152bbf2d2761ad781265f8701'::text;
 $$;
 -- desmoslock-migration-set-sha256:end
 revoke all on function desmoslock_v2.expected_migration_set_sha256() from public, anon, authenticated, service_role;

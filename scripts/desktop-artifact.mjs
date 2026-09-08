@@ -609,10 +609,10 @@ export async function inspectPackagedDesktop({
   const packageMetadata = JSON.parse(
     extractFile(archivePath, "package.json", false).toString("utf8"),
   );
+  // Packager removes the staging-only private field before creating ASAR.
   assert.deepEqual(Object.keys(packageMetadata).sort(), [
     "main",
     "name",
-    "private",
     "productName",
     "type",
     "version",
@@ -622,7 +622,6 @@ export async function inspectPackagedDesktop({
     {
       main: "dist/main.js",
       name: packagedExecutableName,
-      private: true,
       productName: appName,
       type: "module",
       version: undefined,

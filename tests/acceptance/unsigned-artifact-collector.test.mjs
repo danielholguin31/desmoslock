@@ -6,6 +6,7 @@ import { registerHooks } from "node:module";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { defaultSanitizePackageJson } from "@electron/packager";
 
 const helperUrl = new URL("../../scripts/desktop-artifact.mjs", import.meta.url)
   .href;
@@ -189,7 +190,6 @@ async function syntheticPackage(root, distributionRoot, distribution) {
     JSON.stringify({
       main: "dist/main.js",
       name: "desmoslock-internal",
-      private: true,
       productName: "DesmosLock Internal",
       type: "module",
       version: "2.0.0",
@@ -433,6 +433,80 @@ await test("unsigned desktop artifact inspection uses synthetic files and mocked
       },
     );
     await t.test(
+      "accepts the pinned public packager sanitizer's exact final manifest",
+      async () => {
+        const distributionRoot = await directory();
+        const distribution = await syntheticDistribution(distributionRoot);
+        const options = await syntheticPackage(
+          await directory(),
+          distributionRoot,
+          distribution,
+        );
+        const expected = JSON.parse(archiveContents.get("package.json"));
+        const staged = { ...expected, private: true };
+        const sanitized = defaultSanitizePackageJson({ ...staged });
+        assert.deepEqual(Object.keys(sanitized).sort(), [
+          "main",
+          "name",
+          "productName",
+          "type",
+          "version",
+        ]);
+        assert.deepEqual(sanitized, expected);
+        assert.equal(staged.private, true);
+        const metadata = Buffer.from(JSON.stringify(sanitized));
+        archiveEntries.set("package.json", { size: metadata.length });
+        archiveContents.set("package.json", metadata);
+        assert.equal(
+          (await inspectPackagedDesktop(options)).packageVersion,
+          "2.0.0",
+        );
+        assert.equal(packageCalls, 0);
+        assert.equal(hardenCalls, 0);
+      },
+    );
+    await t.test(
+      "rejects extra, missing and changed final manifest fields",
+      async () => {
+        const distributionRoot = await directory();
+        const distribution = await syntheticDistribution(distributionRoot);
+        const options = await syntheticPackage(
+          await directory(),
+          distributionRoot,
+          distribution,
+        );
+        const expected = JSON.parse(archiveContents.get("package.json"));
+        const setMetadata = (value) => {
+          const metadata = Buffer.from(JSON.stringify(value));
+          archiveEntries.set("package.json", { size: metadata.length });
+          archiveContents.set("package.json", metadata);
+        };
+        await inspectPackagedDesktop(options);
+        const invalid = [
+          { ...expected, private: true },
+          { ...expected, private: false },
+          { ...expected, unexpected: "field" },
+          ...Object.keys(expected).map((key) => {
+            const missing = { ...expected };
+            delete missing[key];
+            return missing;
+          }),
+          ...Object.keys(expected).map((key) => ({
+            ...expected,
+            [key]: "invalid",
+          })),
+        ];
+        for (const value of invalid) {
+          setMetadata(value);
+          await assert.rejects(inspectPackagedDesktop(options), {
+            code: "ERR_ASSERTION",
+          });
+        }
+        setMetadata(expected);
+        await inspectPackagedDesktop(options);
+      },
+    );
+    await t.test(
       "rejects a substituted bundle directory before reading ASAR data",
       async () => {
         const distributionRoot = await directory();
@@ -491,7 +565,6 @@ await test("unsigned desktop artifact inspection uses synthetic files and mocked
           JSON.stringify({
             main: "dist/main.js",
             name: "desmoslock-internal",
-            private: true,
             productName: "DesmosLock Internal",
             type: "module",
             version: "2.0.0",
