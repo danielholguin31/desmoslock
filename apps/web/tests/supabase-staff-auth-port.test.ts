@@ -1,11 +1,17 @@
 import { readFileSync } from "node:fs";
 
-import { createClient } from "@supabase/supabase-js";
+import { createClient, GoTrueClient } from "@supabase/supabase-js";
 import { describe, expect, it, vi } from "vitest";
 
 import { prepareStaffRecoveryCallback } from "../src/auth/staff-auth-callback.js";
+import * as staffSessionStorage from "../src/auth/staff-auth-session-storage.js";
+import type {
+  StaffAuthSessionSnapshot,
+  StaffAuthSessionStorage,
+} from "../src/auth/staff-auth-session-storage.js";
 import {
   createSupabaseStaffAuthPort,
+  createProductionSupabaseStaffAuthPort,
   type SupabaseStaffAuthClient,
 } from "../src/auth/supabase-staff-auth-port.js";
 
@@ -113,6 +119,8 @@ function fakeClient(
 function createPort(
   client: SupabaseStaffAuthClient,
   recoveryFetch: typeof fetch = async () => new Response(null, { status: 503 }),
+  sessionStorage?: StaffAuthSessionStorage,
+  disposeOwnedResources?: () => void,
 ) {
   return createSupabaseStaffAuthPort({
     client,
@@ -120,7 +128,140 @@ function createPort(
     origin: "https://app.example.test",
     publishableKey,
     url: backendUrl,
+    ...(sessionStorage === undefined ? {} : { sessionStorage }),
+    ...(disposeOwnedResources === undefined ? {} : { disposeOwnedResources }),
   });
+}
+
+function boundFixture(
+  options: {
+    readonly claims?: Readonly<Record<string, unknown>>;
+    readonly user?: Readonly<Record<string, unknown>>;
+    readonly request?: typeof fetch;
+  } = {},
+) {
+  const user = {
+    id: accountId,
+    email: "teacher@example.test",
+    email_confirmed_at: "2026-09-01T00:00:00Z",
+    aud: "authenticated",
+    created_at: "2026-09-01T00:00:00Z",
+    app_metadata: {},
+    user_metadata: {},
+    factors: [],
+    ...options.user,
+  };
+  const accessToken = syntheticJwt({
+    sub: accountId,
+    session_id: providerSessionId,
+    aal: "aal1",
+    amr: ["password"],
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    ...options.claims,
+  });
+  let value: string | null = JSON.stringify({
+    access_token: accessToken,
+    refresh_token: "synthetic-refresh",
+    user,
+    token_type: "bearer",
+    expires_at: Math.floor(Date.now() / 1000) + 3600,
+  });
+  let version = 0;
+  const snapshots = new WeakSet<object>();
+  const listeners = new Set<() => void>();
+  const matches = (snapshot: StaffAuthSessionSnapshot) =>
+    snapshots.has(snapshot) &&
+    snapshot.version === version &&
+    snapshot.value === value;
+  const storage: StaffAuthSessionStorage = {
+    storageKey: "synthetic-bound-session",
+    async getItem() {
+      return value;
+    },
+    async setItem(_key, next) {
+      value = next;
+      version += 1;
+      for (const listener of listeners) listener();
+    },
+    async removeItem() {
+      value = null;
+      version += 1;
+      for (const listener of listeners) listener();
+    },
+    async readSessionSnapshot() {
+      const snapshot = Object.freeze({
+        storeGeneration: "synthetic-generation",
+        version,
+        value,
+      });
+      snapshots.add(snapshot);
+      return snapshot;
+    },
+    async isCurrentSession(snapshot) {
+      return matches(snapshot);
+    },
+    async compareAndPublish(snapshot, next) {
+      if (!matches(snapshot)) return false;
+      value = next;
+      version += 1;
+      for (const listener of listeners) listener();
+      return true;
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    dispose() {
+      listeners.clear();
+    },
+  };
+  const client = fakeClient({
+    auth: {
+      getSession: async () => ({
+        data: {
+          session: value === null ? null : (JSON.parse(value) as unknown),
+        },
+        error: null,
+      }),
+    },
+  });
+  const providerFetch = vi.fn<typeof fetch>(
+    options.request ??
+      (async (input) =>
+        recoveryResponse(
+          JSON.stringify(
+            String(input).endsWith("/user") ? user : [{ code: "ok" }],
+          ),
+          { status: 200, headers: { "content-type": "application/json" } },
+          { url: String(input) },
+        )),
+  );
+  const port = createPort(client, providerFetch, storage);
+  return { accessToken, client, port, providerFetch, storage, user };
+}
+
+async function captureReadHandle(
+  port: ReturnType<typeof createPort>,
+): Promise<string> {
+  const captured = await port.captureAuthReadAuthority();
+  if (
+    typeof captured !== "object" ||
+    captured === null ||
+    !("authorityHandle" in captured) ||
+    typeof captured.authorityHandle !== "string"
+  )
+    throw new Error("Missing synthetic read authority");
+  return captured.authorityHandle;
+}
+
+async function captureMfaHandle(
+  port: ReturnType<typeof createPort>,
+): Promise<string> {
+  const handle = await port.captureMfaAuthority(accountId, providerSessionId);
+  if (handle === null) throw new Error("Missing synthetic MFA authority");
+  return handle;
 }
 
 async function captureSignOutHandle(port: ReturnType<typeof createPort>) {
@@ -230,71 +371,344 @@ function accountSession() {
 }
 
 const authorityReadCases = [
-  {
-    method: "readCurrentContext",
-    data: [{ code: "ok" }],
-    expected: [{ code: "ok" }],
-    failed: null,
-  },
-  {
-    method: "readCurrentInvitations",
-    data: [{ code: "ok" }],
-    expected: [{ code: "ok" }],
-    failed: null,
-  },
-  {
-    method: "readManageableStaff",
-    data: [{ code: "ok" }],
-    expected: [{ code: "ok" }],
-    failed: null,
-  },
+  { method: "readCurrentContext", path: "current_staff_context" },
+  { method: "readCurrentInvitations", path: "current_staff_invitations" },
+  { method: "readManageableStaff", path: "current_manageable_staff" },
   {
     method: "readManageableInvitations",
-    data: [{ code: "ok" }],
-    expected: [{ code: "ok" }],
-    failed: null,
+    path: "current_manageable_staff_invitations",
   },
-  {
-    method: "readSession",
-    data: accountSession().data,
-    expected: { status: "authenticated" },
-    failed: { status: "unavailable" },
-  },
-  {
-    method: "readAssurance",
-    data: {
-      currentAuthenticationMethods: ["password", "totp"],
-      currentLevel: "aal2",
-      nextLevel: "aal2",
-    },
-    expected: {
-      currentAuthenticationMethods: ["password", "totp"],
-      currentLevel: "aal2",
-      nextLevel: "aal2",
-    },
-    failed: null,
-  },
-  {
-    method: "readTotpFactors",
-    data: { all: [] },
-    expected: { factors: [] },
-    failed: null,
-  },
+  { method: "readAssurance", path: "user" },
+  { method: "readTotpFactors", path: "user" },
 ] as const;
 
-function authorityReadClient(
-  read: () => PromiseLike<{ readonly data: unknown; readonly error: unknown }>,
-) {
-  return fakeClient({
-    auth: {
-      getSession: read,
-      mfa: { getAuthenticatorAssuranceLevel: read, listFactors: read },
-    },
-    schema: () => ({ rpc: read }),
-  });
-}
-
 describe("Supabase staff auth port", () => {
+  it("retires the production SDK channel and subscribers without erasing the persisted session", async () => {
+    const fixture = boundFixture();
+    const before = await fixture.storage.getItem(fixture.storage.storageKey);
+    const storageDispose = vi.spyOn(fixture.storage, "dispose");
+    const storageRemove = vi.spyOn(fixture.storage, "removeItem");
+    const storeFactory = vi
+      .spyOn(staffSessionStorage, "createStaffAuthSessionStorage")
+      .mockReturnValue(fixture.storage);
+    const channelClose = vi.fn();
+    const listeners: Array<(event: { data: unknown }) => Promise<void>> = [];
+    class SyntheticChannel {
+      constructor(readonly name: string) {}
+      addEventListener(
+        _name: string,
+        listener: (event: { data: unknown }) => Promise<void>,
+      ) {
+        listeners.push(listener);
+      }
+      postMessage() {}
+      close() {
+        channelClose();
+      }
+    }
+    vi.stubGlobal("BroadcastChannel", SyntheticChannel);
+    vi.stubGlobal("window", {
+      location: { href: "https://app.example.test/" },
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+    vi.stubGlobal("document", { visibilityState: "hidden" });
+    const ownedAuth: GoTrueClient[] = [];
+    const originalSubscribe = GoTrueClient.prototype.onAuthStateChange;
+    const subscribe = vi
+      .spyOn(GoTrueClient.prototype, "onAuthStateChange")
+      .mockImplementation(function (this: GoTrueClient, callback) {
+        ownedAuth.push(this);
+        return originalSubscribe.call(this, callback);
+      });
+    const dispose = vi.spyOn(GoTrueClient.prototype, "dispose");
+    const providerFetch = vi.fn<typeof fetch>();
+    const port = createProductionSupabaseStaffAuthPort(
+      { url: backendUrl, origin: "https://app.example.test", publishableKey },
+      providerFetch,
+    );
+    try {
+      await expect(port.readSession()).resolves.toEqual({
+        status: "authenticated",
+      });
+      expect(storeFactory).toHaveBeenCalledExactlyOnceWith(backendUrl);
+      const auth = ownedAuth[0];
+      if (auth === undefined)
+        throw new Error("Missing production-owned SDK client");
+      const directListener = vi.fn();
+      auth.onAuthStateChange(directListener);
+      await auth.getSession();
+      await Promise.resolve();
+      directListener.mockClear();
+      expect(listeners).toHaveLength(1);
+      await listeners[0]!({
+        data: {
+          event: "USER_UPDATED",
+          session: JSON.parse(before!) as unknown,
+        },
+      });
+      expect(directListener).toHaveBeenCalledOnce();
+      port.dispose?.();
+      // The owned storage closes synchronously even though SDK disposal awaits
+      // refresh teardown before closing its channel and subscriber map.
+      expect(storageDispose).toHaveBeenCalledOnce();
+      expect(dispose).toHaveBeenCalledOnce();
+      await dispose.mock.results[0]!.value;
+      expect(channelClose).toHaveBeenCalledOnce();
+      await listeners[0]!({
+        data: {
+          event: "USER_UPDATED",
+          session: JSON.parse(before!) as unknown,
+        },
+      });
+      expect(directListener).toHaveBeenCalledOnce();
+      expect(storageRemove).not.toHaveBeenCalled();
+      expect(await fixture.storage.getItem(fixture.storage.storageKey)).toBe(
+        before,
+      );
+      expect(providerFetch).not.toHaveBeenCalled();
+    } finally {
+      port.dispose?.();
+      await Promise.resolve();
+      dispose.mockRestore();
+      subscribe.mockRestore();
+      storeFactory.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("disposes owned resources once, releases handles and ignores late SDK/storage callbacks", async () => {
+    const fixture = boundFixture();
+    const callbacks: Array<() => void> = [];
+    const unsubscribe = vi.fn();
+    vi.spyOn(fixture.client.auth, "onAuthStateChange").mockImplementation(
+      (callback) => {
+        callbacks.push(() => callback("SIGNED_IN", null));
+        return { data: { subscription: { unsubscribe } } };
+      },
+    );
+    const stopStorage = vi.fn();
+    vi.spyOn(fixture.storage, "subscribe").mockImplementation((callback) => {
+      callbacks.push(callback);
+      return stopStorage;
+    });
+    const cleanup = vi.fn();
+    const remove = vi.spyOn(fixture.storage, "removeItem");
+    const signOut = vi.spyOn(fixture.client.auth, "signOut");
+    const port = createPort(
+      fixture.client,
+      fixture.providerFetch,
+      fixture.storage,
+      cleanup,
+    );
+    const handle = await captureMfaHandle(port);
+    const listener = vi.fn();
+    const stop = port.onAuthStateChange(listener);
+    callbacks.forEach((callback) => callback());
+    expect(listener).toHaveBeenCalledTimes(2);
+    port.dispose?.();
+    port.dispose?.();
+    callbacks.forEach((callback) => callback());
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(cleanup).toHaveBeenCalledOnce();
+    await expect(port.enrollTotp(handle)).resolves.toEqual({
+      status: "unavailable",
+    });
+    await expect(port.captureAuthReadAuthority()).resolves.toEqual({
+      status: "unavailable",
+    });
+    await expect(
+      port.captureMfaAuthority(accountId, providerSessionId),
+    ).resolves.toBeNull();
+    expect(fixture.providerFetch).toHaveBeenCalledOnce();
+    expect(remove).not.toHaveBeenCalled();
+    expect(signOut).not.toHaveBeenCalled();
+    stop();
+    stop();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(stopStorage).toHaveBeenCalledOnce();
+  });
+
+  it("leaves injected shared storage and clients intact and fences a late capture on disposal", async () => {
+    const fixture = boundFixture();
+    const held = Promise.withResolvers<Response>();
+    const entered = Promise.withResolvers<void>();
+    const disposeStorage = vi.spyOn(fixture.storage, "dispose");
+    const removeStorage = vi.spyOn(fixture.storage, "removeItem");
+    const signOut = vi.spyOn(fixture.client.auth, "signOut");
+    fixture.providerFetch.mockImplementation(() => {
+      entered.resolve();
+      return held.promise;
+    });
+    const pending = fixture.port.captureAuthReadAuthority();
+    await entered.promise;
+    fixture.port.dispose?.();
+    held.resolve(
+      recoveryResponse(
+        JSON.stringify(fixture.user),
+        { status: 200, headers: { "content-type": "application/json" } },
+        { url: `${backendUrl}/auth/v1/user` },
+      ),
+    );
+    await expect(pending).resolves.toEqual({ status: "unavailable" });
+    expect(disposeStorage).not.toHaveBeenCalled();
+    expect(removeStorage).not.toHaveBeenCalled();
+    expect(signOut).not.toHaveBeenCalled();
+    expect(
+      await fixture.storage.getItem(fixture.storage.storageKey),
+    ).not.toBeNull();
+  });
+
+  it("contains owned-store abort of pending MFA publication without a late success", async () => {
+    const fixture = boundFixture({ claims: { aal: "aal2" } });
+    const before = await fixture.storage.readSessionSnapshot();
+    const pendingPublish = Promise.withResolvers<boolean>();
+    const entered = Promise.withResolvers<void>();
+    vi.spyOn(fixture.storage, "compareAndPublish").mockImplementation(() => {
+      entered.resolve();
+      return pendingPublish.promise;
+    });
+    const cleanup = vi.fn(() => {
+      pendingPublish.reject(
+        new Error("Synthetic owned-store transaction abort"),
+      );
+    });
+    const port = createPort(
+      fixture.client,
+      fixture.providerFetch,
+      fixture.storage,
+      cleanup,
+    );
+    const handle = await captureMfaHandle(port);
+    fixture.providerFetch.mockImplementation(async (input) =>
+      recoveryResponse(
+        JSON.stringify(
+          String(input).endsWith("/verify")
+            ? {
+                access_token: fixture.accessToken,
+                refresh_token: "synthetic-upgraded-refresh",
+                token_type: "bearer",
+                expires_in: 3600,
+                user: fixture.user,
+              }
+            : fixture.user,
+        ),
+        { status: 200, headers: { "content-type": "application/json" } },
+        { url: String(input) },
+      ),
+    );
+    const published = vi.fn();
+    const pending = port
+      .verifyTotp(
+        {
+          challengeId: "71000000-0000-4000-8000-000000000001",
+          factorId: "61000000-0000-4000-8000-000000000001",
+          code: "123456",
+        },
+        handle,
+      )
+      .then(published);
+    await entered.promise;
+    port.dispose?.();
+    await pending;
+    expect(published).toHaveBeenCalledExactlyOnceWith({
+      status: "unavailable",
+    });
+    pendingPublish.resolve(true);
+    await Promise.resolve();
+    expect(published).toHaveBeenCalledExactlyOnceWith({
+      status: "unavailable",
+    });
+    expect(await fixture.storage.readSessionSnapshot()).toEqual(before);
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("does not revive private recovery authority after a disposed installation callback", async () => {
+    const installed = Promise.withResolvers<{
+      data: unknown;
+      error: unknown;
+    }>();
+    const entered = Promise.withResolvers<void>();
+    const setSession = vi.fn(() => {
+      entered.resolve();
+      return installed.promise;
+    });
+    const port = createPort(fakeClient({ auth: { setSession } }), async () =>
+      recoveryResponse(
+        JSON.stringify({
+          access_token: "synthetic-access",
+          refresh_token: "synthetic-refresh",
+          expires_in: 3600,
+          token_type: "bearer",
+          user: { id: accountId },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const pending = port.exchangeRecoveryCode({
+      authorizationCode: "synthetic-code",
+      verifier: "v".repeat(43),
+    });
+    await entered.promise;
+    port.dispose?.();
+    installed.resolve({ data: { session: {}, user: {} }, error: null });
+    await expect(pending).resolves.toEqual({ status: "unavailable" });
+    await expect(port.capturePasswordAuthority()).resolves.toBeNull();
+  });
+
+  it.each([
+    { purpose: "read", check: 1 },
+    { purpose: "read", check: 2 },
+    { purpose: "mfa", check: 1 },
+    { purpose: "mfa", check: 2 },
+  ] as const)(
+    "rejects a private reset during $purpose store-current check $check",
+    async ({ purpose, check }) => {
+      const fixture = boundFixture();
+      const held = Promise.withResolvers<boolean>();
+      const entered = Promise.withResolvers<void>();
+      const original = fixture.storage.isCurrentSession.bind(fixture.storage);
+      let calls = 0;
+      vi.spyOn(fixture.storage, "isCurrentSession").mockImplementation(
+        (snapshot) => {
+          calls += 1;
+          if (calls !== check) return original(snapshot);
+          entered.resolve();
+          return held.promise;
+        },
+      );
+      const capture =
+        purpose === "read"
+          ? fixture.port.captureAuthReadAuthority()
+          : fixture.port.captureMfaAuthority(accountId, providerSessionId);
+      await entered.promise;
+      fixture.port.clearPrivateAuthContinuations();
+      held.resolve(true);
+      await expect(capture).resolves.toEqual(
+        purpose === "read" ? { status: "unavailable" } : null,
+      );
+      expect(fixture.providerFetch).toHaveBeenCalledTimes(check - 1);
+      fixture.port.clearPrivateAuthContinuations();
+    },
+  );
+
+  it("requires the new store for read and MFA captures without any legacy SDK fallback", async () => {
+    const client = fakeClient({
+      auth: { getSession: async () => accountSession() },
+    });
+    const getSession = vi.spyOn(client.auth, "getSession");
+    const providerFetch = vi.fn<typeof fetch>();
+    const port = createPort(client, providerFetch);
+    await expect(port.captureAuthReadAuthority()).resolves.toEqual({
+      status: "unavailable",
+    });
+    await expect(
+      port.captureMfaAuthority(accountId, providerSessionId),
+    ).resolves.toBeNull();
+    expect(getSession).not.toHaveBeenCalled();
+    expect(providerFetch).not.toHaveBeenCalled();
+  });
+
   it.each([
     { name: "missing session ID", claims: { sub: accountId } },
     { name: "null session ID", claims: { sub: accountId, session_id: null } },
@@ -867,149 +1281,175 @@ describe("Supabase staff auth port", () => {
   );
 
   it.each(authorityReadCases)(
-    "bounds a stalled $method, ignores its late result and permits a fresh read",
-    async ({ method, data, expected, failed }) => {
+    "bounds a stalled $method boundary, ignores its late result and permits a fresh read",
+    async ({ method, path }) => {
       vi.useFakeTimers();
+      const late = Promise.withResolvers<Response>();
+      const fixture = boundFixture();
+      let stalled = true;
+      const original = fixture.providerFetch.getMockImplementation()!;
+      fixture.providerFetch.mockImplementation(async (input, init) => {
+        if (String(input).endsWith(`/${path}`) && stalled) return late.promise;
+        return original(input, init);
+      });
+      const read = async () => {
+        const captured = await fixture.port.captureAuthReadAuthority();
+        if (
+          typeof captured !== "object" ||
+          captured === null ||
+          !("authorityHandle" in captured) ||
+          typeof captured.authorityHandle !== "string"
+        )
+          return null;
+        try {
+          return await fixture.port[method](captured.authorityHandle);
+        } finally {
+          fixture.port.releaseAuthReadAuthority(captured.authorityHandle);
+        }
+      };
       try {
-        let complete:
-          | ((value: {
-              readonly data: unknown;
-              readonly error: unknown;
-            }) => void)
-          | undefined;
-        const read = vi
-          .fn<
-            () => Promise<{ readonly data: unknown; readonly error: unknown }>
-          >()
-          .mockImplementationOnce(
-            () =>
-              new Promise((resolve) => {
-                complete = resolve;
-              }),
-          )
-          .mockResolvedValue({ data, error: null });
-        const providerFetch = vi.fn<typeof fetch>();
-        const port = createPort(authorityReadClient(read), providerFetch);
         const published = vi.fn();
-        const pending = port[method]().then(published);
+        const pending = read().then(published);
         await vi.advanceTimersByTimeAsync(4_999);
         expect(published).not.toHaveBeenCalled();
         await vi.advanceTimersByTimeAsync(1);
         await pending;
-        expect(published).toHaveBeenCalledExactlyOnceWith(failed);
+        expect(published).toHaveBeenCalledExactlyOnceWith(null);
         expect(vi.getTimerCount()).toBe(0);
-        complete?.({ data, error: null });
+        const targetCall = fixture.providerFetch.mock.calls.find(([input]) =>
+          String(input).endsWith(`/${path}`),
+        );
+        expect(targetCall?.[1]?.signal?.aborted).toBe(true);
+        late.resolve(
+          recoveryResponse(
+            JSON.stringify(path === "user" ? fixture.user : [{ code: "ok" }]),
+            { status: 200, headers: { "content-type": "application/json" } },
+            { url: String(targetCall?.[0]) },
+          ),
+        );
         await vi.advanceTimersByTimeAsync(0);
-        expect(published).toHaveBeenCalledExactlyOnceWith(failed);
-        expect(read).toHaveBeenCalledOnce();
-        await expect(port[method]()).resolves.toEqual(expected);
-        expect(read).toHaveBeenCalledTimes(2);
-        expect(providerFetch).not.toHaveBeenCalled();
+        expect(published).toHaveBeenCalledExactlyOnceWith(null);
+        stalled = false;
+        expect(await read()).not.toBeNull();
         expect(vi.getTimerCount()).toBe(0);
       } finally {
+        fixture.port.clearPrivateAuthContinuations();
         vi.useRealTimers();
       }
     },
   );
 
   it.each(authorityReadCases)(
-    "contains early and late $method rejection without retaining a timer or retrying",
-    async ({ method, failed }) => {
+    "contains early and late $method HTTP rejection without retaining a timer or retrying",
+    async ({ method, path }) => {
       vi.useFakeTimers();
+      const late = Promise.withResolvers<Response>();
+      const fixture = boundFixture();
+      const original = fixture.providerFetch.getMockImplementation()!;
+      let targetCalls = 0;
+      fixture.providerFetch.mockImplementation(async (input, init) => {
+        if (!String(input).endsWith(`/${path}`)) return original(input, init);
+        targetCalls += 1;
+        if (targetCalls === 1) throw new Error("synthetic early HTTP failure");
+        return late.promise;
+      });
+      const read = async () => {
+        const captured = await fixture.port.captureAuthReadAuthority();
+        if (
+          typeof captured !== "object" ||
+          captured === null ||
+          !("authorityHandle" in captured) ||
+          typeof captured.authorityHandle !== "string"
+        )
+          return null;
+        try {
+          return await fixture.port[method](captured.authorityHandle);
+        } finally {
+          fixture.port.releaseAuthReadAuthority(captured.authorityHandle);
+        }
+      };
       try {
-        let rejectRead: ((reason?: unknown) => void) | undefined;
-        const read = vi
-          .fn<
-            () => Promise<{ readonly data: unknown; readonly error: unknown }>
-          >()
-          .mockRejectedValueOnce(new Error("synthetic early read failure"))
-          .mockImplementationOnce(
-            () =>
-              new Promise((_resolve, reject) => {
-                rejectRead = reject;
-              }),
-          );
-        const providerFetch = vi.fn<typeof fetch>();
-        const port = createPort(authorityReadClient(read), providerFetch);
-        await expect(port[method]()).resolves.toEqual(failed);
+        await expect(read()).resolves.toBeNull();
         expect(vi.getTimerCount()).toBe(0);
-        const pending = port[method]();
+        const pending = read();
         await vi.advanceTimersByTimeAsync(5_000);
-        await expect(pending).resolves.toEqual(failed);
-        rejectRead?.(new Error("synthetic late read failure"));
-        await vi.advanceTimersByTimeAsync(0);
-        await expect(pending).resolves.toEqual(failed);
-        expect(read).toHaveBeenCalledTimes(2);
-        expect(providerFetch).not.toHaveBeenCalled();
-        expect(vi.getTimerCount()).toBe(0);
-      } finally {
-        vi.useRealTimers();
-      }
-    },
-  );
-
-  it.each([
-    ["readCurrentContext", "current_staff_context"],
-    ["readCurrentInvitations", "current_staff_invitations"],
-    ["readManageableStaff", "current_manageable_staff"],
-    ["readManageableInvitations", "current_manageable_staff_invitations"],
-  ] as const)(
-    "cancels a stalled %s PostgREST request when the builder provides abortSignal",
-    async (method, name) => {
-      vi.useFakeTimers();
-      try {
-        const response = new Promise<{
-          readonly data: unknown;
-          readonly error: unknown;
-        }>(() => undefined);
-        const abortSignal = vi.fn((signal: AbortSignal) => {
-          expect(signal.aborted).toBe(false);
-          return response;
-        });
-        const request = Object.assign(response, { abortSignal });
-        const rpc = vi.fn(() => request);
-        const port = createPort(fakeClient({ schema: () => ({ rpc }) }));
-        const pending = port[method]();
-        await vi.advanceTimersByTimeAsync(4_999);
-        expect(rpc).toHaveBeenCalledExactlyOnceWith(name);
-        expect(abortSignal).toHaveBeenCalledOnce();
-        expect(abortSignal.mock.calls[0]?.[0].aborted).toBe(false);
-        await vi.advanceTimersByTimeAsync(1);
         await expect(pending).resolves.toBeNull();
-        expect(abortSignal.mock.calls[0]?.[0].aborted).toBe(true);
+        late.reject(new Error("synthetic late HTTP failure"));
+        await vi.advanceTimersByTimeAsync(0);
+        await expect(pending).resolves.toBeNull();
+        expect(targetCalls).toBe(2);
         expect(vi.getTimerCount()).toBe(0);
       } finally {
+        fixture.port.clearPrivateAuthContinuations();
         vi.useRealTimers();
       }
     },
   );
 
-  it("uses only the desmoslock_v2 schema for authority reads", async () => {
-    const rpc = vi.fn(
-      async (name: string, args?: Readonly<Record<string, unknown>>) => ({
-        data: [{ args: args ?? null, name }],
-        error: null,
-      }),
-    );
-    const schema = vi.fn(() => ({ rpc }));
-    const port = createPort(fakeClient({ schema }));
-
-    await expect(port.readCurrentContext()).resolves.toEqual([
-      { args: null, name: "current_staff_context" },
-    ]);
-    await port.readCurrentInvitations();
-    await port.readManageableStaff();
-    await port.readManageableInvitations();
-
-    expect(schema).toHaveBeenCalledTimes(1);
-    expect(schema).toHaveBeenCalledWith("desmoslock_v2");
-    expect(rpc.mock.calls).toEqual([
-      ["current_staff_context"],
-      ["current_staff_invitations"],
-      ["current_manageable_staff"],
-      ["current_manageable_staff_invitations"],
-    ]);
+  it("bounds SDK session reads and contains late resolution and rejection", async () => {
+    vi.useFakeTimers();
+    const late = Promise.withResolvers<{ data: unknown; error: unknown }>();
+    const rejected = Promise.withResolvers<{ data: unknown; error: unknown }>();
+    const getSession = vi
+      .fn<SupabaseStaffAuthClient["auth"]["getSession"]>()
+      .mockReturnValueOnce(late.promise)
+      .mockRejectedValueOnce(new Error("synthetic early failure"))
+      .mockReturnValueOnce(rejected.promise)
+      .mockResolvedValue(accountSession());
+    const port = createPort(fakeClient({ auth: { getSession } }));
+    try {
+      const pending = port.readSession();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(pending).resolves.toEqual({ status: "unavailable" });
+      late.resolve(accountSession());
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(pending).resolves.toEqual({ status: "unavailable" });
+      await expect(port.readSession()).resolves.toEqual({
+        status: "unavailable",
+      });
+      const delayedRejection = port.readSession();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(delayedRejection).resolves.toEqual({
+        status: "unavailable",
+      });
+      rejected.reject(new Error("synthetic late failure"));
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(port.readSession()).resolves.toEqual({
+        status: "authenticated",
+      });
+      expect(getSession).toHaveBeenCalledTimes(4);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
+
+  it.each(authorityReadCases.filter(({ path }) => path !== "user"))(
+    "uses exact-token direct $method requests with the desmoslock_v2 profile and no shared RPC",
+    async ({ method, path }) => {
+      const fixture = boundFixture();
+      const rpc = vi.spyOn(fixture.client, "schema");
+      const handle = await captureReadHandle(fixture.port);
+      try {
+        await expect(fixture.port[method](handle)).resolves.toEqual([
+          { code: "ok" },
+        ]);
+        const call = fixture.providerFetch.mock.calls.at(-1)!;
+        expect(String(call[0])).toBe(`${backendUrl}/rest/v1/rpc/${path}`);
+        expect(call[1]?.method).toBe("POST");
+        expect(call[1]?.body).toBe("{}");
+        expect(new Headers(call[1]?.headers).get("content-profile")).toBe(
+          "desmoslock_v2",
+        );
+        expect(new Headers(call[1]?.headers).get("authorization")).toBe(
+          `Bearer ${fixture.accessToken}`,
+        );
+        expect(rpc).not.toHaveBeenCalled();
+      } finally {
+        fixture.port.releaseAuthReadAuthority(handle);
+      }
+    },
+  );
 
   it("invokes the recovery Edge function and returns only parsed product responses", async () => {
     const recoveryRequest = {
@@ -2389,131 +2829,151 @@ describe("Supabase staff auth port", () => {
     },
   );
 
-  it("normalizes assurance, all TOTP factors, enrollment, challenge, verification, and removal", async () => {
+  it("normalizes bound assurance, factors and direct MFA responses without exposing tokens or secrets", async () => {
     const factorId = "61000000-0000-4000-8000-000000000001";
     const unverifiedFactorId = "61000000-0000-4000-8000-000000000002";
     const challengeId = "71000000-0000-4000-8000-000000000001";
-    const getAuthenticatorAssuranceLevel = vi.fn(async () => ({
-      data: {
-        currentAuthenticationMethods: [
-          { method: "password", timestamp: 1_788_300_000 },
-        ],
-        currentLevel: "aal1",
-        nextLevel: "aal2",
-      },
-      error: null,
-    }));
-    const listFactors = vi.fn(async () => ({
-      data: {
-        all: [
+    const fixture = boundFixture({
+      claims: { amr: [{ method: "password", timestamp: 1_788_300_000 }] },
+      user: {
+        factors: [
           {
             factor_type: "totp",
             id: factorId,
             status: "verified",
             updated_at: "not returned",
           },
-          {
-            factor_type: "totp",
-            id: unverifiedFactorId,
-            status: "unverified",
-          },
+          { factor_type: "totp", id: unverifiedFactorId, status: "unverified" },
           {
             factor_type: "phone",
             id: "61000000-0000-4000-8000-000000000003",
             status: "verified",
           },
         ],
-        phone: [],
-        totp: [],
-        webauthn: [],
       },
-      error: null,
-    }));
-    const enroll = vi.fn(async () => ({
-      data: {
-        id: unverifiedFactorId,
-        totp: {
-          qr_code: "data:image/svg+xml;utf-8,%3Csvg%3E%3C%2Fsvg%3E",
-          secret: "synthetic-secret-must-not-escape",
-          uri: "otpauth://synthetic-must-not-escape",
-        },
-        type: "totp",
-      },
-      error: null,
-    }));
-    const challenge = vi.fn(async () => ({
-      data: { expires_at: 1_788_300_300, id: challengeId, type: "totp" },
-      error: null,
-    }));
-    const verify = vi.fn(async () => ({
-      data: {
-        access_token: "synthetic-access-token-must-not-escape",
-        expires_at: 1_788_303_600,
-        expires_in: 3600,
-        refresh_token: "synthetic-refresh-token-must-not-escape",
-        token_type: "bearer",
-        user: { id: accountId },
-      },
-      error: null,
-    }));
-    const unenroll = vi.fn(async () => ({
-      data: { id: unverifiedFactorId },
-      error: null,
-    }));
-    const port = createPort(
-      fakeClient({
-        auth: {
-          mfa: {
-            challenge,
-            enroll,
-            getAuthenticatorAssuranceLevel,
-            listFactors,
-            unenroll,
-            verify,
+    });
+    const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+    const upgradedToken = syntheticJwt({
+      sub: accountId,
+      session_id: providerSessionId,
+      aal: "aal2",
+      exp: expiresAt,
+      amr: ["password", "totp"],
+    });
+    fixture.providerFetch.mockImplementation(async (input) => {
+      const path = new URL(String(input)).pathname;
+      const body = path.endsWith("/user")
+        ? fixture.user
+        : path.endsWith("/challenge")
+          ? { expires_at: expiresAt, id: challengeId, type: "totp" }
+          : path.endsWith("/verify")
+            ? {
+                access_token: upgradedToken,
+                expires_at: expiresAt,
+                expires_in: 3600,
+                refresh_token: "synthetic-refresh-must-not-escape",
+                token_type: "bearer",
+                user: fixture.user,
+              }
+            : path.endsWith("/factors")
+              ? {
+                  id: unverifiedFactorId,
+                  type: "totp",
+                  totp: {
+                    qr_code: "<svg></svg>",
+                    secret: "synthetic-secret-must-not-escape",
+                    uri: "otpauth://synthetic-must-not-escape",
+                  },
+                }
+              : { id: unverifiedFactorId };
+      return recoveryResponse(
+        JSON.stringify(body),
+        { status: 200, headers: { "content-type": "application/json" } },
+        { url: String(input) },
+      );
+    });
+    const sdk = [
+      vi.spyOn(fixture.client.auth.mfa, "challenge"),
+      vi.spyOn(fixture.client.auth.mfa, "enroll"),
+      vi.spyOn(fixture.client.auth.mfa, "getAuthenticatorAssuranceLevel"),
+      vi.spyOn(fixture.client.auth.mfa, "listFactors"),
+      vi.spyOn(fixture.client.auth.mfa, "unenroll"),
+      vi.spyOn(fixture.client.auth.mfa, "verify"),
+      vi.spyOn(fixture.client.auth, "getUser"),
+      vi.spyOn(fixture.client.auth, "setSession"),
+    ];
+    const readHandle = await captureReadHandle(fixture.port);
+    const mfaHandle = await captureMfaHandle(fixture.port);
+    try {
+      await expect(fixture.port.readAssurance(readHandle)).resolves.toEqual({
+        currentAuthenticationMethods: ["password"],
+        currentLevel: "aal1",
+        nextLevel: "aal2",
+      });
+      await expect(fixture.port.readTotpFactors(readHandle)).resolves.toEqual({
+        factors: [
+          { factorId, friendlyName: null, status: "verified" },
+          {
+            factorId: unverifiedFactorId,
+            friendlyName: null,
+            status: "unverified",
           },
-        },
-      }),
-    );
-
-    await expect(port.readAssurance()).resolves.toEqual({
-      currentAuthenticationMethods: ["password"],
-      currentLevel: "aal1",
-      nextLevel: "aal2",
-    });
-    await expect(port.readTotpFactors()).resolves.toEqual({
-      factors: [
-        { factorId, friendlyName: null, status: "verified" },
-        {
-          factorId: unverifiedFactorId,
-          friendlyName: null,
-          status: "unverified",
-        },
-      ],
-    });
-    await expect(port.enrollTotp()).resolves.toEqual({
-      factorId: unverifiedFactorId,
-      qrCode: "data:image/svg+xml;utf-8,%3Csvg%3E%3C%2Fsvg%3E",
-      status: "enrolled",
-    });
-    await expect(port.challengeTotp(factorId)).resolves.toEqual({
-      challengeId,
-      status: "challenged",
-    });
-    await expect(
-      port.verifyTotp({ challengeId, code: "123456", factorId }),
-    ).resolves.toEqual({ status: "verified" });
-    await expect(port.removeTotpFactor(unverifiedFactorId)).resolves.toEqual({
-      status: "removed",
-    });
-
-    expect(enroll).toHaveBeenCalledWith({ factorType: "totp" });
-    expect(challenge).toHaveBeenCalledWith({ factorId });
-    expect(verify).toHaveBeenCalledWith({
-      challengeId,
-      code: "123456",
-      factorId,
-    });
-    expect(unenroll).toHaveBeenCalledWith({ factorId: unverifiedFactorId });
+        ],
+      });
+      await expect(fixture.port.enrollTotp(mfaHandle)).resolves.toEqual({
+        factorId: unverifiedFactorId,
+        qrCode: "data:image/svg+xml;utf-8,<svg></svg>",
+        status: "enrolled",
+      });
+      await expect(
+        fixture.port.challengeTotp(factorId, mfaHandle),
+      ).resolves.toEqual({ challengeId, status: "challenged" });
+      await expect(
+        fixture.port.removeTotpFactor(unverifiedFactorId, mfaHandle),
+      ).resolves.toEqual({ status: "removed" });
+      await expect(
+        fixture.port.verifyTotp(
+          { challengeId, code: "123456", factorId },
+          mfaHandle,
+        ),
+      ).resolves.toEqual({ status: "verified" });
+      const factorCalls = fixture.providerFetch.mock.calls.filter(([input]) =>
+        String(input).includes("/factors"),
+      );
+      expect(
+        factorCalls.map(([input, init]) => [
+          new URL(String(input)).pathname,
+          init?.method,
+          init?.body,
+        ]),
+      ).toEqual([
+        ["/auth/v1/factors", "POST", JSON.stringify({ factor_type: "totp" })],
+        [
+          `/auth/v1/factors/${factorId}/challenge`,
+          "POST",
+          JSON.stringify({ factorId }),
+        ],
+        [`/auth/v1/factors/${unverifiedFactorId}`, "DELETE", undefined],
+        [
+          `/auth/v1/factors/${factorId}/verify`,
+          "POST",
+          JSON.stringify({ challenge_id: challengeId, code: "123456" }),
+        ],
+      ]);
+      expect(
+        factorCalls.every(
+          ([, init]) =>
+            new Headers(init?.headers).get("authorization") ===
+            `Bearer ${fixture.accessToken}`,
+        ),
+      ).toBe(true);
+      expect(sdk.every((method) => method.mock.calls.length === 0)).toBe(true);
+      await expect(
+        fixture.port.isAuthReadAuthorityCurrent(readHandle),
+      ).resolves.toBe(false);
+    } finally {
+      fixture.port.clearPrivateAuthContinuations();
+    }
   });
 
   it.each([
@@ -2529,28 +2989,28 @@ describe("Supabase staff auth port", () => {
       label: "structured methods",
     },
   ])("strictly normalizes homogeneous $label", async (data) => {
-    const port = createPort(
-      fakeClient({
-        auth: {
-          mfa: {
-            getAuthenticatorAssuranceLevel: async () => ({
-              data: {
-                currentAuthenticationMethods: data.currentAuthenticationMethods,
-                currentLevel: "aal1",
-                nextLevel: "aal2",
-              },
-              error: null,
-            }),
+    const { port } = boundFixture({
+      claims: { amr: data.currentAuthenticationMethods },
+      user: {
+        factors: [
+          {
+            factor_type: "totp",
+            id: "61000000-0000-4000-8000-000000000001",
+            status: "verified",
           },
-        },
-      }),
-    );
-
-    await expect(port.readAssurance()).resolves.toEqual({
-      currentAuthenticationMethods: ["password", "recovery"],
-      currentLevel: "aal1",
-      nextLevel: "aal2",
+        ],
+      },
     });
+    const handle = await captureReadHandle(port);
+    try {
+      await expect(port.readAssurance(handle)).resolves.toEqual({
+        currentAuthenticationMethods: ["password", "recovery"],
+        currentLevel: "aal1",
+        nextLevel: "aal2",
+      });
+    } finally {
+      port.releaseAuthReadAuthority(handle);
+    }
   });
 
   it.each([
@@ -2561,50 +3021,47 @@ describe("Supabase staff auth port", () => {
     ["control text", ["recovery\n"]],
     ["excess methods", Array.from({ length: 33 }, () => "password")],
   ] as const)("rejects %s authentication methods", async (_label, methods) => {
-    const port = createPort(
-      fakeClient({
-        auth: {
-          mfa: {
-            getAuthenticatorAssuranceLevel: async () => ({
-              data: {
-                currentAuthenticationMethods: methods,
-                currentLevel: "aal1",
-                nextLevel: "aal2",
-              },
-              error: null,
-            }),
-          },
-        },
-      }),
-    );
-
-    await expect(port.readAssurance()).resolves.toBeNull();
+    const { port } = boundFixture({ claims: { amr: methods } });
+    const handle = await captureReadHandle(port);
+    try {
+      await expect(port.readAssurance(handle)).resolves.toBeNull();
+    } finally {
+      port.releaseAuthReadAuthority(handle);
+    }
   });
 
-  it("maps known MFA verification failures to rejected and unknowns to unavailable", async () => {
-    const verify = vi
-      .fn<SupabaseStaffAuthClient["auth"]["mfa"]["verify"]>()
-      .mockResolvedValueOnce({
-        data: null,
-        error: authError("mfa_verification_failed"),
-      })
-      .mockResolvedValueOnce({
-        data: null,
-        error: authError("unclassified_provider_failure"),
-      });
-    const port = createPort(fakeClient({ auth: { mfa: { verify } } }));
+  it("maps known bound MFA verification failures to rejected and unknowns to unavailable", async () => {
+    const fixture = boundFixture();
+    const handle = await captureMfaHandle(fixture.port);
+    const failures = [
+      "mfa_verification_failed",
+      "unclassified_provider_failure",
+    ];
+    fixture.providerFetch.mockImplementation(async (input) =>
+      recoveryResponse(
+        JSON.stringify({
+          code: failures.shift(),
+          message: "Synthetic provider failure",
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+        { url: String(input) },
+      ),
+    );
     const input = {
       challengeId: "71000000-0000-4000-8000-000000000001",
       code: "123456",
       factorId: "61000000-0000-4000-8000-000000000001",
     };
-
-    await expect(port.verifyTotp(input)).resolves.toEqual({
-      status: "rejected",
-    });
-    await expect(port.verifyTotp(input)).resolves.toEqual({
-      status: "unavailable",
-    });
+    try {
+      await expect(fixture.port.verifyTotp(input, handle)).resolves.toEqual({
+        status: "rejected",
+      });
+      await expect(fixture.port.verifyTotp(input, handle)).resolves.toEqual({
+        status: "unavailable",
+      });
+    } finally {
+      fixture.port.releaseMfaAuthority(handle);
+    }
   });
 
   it("exchanges an exact transient PKCE verifier once and installs only a decoded session", async () => {

@@ -414,6 +414,20 @@ function createRecoveryNotificationHarness() {
     operationIds: { next: () => operationId },
     port: {
       ...unavailableTestPort(),
+      captureAuthReadAuthority: async () => ({
+        status: "ready",
+        authorityHandle: "synthetic-recovery-read",
+        account: {
+          accountId: "a1000000-0000-4000-8000-000000000001",
+          providerSessionId: "81000000-0000-4000-8000-000000000001",
+          email: "teacher@example.test",
+          emailVerified: true,
+        },
+      }),
+      isAuthReadAuthorityCurrent: async () => true,
+      releaseAuthReadAuthority() {},
+      captureMfaAuthority: unavailable,
+      releaseMfaAuthority() {},
       captureSchoolSettingsAuthority: unavailable,
       updateSchoolDisplayName: unavailable,
       releaseSchoolSettingsAuthority() {},

@@ -17,6 +17,8 @@ const invitationId = "41000000-0000-4000-8000-000000000001";
 const factorId = "51000000-0000-4000-8000-000000000001";
 const challengeId = "61000000-0000-4000-8000-000000000001";
 const passwordAuthority = "synthetic-password-authority-handle";
+const readAuthority = "synthetic-read-authority-handle";
+const mfaAuthority = "synthetic-mfa-authority-handle";
 
 function port(
   overrides: Partial<SupabaseStaffAuthPort> = {},
@@ -24,7 +26,12 @@ function port(
   const unavailable = async (): Promise<never> => {
     throw new Error("unexpected external call");
   };
-  return {
+  const result: SupabaseStaffAuthPort = {
+    captureAuthReadAuthority: unavailable,
+    isAuthReadAuthorityCurrent: async () => true,
+    releaseAuthReadAuthority: () => undefined,
+    captureMfaAuthority: async () => mfaAuthority,
+    releaseMfaAuthority: () => undefined,
     acceptInvitation: unavailable,
     captureTestWorkspaceAuthority: unavailable,
     releaseTestWorkspaceAuthority: () => undefined,
@@ -80,6 +87,29 @@ function port(
     verifyTotp: unavailable,
     ...overrides,
   };
+  if (overrides.captureAuthReadAuthority === undefined) {
+    result.captureAuthReadAuthority = async () => {
+      const session = await result.readSession();
+      if (
+        typeof session !== "object" ||
+        session === null ||
+        !("status" in session)
+      )
+        return { status: "unavailable" };
+      if (session.status === "signed_out") return { status: "signed_out" };
+      if (session.status !== "authenticated") return { status: "unavailable" };
+      const account = await result.readAccount();
+      if (
+        typeof account === "object" &&
+        account !== null &&
+        "status" in account &&
+        account.status === "signed_out"
+      )
+        return { status: "signed_out" };
+      return { status: "ready", authorityHandle: readAuthority, account };
+    };
+  }
+  return result;
 }
 
 function ownerPort(
@@ -397,7 +427,9 @@ describe("verified provider session continuity", () => {
 });
 
 describe("enrollment cleanup on verified session replacement", () => {
-  async function pendingEnrollment() {
+  async function pendingEnrollment(
+    verificationOutcome: "rejected" | "unavailable" = "rejected",
+  ) {
     let currentSessionId = providerSessionId;
     let emailVerified = true;
     let revoked = false;
@@ -410,9 +442,11 @@ describe("enrollment cleanup on verified session replacement", () => {
       challengeId,
       status: "challenged",
     }));
-    const verifyTotp = vi.fn(async () => ({ status: "rejected" }));
+    const verifyTotp = vi.fn(async () => ({ status: verificationOutcome }));
     const removeTotpFactor = vi.fn(async () => ({ status: "removed" }));
     const revokeBlobUrl = vi.fn();
+    const captureMfaAuthority = vi.fn(async () => mfaAuthority);
+    const disposeOwnedResources = vi.fn();
     const original = ownerPort();
     const adapter = createSupabaseStaffAuthAdapter({
       clock: { now: Date.now },
@@ -433,7 +467,7 @@ describe("enrollment cleanup on verified session replacement", () => {
                 code: "session_revoked",
                 profile_id: null,
               }))
-            : original.readCurrentContext(),
+            : original.readCurrentContext(readAuthority),
         readAssurance: async () => ({
           currentAuthenticationMethods: ["password"],
           currentLevel: "aal1",
@@ -441,6 +475,8 @@ describe("enrollment cleanup on verified session replacement", () => {
         }),
         readTotpFactors: async () => ({ factors: [] }),
         enrollTotp,
+        captureMfaAuthority,
+        dispose: disposeOwnedResources,
         challengeTotp,
         verifyTotp,
         removeTotpFactor,
@@ -462,6 +498,8 @@ describe("enrollment cleanup on verified session replacement", () => {
       verifyTotp,
       removeTotpFactor,
       revokeBlobUrl,
+      captureMfaAuthority,
+      disposeOwnedResources,
       replaceSession(
         branch: "active" | "email_unverified" | "session_revoked",
       ) {
@@ -522,16 +560,274 @@ describe("enrollment cleanup on verified session replacement", () => {
       await expect(fixture.verifyOldReceipt()).resolves.toMatchObject({
         result: { kind: "totp_rejected" },
       });
-      expect(fixture.challengeTotp).toHaveBeenCalledExactlyOnceWith(factorId);
+      expect(fixture.challengeTotp).toHaveBeenCalledExactlyOnceWith(
+        factorId,
+        mfaAuthority,
+      );
       expect(fixture.verifyTotp).toHaveBeenCalledOnce();
       expect(fixture.removeTotpFactor).toHaveBeenCalledExactlyOnceWith(
         factorId,
+        mfaAuthority,
       );
       expect(fixture.revokeBlobUrl).toHaveBeenCalledExactlyOnceWith(
         "blob:original-session-enrollment",
       );
     } finally {
       fixture.adapter.dispose();
+    }
+  });
+
+  it("disposes pending enrollment inertly and releases owned resources exactly once", async () => {
+    const fixture = await pendingEnrollment();
+    const captures = fixture.captureMfaAuthority.mock.calls.length;
+    fixture.adapter.dispose();
+    fixture.adapter.dispose();
+    await Promise.resolve();
+    expect(fixture.captureMfaAuthority).toHaveBeenCalledTimes(captures);
+    expect(fixture.removeTotpFactor).not.toHaveBeenCalled();
+    expect(fixture.revokeBlobUrl).toHaveBeenCalledExactlyOnceWith(
+      "blob:original-session-enrollment",
+    );
+    expect(fixture.disposeOwnedResources).toHaveBeenCalledOnce();
+    await expect(fixture.adapter.read()).rejects.toThrow("disposed");
+  });
+
+  it("does not compensate for unconfirmed verification with a fresh same-session factor deletion", async () => {
+    const fixture = await pendingEnrollment("unavailable");
+    try {
+      const capturesBeforeVerify =
+        fixture.captureMfaAuthority.mock.calls.length;
+      await expect(fixture.verifyOldReceipt()).rejects.toThrow(
+        "verification result",
+      );
+      // The operation captures once. A still-available same-SID account must
+      // not be recaptured to undo verification that may already have succeeded.
+      expect(fixture.captureMfaAuthority).toHaveBeenCalledTimes(
+        capturesBeforeVerify + 1,
+      );
+      expect(fixture.removeTotpFactor).not.toHaveBeenCalled();
+      expect(fixture.revokeBlobUrl).toHaveBeenCalledExactlyOnceWith(
+        "blob:original-session-enrollment",
+      );
+      await expect(fixture.verifyOldReceipt()).resolves.toMatchObject({
+        result: { kind: "totp_rejected" },
+      });
+      expect(fixture.verifyTotp).toHaveBeenCalledOnce();
+    } finally {
+      fixture.adapter.dispose();
+    }
+  });
+});
+
+describe("captured authority reads and MFA ceremonies", () => {
+  function fixture(overrides: Partial<SupabaseStaffAuthPort> = {}) {
+    const boundary = ownerPort({
+      readAssurance: async () => ({
+        currentAuthenticationMethods: ["password"],
+        currentLevel: "aal1",
+        nextLevel: "aal2",
+      }),
+      readTotpFactors: async () => ({
+        factors: [{ factorId, friendlyName: null, status: "verified" }],
+      }),
+      ...overrides,
+    });
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: Date.now },
+      operationIds: operationIdSource(),
+      createBlobUrl: () => "blob:owned-enrollment",
+      revokeBlobUrl: () => undefined,
+      port: boundary,
+    });
+    return { adapter, boundary };
+  }
+
+  it("never publishes the old Owner ceremony when its bound read was replaced", async () => {
+    const releaseAuthReadAuthority = vi.fn();
+    const challengeTotp = vi.fn();
+    const readTotpFactors = vi.fn(async () => ({
+      factors: [{ factorId, friendlyName: null, status: "verified" }],
+    }));
+    const test = fixture({
+      isAuthReadAuthorityCurrent: async () => false,
+      releaseAuthReadAuthority,
+      readTotpFactors,
+      challengeTotp,
+    });
+    try {
+      await expect(test.adapter.read()).rejects.toThrow("superseded");
+      expect(readTotpFactors).toHaveBeenCalledExactlyOnceWith(readAuthority);
+      expect(releaseAuthReadAuthority).toHaveBeenCalledExactlyOnceWith(
+        readAuthority,
+      );
+      expect(challengeTotp).not.toHaveBeenCalled();
+    } finally {
+      test.adapter.dispose();
+    }
+  });
+
+  it("stays terminal when unsubscription and owned disposal throw", async () => {
+    const dispose = vi.fn(() => {
+      throw new Error("Synthetic owned resource close failure");
+    });
+    const test = fixture({
+      dispose,
+      onAuthStateChange: () => () => {
+        throw new Error("Synthetic unsubscribe failure");
+      },
+    });
+    await test.adapter.read();
+    expect(() => test.adapter.dispose()).not.toThrow();
+    test.adapter.dispose();
+    expect(dispose).toHaveBeenCalledOnce();
+    await expect(test.adapter.read()).rejects.toThrow("disposed");
+  });
+
+  it.each(["same-account new SID", "different account"])(
+    "rejects %s at MFA capture before factor egress",
+    async () => {
+      const captureMfaAuthority = vi.fn(async () => null);
+      const challengeTotp = vi.fn();
+      const verifyTotp = vi.fn();
+      const test = fixture({ captureMfaAuthority, challengeTotp, verifyTotp });
+      try {
+        const grant = await test.adapter.read();
+        if (
+          grant.kind !== "access_granted" ||
+          grant.secondFactor !== "challenge_required"
+        )
+          throw new Error("Expected Owner challenge");
+        await expect(
+          test.adapter.perform({
+            type: "verify_totp",
+            operationId: firstOperationId,
+            purpose: "step_up",
+            code: "123456",
+            challengeReceipt: grant.challengeReceipt,
+          }),
+        ).rejects.toThrow("re-entry");
+        expect(captureMfaAuthority).toHaveBeenCalledExactlyOnceWith(
+          accountId,
+          providerSessionId,
+        );
+        expect(challengeTotp).not.toHaveBeenCalled();
+        expect(verifyTotp).not.toHaveBeenCalled();
+      } finally {
+        test.adapter.dispose();
+      }
+    },
+  );
+
+  it("releases a late MFA capture after reset without challenging or verifying", async () => {
+    let resolveCapture: ((handle: string) => void) | undefined;
+    const captureMfaAuthority = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveCapture = resolve;
+        }),
+    );
+    const releaseMfaAuthority = vi.fn();
+    const challengeTotp = vi.fn();
+    const verifyTotp = vi.fn();
+    const test = fixture({
+      captureMfaAuthority,
+      releaseMfaAuthority,
+      challengeTotp,
+      verifyTotp,
+    });
+    try {
+      const grant = await test.adapter.read();
+      if (
+        grant.kind !== "access_granted" ||
+        grant.secondFactor !== "challenge_required"
+      )
+        throw new Error("Expected Owner challenge");
+      const pending = test.adapter.perform({
+        type: "verify_totp",
+        operationId: firstOperationId,
+        purpose: "step_up",
+        code: "123456",
+        challengeReceipt: grant.challengeReceipt,
+      });
+      const rejected = expect(pending).rejects.toThrow("superseded");
+      await vi.waitFor(() => expect(resolveCapture).toBeTypeOf("function"));
+      await test.adapter.perform({
+        type: "reset_to_sign_in",
+        operationId: secondOperationId,
+      });
+      resolveCapture!(mfaAuthority);
+      await rejected;
+      expect(releaseMfaAuthority).toHaveBeenCalledExactlyOnceWith(mfaAuthority);
+      expect(challengeTotp).not.toHaveBeenCalled();
+      expect(verifyTotp).not.toHaveBeenCalled();
+    } finally {
+      test.adapter.dispose();
+    }
+  });
+
+  it("accepts its committed AAL2 session after conservative publication invalidation", async () => {
+    let changed: (() => void) | undefined;
+    let upgraded = false;
+    const challengeTotp = vi.fn(async () => ({
+      status: "challenged",
+      challengeId,
+    }));
+    const verifyTotp = vi.fn(async () => {
+      upgraded = true;
+      changed?.();
+      return { status: "verified" };
+    });
+    const releaseMfaAuthority = vi.fn();
+    const test = fixture({
+      onAuthStateChange(listener) {
+        changed = listener;
+        return () => {
+          changed = undefined;
+        };
+      },
+      readAssurance: async () => ({
+        currentAuthenticationMethods: upgraded
+          ? ["password", "totp"]
+          : ["password"],
+        currentLevel: upgraded ? "aal2" : "aal1",
+        nextLevel: "aal2",
+      }),
+      challengeTotp,
+      verifyTotp,
+      releaseMfaAuthority,
+    });
+    try {
+      const grant = await test.adapter.read();
+      if (
+        grant.kind !== "access_granted" ||
+        grant.secondFactor !== "challenge_required"
+      )
+        throw new Error("Expected Owner challenge");
+      const result = await test.adapter.perform({
+        type: "verify_totp",
+        operationId: firstOperationId,
+        purpose: "step_up",
+        code: "123456",
+        challengeReceipt: grant.challengeReceipt,
+      });
+      expect(result.result).toMatchObject({
+        kind: "access_granted",
+        providerSessionId,
+        assuranceLevel: "aal2",
+        secondFactor: "satisfied",
+        identity: { accountId },
+      });
+      expect(challengeTotp).toHaveBeenCalledExactlyOnceWith(
+        factorId,
+        mfaAuthority,
+      );
+      expect(verifyTotp).toHaveBeenCalledExactlyOnceWith(
+        { challengeId, code: "123456", factorId },
+        mfaAuthority,
+      );
+      expect(releaseMfaAuthority).toHaveBeenCalledExactlyOnceWith(mfaAuthority);
+    } finally {
+      test.adapter.dispose();
     }
   });
 });

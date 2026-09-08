@@ -30,6 +30,10 @@ Existing conservative provider-notification revalidation, including token
 refresh notifications, remains in place; this adds no event-ignore behavior or
 provider-cache cleanup scheme.
 
+The shared authority-read and MFA publication boundary, including the explicit
+local session cutover, is defined in
+[Staff session publication](staff-session-publication.md).
+
 Titles reject control characters and malformed UTF-16 before trimming, then
 allow at most 160 UTF-8 bytes. Lists show at most 50 Tests, with one lookahead
 row. Native timestamp/UUID ordering retains all six fractional UTC digits; the

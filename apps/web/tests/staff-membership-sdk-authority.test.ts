@@ -1,3 +1,4 @@
+import { createStaffAuthSessionStorageFixture } from "./helpers/staff-auth-session-storage-fixture.js";
 import { createClient } from "@supabase/supabase-js";
 import { describe, expect, it } from "vitest";
 
@@ -231,27 +232,28 @@ async function harness() {
     }
     throw new Error("Unexpected synthetic SDK endpoint");
   };
+  const sessionStorage = createStaffAuthSessionStorageFixture(
+    storageKey,
+    storage,
+  );
+  const removeItem = sessionStorage.removeItem.bind(sessionStorage);
+  sessionStorage.removeItem = async (key) => {
+    removals.push(key);
+    await removeItem(key);
+  };
   const client = createClient(backend, publishableKey, {
     auth: {
       autoRefreshToken: false,
       detectSessionInUrl: false,
       persistSession: true,
       storageKey,
-      storage: {
-        getItem: (key) => storage.get(key) ?? null,
-        setItem: (key, value) => {
-          storage.set(key, value);
-        },
-        removeItem: (key) => {
-          removals.push(key);
-          storage.delete(key);
-        },
-      },
+      storage: sessionStorage,
     },
     global: { fetch: intercepted },
   });
   await client.auth.getSession();
   const port = createSupabaseStaffAuthPort({
+    sessionStorage,
     client: client as unknown as SupabaseStaffAuthClient,
     fetch: intercepted,
     origin: "https://app.example.test",
@@ -447,7 +449,7 @@ describe("installed SDK staff management authority", () => {
   );
 
   it.each(commandTypes)(
-    "%s sends only captured S1 when S2 replaces storage before mutation",
+    "%s stops before mutation when S2 invalidates the captured authority reread",
     async (type) => {
       const test = await harness();
       const gate = test.hold("/rest/v1/rpc/current_manageable_staff");
@@ -456,12 +458,13 @@ describe("installed SDK staff management authority", () => {
         await gate.entered.promise;
         test.replaceSession("A2");
         gate.released.resolve();
-        await expect(pending).rejects.toThrow("continuity");
+        await expect(pending).rejects.toThrow(
+          "Staff management dependency is unavailable",
+        );
         const mutations = test.sessionRequests.filter(({ path }) =>
           mutationPaths.includes(path),
         );
-        expect(mutations).toHaveLength(1);
-        expect(mutations[0]?.variant).toBe("A");
+        expect(mutations).toHaveLength(0);
         expect(test.sessionUnchanged("A2")).toBe(true);
         expect(test.removals).toEqual([]);
       } finally {
@@ -513,7 +516,7 @@ describe("installed SDK staff management authority", () => {
   );
 
   it.each(commandTypes)(
-    "%s uses only captured A if storage changes after capture before mutation",
+    "%s stops before mutation when B invalidates the captured authority reread",
     async (type) => {
       const test = await harness();
       try {
@@ -522,9 +525,10 @@ describe("installed SDK staff management authority", () => {
         await gate.entered.promise;
         test.replaceWithB();
         gate.released.resolve();
-        await expect(pending).rejects.toThrow("continuity");
-        expect(test.mutations()).toHaveLength(1);
-        expect(test.mutations()[0]?.account).toBe("A");
+        await expect(pending).rejects.toThrow(
+          "Staff management dependency is unavailable",
+        );
+        expect(test.mutations()).toHaveLength(0);
         expect(test.bIsUnchanged()).toBe(true);
         expect(test.removals).toEqual([]);
         const priorRequests = test.requests.length;

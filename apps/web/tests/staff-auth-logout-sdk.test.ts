@@ -1,3 +1,4 @@
+import { createStaffAuthSessionStorageFixture } from "./helpers/staff-auth-session-storage-fixture.js";
 import { createClient, isAuthSessionMissingError } from "@supabase/supabase-js";
 import { describe, expect, it } from "vitest";
 
@@ -197,20 +198,16 @@ async function harness() {
     throw new Error("Unexpected synthetic SDK endpoint");
   };
 
+  const sessionStorage = createStaffAuthSessionStorageFixture(
+    storageKey,
+    storage,
+  );
   const client = createClient(backendUrl, publishableKey, {
     auth: {
       autoRefreshToken: false,
       detectSessionInUrl: false,
       persistSession: true,
-      storage: {
-        getItem: (key) => storage.get(key) ?? null,
-        removeItem: (key) => {
-          storage.delete(key);
-        },
-        setItem: (key, value) => {
-          storage.set(key, value);
-        },
-      },
+      storage: sessionStorage,
       storageKey,
     },
     global: { fetch: interceptedFetch },
@@ -218,6 +215,7 @@ async function harness() {
   // Settle SDK initialization before observing adapter state-change events.
   await client.auth.getSession();
   const port = createSupabaseStaffAuthPort({
+    sessionStorage,
     client: client as unknown as SupabaseStaffAuthClient,
     fetch: interceptedFetch,
     origin: "https://app.example.test",

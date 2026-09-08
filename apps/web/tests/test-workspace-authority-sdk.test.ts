@@ -1,3 +1,4 @@
+import { createStaffAuthSessionStorageFixture } from "./helpers/staff-auth-session-storage-fixture.js";
 import { createClient } from "@supabase/supabase-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -314,21 +315,17 @@ async function harness() {
     Object.defineProperty(response, "url", { value: url.href });
     return response;
   };
+  const sessionStorage = createStaffAuthSessionStorageFixture(
+    storageKey,
+    storage,
+  );
   const client = createClient(backend, publishableKey, {
     auth: {
       autoRefreshToken: false,
       detectSessionInUrl: false,
       persistSession: true,
       storageKey,
-      storage: {
-        getItem: (key) => storage.get(key) ?? null,
-        setItem: (key, value) => {
-          storage.set(key, value);
-        },
-        removeItem: (key) => {
-          storage.delete(key);
-        },
-      },
+      storage: sessionStorage,
     },
     global: { fetch: intercepted },
   });
@@ -340,6 +337,7 @@ async function harness() {
   const schema = vi.spyOn(client, "schema").mockReturnValue(database);
   const invoke = vi.spyOn(client.functions, "invoke");
   const port = createSupabaseStaffAuthPort({
+    sessionStorage,
     client: client as unknown as SupabaseStaffAuthClient,
     fetch: intercepted,
     origin: "https://app.example.test",
@@ -354,7 +352,7 @@ async function harness() {
     expect(getUser).not.toHaveBeenCalled();
     expect(sdkRpc).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();
-    expect(schema).toHaveBeenCalledOnce();
+    expect(schema).not.toHaveBeenCalled();
   });
   return {
     getSession,
