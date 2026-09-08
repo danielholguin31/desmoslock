@@ -46,6 +46,7 @@ function createElectronSurfaceHarness(
     readonly requestResetFailure?: Error;
     readonly webContentsCloseFailure?: Error;
     readonly deferDestroyed?: boolean;
+    readonly invalidateViewGetterOnDestroyed?: boolean;
   } = {},
 ) {
   let webContentsDestroyed = false;
@@ -101,6 +102,11 @@ function createElectronSurfaceHarness(
     setBounds: vi.fn(),
     webContents,
   };
+  if (options.invalidateViewGetterOnDestroyed === true) {
+    Object.defineProperty(view, "webContents", {
+      get: () => (webContentsDestroyed ? undefined : webContents),
+    });
+  }
   const cleanup = {
     clearAuthCache: vi.fn(async () => {
       if (cleanupFailures.auth !== undefined) throw cleanupFailures.auth;
@@ -592,6 +598,100 @@ describe("calculator surface boundary", () => {
       }
     },
   );
+
+  it.each([false, true])(
+    "retains the direct WebContents when Electron invalidates its View getter (deferred destruction: %s)",
+    async (deferDestroyed) => {
+      const failures = {
+        storage: new Error("synthetic storage cleanup failure"),
+        cache: new Error("synthetic cache cleanup failure"),
+        auth: new Error("synthetic auth cleanup failure"),
+        connections: new Error("synthetic connection cleanup failure"),
+      };
+      const harness = createElectronSurfaceHarness(failures, {
+        deferDestroyed,
+        invalidateViewGetterOnDestroyed: true,
+      });
+      const { outputDirectory, temporaryRoot } =
+        await createCalculatorOutputDirectory();
+      try {
+        const surface = await prepareElectronCalculatorSurface({
+          bounds: { height: 400, width: 600, x: 0, y: 0 },
+          onCleanupFailure: harness.onCleanupFailure,
+          outputDirectory,
+          parent: harness.parent,
+        });
+        surface.attach();
+        const close = surface.close();
+        const outcomes = Promise.allSettled([close, surface.close()]);
+        if (deferDestroyed) {
+          expect(harness.webContents.isDestroyed()).toBe(false);
+          harness.acknowledgeDestroyed();
+        }
+        expect(harness.view.webContents).toBeUndefined();
+        const result = await outcomes;
+        for (const outcome of result)
+          expect(outcome).toEqual({
+            status: "rejected",
+            reason: expect.objectContaining({
+              message: "CalculatorSurface session cleanup failed",
+              errors: [
+                failures.storage,
+                failures.cache,
+                failures.auth,
+                failures.connections,
+              ],
+            }),
+          });
+        if (
+          result[0]?.status === "rejected" &&
+          result[1]?.status === "rejected"
+        )
+          expect(result[0].reason).toBe(result[1].reason);
+        expect(harness.destroyedListenerCount()).toBe(0);
+        expect(harness.rendererTeardown.close).toHaveBeenCalledOnce();
+        expect(harness.cleanup.clearStorageData).toHaveBeenCalledOnce();
+        expect(harness.cleanup.clearCache).toHaveBeenCalledOnce();
+        expect(harness.cleanup.clearAuthCache).toHaveBeenCalledOnce();
+        expect(harness.cleanup.closeAllConnections).toHaveBeenCalledOnce();
+      } finally {
+        harness.acknowledgeDestroyed();
+        await fs.rm(temporaryRoot, { force: true, recursive: true });
+      }
+    },
+  );
+
+  it("uses its original renderer after spontaneous destruction clears the View getter before close", async () => {
+    const harness = createElectronSurfaceHarness(
+      {},
+      { invalidateViewGetterOnDestroyed: true },
+    );
+    const { outputDirectory, temporaryRoot } =
+      await createCalculatorOutputDirectory();
+    try {
+      const surface = await prepareElectronCalculatorSurface({
+        bounds: { height: 400, width: 600, x: 0, y: 0 },
+        onCleanupFailure: harness.onCleanupFailure,
+        outputDirectory,
+        parent: harness.parent,
+      });
+      harness.acknowledgeDestroyed();
+      expect(harness.view.webContents).toBeUndefined();
+      expect(() => surface.attach()).toThrow(
+        "CalculatorSurface is closed or invalidated",
+      );
+      surface.setBounds({ height: 300, width: 500, x: 0, y: 0 });
+      await expect(surface.close()).resolves.toBeUndefined();
+      expect(harness.rendererTeardown.close).not.toHaveBeenCalled();
+      expect(harness.destroyedListenerCount()).toBe(0);
+      expect(harness.cleanup.clearStorageData).toHaveBeenCalledOnce();
+      expect(harness.cleanup.clearCache).toHaveBeenCalledOnce();
+      expect(harness.cleanup.clearAuthCache).toHaveBeenCalledOnce();
+      expect(harness.cleanup.closeAllConnections).toHaveBeenCalledOnce();
+    } finally {
+      await fs.rm(temporaryRoot, { force: true, recursive: true });
+    }
+  });
 
   it("does not miss destruction caused by synchronous native child removal", async () => {
     const harness = createElectronSurfaceHarness({}, { deferDestroyed: true });

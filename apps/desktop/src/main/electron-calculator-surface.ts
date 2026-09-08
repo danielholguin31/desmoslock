@@ -5,6 +5,7 @@ import {
   WebContentsView,
   type BrowserWindow,
   type Session,
+  type WebContents,
 } from "electron";
 
 import { createAssessmentSessionPolicy } from "./assessment-session-policy.js";
@@ -136,6 +137,7 @@ export async function prepareElectronCalculatorSurface(
   }
 
   let view: WebContentsView | null = null;
+  let contents: WebContents | null = null;
   let closed = false;
   let invalidated = false;
   let attached = false;
@@ -161,6 +163,9 @@ export async function prepareElectronCalculatorSurface(
     invalidated = true;
     if (view === null) return failures;
     const ownedView = view;
+    // Electron clears WebContentsView.webContents during destruction. Keep the
+    // direct emitter for acknowledgement and listener cleanup across that event.
+    const ownedContents = contents ?? ownedView.webContents;
     view = null;
     let completeDestruction!: (failures: readonly unknown[]) => void;
     // A result-valued promise also covers parent loss during a held load: it
@@ -180,7 +185,7 @@ export async function prepareElectronCalculatorSurface(
       if (timer !== null) clearTimeout(timer);
       if (listening) {
         try {
-          ownedView.webContents.removeListener("destroyed", handleDestroyed);
+          ownedContents.removeListener("destroyed", handleDestroyed);
         } catch (listenerError) {
           acknowledgementFailures.push(listenerError);
         }
@@ -190,7 +195,7 @@ export async function prepareElectronCalculatorSurface(
     const handleDestroyed = (): void => finishDestruction();
     const observeDestroyed = (): void => {
       try {
-        if (ownedView.webContents.isDestroyed()) handleDestroyed();
+        if (ownedContents.isDestroyed()) handleDestroyed();
       } catch (error) {
         failures.push(error);
       }
@@ -209,7 +214,7 @@ export async function prepareElectronCalculatorSurface(
       timer.unref?.();
       try {
         listening = true;
-        ownedView.webContents.once("destroyed", handleDestroyed);
+        ownedContents.once("destroyed", handleDestroyed);
       } catch (error) {
         failures.push(error);
       }
@@ -224,7 +229,7 @@ export async function prepareElectronCalculatorSurface(
     observeDestroyed();
     if (!destructionConfirmed) {
       try {
-        ownedView.webContents.close({ waitForBeforeUnload: false });
+        ownedContents.close({ waitForBeforeUnload: false });
       } catch (error) {
         failures.push(error);
       }
@@ -337,6 +342,7 @@ export async function prepareElectronCalculatorSurface(
     view = new WebContentsView({
       webPreferences: createCalculatorWebPreferences(partition),
     });
+    contents = view.webContents;
     destructionConfirmed = false;
     const assessmentPolicy = createAssessmentSessionPolicy({
       allowedResources: calculatorResourceManifest,
@@ -384,13 +390,14 @@ export async function prepareElectronCalculatorSurface(
   }
 
   const liveView = view;
-  if (liveView === null) {
+  const liveContents = contents;
+  if (liveView === null || liveContents === null) {
     throw new Error("CalculatorSurface closed before initialization completed");
   }
 
   return Object.freeze({
     partition,
-    webContentsId: liveView.webContents.id,
+    webContentsId: liveContents.id,
     attach(): void {
       let attachmentAttempted = false;
       try {
@@ -399,7 +406,7 @@ export async function prepareElectronCalculatorSurface(
           invalidated ||
           parentClosed ||
           options.parent.isDestroyed() ||
-          liveView.webContents.isDestroyed()
+          liveContents.isDestroyed()
         ) {
           throw new Error("CalculatorSurface is closed or invalidated");
         }
@@ -414,7 +421,7 @@ export async function prepareElectronCalculatorSurface(
           invalidated ||
           parentClosed ||
           options.parent.isDestroyed() ||
-          liveView.webContents.isDestroyed()
+          liveContents.isDestroyed()
         ) {
           throw new Error("CalculatorSurface invalidated during attachment");
         }
@@ -441,7 +448,7 @@ export async function prepareElectronCalculatorSurface(
     },
     close: closeSurface,
     setBounds(bounds: CalculatorSurfaceBounds) {
-      if (!closed && !invalidated && !liveView.webContents.isDestroyed()) {
+      if (!closed && !invalidated && !liveContents.isDestroyed()) {
         liveView.setBounds(bounds);
       }
     },
