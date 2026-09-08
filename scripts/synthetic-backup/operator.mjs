@@ -6,13 +6,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const CURRENT_MIGRATION_SET_SHA256 =
-  "1b499b73aca1ff812cbc244f9eb9908e8dad839ecc6befbcb1a496865a2d5f52";
+  "8d5fd99304ce8bbf9524dfb788080f890ab84565c096a8e6d4faf437a9b734dc";
 export const CURRENT_MIGRATION_FILES = Object.freeze([
   "20260824000100_v2_foundation.sql",
   "20260828000100_internal_release_backend.sql",
   "20260903000100_staff_auth_lifecycle.sql",
   "20260903000200_staff_auth_generation_4.sql",
   "20260907000100_staff_auth_callback_completion.sql",
+  "20260907000200_runtime_owner_bootstrap.sql",
 ]);
 export const CURRENT_MIGRATION_VERSIONS = Object.freeze(
   CURRENT_MIGRATION_FILES.map((fileName) => fileName.slice(0, 14)),

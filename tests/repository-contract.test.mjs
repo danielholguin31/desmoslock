@@ -398,10 +398,12 @@ test("v2 data plane is migration-owned and clean-start only", () => {
     "supabase/migrations/20260903000100_staff_auth_lifecycle.sql",
     "supabase/migrations/20260903000200_staff_auth_generation_4.sql",
     "supabase/migrations/20260907000100_staff_auth_callback_completion.sql",
+    "supabase/migrations/20260907000200_runtime_owner_bootstrap.sql",
     "supabase/seed.sql",
     "supabase/tests/database/internal_release_backend.test.sql",
     "supabase/tests/database/staff_auth_generation_4.test.sql",
     "supabase/tests/database/staff_auth_callback_completion.test.sql",
+    "supabase/tests/database/runtime_owner_bootstrap.test.sql",
     "supabase/tests/database/staff_auth_lifecycle.test.sql",
     "supabase/tests/database/v2_foundation.test.sql",
   ]) {
@@ -576,9 +578,15 @@ test("generation-4 attests the exact normalized migration history", () => {
         "4e7321c8d9d6d3e4c27e07ab38d75252a8922868842c40c0723c349c251cac44",
     },
     "20260907000100_staff_auth_callback_completion.sql": {
-      migrationSetSha256: expectedMigrationSetSha256,
+      migrationSetSha256:
+        "1b499b73aca1ff812cbc244f9eb9908e8dad839ecc6befbcb1a496865a2d5f52",
       rawSha256:
         "79ab31e822b4f04f4148c50bb98446210a37d975a646119b42d78fe1349a8862",
+    },
+    "20260907000200_runtime_owner_bootstrap.sql": {
+      migrationSetSha256: expectedMigrationSetSha256,
+      rawSha256:
+        "43527d889ae0823057bba8ab7b4ed97eb9603220658c59c56cfda70889af75c9",
     },
   });
   assert.doesNotThrow(() => assertMigrationSetAttestation(migrations));
@@ -601,6 +609,7 @@ test("generation-4 attests the exact normalized migration history", () => {
   for (const historicalFile of [
     "20260828000100_internal_release_backend.sql",
     "20260903000200_staff_auth_generation_4.sql",
+    "20260907000100_staff_auth_callback_completion.sql",
   ]) {
     assert.throws(
       () =>
@@ -637,7 +646,7 @@ test("generation-4 attests the exact normalized migration history", () => {
       assertMigrationSetAttestation(
         migrations.map(([fileName, source]) => [
           fileName,
-          fileName === "20260907000100_staff_auth_callback_completion.sql"
+          fileName === "20260907000200_runtime_owner_bootstrap.sql"
             ? source.replace(expectedMigrationSetSha256, "0".repeat(64))
             : source,
         ]),

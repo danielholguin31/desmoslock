@@ -39,7 +39,10 @@ select results_eq(
 
 select results_eq(
   $$
-    select relation.relname::text, constraint_info.conname::text
+    -- Match catalog-name and expected-text collations for pgTAP record comparison.
+    select
+      relation.relname::text collate "C",
+      constraint_info.conname::text collate "C"
     from pg_constraint as constraint_info
     join pg_class as relation on relation.oid = constraint_info.conrelid
     join pg_namespace as namespace on namespace.oid = relation.relnamespace
@@ -56,13 +59,13 @@ select results_eq(
             'baseline_fixture_state_digest'
           ))
       )
-    order by relation.relname, constraint_info.conname
+    order by 1, 2
   $$,
   $$values
-    ('baseline_fixture_state'::text, 'baseline_fixture_state_digest'::text),
-    ('baseline_fixture_state'::text, 'baseline_fixture_state_generation'::text),
-    ('baseline_fixture_state'::text, 'baseline_fixture_state_version'::text),
-    ('internal_release_attestation'::text, 'internal_release_attestation_generation'::text)
+    ('baseline_fixture_state'::text collate "C", 'baseline_fixture_state_digest'::text collate "C"),
+    ('baseline_fixture_state'::text collate "C", 'baseline_fixture_state_generation'::text collate "C"),
+    ('baseline_fixture_state'::text collate "C", 'baseline_fixture_state_version'::text collate "C"),
+    ('internal_release_attestation'::text collate "C", 'internal_release_attestation_generation'::text collate "C")
   $$,
   'generation 4 installs the exact replacement constraint set'
 );

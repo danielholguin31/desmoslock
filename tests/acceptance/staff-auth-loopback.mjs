@@ -2,8 +2,11 @@ import { spawnSync } from "node:child_process";
 import { createHmac, randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 import { createClient } from "@supabase/supabase-js";
+
+import { createBackendProbe } from "../../supabase/functions/health/index.ts";
 
 export const API_ORIGIN = "http://127.0.0.1:54321";
 // Match the checked-in inert SiteURL so real GoTrue accepts the callback
@@ -208,6 +211,88 @@ export function client(key, fetcher = loopbackFetch) {
     },
     global: { fetch: fetcher },
   });
+}
+
+// These checks reach the actual database, Auth server, and local Edge endpoint.
+// The source probe independently enforces its exact migration-set attestation;
+// runtime provisioning must leave the fixed synthetic fixture identity intact.
+export function createRuntimeHealthCheck(admin, serviceKey) {
+  const expectedBaseline = {
+    capabilities: ["auth", "database", "rest"],
+    fixtureDigest:
+      "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
+    fixtureValid: true,
+    fixtureVersion: "internal-baseline-v2",
+    schemaGeneration: 4,
+  };
+  const probe = createBackendProbe(
+    {
+      DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: API_ORIGIN,
+      SUPABASE_SERVICE_ROLE_KEY: serviceKey,
+      SUPABASE_URL: API_ORIGIN,
+    },
+    loopbackFetch,
+  );
+  let migrationSet;
+
+  return async (checkpoint) => {
+    const status = await rpc(admin, "internal_baseline_status");
+    check(
+      typeof status.migration_set_sha256 === "string" &&
+        /^[0-9a-f]{64}$/u.test(status.migration_set_sha256),
+      `Database migration attestation is missing ${checkpoint}`,
+    );
+    migrationSet ??= status.migration_set_sha256;
+    check(
+      isDeepStrictEqual(status, {
+        fixture_digest: expectedBaseline.fixtureDigest,
+        fixture_valid: true,
+        fixture_version: expectedBaseline.fixtureVersion,
+        migration_set_sha256: migrationSet,
+        schema_generation: 4,
+      }),
+      `Database baseline changed ${checkpoint}`,
+    );
+
+    let probed;
+    try {
+      probed = await probe();
+    } catch {
+      throw new Error(
+        `Real source health probe failed ${checkpoint}; details redacted`,
+      );
+    }
+    check(
+      isDeepStrictEqual(probed, expectedBaseline),
+      `Real source health probe is not exact-ready ${checkpoint}`,
+    );
+
+    const response = await loopbackFetch(`${API_ORIGIN}/functions/v1/health`, {
+      method: "GET",
+    });
+    check(
+      response.status === 200 &&
+        response.headers.get("cache-control") === "no-store" &&
+        response.headers.get("access-control-allow-origin") === "*",
+      `Live public health is unavailable ${checkpoint}`,
+    );
+    let publicStatus;
+    try {
+      publicStatus = await response.json();
+    } catch {
+      throw new Error(
+        `Live health response is malformed ${checkpoint}; details redacted`,
+      );
+    }
+    check(
+      isDeepStrictEqual(publicStatus, {
+        ...expectedBaseline,
+        service: "desmoslock-v2",
+        status: "ready",
+      }),
+      `Live public health is not exact-ready ${checkpoint}`,
+    );
+  };
 }
 
 export async function auth(operation) {

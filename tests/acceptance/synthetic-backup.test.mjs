@@ -33,9 +33,15 @@ const MIGRATION_ATTESTATIONS = Object.freeze({
       "4e7321c8d9d6d3e4c27e07ab38d75252a8922868842c40c0723c349c251cac44",
   }),
   "20260907000100_staff_auth_callback_completion.sql": Object.freeze({
-    migrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
+    migrationSetSha256:
+      "1b499b73aca1ff812cbc244f9eb9908e8dad839ecc6befbcb1a496865a2d5f52",
     rawSha256:
       "79ab31e822b4f04f4148c50bb98446210a37d975a646119b42d78fe1349a8862",
+  }),
+  "20260907000200_runtime_owner_bootstrap.sql": Object.freeze({
+    migrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
+    rawSha256:
+      "43527d889ae0823057bba8ab7b4ed97eb9603220658c59c56cfda70889af75c9",
   }),
 });
 const execFileAsync = promisify(execFile);
@@ -351,6 +357,13 @@ for (const [label, mutateManifest] of [
     (manifest) => {
       manifest.schema.migrationSetSha256 =
         "ce79427901195258897e0b75c80acfb7b50699eb223af5289cf5d5d59958f2b7";
+    },
+  ],
+  [
+    "generation-4 five-migration",
+    (manifest) => {
+      manifest.schema.migrationSetSha256 =
+        "1b499b73aca1ff812cbc244f9eb9908e8dad839ecc6befbcb1a496865a2d5f52";
     },
   ],
 ]) {
@@ -1367,9 +1380,10 @@ test("pins the operator migration digest to the exact migration file set", async
     "20260828000100_internal_release_backend.sql",
     "20260903000200_staff_auth_generation_4.sql",
     "20260907000100_staff_auth_callback_completion.sql",
+    "20260907000200_runtime_owner_bootstrap.sql",
   ]);
   assert.deepEqual(currentAttestedMigrations, [
-    "20260907000100_staff_auth_callback_completion.sql",
+    "20260907000200_runtime_owner_bootstrap.sql",
   ]);
   assert.equal(
     crypto.createHash("sha256").update(inventory.join("\n")).digest("hex"),

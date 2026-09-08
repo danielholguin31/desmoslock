@@ -41,6 +41,7 @@ health function, and operator modules in this repository are the authority.
 - `supabase/migrations/20260903000100_staff_auth_lifecycle.sql`
 - `supabase/migrations/20260903000200_staff_auth_generation_4.sql`
 - `supabase/migrations/20260907000100_staff_auth_callback_completion.sql`
+- `supabase/migrations/20260907000200_runtime_owner_bootstrap.sql`
 - `supabase/seed.sql`
 - `supabase/config.toml`
 - `supabase/functions/deno.json`
@@ -57,17 +58,21 @@ The fixture contract is generation `4`, version `internal-baseline-v2`, with
 SHA-256
 `f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201`.
 The exact discovered migration file set has normalized SHA-256
-`1b499b73aca1ff812cbc244f9eb9908e8dad839ecc6befbcb1a496865a2d5f52`.
+`8d5fd99304ce8bbf9524dfb788080f890ab84565c096a8e6d4faf437a9b734dc`.
 The published generation-3 migration retains its contemporaneous digest
 `06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49`;
 the original generation-4 migration likewise retains
 `ce79427901195258897e0b75c80acfb7b50699eb223af5289cf5d5d59958f2b7`.
-Only the callback-completion migration records the current aggregate. Its raw
-SHA-256 is
+The callback-completion migration retains its five-file digest
+`1b499b73aca1ff812cbc244f9eb9908e8dad839ecc6befbcb1a496865a2d5f52`
+and raw SHA-256
 `79ab31e822b4f04f4148c50bb98446210a37d975a646119b42d78fe1349a8862`.
+Only the runtime-Owner-bootstrap migration records the current aggregate. Its
+raw SHA-256 is
+`43527d889ae0823057bba8ab7b4ed97eb9603220658c59c56cfda70889af75c9`.
 The repository contract pins each attested migration's raw SHA-256 and literal
-independently, then zeroes only those three delimited self-references when deriving
-the five-file aggregate. The follow-on migration updates the existing singleton
+independently, then zeroes only those four delimited self-references when deriving
+the six-file aggregate. The follow-on migration updates the existing singleton
 attestation without changing schema generation `4` or the seven-table fixture;
 the upgrade path does not depend on rewriting or replaying historical migrations.
 The seed takes a transaction advisory lock, refuses altered or partial targets,
@@ -316,7 +321,7 @@ operator re-hashes the held archive bytes. After commit, it directly re-observes
 the target through PostgreSQL and emits a scoped local synthetic-fixture receipt
 only when the expected generation-4 seven-table fixture matches. This receipt is
 not evidence of the public health or web/desktop smoke journey; that remains
-part of the remote staging human gate below.
+part of the remote staging acceptance gate below.
 
 Backup publication opens and verifies the canonical root descriptor, binds the
 new backup directory as the worker's current directory, and performs every file
@@ -341,7 +346,7 @@ path replacement cannot make it delete an unowned inode. Never restore or
 reuse a refused backup name; an operator must inspect and move the quarantine
 through a separate approved cleanup procedure.
 
-## Remote staging human gate
+## Remote staging acceptance gate
 
 The guarded Supabase CLI 2.115.0 configuration pass applied only the intended
 API schema allowlist change. Its bundled Auth diff was declined because the
@@ -363,11 +368,15 @@ global signup, anonymous sign-in, and redirect allowlist settings.
 The generation-4 integration work makes no hosted call and does not provide
 evidence for a database migration, seed, function deployment, backup, restore,
 email delivery, callback completion, or two-browser revocation journey. An
-authorized operator must complete or provide the missing receipts for the
-unresolved gates:
+agent carries the implementation, verification and receipt collection through
+the unresolved gates within the authorized scope. Human input is required for
+an actual authority boundary or unresolved material choice, not for checks the
+agent can perform:
 
-1. Select a newly created, empty, synthetic-only staging project and independently
-   record its project identity and PostgreSQL `system_identifier`.
+1. Verify and reuse an approved empty synthetic-only staging target when one is
+   already available. Create a new project only when the reviewed requirements
+   call for it. Independently record the target identity and PostgreSQL
+   `system_identifier`.
 2. Confirm the target is not production and contains no real School or student
    data.
 3. Link the Supabase CLI using an approved account and credential channel, then
@@ -398,4 +407,7 @@ unresolved gates:
 
 Actual hosted bootstrap, credential provisioning, function deployment, email
 delivery, callback, multi-context revocation, backup, and restore receipts remain
-this human gate. They must not be represented as complete from local tests alone.
+this acceptance gate. They must not be represented as complete from local tests
+alone. Initial Owner provisioning must follow the separate
+[runtime bootstrap contract](runtime-owner-bootstrap.md), preserving the
+immutable synthetic fixture and proving health after the operational lifecycle.

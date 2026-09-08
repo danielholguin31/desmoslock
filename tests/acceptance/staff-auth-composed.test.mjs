@@ -13,6 +13,7 @@ import {
   check,
   client,
   code,
+  createRuntimeHealthCheck,
   loopbackFetch,
   openDisposableStack,
   password,
@@ -33,6 +34,8 @@ test(
   async (t) => {
     const { publishableKey, serviceKey } = openDisposableStack();
     const admin = client(serviceKey);
+    const checkRuntimeHealth = createRuntimeHealthCheck(admin, serviceKey);
+    await checkRuntimeHealth("before runtime provisioning");
     const owner = client(publishableKey);
     let loseAcceptanceResponse = false;
     let observedAcceptanceCommit = false;
@@ -91,10 +94,11 @@ test(
       userIds.push(requireUuid(created.user?.id));
     }
     sql(`begin;
-insert into desmoslock_v2.workspaces (id,kind,slug,display_name,seed_key) values (${sqlUuid(workspaceId)},'school','composed-${namespace}','Disposable Acceptance School','composed.school.${namespace}');
-insert into desmoslock_v2.profiles (id,display_name,seed_key) values (${sqlUuid(ownerProfileId)},'Disposable Owner','composed.owner.${namespace}');
-insert into desmoslock_v2.memberships (workspace_id,profile_id,role,seed_key) values (${sqlUuid(workspaceId)},${sqlUuid(ownerProfileId)},'owner','composed.membership.${namespace}');
+insert into desmoslock_v2.workspaces (id,kind,slug,display_name,seed_key) values (${sqlUuid(workspaceId)},'school','composed-${namespace}','Disposable Acceptance School',null);
+insert into desmoslock_v2.profiles (id,display_name,seed_key) values (${sqlUuid(ownerProfileId)},'Disposable Owner',null);
+insert into desmoslock_v2.memberships (workspace_id,profile_id,role,seed_key) values (${sqlUuid(workspaceId)},${sqlUuid(ownerProfileId)},'owner',null);
 commit;`);
+    await checkRuntimeHealth("after runtime provisioning");
     code(
       await rpc(admin, "internal_bind_initial_owner", {
         workspace_id: workspaceId,
@@ -103,6 +107,7 @@ commit;`);
       }),
       "initial_owner_bound",
     );
+    await checkRuntimeHealth("after initial owner binding");
     await auth(() =>
       owner.auth.signInWithPassword({
         email: ownerEmail,
@@ -286,6 +291,7 @@ commit;`);
           await rpc(outsider, "current_staff_context"),
           "membership_inactive",
         );
+        await checkRuntimeHealth("after invitation acceptance and replay");
       },
     );
     check(
@@ -379,6 +385,7 @@ commit;`);
         );
         code(await rpc(teacher, "current_staff_context"), "ok");
         currentTeacherPassword = replacement;
+        await checkRuntimeHealth("after password recovery and cleanup");
       },
     );
 
@@ -470,6 +477,7 @@ commit;`);
         code(await rpc(first, "current_staff_context"), "session_revoked");
         code(await rpc(second, "current_staff_context"), "session_revoked");
         code(await rpc(owner, "current_staff_context"), "session_revoked");
+        await checkRuntimeHealth("after membership and session revocation");
       },
     );
     // Audit rows are deliberately append-only. This suite must run last against

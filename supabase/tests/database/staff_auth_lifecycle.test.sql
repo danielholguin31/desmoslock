@@ -214,7 +214,7 @@ select ok(
     'desmoslock_v2.internal_bind_initial_owner(uuid,uuid,uuid)',
     'EXECUTE'
   ),
-  'the service boundary can bind an initial seeded Owner'
+  'the service boundary can bind an initial runtime Owner'
 );
 select ok(
   not has_function_privilege(
@@ -484,6 +484,53 @@ select ok(
   'password-recovery operations persist no School guess, contact PII, password, PKCE material, token, or provider error'
 );
 
+-- Lifecycle tests use runtime Schools and staff, leaving the pinned generation-4
+-- seed rows unchanged. All runtime bootstrap targets deliberately have NULL keys.
+insert into desmoslock_v2.workspaces (id, kind, slug, display_name, seed_key)
+values
+  (
+    '11000000-0000-4000-8000-000000000001',
+    'school', 'runtime-alpha', 'Runtime Alpha School', null
+  ),
+  (
+    '11000000-0000-4000-8000-000000000002',
+    'school', 'runtime-beta', 'Runtime Beta School', null
+  );
+insert into desmoslock_v2.profiles (id, display_name, seed_key)
+values
+  ('21000000-0000-4000-8000-000000000001', 'Runtime Alpha Owner', null),
+  ('21000000-0000-4000-8000-000000000002', 'Runtime Alpha Admin', null),
+  ('21000000-0000-4000-8000-000000000003', 'Runtime Alpha Teacher', null),
+  ('21000000-0000-4000-8000-000000000011', 'Runtime Beta Owner', null),
+  ('21000000-0000-4000-8000-000000000012', 'Runtime Beta Admin', null),
+  ('21000000-0000-4000-8000-000000000013', 'Runtime Beta Teacher', null);
+insert into desmoslock_v2.memberships (workspace_id, profile_id, role, seed_key)
+values
+  (
+    '11000000-0000-4000-8000-000000000001',
+    '21000000-0000-4000-8000-000000000001', 'owner', null
+  ),
+  (
+    '11000000-0000-4000-8000-000000000001',
+    '21000000-0000-4000-8000-000000000002', 'admin', null
+  ),
+  (
+    '11000000-0000-4000-8000-000000000001',
+    '21000000-0000-4000-8000-000000000003', 'teacher', null
+  ),
+  (
+    '11000000-0000-4000-8000-000000000002',
+    '21000000-0000-4000-8000-000000000011', 'owner', null
+  ),
+  (
+    '11000000-0000-4000-8000-000000000002',
+    '21000000-0000-4000-8000-000000000012', 'admin', null
+  ),
+  (
+    '11000000-0000-4000-8000-000000000002',
+    '21000000-0000-4000-8000-000000000013', 'teacher', null
+  );
+
 insert into auth.users (
   instance_id,
   id,
@@ -694,8 +741,8 @@ select is(
   (
     select code
     from desmoslock_v2.internal_bind_initial_owner(
-      '10000000-0000-4000-8000-000000000001',
-      '20000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
+      '21000000-0000-4000-8000-000000000001',
       'a1000000-0000-4000-8000-000000000001'
     )
   ),
@@ -718,6 +765,18 @@ select is(
       'a1000000-0000-4000-8000-000000000001'
     )
   ),
+  'invalid_request',
+  'even a confirmed Auth identity cannot bind the canonical seeded Owner'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_bind_initial_owner(
+      '11000000-0000-4000-8000-000000000001',
+      '21000000-0000-4000-8000-000000000001',
+      'a1000000-0000-4000-8000-000000000001'
+    )
+  ),
   'initial_owner_bound',
   'the service boundary binds the confirmed Alpha Owner'
 );
@@ -725,8 +784,8 @@ select is(
   (
     select code
     from desmoslock_v2.internal_bind_initial_owner(
-      '10000000-0000-4000-8000-000000000001',
-      '20000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
+      '21000000-0000-4000-8000-000000000001',
       'a1000000-0000-4000-8000-000000000001'
     )
   ),
@@ -737,8 +796,8 @@ select is(
   (
     select code
     from desmoslock_v2.internal_bind_initial_owner(
-      '10000000-0000-4000-8000-000000000001',
-      '20000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
+      '21000000-0000-4000-8000-000000000001',
       'a1000000-0000-4000-8000-000000000003'
     )
   ),
@@ -749,9 +808,9 @@ reset role;
 
 insert into desmoslock_v2.profiles (id, display_name, seed_key)
 values (
-  '20000000-0000-4000-8000-000000000099',
-  'Synthetic second Alpha Owner',
-  'review-second-alpha-owner'
+  '21000000-0000-4000-8000-000000000099',
+  'Runtime second Alpha Owner',
+  null
 );
 insert into desmoslock_v2.memberships (
   workspace_id,
@@ -759,10 +818,10 @@ insert into desmoslock_v2.memberships (
   role,
   seed_key
 ) values (
-  '10000000-0000-4000-8000-000000000001',
-  '20000000-0000-4000-8000-000000000099',
+  '11000000-0000-4000-8000-000000000001',
+  '21000000-0000-4000-8000-000000000099',
   'owner',
-  'review-second-alpha-owner-membership'
+  null
 );
 
 set local role service_role;
@@ -770,41 +829,41 @@ select is(
   (
     select code
     from desmoslock_v2.internal_bind_initial_owner(
-      '10000000-0000-4000-8000-000000000001',
-      '20000000-0000-4000-8000-000000000099',
+      '11000000-0000-4000-8000-000000000001',
+      '21000000-0000-4000-8000-000000000099',
       'a1000000-0000-4000-8000-000000000003'
     )
   ),
   'conflict',
-  'a School with a bound Owner cannot bind a different seeded Owner'
+  'a School with a bound Owner cannot bind a different runtime Owner'
 );
 reset role;
 
 delete from desmoslock_v2.memberships
-where workspace_id = '10000000-0000-4000-8000-000000000001'
-  and profile_id = '20000000-0000-4000-8000-000000000099';
+where workspace_id = '11000000-0000-4000-8000-000000000001'
+  and profile_id = '21000000-0000-4000-8000-000000000099';
 delete from desmoslock_v2.profiles
-where id = '20000000-0000-4000-8000-000000000099';
+where id = '21000000-0000-4000-8000-000000000099';
 
 set local role service_role;
 select is(
   (
     select code
     from desmoslock_v2.internal_bind_initial_owner(
-      '10000000-0000-4000-8000-000000000001',
-      '20000000-0000-4000-8000-000000000002',
+      '11000000-0000-4000-8000-000000000001',
+      '21000000-0000-4000-8000-000000000002',
       'a1000000-0000-4000-8000-000000000003'
     )
   ),
   'invalid_request',
-  'a seeded Administrator profile cannot be bound as the initial Owner'
+  'a runtime Administrator profile cannot be bound as the initial Owner'
 );
 select is(
   (
     select code
     from desmoslock_v2.internal_bind_initial_owner(
-      '10000000-0000-4000-8000-000000000002',
-      '20000000-0000-4000-8000-000000000011',
+      '11000000-0000-4000-8000-000000000002',
+      '21000000-0000-4000-8000-000000000011',
       'a1000000-0000-4000-8000-000000000001'
     )
   ),
@@ -815,8 +874,8 @@ select is(
   (
     select code
     from desmoslock_v2.internal_bind_initial_owner(
-      '10000000-0000-4000-8000-000000000002',
-      '20000000-0000-4000-8000-000000000011',
+      '11000000-0000-4000-8000-000000000002',
+      '21000000-0000-4000-8000-000000000011',
       'a1000000-0000-4000-8000-000000000005'
     )
   ),
@@ -824,6 +883,18 @@ select is(
   'the service boundary independently binds the confirmed Beta Owner'
 );
 reset role;
+
+select results_eq(
+  $$
+    select fixture_digest, fixture_valid
+    from desmoslock_v2.internal_baseline_status()
+  $$,
+  $$values (
+    'f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201'::text,
+    true
+  )$$,
+  'both runtime Owner binds preserve the exact pinned synthetic health fixture'
+);
 
 select is(
   (
@@ -849,8 +920,8 @@ select throws_ok(
   $$
     select *
     from desmoslock_v2.internal_bind_initial_owner(
-      '10000000-0000-4000-8000-000000000001',
-      '20000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
+      '21000000-0000-4000-8000-000000000001',
       'a1000000-0000-4000-8000-000000000001'
     )
   $$,
@@ -953,7 +1024,7 @@ select is(
   (
     select code
     from desmoslock_v2.begin_staff_invitation(
-      '10000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
       'parser-regression@staff.invalid',
       'owner',
       gen_random_uuid()
@@ -966,7 +1037,7 @@ select is(
   (
     select code
     from desmoslock_v2.begin_staff_invitation(
-      '10000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
       'missing-request-key@staff.invalid',
       'teacher',
       null
@@ -1052,8 +1123,8 @@ select results_eq(
   $$,
   $$values (
     'ok'::text,
-    'Synthetic Alpha Owner'::text,
-    '10000000-0000-4000-8000-000000000001'::text,
+    'Runtime Alpha Owner'::text,
+    '11000000-0000-4000-8000-000000000001'::text,
     'owner'::text
   )$$,
   'live database identity, canonical display name, membership, and role produce Alpha context'
@@ -1063,7 +1134,7 @@ select results_eq(
     select school_id::text, school_slug, membership_role
     from desmoslock_v2.current_school_summary()
   $$,
-  $$values ('10000000-0000-4000-8000-000000000001'::text, 'synthetic-alpha'::text, 'owner'::text)$$,
+  $$values ('11000000-0000-4000-8000-000000000001'::text, 'runtime-alpha'::text, 'owner'::text)$$,
   'the original School summary now uses the live Auth/session/membership seam'
 );
 reset role;
@@ -1078,7 +1149,7 @@ select is(
   (
     select code
     from desmoslock_v2.begin_staff_invitation(
-      '10000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
       'aal1-recipient@staff.invalid',
       'teacher',
       gen_random_uuid()
@@ -1140,7 +1211,7 @@ select is(
   (
     select code
     from desmoslock_v2.begin_staff_invitation(
-      '10000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
       'removed-factor-recipient@staff.invalid',
       'teacher',
       gen_random_uuid()
@@ -1158,14 +1229,14 @@ select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000001',
   'c1000000-0000-4000-8000-000000000001',
   'aal2',
-  '{"app_metadata":{"role":"owner","workspace_id":"10000000-0000-4000-8000-000000000002"}}'
+  '{"app_metadata":{"role":"owner","workspace_id":"11000000-0000-4000-8000-000000000002"}}'
 );
 set local role authenticated;
 select is(
   (
     select code
     from desmoslock_v2.begin_staff_invitation(
-      '10000000-0000-4000-8000-000000000002',
+      '11000000-0000-4000-8000-000000000002',
       'cross-school-recipient@staff.invalid',
       'admin',
       gen_random_uuid()
@@ -1178,7 +1249,7 @@ select is(
   (
     select code
     from desmoslock_v2.begin_staff_invitation(
-      '10000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
       'owner-role-recipient@staff.invalid',
       'owner',
       gen_random_uuid()
@@ -1202,7 +1273,7 @@ select
   result.invitation_id,
   'd1000000-0000-4000-8000-000000000001'::uuid
 from desmoslock_v2.begin_staff_invitation(
-  '10000000-0000-4000-8000-000000000001',
+  '11000000-0000-4000-8000-000000000001',
   'invitee@staff.invalid',
   'admin',
   'd1000000-0000-4000-8000-000000000001'
@@ -1258,7 +1329,7 @@ set local role authenticated;
 insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
 select 'beta-management-invitation', result.code, result.invitation_id
 from desmoslock_v2.begin_staff_invitation(
-  '10000000-0000-4000-8000-000000000002',
+  '11000000-0000-4000-8000-000000000002',
   'beta-pending@staff.invalid',
   'teacher',
   'd1000000-0000-4000-8000-000000000015'
@@ -1304,7 +1375,7 @@ select results_eq(
     select
       'ok'::text,
       invitation_id,
-      '10000000-0000-4000-8000-000000000001'::uuid,
+      '11000000-0000-4000-8000-000000000001'::uuid,
       'invitee@staff.invalid'::text,
       'admin'::text,
       'pending_delivery'::text,
@@ -1321,7 +1392,7 @@ select results_eq(
   $$
     select result.code, result.invitation_id
     from desmoslock_v2.begin_staff_invitation(
-      '10000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
       ' INVITEE@staff.invalid ',
       'admin',
       'd1000000-0000-4000-8000-000000000001'
@@ -1338,7 +1409,7 @@ select results_eq(
   $$
     select result.code, result.invitation_id
     from desmoslock_v2.begin_staff_invitation(
-      '10000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
       'invitee@staff.invalid',
       'teacher',
       'd1000000-0000-4000-8000-000000000001'
@@ -1351,7 +1422,7 @@ select results_eq(
   $$
     select result.code, result.invitation_id
     from desmoslock_v2.begin_staff_invitation(
-      '10000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
       'different-recipient@staff.invalid',
       'admin',
       'd1000000-0000-4000-8000-000000000001'
@@ -1364,7 +1435,7 @@ select results_eq(
   $$
     select result.code, result.invitation_id
     from desmoslock_v2.begin_staff_invitation(
-      '10000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
       'invitee@staff.invalid',
       'admin',
       'd1000000-0000-4000-8000-000000000002'
@@ -1492,7 +1563,7 @@ select results_eq(
     select
       'ok'::text,
       invitation_id,
-      '10000000-0000-4000-8000-000000000001'::uuid,
+      '11000000-0000-4000-8000-000000000001'::uuid,
       'invitee@staff.invalid'::text,
       'admin'::text,
       'delivery_ready'::text,
@@ -1514,7 +1585,7 @@ select is(
   (
     select code
     from desmoslock_v2.begin_staff_invitation(
-      '10000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
       'invitee@staff.invalid',
       'admin',
       'd1000000-0000-4000-8000-000000000001'
@@ -1676,7 +1747,7 @@ select results_eq(
     select
       'ok'::text,
       invitation_id,
-      '10000000-0000-4000-8000-000000000001'::uuid,
+      '11000000-0000-4000-8000-000000000001'::uuid,
       'invitee@staff.invalid'::text,
       'admin'::text,
       'pending_acceptance'::text,
@@ -1690,7 +1761,7 @@ select is(
   (
     select code
     from desmoslock_v2.begin_staff_invitation(
-      '10000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
       'invitee@staff.invalid',
       'admin',
       gen_random_uuid()
@@ -1829,8 +1900,8 @@ select is(
   (
     select code
     from desmoslock_v2.revoke_membership(
-      '10000000-0000-4000-8000-000000000001',
-      '20000000-0000-4000-8000-000000000003'
+      '11000000-0000-4000-8000-000000000001',
+      '21000000-0000-4000-8000-000000000003'
     )
   ),
   'step_up_required',
@@ -1851,7 +1922,7 @@ set
     from desmoslock_v2.profiles as profile
     where profile.auth_user_id = 'a1000000-0000-4000-8000-000000000002'
   ),
-  school_id = '10000000-0000-4000-8000-000000000001',
+  school_id = '11000000-0000-4000-8000-000000000001',
   membership_role = 'admin'
 where label = 'accepted';
 
@@ -1877,7 +1948,7 @@ select results_eq(
   $$,
   $$values (
     'a1000000-0000-4000-8000-000000000002'::text,
-    '10000000-0000-4000-8000-000000000001'::text,
+    '11000000-0000-4000-8000-000000000001'::text,
     'admin'::text,
     'active'::text,
     'accepted'::text
@@ -1919,7 +1990,7 @@ select results_eq(
   $$
     select
       'ok'::text,
-      '10000000-0000-4000-8000-000000000001'::text,
+      '11000000-0000-4000-8000-000000000001'::text,
       profile_id,
       'Synthetic Accepted Administrator'::text,
       'invitee@staff.invalid'::text,
@@ -2074,7 +2145,7 @@ select is(
   (
     select code
     from desmoslock_v2.begin_staff_invitation(
-      '10000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
       'admin-cannot-invite@staff.invalid',
       'teacher',
       gen_random_uuid()
@@ -2094,7 +2165,7 @@ set local role authenticated;
 insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
 select 'rollback', result.code, result.invitation_id
 from desmoslock_v2.begin_staff_invitation(
-  '10000000-0000-4000-8000-000000000001',
+  '11000000-0000-4000-8000-000000000001',
   'rollback-recipient@staff.invalid',
   'teacher',
   gen_random_uuid()
@@ -2364,7 +2435,7 @@ set local role authenticated;
 insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
 select 'elapsed', result.code, result.invitation_id
 from desmoslock_v2.begin_staff_invitation(
-  '10000000-0000-4000-8000-000000000001',
+  '11000000-0000-4000-8000-000000000001',
   'wrong-recipient@staff.invalid',
   'teacher',
   gen_random_uuid()
@@ -2442,7 +2513,7 @@ set local role authenticated;
 insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
 select 'reissued', result.code, result.invitation_id
 from desmoslock_v2.begin_staff_invitation(
-  '10000000-0000-4000-8000-000000000001',
+  '11000000-0000-4000-8000-000000000001',
   ' WRONG-RECIPIENT@staff.invalid ',
   'admin',
   gen_random_uuid()
@@ -2507,7 +2578,7 @@ select is(
   (
     select code
     from desmoslock_v2.begin_staff_invitation(
-      '10000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
       'wrong-recipient@staff.invalid',
       'teacher',
       gen_random_uuid()
@@ -2597,7 +2668,7 @@ set local role authenticated;
 insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
 select 'revoke', result.code, result.invitation_id
 from desmoslock_v2.begin_staff_invitation(
-  '10000000-0000-4000-8000-000000000001',
+  '11000000-0000-4000-8000-000000000001',
   'wrong-recipient@staff.invalid',
   'teacher',
   gen_random_uuid()
@@ -2722,7 +2793,7 @@ set local role authenticated;
 insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
 select 'delivery-failure', result.code, result.invitation_id
 from desmoslock_v2.begin_staff_invitation(
-  '10000000-0000-4000-8000-000000000001',
+  '11000000-0000-4000-8000-000000000001',
   'wrong-recipient@staff.invalid',
   'teacher',
   gen_random_uuid()
@@ -2931,7 +3002,7 @@ set local role authenticated;
 insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
 select 'failure-unavailable', result.code, result.invitation_id
 from desmoslock_v2.begin_staff_invitation(
-  '10000000-0000-4000-8000-000000000001',
+  '11000000-0000-4000-8000-000000000001',
   'rollback-recipient@staff.invalid',
   'teacher',
   gen_random_uuid()
@@ -3047,7 +3118,7 @@ set local role authenticated;
 select is(
   (
     select code from desmoslock_v2.revoke_membership(
-      '10000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
       (
         select profile_id from pg_temp.staff_auth_test_results
         where label = 'failure-unavailable'
@@ -3077,7 +3148,7 @@ select
   result.invitation_id,
   'd1000000-0000-4000-8000-000000000010'::uuid
 from desmoslock_v2.begin_staff_invitation(
-  '10000000-0000-4000-8000-000000000001',
+  '11000000-0000-4000-8000-000000000001',
   'wrong-recipient@staff.invalid',
   'teacher',
   'd1000000-0000-4000-8000-000000000010'
@@ -3146,7 +3217,7 @@ select
   result.invitation_id,
   'd1000000-0000-4000-8000-000000000011'::uuid
 from desmoslock_v2.begin_staff_invitation(
-  '10000000-0000-4000-8000-000000000001',
+  '11000000-0000-4000-8000-000000000001',
   'wrong-recipient@staff.invalid',
   'teacher',
   'd1000000-0000-4000-8000-000000000011'
@@ -3155,7 +3226,7 @@ select results_eq(
   $$
     select result.code, result.invitation_id
     from desmoslock_v2.begin_staff_invitation(
-      '10000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
       'wrong-recipient@staff.invalid',
       'teacher',
       'd1000000-0000-4000-8000-000000000010'
@@ -3237,7 +3308,7 @@ select
   result.invitation_id,
   'd1000000-0000-4000-8000-000000000012'::uuid
 from desmoslock_v2.begin_staff_invitation(
-  '10000000-0000-4000-8000-000000000001',
+  '11000000-0000-4000-8000-000000000001',
   'rollback-recipient@staff.invalid',
   'teacher',
   'd1000000-0000-4000-8000-000000000012'
@@ -3313,7 +3384,7 @@ set local role authenticated;
 insert into pg_temp.staff_auth_test_results (label, code, invitation_id)
 select 'existing-user', result.code, result.invitation_id
 from desmoslock_v2.begin_staff_invitation(
-  '10000000-0000-4000-8000-000000000001',
+  '11000000-0000-4000-8000-000000000001',
   'owner-alpha@staff.invalid',
   'teacher',
   gen_random_uuid()
@@ -3348,7 +3419,7 @@ insert into desmoslock_v2.memberships (
   accepted_at
 )
 select
-  '10000000-0000-4000-8000-000000000002',
+  '11000000-0000-4000-8000-000000000002',
   profile.id,
   'teacher',
   null,
@@ -3371,7 +3442,7 @@ select results_eq(
   $$,
   $$
     select
-      '10000000-0000-4000-8000-000000000001'::text,
+      '11000000-0000-4000-8000-000000000001'::text,
       profile_id,
       'invitee@staff.invalid'::text,
       'admin'::text
@@ -3384,7 +3455,7 @@ select is(
   (
     select code
     from desmoslock_v2.revoke_membership(
-      '10000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
       (
         select profile_id
         from pg_temp.staff_auth_test_results
@@ -3409,8 +3480,8 @@ select results_eq(
     order by workspace_id
   $$,
   $$values
-    ('10000000-0000-4000-8000-000000000001'::text, 'revoked'::text),
-    ('10000000-0000-4000-8000-000000000002'::text, 'active'::text)
+    ('11000000-0000-4000-8000-000000000001'::text, 'revoked'::text),
+    ('11000000-0000-4000-8000-000000000002'::text, 'active'::text)
   $$,
   'membership revocation affects only the selected School'
 );
@@ -3484,7 +3555,7 @@ select results_eq(
   $$,
   $$
     select
-      '10000000-0000-4000-8000-000000000002'::text,
+      '11000000-0000-4000-8000-000000000002'::text,
       profile_id,
       'invitee@staff.invalid'::text,
       'teacher'::text
@@ -3506,7 +3577,7 @@ select results_eq(
   $$
     select
       invitation_id,
-      '10000000-0000-4000-8000-000000000002'::text,
+      '11000000-0000-4000-8000-000000000002'::text,
       'beta-pending@staff.invalid'::text,
       'teacher'::text,
       'pending_delivery'::text
@@ -3521,7 +3592,7 @@ select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000002',
   'c1000000-0000-4000-8000-000000000002',
   'aal2',
-  '{"app_metadata":{"role":"owner","workspace_id":"10000000-0000-4000-8000-000000000002"}}'
+  '{"app_metadata":{"role":"owner","workspace_id":"11000000-0000-4000-8000-000000000002"}}'
 );
 set local role authenticated;
 select results_eq(
@@ -3529,14 +3600,14 @@ select results_eq(
     select code, school_id::text, membership_role
     from desmoslock_v2.current_staff_context()
   $$,
-  $$values ('ok'::text, '10000000-0000-4000-8000-000000000002'::text, 'teacher'::text)$$,
+  $$values ('ok'::text, '11000000-0000-4000-8000-000000000002'::text, 'teacher'::text)$$,
   'an already-open Teacher session observes only its remaining live School role'
 );
 select is(
   (
     select code
     from desmoslock_v2.begin_staff_invitation(
-      '10000000-0000-4000-8000-000000000002',
+      '11000000-0000-4000-8000-000000000002',
       'forged-role-recipient@staff.invalid',
       'teacher',
       gen_random_uuid()
@@ -3596,7 +3667,7 @@ insert into desmoslock_v2.memberships (
   updated_at
 )
 select
-  '10000000-0000-4000-8000-000000000001',
+  '11000000-0000-4000-8000-000000000001',
   fixture.profile_id,
   'teacher',
   'active',
@@ -3619,7 +3690,7 @@ reset role;
 
 delete from desmoslock_v2.memberships as membership
 using management_staff_overflow_fixture as fixture
-where membership.workspace_id = '10000000-0000-4000-8000-000000000001'
+where membership.workspace_id = '11000000-0000-4000-8000-000000000001'
   and membership.profile_id = fixture.profile_id;
 delete from desmoslock_v2.profiles as profile
 using management_staff_overflow_fixture as fixture
@@ -3646,8 +3717,8 @@ insert into desmoslock_v2.staff_invitations (
 )
 select
   fixture.id,
-  '10000000-0000-4000-8000-000000000001',
-  '20000000-0000-4000-8000-000000000001',
+  '11000000-0000-4000-8000-000000000001',
+  '21000000-0000-4000-8000-000000000001',
   gen_random_uuid(),
   format('invitation-overflow-%s@staff.invalid', row_number() over (order by fixture.id)),
   'teacher',
@@ -3758,8 +3829,8 @@ insert into desmoslock_v2.memberships (
   updated_at
 )
 values (
-  '10000000-0000-4000-8000-000000000002',
-  '20000000-0000-4000-8000-000000000001',
+  '11000000-0000-4000-8000-000000000002',
+  '21000000-0000-4000-8000-000000000001',
   'teacher',
   'active',
   now(),
@@ -3885,7 +3956,7 @@ select is(
   (
     select code
     from desmoslock_v2.begin_staff_invitation(
-      '10000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
       'recovery-cannot-invite@staff.invalid',
       'teacher',
       gen_random_uuid()
@@ -3947,7 +4018,7 @@ select results_eq(
   $$values (
     'a1000000-0000-4000-8000-000000000001'::text,
     'c1000000-0000-4000-8000-000000000012'::text,
-    '20000000-0000-4000-8000-000000000001'::text,
+    '21000000-0000-4000-8000-000000000001'::text,
     'sessions_revoked'::text
   )$$,
   'recovery state is bound only to the exact caller, provider session, and staff profile'
@@ -4004,12 +4075,12 @@ select results_eq(
   $$
     select workspace_id::text, role, status
     from desmoslock_v2.memberships
-    where profile_id = '20000000-0000-4000-8000-000000000001'
+    where profile_id = '21000000-0000-4000-8000-000000000001'
     order by workspace_id
   $$,
   $$values
-    ('10000000-0000-4000-8000-000000000001'::text, 'owner'::text, 'active'::text),
-    ('10000000-0000-4000-8000-000000000002'::text, 'teacher'::text, 'active'::text)
+    ('11000000-0000-4000-8000-000000000001'::text, 'owner'::text, 'active'::text),
+    ('11000000-0000-4000-8000-000000000002'::text, 'teacher'::text, 'active'::text)
   $$,
   'account-wide recovery revokes sessions without changing either active School membership'
 );
@@ -4200,8 +4271,8 @@ select results_eq(
     order by school_id
   $$,
   $$values
-    ('ok'::text, '10000000-0000-4000-8000-000000000001'::text),
-    ('ok'::text, '10000000-0000-4000-8000-000000000002'::text)
+    ('ok'::text, '11000000-0000-4000-8000-000000000001'::text),
+    ('ok'::text, '11000000-0000-4000-8000-000000000002'::text)
   $$,
   'a fresh normal session can enter both Schools while recovery remains unfinished'
 );
@@ -4567,7 +4638,7 @@ values (
 );
 insert into desmoslock_v2.profiles (id, display_name, auth_user_id)
 values (
-  '20000000-0000-4000-8000-000000000006',
+  '21000000-0000-4000-8000-000000000006',
   'Removed Recovery Staff',
   'a1000000-0000-4000-8000-000000000006'
 );
@@ -4584,14 +4655,14 @@ insert into desmoslock_v2.memberships (
   updated_at
 )
 values (
-  '10000000-0000-4000-8000-000000000001',
-  '20000000-0000-4000-8000-000000000006',
+  '11000000-0000-4000-8000-000000000001',
+  '21000000-0000-4000-8000-000000000006',
   'teacher',
   'revoked',
   2,
   now() - interval '1 day',
   now(),
-  '20000000-0000-4000-8000-000000000001',
+  '21000000-0000-4000-8000-000000000001',
   'owner_action',
   now()
 );
@@ -4619,8 +4690,8 @@ select results_eq(
     from desmoslock_v2.memberships as membership
     join desmoslock_v2.application_session_revocations as revocation
       on revocation.user_id = 'a1000000-0000-4000-8000-000000000006'
-    where membership.workspace_id = '10000000-0000-4000-8000-000000000001'
-      and membership.profile_id = '20000000-0000-4000-8000-000000000006'
+    where membership.workspace_id = '11000000-0000-4000-8000-000000000001'
+      and membership.profile_id = '21000000-0000-4000-8000-000000000006'
   $$,
   $$values ('revoked'::text, null::uuid)$$,
   'credential recovery remains account-wide and never reactivates removed School authority'
@@ -4658,8 +4729,8 @@ select throws_ok(
       status
     ) values (
       'd1000000-0000-4000-8000-000000000099',
-      '10000000-0000-4000-8000-000000000001',
-      '20000000-0000-4000-8000-000000000001',
+      '11000000-0000-4000-8000-000000000001',
+      '21000000-0000-4000-8000-000000000001',
       'teacher',
       'pending_delivery'
     )

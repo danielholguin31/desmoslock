@@ -170,6 +170,14 @@ test("email verification round-trips the SDK-owned PKCE flow and scrubs before e
     markExchangeStarted = resolve;
   });
   let exactPkceBody = false;
+  let callbackNavigationStarted = false;
+  let callbackAuthRequests = 0;
+  let callbackUrlAtExchange: string | undefined;
+  page.on("request", (request) => {
+    if (callbackNavigationStarted && request.url().includes("/auth/v1/")) {
+      callbackAuthRequests += 1;
+    }
+  });
   const authCorsHeaders = {
     "access-control-allow-headers":
       "apikey, authorization, content-type, x-client-info, x-supabase-api-version",
@@ -205,6 +213,7 @@ test("email verification round-trips the SDK-owned PKCE flow and scrubs before e
       body.auth_code === "synthetic-email-code" &&
       typeof body.code_verifier === "string" &&
       body.code_verifier.length >= 43;
+    callbackUrlAtExchange = page.url();
     markExchangeStarted?.();
     await new Promise<void>((resolve) => {
       releaseExchange = resolve;
@@ -255,12 +264,33 @@ test("email verification round-trips the SDK-owned PKCE flow and scrubs before e
   const flowId = redirectUrl.searchParams.get("sb_flow_id");
   expect(flowId).toMatch(/^[A-Za-z0-9_-]{8,64}$/u);
 
+  callbackNavigationStarted = true;
   await page.goto(
     `/?auth=email-verification&sb_flow_id=${flowId ?? "missing"}&code=synthetic-email-code`,
   );
-  await exchangeStarted;
   await expect(page).toHaveURL("http://127.0.0.1:43173/");
-  await expect(page.locator("[data-staff-auth-root]")).toBeHidden();
+  await expect(
+    page.getByRole("heading", { name: "Continue securely" }),
+  ).toBeVisible();
+  expect(callbackAuthRequests).toBe(0);
+  expect(exactPkceBody).toBe(false);
+  expect(await page.content()).not.toContain("synthetic-email-code");
+  const callbackBrowserState = await page.evaluate(() =>
+    JSON.stringify({
+      history: window.history.state,
+      localStorage: { ...window.localStorage },
+      sessionStorage: { ...window.sessionStorage },
+    }),
+  );
+  expect(callbackBrowserState).not.toContain("synthetic-email-code");
+
+  await page.getByRole("button", { name: "Continue securely" }).click();
+  await exchangeStarted;
+  expect(callbackUrlAtExchange).toBe("http://127.0.0.1:43173/");
+  await expect(
+    page.getByRole("heading", { name: "Checking verification link" }),
+  ).toBeVisible();
+  await expect(page.locator("[data-protected-school-data]")).toBeHidden();
   expect(exactPkceBody).toBe(true);
   releaseExchange?.();
 
@@ -303,6 +333,7 @@ test("a failed address-bar scrub leaves the callback surface inert and offline",
   page,
 }) => {
   let applicationRequests = 0;
+  let staticResourceRequests = 0;
   page.on("request", (request) => {
     if (
       request.url().includes("/auth/v1/") ||
@@ -310,6 +341,12 @@ test("a failed address-bar scrub leaves the callback surface inert and offline",
       request.url().includes("/rest/v1/")
     ) {
       applicationRequests += 1;
+    }
+    if (
+      request.resourceType() === "script" ||
+      request.resourceType() === "stylesheet"
+    ) {
+      staticResourceRequests += 1;
     }
   });
   await page.addInitScript(() => {
@@ -319,10 +356,18 @@ test("a failed address-bar scrub leaves the callback surface inert and offline",
   });
   const tokenHash = "b".repeat(56);
 
-  await page.goto(`/?auth=invite#token_hash=${tokenHash}`);
+  // The inline fail-closed path deliberately stops loading before the body or
+  // application resources are parsed, so document load is not its boundary.
+  await page.goto(`/?auth=invite#token_hash=${tokenHash}`, {
+    waitUntil: "commit",
+  });
 
-  await expect(page.locator("[data-staff-auth-root]")).toBeHidden();
-  await expect(page.locator("[data-protected-school-data]")).toBeHidden();
+  await expect(page.locator("html")).toHaveAttribute("hidden", "");
+  await expect(page.locator("html")).toBeHidden();
+  await expect(page.locator('script[src], link[rel="stylesheet"]')).toHaveCount(
+    0,
+  );
   expect(applicationRequests).toBe(0);
+  expect(staticResourceRequests).toBe(0);
   expect(page.url()).toContain(tokenHash);
 });
