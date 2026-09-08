@@ -1,8 +1,9 @@
 # Disposable synthetic restore acceptance
 
 This source tranche adds a required real backup/restore gate for the internal
-baseline. Runtime execution is pending; source review and helper tests alone
-do not establish a successful export, restore, TLS connection or health check.
+baseline. The first CI execution stopped during fixture TLS reload; successful
+runtime acceptance is pending. Source review and helper tests alone do not
+establish a successful export, restore, TLS connection or health check.
 The existing hosted staging project and legacy deployment restrictions remain
 separate from this disposable CI lane.
 
@@ -29,8 +30,10 @@ only allowlisted environment variable names are passed to Docker. No injected
 adapter runner or fabricated native output is used.
 
 The source generates ephemeral CA/server keys as root only within its own
-tmpfs. A separate PostgreSQL-user command reloads that disposable server's SSL
-configuration. Only the public CA reaches host tmpfs and the client container.
+tmpfs. A separate command runs as OS user `postgres` and connects through the
+explicit `/var/run/postgresql` socket, port 5432, as DB role `supabase_admin` to
+reload that disposable server's SSL configuration. Only the public CA reaches
+host tmpfs and the client container.
 The staging-profile export uses `verify-full`, the exact numeric-loopback
 endpoint and explicit CA path; the local restore profile retains its existing
 loopback/SSL contract. Numeric-loopback harness endpoints do not imply that the
@@ -95,7 +98,8 @@ and separately assigned synthetic username/password. Parser inputs and all
 rejection assertions remain unchanged; scanner rules were not weakened. The
 current `synthetic-backup-runtime.test.mjs` SHA256 is
 `0b07cd695de978c7eb307a902021feb9365a448e5f3537fc7bc82896625a91ed`.
-The other executable imports and all CI hooks retain their reviewed hashes.
+At that checkpoint, the other executable imports and all CI hooks retained
+their reviewed hashes.
 Scoped Secretlint, the ten affected helper tests, formatting and ESLint passed
 again after this fixture-only repair.
 
@@ -115,8 +119,40 @@ OpenClaw change guard does not support this external repository; its scope
 refusal was explicitly acknowledged under the assigned repository task, with no
 guard-root changes or verifier bypass.
 
+## First CI execution and scoped reload correction
+
+[Verification run 34188437645](https://github.com/danielholguin31/desmoslock/actions/runs/34188437645)
+ran at exact PR56 source `f4df770aae62d946dda30bf39d1df4470e3624b9`.
+The roundtrip step failed with the fixed code
+`TLS_RELOAD_FIXTURE_COMMAND_FAILED`. Both disposable stacks initialized and the
+source TLS-generation stage completed, including the in-image OpenSSL probe.
+Export, restore and the subsequent staff suite were not reached. All other
+substantive verification jobs and [security run 34188437624](https://github.com/danielholguin31/desmoslock/actions/runs/34188437624)
+passed; the unconditional final stop step also passed. No cleanup-failure suffix
+was reported. Raw native diagnostics remain withheld.
+
+The pinned image explicitly [demotes DB role `postgres`](https://raw.githubusercontent.com/supabase/postgres/17.6.1.159/migrations/db/migrations/10000000000000_demote-postgres.sql)
+and [makes `supabase_admin` a superuser](https://raw.githubusercontent.com/supabase/postgres/17.6.1.159/migrations/db/init-scripts/00000000000000-initial-schema.sql).
+PostgreSQL 17 requires [superuser or parameter-specific authority for `ALTER SYSTEM`](https://www.postgresql.org/docs/17/sql-altersystem.html).
+The image's [local socket rules](https://raw.githubusercontent.com/supabase/postgres/17.6.1.159/ansible/files/postgresql_config/pg_hba.conf.j2)
+permit `supabase_admin`, while its [build](https://raw.githubusercontent.com/supabase/postgres/17.6.1.159/Dockerfile-17)
+provides `/usr/lib/postgresql/bin/psql` and configures the socket directory.
+The [pinned CLI startup](https://raw.githubusercontent.com/supabase/cli/v2.115.0/apps/cli/src/legacy/shared/db-bootstrap/postgres.service.ts)
+retains those image paths and local authentication rules. These sources support
+a fixture role mismatch; CI did not expose an observed permission-denied error.
+
+The correction changes only the source fixture reload's native path, explicit
+socket/port and DB role. OS user `postgres`, SQL settings, process/output bounds,
+TLS assertions, operator roles and cleanup remain unchanged. No grants or
+authentication policy are changed. The original candidate hashes above remain
+historical evidence. The corrected runtime SHA256 is
+`220401b2774066ced89a2f38c0f838975d68ffd97902a987f73fb73e798e3068`.
+All ten existing helper tests, scoped ESLint, Prettier, Secretlint and whitespace
+checks passed with the exact Node 24.20.0 toolchain. No local stack was started;
+the corrected TLS reload still requires CI execution.
+
 Actual disposable runtime acceptance remains pending until the required CI job
-passes at the reviewed source. A passing local roundtrip will not prove hosted
+passes at the corrected source. A passing local roundtrip will not prove hosted
 staging migration/export, delivered hosted email or packaged desktop staging
 acceptance.
 
