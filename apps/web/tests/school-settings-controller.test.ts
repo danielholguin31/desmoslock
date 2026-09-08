@@ -13,6 +13,7 @@ import type {
 
 const authority: StaffProductAuthority = {
   accountId: "a1000000-0000-4000-8000-000000000001",
+  providerSessionId: "51000000-0000-4000-8000-000000000001",
   profileId: "21000000-0000-4000-8000-000000000001",
   membershipId:
     "11000000-0000-4000-8000-000000000001:21000000-0000-4000-8000-000000000001",
@@ -145,7 +146,10 @@ describe("School settings controller", () => {
         school: { settingsRevision: 5, displayName: "New School" },
         notice: "updated",
       });
-      expect(test.capture).toHaveBeenCalledExactlyOnceWith(authority.accountId);
+      expect(test.capture).toHaveBeenCalledExactlyOnceWith(
+        authority.accountId,
+        authority.providerSessionId,
+      );
       expect(test.update).toHaveBeenCalledExactlyOnceWith(
         {
           schoolId: authority.schoolId,
@@ -275,6 +279,68 @@ describe("School settings controller", () => {
     });
     expect(test.capture).not.toHaveBeenCalled();
     expect(test.update).not.toHaveBeenCalled();
+    test.controller.dispose();
+  });
+
+  it("a later verified session for the same account discards the original Save intent and draft", async () => {
+    const test = harness();
+    await edit(test.controller, "Old session draft");
+    const fresh = deferred<StaffProductRefreshResult>();
+    test.refreshAccess.mockImplementationOnce(() => fresh.promise);
+    const pending = save(test.controller);
+    const replacement = access("Original School", 4, {
+      ...authority,
+      providerSessionId: "51000000-0000-4000-8000-000000000002",
+    });
+    test.setLive({ kind: "ready", access: replacement });
+    fresh.resolve({ kind: "fresh_authorized", access: replacement });
+    expect(await pending).toMatchObject({
+      kind: "editing",
+      draft: "Original School",
+    });
+    expect(test.capture).not.toHaveBeenCalled();
+    expect(test.update).not.toHaveBeenCalled();
+    await edit(test.controller, "New session draft");
+    await save(test.controller);
+    expect(test.capture).toHaveBeenCalledExactlyOnceWith(
+      authority.accountId,
+      replacement.authority.providerSessionId,
+    );
+    expect(test.update).toHaveBeenCalledExactlyOnceWith(
+      {
+        schoolId: authority.schoolId,
+        displayName: "New session draft",
+        expectedSettingsRevision: 4,
+      },
+      handle,
+    );
+    test.controller.dispose();
+  });
+
+  it("a renewed token projecting the same provider session retains the draft and permits Save", async () => {
+    const test = harness();
+    await edit(test.controller, "Retained session draft");
+    const fresh = deferred<StaffProductRefreshResult>();
+    test.refreshAccess.mockImplementationOnce(() => fresh.promise);
+    const pending = save(test.controller);
+    const verifying = test.controller.getSnapshot();
+    // Token bytes belong to the port. A verified renewal keeps this exact
+    // nonsecret session identity while producing a new projection object.
+    const renewed = access("Original School", 4, { ...authority });
+    test.set({ kind: "ready", access: renewed });
+    expect(test.controller.getSnapshot()).toBe(verifying);
+    fresh.resolve({ kind: "fresh_authorized", access: renewed });
+    expect(await pending).toMatchObject({
+      kind: "editing",
+      draft: "Retained session draft",
+      notice: "updated",
+    });
+    expect(test.capture).toHaveBeenCalledExactlyOnceWith(
+      authority.accountId,
+      authority.providerSessionId,
+    );
+    expect(test.update).toHaveBeenCalledOnce();
+    expect(test.release).toHaveBeenCalledExactlyOnceWith(handle);
     test.controller.dispose();
   });
 

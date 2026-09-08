@@ -1,0 +1,268 @@
+{
+  "date": "2026-09-08",
+  "status": "source_frozen_local_checks_and_independent_review_clean_awaiting_root_integration",
+  "base_commit": "6939c59724d3c5e98478defc1399b40166f0c199",
+  "branch": "codex/desmoslock-test-workspace",
+  "scope": "Staff Test workspace source contract and verified provider-session binding; no StudentSession/native/hosted implementation.",
+  "files_sha256": {
+    "README.md": "f0df2408a7bcb17c34a8dbd3224b0d64c8d3942754249296c27577d773e7ccb5",
+    "apps/web/src/auth/staff-auth-application.ts": "b72ed5b40349d7e1813c77e03570eeff431af0788d7ce324516ee7facb6469c0",
+    "apps/web/src/auth/staff-auth-controller.ts": "03272ea439121bf0cc3b15e44befc5afd26c5647fd64e9a4ae43888e531404e3",
+    "apps/web/src/auth/staff-product-access.ts": "f9743f9b99dfde6ec6fc83be38389cf109ed813d679353bd8d6362eba557f23e",
+    "apps/web/src/auth/supabase-staff-auth-adapter.ts": "bf602e0ecb3c5724fd7a6334d41387309e72b69f86dda935f19dd5519febdb9d",
+    "apps/web/src/auth/supabase-staff-auth-port.ts": "7c3dfb0c519b3fc995a68a21fa30514bfe1f9acb75c112c14b8fcecd27433a38",
+    "apps/web/src/index.html": "6cf21d56b719de2977af97cde94f307ab053ef0a7cb608b4be3cdd8c57e33190",
+    "apps/web/src/school-settings/school-settings-controller.ts": "09c9698711620563610d3f2f21da72afa9b61cee4f9de173661d2d82335e5491",
+    "apps/web/src/styles.css": "0a36b3d1fa379fc203e4a486a04fc88715d7b30a484fe65a72a8c72b82026af5",
+    "apps/web/src/test-workspace/test-workspace-controller.ts": "af38a5524e18a34121baf3da9fa8f5f5d13ee503459ae754b48439a6e3161d4d",
+    "apps/web/src/test-workspace/test-workspace-view.ts": "072e10873e05dd482b3b3305ea225b5320b40a762e9ffa3e8ba5f63aa58f1bc6",
+    "apps/web/src/test-workspace/test-workspace.css": "63844e3d8e56d31775014a8608cb7ac8b8945e048bca2b548fcf1db4fe083f27",
+    "apps/web/tests/school-settings-authority-sdk.test.ts": "aee0aa5a0b60060e01321ba959472d6a345d22dd2597bfb0f095a016fef222da",
+    "apps/web/tests/school-settings-controller.test.ts": "fb4c9403b610f1e2cd37e2dc99a9e961a1510134813eb5f444c335e4351191f5",
+    "apps/web/tests/staff-auth-application.test.ts": "31ae1146adece2724fb6158483ddae3511685d1808b2844cec0de794abd0f865",
+    "apps/web/tests/staff-auth-controller.test.ts": "aa11affc3bc4446c908cdbd7f6c94eab0845674e8cfcf18a6e6cefa127e0ce27",
+    "apps/web/tests/staff-auth-logout-sdk.test.ts": "76b305d9b77619016fbdba8a52af22efa26b3219778d717f1710725a8604a16a",
+    "apps/web/tests/staff-membership-controller.test.ts": "679b4abbc84ae02a77dfdfe4636b1fbfdff3d1dbe9372edaa5444c5904785161",
+    "apps/web/tests/staff-membership-sdk-authority.test.ts": "84c45fb3291d0cd94d659d483f99a7373876eaee1f4e8e71064a81cd0515115a",
+    "apps/web/tests/supabase-staff-auth-adapter.test.ts": "885fcb816ed28cb17fd9a6d050dfa9aff48c6f97e6917d7c182df555cce61c53",
+    "apps/web/tests/supabase-staff-auth-port.test.ts": "cf9f22b4fd858c0374a15bc4616679e8775836e90734c0028c5d0b383977a6ad",
+    "apps/web/tests/supabase-staff-password-authority.test.ts": "5f470f5dd1cc200a11bf1fba9b1f9b1728138b73eaf6439a38285debfa7eb311",
+    "apps/web/tests/test-workspace-authority-sdk.test.ts": "5c5b60056a0edbfdcbc82b66b21be984754fdc06c6a5e6b6d030106254e69060",
+    "apps/web/tests/test-workspace-controller.test.ts": "f765861aac698008690fd8414fd45ae3428f2c924afe82ef3fde7cdd91684e71",
+    "apps/web/tests/test-workspace-view.test.ts": "36e722b2af9bee1e368641382a66b0ef18ccda42bb8d2e5816ec823b198807e9",
+    "docs/product-completion/reproducible-supabase.md": "48fbf5188682a837558195af8483ab947b38e4e416f2f5c5309e0598e8c187ef",
+    "docs/product-completion/synthetic-restore-acceptance.md": "fb633dd47e3a77f34670278479442e5903bbec3aff7196c75f99fec3aaef0af6",
+    "docs/product-completion/test-workspace.md": "0019eeefa5f732dd12c19a2216ec2ce2ba8e2a18b7c2c3709de45b37b126abd2",
+    "packages/contracts/src/index.ts": "9147550032b08645b66261acdad014cd63a2e873e539522911cb7d5585c3f069",
+    "packages/contracts/src/test-workspace.ts": "55d0d6376eed1dfcc712f9e3bb414cf2ea462898cf2b9d77eafa2572c70f52b7",
+    "packages/contracts/tests/test-workspace.test.ts": "ac93f290b79f39dc719b3eb4f3d8d2bb6528b4db7d19768cc251b5201d54cb02",
+    "scripts/build-app.mjs": "2690121a57de5ac853a4ae9413772c91df2d6bad2ebe8eee5f3c487b91c94141",
+    "scripts/repository-contract/supabase-contract.mjs": "1e90aa84627b3277c84ac3b1c5d5b4010823c78adca44758c8ec1f4c7b52fede",
+    "scripts/synthetic-backup/operator.mjs": "f179f043403cc161a52e9c5d42193f301d02ce9a4ecf1571c8e09da60bde909a",
+    "scripts/synthetic-backup/postgres-adapter.mjs": "d08eb03fa559119910edf71aa056dd00de1fa4fdb53de87d7ddcb385056ab439",
+    "supabase/functions/health/index.test.ts": "4035df0854d8743d0e2624a7b04f8ffd9109724b3f8c77d611206fae4cb9d9a9",
+    "supabase/functions/health/index.ts": "afdad20fd2be073ec35a6a93745866f6cf9be5f2a4742b9f39e60efcb4d9b8a9",
+    "supabase/migrations/20260908000200_test_workspace.sql": "233123dd9038740ef724432715cc17e32a5adc2be68160466fa11f5b2dfb865c",
+    "supabase/seed.sql": "cb0af7d1cb4ce9696ecb2f7d146705e8e74c560703af7d954afae58ac974e874",
+    "supabase/tests/database/internal_release_backend.test.sql": "9cee4b2d1c10a62ef4aa2ae323ae89649391ffc4153c40545e8d26e83251c904",
+    "supabase/tests/database/school_display_name.test.sql": "700483097266ffc5de0b759ba46ec8396ddfafff95b8c9af3581eff863aab42c",
+    "supabase/tests/database/test_workspace.test.sql": "65f6c646beb988c5fde3889abdb6511cf661f506cb8af2c86903bc7d195cd2c9",
+    "tests/acceptance/clean-build.test.mjs": "9a5c67affbd7cb5f03981604b7ab3550dc2d621bbb10960e9978df73372e9a66",
+    "tests/acceptance/postgres-backup-adapter.test.mjs": "bf0d5dc5effed9038c2dd64819ac9355ceef5d7a76074be1a4d9876b6dee1437",
+    "tests/acceptance/revoke-membership-lock.test.mjs": "a2a9659790b36fbdce1660cbf6e6b3e7ca281f066822b201dc816b09b52d950b",
+    "tests/acceptance/staff-auth-composed.test.mjs": "3607cd1cd2634984dc19ec4b76625054a4f5a9b0e1ee53075ac3c1a300b8b4ce",
+    "tests/acceptance/staff-auth-loopback.mjs": "f100d9a8f9d36d0e588e6ec1ebd0dcb31deaa59d0f404622ffc9eac00df97962",
+    "tests/acceptance/staff-membership-browser.mjs": "484f6b7a73ce40e51b8c11b4a58a715847c2ac552fc4f7fdcce5c5bd641282f3",
+    "tests/acceptance/synthetic-backup-roundtrip.test.mjs": "0c8877f7ffbb462677b3c050256066773505d0b3082114a8814e336dd054ae21",
+    "tests/acceptance/synthetic-backup-runtime.mjs": "3ed21aff8ddb7f24c9aa80395b66a715b3301b80b5bd962202b7f64fe86717d8",
+    "tests/acceptance/synthetic-backup-runtime.test.mjs": "7ba9c06e3cbe0d9f837e9804fd3236a731683b635b03edf9731bbaa1119dfd63",
+    "tests/acceptance/synthetic-backup.test.mjs": "44fca0b44d90b53243e685fa904bee0a814c6d6a674c0fd1f0fd7e1dc3985a6d",
+    "tests/repository-contract.test.mjs": "30f8ad7ccc6f4b76f1223dc9966826d41bd0a2786eca1b6f3ea0dae5347cf7f2"
+  },
+  "candidate_paths": [
+    "README.md",
+    "apps/web/src/auth/staff-auth-application.ts",
+    "apps/web/src/auth/staff-auth-controller.ts",
+    "apps/web/src/auth/staff-product-access.ts",
+    "apps/web/src/auth/supabase-staff-auth-adapter.ts",
+    "apps/web/src/auth/supabase-staff-auth-port.ts",
+    "apps/web/src/index.html",
+    "apps/web/src/school-settings/school-settings-controller.ts",
+    "apps/web/src/styles.css",
+    "apps/web/src/test-workspace/test-workspace-controller.ts",
+    "apps/web/src/test-workspace/test-workspace-view.ts",
+    "apps/web/src/test-workspace/test-workspace.css",
+    "apps/web/tests/school-settings-authority-sdk.test.ts",
+    "apps/web/tests/school-settings-controller.test.ts",
+    "apps/web/tests/staff-auth-application.test.ts",
+    "apps/web/tests/staff-auth-controller.test.ts",
+    "apps/web/tests/staff-auth-logout-sdk.test.ts",
+    "apps/web/tests/staff-membership-controller.test.ts",
+    "apps/web/tests/staff-membership-sdk-authority.test.ts",
+    "apps/web/tests/supabase-staff-auth-adapter.test.ts",
+    "apps/web/tests/supabase-staff-auth-port.test.ts",
+    "apps/web/tests/supabase-staff-password-authority.test.ts",
+    "apps/web/tests/test-workspace-authority-sdk.test.ts",
+    "apps/web/tests/test-workspace-controller.test.ts",
+    "apps/web/tests/test-workspace-view.test.ts",
+    "docs/product-completion/reproducible-supabase.md",
+    "docs/product-completion/synthetic-restore-acceptance.md",
+    "docs/product-completion/test-workspace-receipt.json",
+    "docs/product-completion/test-workspace.md",
+    "packages/contracts/src/index.ts",
+    "packages/contracts/src/test-workspace.ts",
+    "packages/contracts/tests/test-workspace.test.ts",
+    "scripts/build-app.mjs",
+    "scripts/repository-contract/supabase-contract.mjs",
+    "scripts/synthetic-backup/operator.mjs",
+    "scripts/synthetic-backup/postgres-adapter.mjs",
+    "supabase/functions/health/index.test.ts",
+    "supabase/functions/health/index.ts",
+    "supabase/migrations/20260908000200_test_workspace.sql",
+    "supabase/seed.sql",
+    "supabase/tests/database/internal_release_backend.test.sql",
+    "supabase/tests/database/school_display_name.test.sql",
+    "supabase/tests/database/test_workspace.test.sql",
+    "tests/acceptance/clean-build.test.mjs",
+    "tests/acceptance/postgres-backup-adapter.test.mjs",
+    "tests/acceptance/revoke-membership-lock.test.mjs",
+    "tests/acceptance/staff-auth-composed.test.mjs",
+    "tests/acceptance/staff-auth-loopback.mjs",
+    "tests/acceptance/staff-membership-browser.mjs",
+    "tests/acceptance/synthetic-backup-roundtrip.test.mjs",
+    "tests/acceptance/synthetic-backup-runtime.mjs",
+    "tests/acceptance/synthetic-backup-runtime.test.mjs",
+    "tests/acceptance/synthetic-backup.test.mjs",
+    "tests/repository-contract.test.mjs"
+  ],
+  "candidate_source_file_count": 53,
+  "candidate_total_path_count": 54,
+  "precommit_tracked_diff_sha256": "4fe4499c49d19ac5922f74b0bd8a8ab50413debe80fd88deebb5a14b8fb50478",
+  "packet_root": "state/execution-packets/desmoslock-astra-2026-09-04",
+  "selected_packet_inputs_sha256": {
+    "test-workspace-wire-proposal.md": "15868468ff77c9d5be332cf7def74cdf070b7834329f15fd95a51782bea1f221",
+    "test-workspace-implementation-lock.md": "5bd4a78cea50c3315ad52d2c54c0ad0c05f4d4d8b73def571fd48d855ebc5947",
+    "test-worktree-setup-receipt.json": "7e8d490e62a4f87b22c5fdac06fc39514f63df7db2b0aeaec10f472016233189",
+    "test-session-binding-probe.json": "14f6ee67e9ff96f8e6370f1996d93c712461385c82152fcc339af9c77004aa8f"
+  },
+  "local_verification": {
+    "full_unit": {
+      "passed": 1801,
+      "test_files": 45,
+      "exit_code": 0
+    },
+    "all_workspace_typescript": {
+      "workspaces": 5,
+      "exit_code": 0
+    },
+    "root_test_typescript": {
+      "exit_code": 0
+    },
+    "final_web_typescript": {
+      "exit_code": 0
+    },
+    "session_repair_checks": {
+      "five_installed_sdk_suites_passed": 177,
+      "adapter_tests_after_inert_cleanup_repair": 144,
+      "boundary": "Actual installed SDK with intercepted synthetic storage/HTTP; no real provider contacted."
+    },
+    "source_contract_checks": {
+      "synthetic_backup_tests": 48,
+      "postgres_adapter_and_runtime_helper_tests": 138,
+      "repository_and_related_acceptance_tests": 32,
+      "health_edge_tests": 15,
+      "health_deno_type_and_lint": "pass",
+      "repository_verifier": "pass",
+      "evidence_owner": "Turing consumer lane; frozen bytes independently matched by DB/backup reviewer"
+    },
+    "scoped_eslint": "pass on applicable changed TypeScript/JavaScript; final narrow repairs rechecked",
+    "scoped_prettier": "pass on applicable changed paths; final narrow repairs rechecked",
+    "scoped_secretlint": {
+      "source_paths": 53,
+      "findings": 0,
+      "exit_code": 0,
+      "final_narrow_repairs_rechecked": true
+    },
+    "git_diff_check": {
+      "exit_code": 0
+    },
+    "coordinated_initial_package_build": {
+      "exit_code": 0,
+      "scope": "Test-local domain/contracts/test-support outputs"
+    },
+    "workspace_outputs_and_caches": "All five workspace links and local caches/temp/output paths resolve inside isolated Test checkout; read-only third-party dependencies retained."
+  },
+  "independent_review": {
+    "db_backup_provider": {
+      "status": "clean",
+      "path": "test-db-backup-independent-review.json",
+      "sha256": "bbc16c57cb914f9460f3c25ca926cfd6d775f6cd4794a0a1050c3a6d68194fb1",
+      "reviewed_paths": 21
+    },
+    "test_view": {
+      "status": "clean after two focus repairs",
+      "path": "qa/test-workspace-preview/native-focus-repair-handoff.json",
+      "sha256": "519bd0916306d565691b8a5ea2881bf9bc72fee7e393e94bb5d887bd0bb021de",
+      "focused_tests": 68,
+      "rendered_execution": false
+    },
+    "provider_session_binding": {
+      "status": "clean at final source bytes after inert enrollment cleanup and canonical decoder repairs",
+      "reviewer": "/root/atlas_auth_plan_critique",
+      "reviewed_file_count": 17,
+      "accepted_findings_closed": [
+        "Silent same-account provider-session replacement cannot inherit prior intent",
+        "Verified SID change discards old enrollment receipts and blobs without provider cleanup",
+        "Grant decoder matches canonical UUID version and variant rule"
+      ],
+      "verified_semantics": [
+        "Exact snapshot token must pass direct /user verification and matching canonical sub/account/session_id",
+        "All initiating captures require account plus provider SID and preserve purpose/token/release",
+        "Different SID invalidates without notification; same SID renewal acceptable only absent intervening notification invalidation",
+        "All notifications including TOKEN_REFRESHED retain conservative revalidation",
+        "Private no-argument recovery binding remains unchanged"
+      ],
+      "evidence_limit": "Read-only independent review; evaluator did not rerun tests or contact a provider."
+    },
+    "application_composition": {
+      "status": "root source review clear before mechanical SID projection; final cumulative root gate pending",
+      "new_composition_regressions": 8
+    },
+    "test_controller": {
+      "status": "clean at final controller and test bytes",
+      "reviewer": "/root/turing_auth_integration/turing_edge_delivery/test_controller_review",
+      "files_sha256": {
+        "apps/web/src/test-workspace/test-workspace-controller.ts": "af38a5524e18a34121baf3da9fa8f5f5d13ee503459ae754b48439a6e3161d4d",
+        "apps/web/tests/test-workspace-controller.test.ts": "f765861aac698008690fd8414fd45ae3428f2c924afe82ef3fde7cdd91684e71"
+      },
+      "accepted_findings_closed": [
+        "Quiet outer refresh no longer supersedes pending Select/Next/First intent; it retains active read cursor/selection and coalesces quiet/explicit reads."
+      ],
+      "prior_clean_controller_sha256": "5f5e045b0882f65fcaebaca1d092d9a105e279d9bdf4243671f5d0a1b413d119",
+      "prior_clean_test_sha256": "7f665fce8d357dbab09bcc9a3f426094357c8a05537ce4b309321b1ceeb42114",
+      "incremental_review": "Reviewer independently inverted only the three mechanical SID source changes in memory and recovered the prior clean controller hash exactly; current SID and retained quiet-refresh regressions inspected.",
+      "evidence_limit": "Read-only final rehash/review; no checks/builds/services/network rerun by evaluator. Prior finding had independent reproduction and repaired real-controller verification."
+    }
+  },
+  "preserved_predecessors_sha256": {
+    "supabase/migrations/20260824000100_v2_foundation.sql": "03cc111602a4dc8bc196b5bfb53b87ab1ae902096642af3fd7f45ad9428e951d",
+    "supabase/migrations/20260828000100_internal_release_backend.sql": "1a60d2fb308a8e2cfad102f9c218c319bacd95c33a40801d5b0b731119434f2f",
+    "supabase/migrations/20260903000100_staff_auth_lifecycle.sql": "72cdf8f506153606066968e94943a8d81c2da2b485e5bf43ac9b10f73a345414",
+    "supabase/migrations/20260903000200_staff_auth_generation_4.sql": "4e7321c8d9d6d3e4c27e07ab38d75252a8922868842c40c0723c349c251cac44",
+    "supabase/migrations/20260907000100_staff_auth_callback_completion.sql": "79ab31e822b4f04f4148c50bb98446210a37d975a646119b42d78fe1349a8862",
+    "supabase/migrations/20260907000200_runtime_owner_bootstrap.sql": "43527d889ae0823057bba8ab7b4ed97eb9603220658c59c56cfda70889af75c9",
+    "supabase/migrations/20260907000300_membership_revocation_authority.sql": "9c59c0192b4f960f925db8c64be1c7b2aa6843591d6214a98b29c2bac5a326ad",
+    "supabase/migrations/20260907000400_membership_administration.sql": "078a886cc923b0d9349eca992ebf1d74b06e4bbd302ee165828b4003ca3326a5",
+    "supabase/migrations/20260908000100_school_display_name.sql": "96febd78bbec6859771cb26ae095458553e19ddd75dbc438e99b54ee86549e18"
+  },
+  "ten_migration_set_sha256": "5cf17174bf44e491a6bd78fe540326d8bdee169518d75c8082e5bd9b833f3f62",
+  "fixture_digest_unchanged": "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
+  "candidate_runtime_coverage_not_executed": {
+    "new_test_sql_assertions": 255,
+    "new_test_observed_lock_scenarios": 13,
+    "total_observed_lock_scenarios": 34,
+    "total_composed_provider_groups": 14,
+    "real_restore_receipt_keys": 13,
+    "real_restore_required_true_booleans": 8,
+    "new_restore_observations": [
+      "distinctSessionTimezones",
+      "testMetadataPreserved"
+    ],
+    "boundary": "Source-reviewed coverage only; SQL/Auth/Mailpit/actual-backend browser and restore execution remain exact-commit CI gates."
+  },
+  "remaining_gates": [
+    "Final cumulative root source review.",
+    "Root-owned local commit and normal integration of verified School main.",
+    "Coordinated clean aggregate build, final synthetic public-config web build, and immutable external source/output manifest.",
+    "Banksy actual-entrypoint rendered acceptance and changed-neighbor regressions on frozen outputs.",
+    "Exact-commit required verification/security CI, including all ten migrations, real provider journeys, locks, live-backend browser and restored-target timezone/metadata evidence."
+  ],
+  "evidence_lifecycle": "This is an immutable source checkpoint, not a completion claim. Later final-build, rendered and per-commit runtime evidence belong to the existing external packet and associated PR/checks; both rendered and runtime gates are required before merge. Historical School receipts remain unchanged.",
+  "excluded_actions": [
+    "No .env/private key/authentication material read",
+    "No installs or local stack/services",
+    "No hosted mutation",
+    "No source commitment/publication by integration builder",
+    "No native or StudentSession implementation"
+  ]
+}

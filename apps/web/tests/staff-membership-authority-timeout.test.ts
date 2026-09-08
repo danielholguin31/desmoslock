@@ -1,3 +1,4 @@
+import { createStaffAuthSessionStorageFixture } from "./helpers/staff-auth-session-storage-fixture.js";
 import { createClient } from "@supabase/supabase-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -154,26 +155,23 @@ async function harness() {
     unexpectedRequests.push(url.href);
     throw new Error("Unexpected synthetic authority endpoint");
   };
+  const sessionStorage = createStaffAuthSessionStorageFixture(
+    storageKey,
+    storage,
+  );
   const client = createClient(backend, publishableKey, {
     auth: {
       autoRefreshToken: false,
       detectSessionInUrl: false,
       persistSession: true,
       storageKey,
-      storage: {
-        getItem: (key) => storage.get(key) ?? null,
-        setItem: (key, value) => {
-          storage.set(key, value);
-        },
-        removeItem: (key) => {
-          storage.delete(key);
-        },
-      },
+      storage: sessionStorage,
     },
     global: { fetch: intercepted },
   });
   await client.auth.getSession();
   const port = createSupabaseStaffAuthPort({
+    sessionStorage,
     client: client as unknown as SupabaseStaffAuthClient,
     fetch: intercepted,
     origin: "https://app.example.test",

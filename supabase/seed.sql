@@ -131,7 +131,13 @@ insert into desmoslock_v2.tests (
   workspace_id,
   created_by_profile_id,
   title,
-  seed_key
+  seed_key,
+  lifecycle,
+  revision,
+  created_at,
+  opened_at,
+  ended_at,
+  creation_request_id
 )
 values
   (
@@ -139,14 +145,26 @@ values
     '10000000-0000-4000-8000-000000000001',
     '20000000-0000-4000-8000-000000000003',
     'Synthetic Alpha Algebra Test',
-    'test.alpha.algebra'
+    'test.alpha.algebra',
+    'draft',
+    1,
+    '2000-01-01T00:00:00.000000Z',
+    null,
+    null,
+    null
   ),
   (
     '30000000-0000-4000-8000-000000000002',
     '10000000-0000-4000-8000-000000000002',
     '20000000-0000-4000-8000-000000000013',
     'Synthetic Beta Algebra Test',
-    'test.beta.algebra'
+    'test.beta.algebra',
+    'draft',
+    1,
+    '2000-01-01T00:00:00.000000Z',
+    null,
+    null,
+    null
   )
 on conflict do nothing;
 

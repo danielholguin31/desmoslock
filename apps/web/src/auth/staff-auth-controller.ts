@@ -107,6 +107,7 @@ export type StaffAuthAccessGrant = {
   readonly assuranceLevel: "aal1" | "aal2";
   readonly identity: StaffAuthBoundaryIdentity;
   readonly identityGeneration: string;
+  readonly providerSessionId: string;
   readonly kind: "access_granted";
   /** Adapter-filtered to the exact active identity School before this boundary. */
   readonly manageableInvitations: readonly StaffAuthBoundaryManagedInvitation[];
@@ -1098,6 +1099,7 @@ export function createStaffAuthController(dependencies: {
   ): boolean {
     return (
       left.sessionGeneration === right.sessionGeneration &&
+      left.providerSessionId === right.providerSessionId &&
       left.identityGeneration === right.identityGeneration &&
       sameIdentity(left.identity, right.identity)
     );
@@ -1318,6 +1320,7 @@ export function createStaffAuthController(dependencies: {
       result.identity.accountId !== expected.identity.accountId ||
       result.identity.profile.id !== expected.identity.profile.id ||
       result.identity.school.id !== expected.identity.school.id ||
+      result.providerSessionId !== expected.providerSessionId ||
       result.sessionGeneration !== expected.sessionGeneration
     )
       return false;
@@ -1889,6 +1892,7 @@ export function createStaffAuthController(dependencies: {
       role: identity.membership.role,
       assuranceLevel: activeGrant.assuranceLevel,
       identityGeneration: activeGrant.identityGeneration,
+      providerSessionId: activeGrant.providerSessionId,
       sessionGeneration: activeGrant.sessionGeneration,
     };
     if (isMembershipRefreshState()) {
@@ -3573,7 +3577,11 @@ function decodeAccessGrant(value: unknown): StaffAuthAccessGrant | null {
     record.kind !== "access_granted" ||
     (record.assuranceLevel !== "aal1" && record.assuranceLevel !== "aal2") ||
     !validText(record.identityGeneration, 256) ||
-    !validText(record.sessionGeneration, 256)
+    !validText(record.sessionGeneration, 256) ||
+    typeof record.providerSessionId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+      record.providerSessionId,
+    )
   ) {
     return null;
   }
@@ -3602,6 +3610,7 @@ function decodeAccessGrant(value: unknown): StaffAuthAccessGrant | null {
           "kind",
           "manageableInvitations",
           "manageableStaff",
+          "providerSessionId",
           "secondFactor",
           "sessionGeneration",
         ]
@@ -3614,6 +3623,7 @@ function decodeAccessGrant(value: unknown): StaffAuthAccessGrant | null {
             "kind",
             "manageableInvitations",
             "manageableStaff",
+            "providerSessionId",
             "secondFactor",
             "sessionGeneration",
           ]
@@ -3624,6 +3634,7 @@ function decodeAccessGrant(value: unknown): StaffAuthAccessGrant | null {
             "kind",
             "manageableInvitations",
             "manageableStaff",
+            "providerSessionId",
             "secondFactor",
             "sessionGeneration",
           ];
@@ -3702,6 +3713,7 @@ function decodeAccessGrant(value: unknown): StaffAuthAccessGrant | null {
     kind: "access_granted" as const,
     manageableInvitations: invitations,
     manageableStaff: staff,
+    providerSessionId: record.providerSessionId,
     sessionGeneration: record.sessionGeneration,
   };
   if (record.secondFactor === "challenge_required") {

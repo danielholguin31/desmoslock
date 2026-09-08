@@ -35,6 +35,7 @@ function access(
       },
     },
     identityGeneration: `identity-${role}`,
+    providerSessionId: "81000000-0000-4000-8000-000000000001",
     kind: "access_granted",
     manageableInvitations:
       role === "teacher"
@@ -569,3 +570,54 @@ describe("School presentation through Membership authority", () => {
     },
   );
 });
+
+it("invalidates a pending Membership intent on verified provider-session replacement even when local epochs are unchanged", async () => {
+  const first = access();
+  const h = harness(first);
+  await h.controller.dispatch({ type: "bootstrap" });
+  await h.controller.dispatch({
+    type: "review_staff_membership_revocation",
+    profileId: "profile-target",
+    schoolId: "school-alpha",
+  });
+  h.resetObservations();
+  const replacement = {
+    ...first,
+    providerSessionId: "81000000-0000-4000-8000-000000000002",
+  };
+  h.read.mockResolvedValue(replacement);
+  await h.controller.refreshMembership();
+  expect(h.order).toEqual(["clear", "state:authenticated"]);
+  expect(h.controller.getSnapshot()).toMatchObject({
+    kind: "authenticated",
+    notice: "staff_access_changed",
+  });
+  expect(h.controller.getProductAccess()).toMatchObject({
+    kind: "ready",
+    access: { authority: { providerSessionId: replacement.providerSessionId } },
+  });
+  await h.controller.dispatch({ type: "confirm_staff_membership_revocation" });
+  expect(h.perform).not.toHaveBeenCalled();
+});
+
+it.each([
+  undefined,
+  null,
+  "",
+  "session-current",
+  "81000000-0000-4000-8000-00000000000A",
+  "81000000-0000-0000-8000-000000000001",
+  "81000000-0000-4000-7000-000000000001",
+])(
+  "rejects missing or noncanonical verified provider session %j before exposing product authority",
+  async (providerSessionId) => {
+    const candidate: unknown = { ...access(), providerSessionId };
+    const h = harness(candidate as StaffAuthBoundaryResult);
+    await h.controller.dispatch({ type: "bootstrap" });
+    expect(h.controller.getProductAccess()).toEqual({ kind: "unavailable" });
+    expect(h.controller.getSnapshot()).toMatchObject({
+      kind: "dependency_failure",
+    });
+    expect(h.perform).not.toHaveBeenCalled();
+  },
+);

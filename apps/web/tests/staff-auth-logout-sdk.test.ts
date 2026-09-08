@@ -1,3 +1,4 @@
+import { createStaffAuthSessionStorageFixture } from "./helpers/staff-auth-session-storage-fixture.js";
 import { createClient, isAuthSessionMissingError } from "@supabase/supabase-js";
 import { describe, expect, it } from "vitest";
 
@@ -15,6 +16,12 @@ const accountIds = {
   B: "a1000000-0000-4000-8000-000000000002",
 } as const;
 type Account = keyof typeof accountIds;
+const providerSessionIds: Record<Account, string> = {
+  A: "b1000000-0000-4000-8000-000000000001",
+  B: "b1000000-0000-4000-8000-000000000002",
+};
+const replacementSessionId = "b1000000-0000-4000-8000-000000000003";
+type SessionVariant = Account | "A2" | "AR";
 type Scope = "local" | "all";
 type RequestPhase = "account" | "application" | "provider";
 
@@ -26,7 +33,11 @@ function deferred() {
   return { promise, resolve };
 }
 
-function syntheticSession(account: Account) {
+function syntheticSession(
+  account: Account,
+  providerSessionId = providerSessionIds[account],
+  tokenVersion = 0,
+) {
   const now = Math.floor(Date.now() / 1_000);
   const user = {
     app_metadata: {},
@@ -50,7 +61,8 @@ function syntheticSession(account: Account) {
       exp: now + 3_600,
       iat: now,
       role: "authenticated",
-      session_id: `b1000000-0000-4000-8000-00000000000${account === "A" ? "1" : "2"}`,
+      session_id: providerSessionId,
+      jti: String(tokenVersion),
       sub: user.id,
     },
     "synthetic-signature",
@@ -68,12 +80,22 @@ function syntheticSession(account: Account) {
 }
 
 async function harness() {
-  const sessions = { A: syntheticSession("A"), B: syntheticSession("B") };
+  const sessions = {
+    A: syntheticSession("A"),
+    B: syntheticSession("B"),
+    A2: syntheticSession("A", replacementSessionId),
+    AR: syntheticSession("A", providerSessionIds.A, 1),
+  };
   const storage = new Map([[storageKey, JSON.stringify(sessions.A)]]);
   const requests: Array<{
     readonly account: Account | "unknown";
     readonly method: string;
     readonly path: string;
+  }> = [];
+  const sessionRequests: Array<{
+    variant: SessionVariant | undefined;
+    method: string;
+    path: string;
   }> = [];
   const ended = new Set<Account>();
   let hold:
@@ -104,12 +126,16 @@ async function harness() {
       return response;
     };
     const authorization = request.headers.get("authorization");
+    const variant = (Object.keys(sessions) as SessionVariant[]).find(
+      (key) => authorization === `Bearer ${sessions[key].access_token}`,
+    );
     const account =
-      authorization === `Bearer ${sessions.A.access_token}`
-        ? "A"
-        : authorization === `Bearer ${sessions.B.access_token}`
-          ? "B"
-          : "unknown";
+      variant === undefined ? "unknown" : variant === "B" ? "B" : "A";
+    sessionRequests.push({
+      variant,
+      method: request.method,
+      path: url.pathname,
+    });
     const path = `${url.pathname}${url.search}`;
     requests.push({ account, method: request.method, path });
     const phase: RequestPhase | undefined =
@@ -172,20 +198,16 @@ async function harness() {
     throw new Error("Unexpected synthetic SDK endpoint");
   };
 
+  const sessionStorage = createStaffAuthSessionStorageFixture(
+    storageKey,
+    storage,
+  );
   const client = createClient(backendUrl, publishableKey, {
     auth: {
       autoRefreshToken: false,
       detectSessionInUrl: false,
       persistSession: true,
-      storage: {
-        getItem: (key) => storage.get(key) ?? null,
-        removeItem: (key) => {
-          storage.delete(key);
-        },
-        setItem: (key, value) => {
-          storage.set(key, value);
-        },
-      },
+      storage: sessionStorage,
       storageKey,
     },
     global: { fetch: interceptedFetch },
@@ -193,6 +215,7 @@ async function harness() {
   // Settle SDK initialization before observing adapter state-change events.
   await client.auth.getSession();
   const port = createSupabaseStaffAuthPort({
+    sessionStorage,
     client: client as unknown as SupabaseStaffAuthClient,
     fetch: interceptedFetch,
     origin: "https://app.example.test",
@@ -224,8 +247,17 @@ async function harness() {
       authority.identity.accountId === accountIds.A,
   ).toBe(true);
   requests.length = 0;
+  sessionRequests.length = 0;
 
   return {
+    sessions,
+    sessionRequests,
+    replaceSession(variant: SessionVariant) {
+      storage.set(storageKey, JSON.stringify(sessions[variant]));
+    },
+    sessionUnchanged: (variant: SessionVariant) =>
+      storage.get(storageKey) === JSON.stringify(sessions[variant]),
+    initialAuthority: authority,
     adapter,
     cached(account: Account) {
       return storage.get(storageKey) === JSON.stringify(sessions[account]);
@@ -281,6 +313,131 @@ function expectedMutations(scope: Scope) {
 }
 
 describe("normal logout with the installed Supabase SDK, real port and adapter", () => {
+  it.each(["A2", "B"] as const)(
+    "rejects logout if %s replaces the visible session before capture without an auth event",
+    async (variant) => {
+      const fixture = await harness();
+      let events = 0;
+      const unsubscribe = fixture.adapter.subscribe(() => {
+        events += 1;
+      });
+      try {
+        fixture.replaceSession(variant);
+        await expect(
+          fixture.adapter.perform({
+            operationId: fixture.operationId(),
+            scope: "local",
+            type: "sign_out",
+          }),
+        ).rejects.toThrow("authority");
+        expect(events).toBe(0);
+        expect(
+          fixture.requests.filter(({ method }) => method === "POST"),
+        ).toEqual([]);
+        expect(fixture.sessionUnchanged(variant)).toBe(true);
+        expect(fixture.ended.size).toBe(0);
+      } finally {
+        unsubscribe();
+        fixture.dispose();
+      }
+    },
+  );
+
+  it.each(["A2", "AR"] as const)(
+    "retains identity and changes the local session generation only for a verified new SID (%s)",
+    async (variant) => {
+      const fixture = await harness();
+      let events = 0;
+      const unsubscribe = fixture.adapter.subscribe(() => {
+        events += 1;
+      });
+      try {
+        const initial = fixture.initialAuthority;
+        if (initial.kind !== "access_granted")
+          throw new Error("Expected initial grant");
+        expect(initial.providerSessionId).toBe(providerSessionIds.A);
+        fixture.replaceSession(variant);
+        const fresh = await fixture.adapter.read();
+        if (fresh.kind !== "access_granted")
+          throw new Error("Expected fresh grant");
+        expect(fresh.identityGeneration).toBe(initial.identityGeneration);
+        expect(fresh.providerSessionId).toBe(
+          variant === "A2" ? replacementSessionId : providerSessionIds.A,
+        );
+        if (variant === "A2")
+          expect(fresh.sessionGeneration).not.toBe(initial.sessionGeneration);
+        else expect(fresh.sessionGeneration).toBe(initial.sessionGeneration);
+        expect(events).toBe(0);
+        await expect(fixture.adapter.read()).resolves.toEqual(fresh);
+        expect(fixture.sessionUnchanged(variant)).toBe(true);
+      } finally {
+        unsubscribe();
+        fixture.dispose();
+      }
+    },
+  );
+
+  it.each<Scope>(["local", "all"])(
+    "accepts a renewed token from the visible S1 for both %s logout phases",
+    async (scope) => {
+      const fixture = await harness();
+      try {
+        fixture.replaceSession("AR");
+        const result = await fixture.adapter.perform({
+          operationId: fixture.operationId(),
+          scope,
+          type: "sign_out",
+        });
+        expect(result.result).toEqual({ kind: "sign_out_complete", scope });
+        expect(
+          fixture.requests.filter(({ method }) => method === "POST"),
+        ).toEqual(expectedMutations(scope));
+        expect(
+          fixture.sessionRequests.every(({ variant }) => variant === "AR"),
+        ).toBe(true);
+        expect(fixture.sessionUnchanged("AR")).toBe(true);
+      } finally {
+        fixture.dispose();
+      }
+    },
+  );
+
+  it.each(
+    (["local", "all"] as const).flatMap((scope) =>
+      (["application", "provider"] as const).map((phase) => ({ phase, scope })),
+    ),
+  )(
+    "keeps captured S1 in both logout phases if S2 replaces storage during $scope $phase",
+    async ({ phase, scope }) => {
+      const fixture = await harness();
+      const gate = fixture.hold(phase);
+      try {
+        const pending = fixture.adapter.perform({
+          operationId: fixture.operationId(),
+          scope,
+          type: "sign_out",
+        });
+        await gate.entered.promise;
+        fixture.replaceSession("A2");
+        gate.released.resolve();
+        expect((await pending).result).toEqual({
+          kind: "sign_out_complete",
+          scope,
+        });
+        expect(
+          fixture.requests.filter(({ method }) => method === "POST"),
+        ).toEqual(expectedMutations(scope));
+        expect(
+          fixture.sessionRequests.every(({ variant }) => variant === "A"),
+        ).toBe(true);
+        expect(fixture.sessionUnchanged("A2")).toBe(true);
+      } finally {
+        gate.released.resolve();
+        fixture.dispose();
+      }
+    },
+  );
+
   it("control reproduces stale SDK account verification erasing replacement B", async () => {
     const fixture = await harness();
     const gate = fixture.hold("account");

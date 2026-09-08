@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { chromium } from "@playwright/test";
 import { build } from "esbuild";
+import { parseCreateSchoolTestRpcResult } from "@desmoslock/contracts";
 
 import { createAppBrowserDefine } from "../../scripts/build-app.mjs";
 
@@ -22,12 +23,17 @@ const root = path.resolve(
 // Optional schoolSettings adds a UI Save and an external rename before the
 // existing downgrade/revocation. Its renameExternally(displayName) callback
 // must perform and verify a real same-School RPC using the caller-owned client.
+// Optional testWorkspace supplies titlePrefix and same-School real-client
+// updateTitleExternally(testId, title), openExternally(testId), and
+// endExternally(testId) callbacks. They must read the current revision and
+// verify each mutation; browser-created Test IDs remain only in memory.
 export async function runMembershipBrowserAcceptance({
   publishableKey,
   owner,
   actor,
   schoolId,
   schoolSettings,
+  testWorkspace,
 }) {
   let server;
   let browser;
@@ -62,6 +68,11 @@ export async function runMembershipBrowserAcceptance({
       [
         "/school-settings/school-settings.css",
         "school-settings/school-settings.css",
+        "text/css",
+      ],
+      [
+        "/test-workspace/test-workspace.css",
+        "test-workspace/test-workspace.css",
         "text/css",
       ],
     ])
@@ -107,6 +118,7 @@ export async function runMembershipBrowserAcceptance({
     let navigations = 0;
     let observedTeacher = false;
     let observedInactive = false;
+    let observedTestStylesheet = false;
     const observedSchoolNames = new Set();
     page.on("pageerror", () => {
       errors += 1;
@@ -115,6 +127,12 @@ export async function runMembershipBrowserAcceptance({
       if (frame === page.mainFrame()) navigations += 1;
     });
     page.on("response", async (response) => {
+      if (
+        new URL(response.url()).pathname ===
+          "/test-workspace/test-workspace.css" &&
+        response.status() === 200
+      )
+        observedTestStylesheet = true;
       if (
         new URL(response.url()).pathname !==
         "/rest/v1/rpc/current_staff_context"
@@ -174,15 +192,39 @@ export async function runMembershipBrowserAcceptance({
       "Administrator browser exposed Owner-only invitations",
     );
     const documentStart = await page.evaluate(() => performance.timeOrigin);
+    const setStage = (nextStage) => {
+      stage = nextStage;
+    };
+    const tests =
+      testWorkspace === undefined
+        ? null
+        : await startTestWorkspace(page, testWorkspace, setStage);
 
     if (schoolSettings !== undefined) {
-      await exerciseSchoolSettings(page, schoolSettings, (nextStage) => {
-        stage = nextStage;
+      await exerciseSchoolSettings(page, schoolSettings, setStage, async () => {
+        if (tests !== null) {
+          await page
+            .locator("[data-test-workspace-root]")
+            .getByText(`School: ${schoolSettings.localDisplayName}`, {
+              exact: true,
+            })
+            .waitFor();
+          await reviewBrowserTestEnd(page, tests, setStage);
+        }
       });
       check(
         observedSchoolNames.has(schoolSettings.localDisplayName) &&
           observedSchoolNames.has(schoolSettings.externalDisplayName),
         "Browser did not observe both real backend School name revisions",
+      );
+    } else if (tests !== null) {
+      await reviewBrowserTestEnd(page, tests, setStage);
+    }
+    if (tests !== null) {
+      await finishTestWorkspace(page, tests, schoolSettings, setStage);
+      check(
+        observedTestStylesheet,
+        "Production browser did not load its Test workspace stylesheet",
       );
     }
 
@@ -235,6 +277,20 @@ export async function runMembershipBrowserAcceptance({
         "Downgraded browser retained School editing or Membership confirmation",
       );
     }
+    if (tests !== null) {
+      await page.locator('[data-test-workspace-status="ready"]').waitFor();
+      check(
+        (await page
+          .locator("[data-test-workspace-root]")
+          .getByLabel("New Test title", { exact: true })
+          .inputValue()) === "" &&
+          (await page
+            .locator("[data-test-workspace-root]")
+            .getByRole("button", { name: "Create Test", exact: true })
+            .isEnabled()),
+        "Role downgrade retained old Test intent or denied a fresh Teacher workspace",
+      );
+    }
 
     stage = "same-document backend revocation";
     code(
@@ -277,6 +333,15 @@ export async function runMembershipBrowserAcceptance({
         "Revoked browser retained protected School settings presentation",
       );
     }
+    if (tests !== null) {
+      check(
+        (await page.locator("[data-test-workspace-heading]").count()) === 0 &&
+          (await page
+            .getByText(tests.remoteChangedTitle, { exact: true })
+            .count()) === 0,
+        "Revoked browser retained protected Test presentation",
+      );
+    }
     check(
       navigations === 1 &&
         (await page.evaluate(() => performance.timeOrigin)) === documentStart,
@@ -299,7 +364,12 @@ export async function runMembershipBrowserAcceptance({
   }
 }
 
-async function exerciseSchoolSettings(page, settings, setStage) {
+async function exerciseSchoolSettings(
+  page,
+  settings,
+  setStage,
+  afterLocalSave,
+) {
   const {
     localDisplayName,
     externalDisplayName,
@@ -389,6 +459,7 @@ async function exerciseSchoolSettings(page, settings, setStage) {
     "Local School rename remounted or discarded the unrelated invitation draft",
   );
   await originalEmail?.dispose();
+  await afterLocalSave?.();
 
   const selectedTarget = await memberSelect.evaluate((select, email) => {
     const matches = Array.from(select.options).filter(
@@ -458,10 +529,10 @@ async function exerciseSchoolSettings(page, settings, setStage) {
     "External School rename lost the dirty draft, focus, caret or revision conflict",
   );
   check(
-    (await page
+    (await schoolSection
       .getByRole("button", { name: "Keep my draft", exact: true })
       .isVisible()) &&
-      (await page
+      (await schoolSection
         .getByRole("button", { name: "Save", exact: true })
         .isHidden()),
     "Dirty School draft silently adopted the new revision without reconciliation",
@@ -471,7 +542,9 @@ async function exerciseSchoolSettings(page, settings, setStage) {
 
   // Restore the management form to check its retained private form state, then
   // reopen the same confirmation so the existing live downgrade must clear it.
-  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await authSection
+    .getByRole("button", { name: "Cancel", exact: true })
+    .click();
   await page
     .getByRole("heading", { name: "Administrator access", exact: true })
     .waitFor();
@@ -492,4 +565,317 @@ async function exerciseSchoolSettings(page, settings, setStage) {
       exact: true,
     })
     .waitFor();
+}
+
+async function createBrowserTest(page, title) {
+  const section = page.locator("[data-test-workspace-root]");
+  await page.locator('[data-test-workspace-status="ready"]').waitFor();
+  await section.getByLabel("New Test title", { exact: true }).fill(title);
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname ===
+          "/rest/v1/rpc/create_school_test" &&
+        response.request().method() === "POST",
+    ),
+    section.getByRole("button", { name: "Create Test", exact: true }).click(),
+  ]);
+  const result = parseCreateSchoolTestRpcResult(await response.json());
+  check(
+    response.ok() && result?.ok && result.code === "test_created",
+    "Browser creation did not return one real Test identity",
+  );
+  await section.getByText("Test created.", { exact: true }).waitFor();
+  await section.getByRole("heading", { name: title, exact: true }).waitFor();
+  return result.testId;
+}
+
+async function startTestWorkspace(page, settings, setStage) {
+  check(
+    typeof settings.titlePrefix === "string" &&
+      settings.titlePrefix.length > 0 &&
+      typeof settings.updateTitleExternally === "function" &&
+      typeof settings.openExternally === "function" &&
+      typeof settings.endExternally === "function",
+    "Test browser callback contract is incomplete",
+  );
+  const tests = {
+    settings,
+    localTitle: `${settings.titlePrefix} local draft`,
+    localSavedTitle: `${settings.titlePrefix} local saved`,
+    localDirtyTitle: `${settings.titlePrefix} retained title`,
+    remoteTitle: `${settings.titlePrefix} external draft`,
+    remoteSavedTitle: `${settings.titlePrefix} external saved`,
+    remoteChangedTitle: `${settings.titlePrefix} changed during end review`,
+    remoteDirtyTitle: `${settings.titlePrefix} unsaved title`,
+    createDraft: `${settings.titlePrefix} unsaved creation`,
+    mutationRequests: 0,
+  };
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      [
+        "/rest/v1/rpc/create_school_test",
+        "/rest/v1/rpc/update_test_title",
+        "/rest/v1/rpc/open_test",
+        "/rest/v1/rpc/end_test",
+      ].includes(new URL(request.url()).pathname)
+    )
+      tests.mutationRequests += 1;
+  });
+  const section = page.locator("[data-test-workspace-root]");
+  setStage("real browser Test creation, title save and opening");
+  tests.localId = await createBrowserTest(page, tests.localTitle);
+  const title = section.getByLabel("Test title", { exact: true });
+  await title.fill(tests.localSavedTitle);
+  await section
+    .getByRole("button", { name: "Save title", exact: true })
+    .click();
+  await section
+    .getByText("Saved the Test title change.", { exact: true })
+    .waitFor();
+  await section
+    .getByRole("heading", { name: tests.localSavedTitle, exact: true })
+    .waitFor();
+  await section.getByRole("button", { name: "Open Test", exact: true }).click();
+  await section.getByText("Opened the Test.", { exact: true }).waitFor();
+  await title.fill(tests.localDirtyTitle);
+  tests.originalTitle = await title.elementHandle();
+  return tests;
+}
+
+async function reviewBrowserTestEnd(page, tests, setStage) {
+  setStage("retained Test draft and fresh End review after School Save");
+  const section = page.locator("[data-test-workspace-root]");
+  check(
+    tests.originalTitle !== null &&
+      (await tests.originalTitle.evaluate(
+        (input, title) => input.isConnected && input.value === title,
+        tests.localDirtyTitle,
+      )),
+    "School Save remounted or discarded the dirty Test title",
+  );
+  await tests.originalTitle?.dispose();
+  await section
+    .getByRole("button", { name: "Save title", exact: true })
+    .click();
+  await section
+    .getByText("Saved the Test title change.", { exact: true })
+    .waitFor();
+  await section.getByRole("button", { name: "End Test", exact: true }).click();
+  await section
+    .getByRole("heading", { name: "End this Test?", exact: true })
+    .waitFor();
+  tests.originalEnd = await section
+    .getByRole("button", { name: "Confirm end", exact: true })
+    .elementHandle();
+}
+
+async function finishTestWorkspace(page, tests, schoolSettings, setStage) {
+  const section = page.locator("[data-test-workspace-root]");
+  const detail = section.locator(".test-workspace__detail");
+  const title = section.getByLabel("Test title", { exact: true });
+  const school = page.locator("[data-school-settings-root]");
+  const auth = page.locator("[data-auth-status]");
+  const schoolName = school.getByLabel("School name", { exact: true });
+  let originalSchool = null;
+  let originalMembership = null;
+  let schoolDraft = null;
+  if (schoolSettings !== undefined) {
+    await section
+      .getByText(
+        `End “${tests.localDirtyTitle}” at ${schoolSettings.externalDisplayName}?`,
+        { exact: true },
+      )
+      .waitFor();
+    originalSchool = await schoolName.elementHandle();
+    schoolDraft = await schoolName.inputValue();
+    originalMembership = await auth
+      .getByRole("button", { name: "Revoke staff access", exact: true })
+      .elementHandle();
+  }
+  async function checkSiblings() {
+    if (schoolSettings === undefined) return;
+    check(
+      originalSchool !== null &&
+        (await originalSchool.evaluate(
+          (input, draft) => input.isConnected && input.value === draft,
+          schoolDraft,
+        )) &&
+        (await school
+          .locator('[data-school-settings-status="conflict"]')
+          .count()) === 1 &&
+        originalMembership !== null &&
+        (await originalMembership.evaluate(
+          (button) => button.isConnected && !button.disabled,
+        )) &&
+        (await auth.getAttribute("data-auth-status")) ===
+          "confirming_staff_membership_revocation",
+      "Test changes remounted or discarded a School draft or Membership confirmation",
+    );
+  }
+
+  setStage("real browser Test ending with preserved sibling modules");
+  await section
+    .locator('[data-test-workspace-action="confirm_end"]:not(:disabled)')
+    .waitFor();
+  check(
+    tests.originalEnd !== null &&
+      (await tests.originalEnd.evaluate(
+        (button) => button.isConnected && !button.disabled,
+      )),
+    "School rename replaced or cancelled the Test End confirmation",
+  );
+  await tests.originalEnd?.dispose();
+  await section
+    .getByRole("button", { name: "Confirm end", exact: true })
+    .click();
+  await section
+    .getByText("Test ended. Participation is closed.", { exact: true })
+    .waitFor();
+  await detail
+    .getByText("Participation is closed. This Test is read-only.", {
+      exact: true,
+    })
+    .waitFor();
+  check(
+    (await title.isHidden()) &&
+      (await section
+        .getByRole("button", { name: "Open Test", exact: true })
+        .count()) === 0 &&
+      (await section
+        .getByRole("button", { name: "End Test", exact: true })
+        .count()) === 0,
+    "Browser-ended Test retained title or lifecycle controls",
+  );
+  await checkSiblings();
+
+  setStage("external Test title refresh with a dirty focused title");
+  const remoteId = await createBrowserTest(page, tests.remoteTitle);
+  check(remoteId !== tests.localId, "Separate browser creations reused a Test");
+  const originalTitle = await title.elementHandle();
+  await title.fill(tests.remoteDirtyTitle);
+  await title.evaluate((input) => {
+    input.focus();
+    input.setSelectionRange(3, 10);
+  });
+  const mutationsBeforeExternal = tests.mutationRequests;
+  await tests.settings.updateTitleExternally(remoteId, tests.remoteSavedTitle);
+  await section
+    .getByRole("heading", { name: tests.remoteSavedTitle, exact: true })
+    .waitFor();
+  await page.locator('[data-test-workspace-status="conflict"]').waitFor();
+  check(
+    originalTitle !== null &&
+      (await originalTitle.evaluate(
+        (input, draft) =>
+          input.isConnected &&
+          input.value === draft &&
+          input.ownerDocument.activeElement === input &&
+          input.selectionStart === 3 &&
+          input.selectionEnd === 10,
+        tests.remoteDirtyTitle,
+      )) &&
+      (await section
+        .getByRole("button", { name: "Keep my draft", exact: true })
+        .isEnabled()) &&
+      (await section
+        .getByRole("button", { name: "Save title", exact: true })
+        .isDisabled()),
+    "Passive Test title refresh lost the draft, focus, caret or explicit conflict",
+  );
+  await originalTitle?.dispose();
+  await checkSiblings();
+  await section
+    .getByRole("button", { name: "Use current Test", exact: true })
+    .click();
+  await page.locator('[data-test-workspace-status="ready"]').waitFor();
+  check(
+    (await title.inputValue()) === tests.remoteSavedTitle,
+    "Explicit Test reconciliation did not adopt the current title",
+  );
+
+  setStage("passive external Test opening with retained School focus");
+  if (schoolSettings !== undefined)
+    await schoolName.evaluate((input) => {
+      input.focus();
+      input.setSelectionRange(3, 10);
+    });
+  await tests.settings.openExternally(remoteId);
+  await detail.getByText("Open", { exact: true }).waitFor();
+  await section
+    .locator('[data-test-workspace-action="review_end"]:not(:disabled)')
+    .waitFor();
+  if (schoolSettings !== undefined)
+    check(
+      await originalSchool.evaluate(
+        (input) =>
+          input.ownerDocument.activeElement === input &&
+          input.selectionStart === 3 &&
+          input.selectionEnd === 10,
+      ),
+      "Passive Test opening stole the sibling School input focus or caret",
+    );
+  await checkSiblings();
+
+  setStage("external Test title change cancels the original End intent");
+  await section.getByRole("button", { name: "End Test", exact: true }).click();
+  await section
+    .getByRole("heading", { name: "End this Test?", exact: true })
+    .waitFor();
+  await tests.settings.updateTitleExternally(
+    remoteId,
+    tests.remoteChangedTitle,
+  );
+  await section
+    .getByRole("heading", { name: tests.remoteChangedTitle, exact: true })
+    .waitFor();
+  await page.locator('[data-test-workspace-status="conflict"]').waitFor();
+  check(
+    (await section
+      .getByRole("button", { name: "Confirm end", exact: true })
+      .count()) === 0 &&
+      (await section
+        .getByRole("button", { name: "Keep my draft", exact: true })
+        .count()) === 0,
+    "Changed Test retained an obsolete End confirmation or silently rebased it",
+  );
+  await section
+    .getByRole("button", { name: "Use current Test", exact: true })
+    .click();
+  await section.getByRole("button", { name: "End Test", exact: true }).click();
+  await section
+    .getByRole("heading", { name: "End this Test?", exact: true })
+    .waitFor();
+
+  setStage("passive external Test ending invalidates fresh End review");
+  await tests.settings.endExternally(remoteId);
+  await detail.getByText("Ended", { exact: true }).waitFor();
+  await page.locator('[data-test-workspace-status="conflict"]').waitFor();
+  check(
+    (await section
+      .getByRole("button", { name: "Confirm end", exact: true })
+      .count()) === 0 && (await title.isHidden()),
+    "Externally ended Test retained an interactive title or End confirmation",
+  );
+  await section
+    .getByRole("button", { name: "Use current Test", exact: true })
+    .click();
+  await page.locator('[data-test-workspace-status="ready"]').waitFor();
+  await detail
+    .getByText("Participation is closed. This Test is read-only.", {
+      exact: true,
+    })
+    .waitFor();
+  await checkSiblings();
+  check(
+    tests.mutationRequests === mutationsBeforeExternal &&
+      mutationsBeforeExternal === 6,
+    "Browser replayed a Test mutation or skipped the six explicit UI writes",
+  );
+  await section
+    .getByLabel("New Test title", { exact: true })
+    .fill(tests.createDraft);
+  await originalSchool?.dispose();
+  await originalMembership?.dispose();
 }

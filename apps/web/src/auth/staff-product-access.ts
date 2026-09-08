@@ -5,6 +5,7 @@ import type { StaffRole } from "./staff-auth-controller.js";
 /** Nonsecret verified authority; School presentation does not change this key. */
 export interface StaffProductAuthority {
   readonly accountId: string;
+  readonly providerSessionId: string;
   readonly profileId: string;
   readonly membershipId: string;
   readonly schoolId: string;

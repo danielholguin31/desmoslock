@@ -402,7 +402,9 @@ test("v2 data plane is migration-owned and clean-start only", () => {
     "supabase/migrations/20260907000300_membership_revocation_authority.sql",
     "supabase/migrations/20260907000400_membership_administration.sql",
     "supabase/migrations/20260908000100_school_display_name.sql",
+    "supabase/migrations/20260908000200_test_workspace.sql",
     "supabase/tests/database/school_display_name.test.sql",
+    "supabase/tests/database/test_workspace.test.sql",
     "supabase/seed.sql",
     "supabase/tests/database/internal_release_backend.test.sql",
     "supabase/tests/database/staff_auth_generation_4.test.sql",
@@ -608,9 +610,15 @@ test("generation-4 attests the exact normalized migration history", () => {
         "078a886cc923b0d9349eca992ebf1d74b06e4bbd302ee165828b4003ca3326a5",
     },
     "20260908000100_school_display_name.sql": {
-      migrationSetSha256: expectedMigrationSetSha256,
+      migrationSetSha256:
+        "9264f3b4933e4f1bb207d5a1a130ab0b3edafea787ac37fb25268b09afba2538",
       rawSha256:
         "96febd78bbec6859771cb26ae095458553e19ddd75dbc438e99b54ee86549e18",
+    },
+    "20260908000200_test_workspace.sql": {
+      migrationSetSha256: expectedMigrationSetSha256,
+      rawSha256:
+        "233123dd9038740ef724432715cc17e32a5adc2be68160466fa11f5b2dfb865c",
     },
   });
   assert.doesNotThrow(() => assertMigrationSetAttestation(migrations));
@@ -637,6 +645,7 @@ test("generation-4 attests the exact normalized migration history", () => {
     "20260907000200_runtime_owner_bootstrap.sql",
     "20260907000300_membership_revocation_authority.sql",
     "20260907000400_membership_administration.sql",
+    "20260908000100_school_display_name.sql",
   ]) {
     assert.throws(
       () =>
@@ -673,7 +682,7 @@ test("generation-4 attests the exact normalized migration history", () => {
       assertMigrationSetAttestation(
         migrations.map(([fileName, source]) => [
           fileName,
-          fileName === "20260908000100_school_display_name.sql"
+          fileName === "20260908000200_test_workspace.sql"
             ? source.replace(expectedMigrationSetSha256, "0".repeat(64))
             : source,
         ]),

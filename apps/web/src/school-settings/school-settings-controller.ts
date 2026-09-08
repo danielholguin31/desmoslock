@@ -53,7 +53,10 @@ export type SchoolSettingsAction =
     };
 
 export interface SchoolSettingsPort {
-  captureSchoolSettingsAuthority(expectedAccountId: string): Promise<unknown>;
+  captureSchoolSettingsAuthority(
+    expectedAccountId: string,
+    expectedProviderSessionId: string,
+  ): Promise<unknown>;
   updateSchoolDisplayName(
     request: UpdateSchoolDisplayNameRequest,
     authorityHandle: string,
@@ -419,6 +422,7 @@ export function createSchoolSettingsController(
       try {
         captured = await dependencies.port.captureSchoolSettingsAuthority(
           intent.authority.accountId,
+          intent.authority.providerSessionId,
         );
       } catch {
         captured = null;
@@ -570,6 +574,7 @@ function sameAuthority(
 ): boolean {
   return (
     left.accountId === right.accountId &&
+    left.providerSessionId === right.providerSessionId &&
     left.profileId === right.profileId &&
     left.membershipId === right.membershipId &&
     left.schoolId === right.schoolId &&

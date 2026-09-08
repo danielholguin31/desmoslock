@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import "./staff-suite-diagnostics-reporter.test.mjs";
 import {
   boundedCommand,
   connectionFromStatus,
   FixtureFailure,
   isExpectedInvalidRootCertificate,
   nativeClientWrapper,
+  runStaffSuite,
   sourceConfiguration,
+  StaffSuiteCommandFailure,
+  withSessionTimezone,
 } from "./synthetic-backup-runtime.mjs";
 
 const node = process.execPath;
@@ -38,6 +45,107 @@ test("nonzero subprocess output remains behind a static error", async () => {
       { timeoutMs: 5_000 },
     ),
     failure("FIXTURE_COMMAND_FAILED"),
+  );
+});
+
+test("only the real staff npm invocation returns closed failure locations after context wrapping", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "staff-failure-"));
+  try {
+    await fs.mkdir(path.join(directory, "tests/acceptance"), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(directory, "package.json"),
+      JSON.stringify({
+        private: true,
+        scripts: {
+          "test:staff-auth": "npm run test:staff-auth:composed",
+          "test:staff-auth:composed":
+            "node --test tests/acceptance/staff-auth-composed.test.mjs",
+        },
+      }),
+    );
+    await fs.writeFile(
+      path.join(directory, "tests/acceptance/staff-auth-composed.test.mjs"),
+      "import test from 'node:test';\n" +
+        "test('synthetic-private-name', () => { console.log('synthetic-private-output'); console.error('synthetic-private-stderr'); throw new Error('synthetic-private-error'); });\n",
+    );
+    await fs.writeFile(path.join(directory, "user.npmrc"), "");
+    await fs.writeFile(path.join(directory, "global.npmrc"), "");
+    const environment = {
+      PATH: `${path.dirname(node)}:/usr/bin:/bin`,
+      NODE_OPTIONS: "--max-old-space-size=128",
+      NPM_CONFIG_USERCONFIG: path.join(directory, "user.npmrc"),
+      NPM_CONFIG_GLOBALCONFIG: path.join(directory, "global.npmrc"),
+      NPM_CONFIG_CACHE: path.join(directory, "npm-cache"),
+    };
+    await assert.rejects(
+      runStaffSuite(path.join(path.dirname(node), "npm"), {
+        cwd: directory,
+        environment,
+        timeoutMs: 10_000,
+      }),
+      (error) => {
+        assert.ok(error instanceof StaffSuiteCommandFailure);
+        assert.equal(error.code, "FIXTURE_COMMAND_FAILED");
+        assert.equal(error.diagnostics.stage, "composed");
+        assert.deepEqual(error.diagnostics.records, [
+          {
+            file: "tests/acceptance/staff-auth-composed.test.mjs",
+            line: 2,
+            outcome: "failed",
+          },
+        ]);
+        assert.equal(error.diagnostics.eventCounters.failed, 1);
+        const afterCleanup = error
+          .withCode(`STAFF_SUITE_${error.code}`)
+          .withCode("STAFF_SUITE_FIXTURE_COMMAND_FAILED_AND_CLEANUP_FAILED");
+        assert.ok(afterCleanup instanceof StaffSuiteCommandFailure);
+        assert.equal(
+          afterCleanup.code,
+          "STAFF_SUITE_FIXTURE_COMMAND_FAILED_AND_CLEANUP_FAILED",
+        );
+        assert.deepEqual(afterCleanup.diagnostics, error.diagnostics);
+        assert.equal(
+          JSON.stringify(afterCleanup).includes("synthetic-private"),
+          false,
+        );
+        return true;
+      },
+    );
+    assert.equal(environment.NODE_OPTIONS, "--max-old-space-size=128");
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("public command options cannot enable staff failure projection", async () => {
+  await assert.rejects(
+    boundedCommand(
+      node,
+      [
+        "-e",
+        "process.stdout.write('[desmoslock-staff-suite:v1] '+JSON.stringify({file:'tests/acceptance/staff-auth-composed.test.mjs',line:2,outcome:'failed'})+'\\n');process.exit(1)",
+      ],
+      { timeoutMs: 5_000, staffSuiteDiagnostics: true },
+    ),
+    (error) => {
+      assert.ok(error instanceof FixtureFailure);
+      assert.equal(error instanceof StaffSuiteCommandFailure, false);
+      assert.equal(error.code, "FIXTURE_COMMAND_FAILED");
+      assert.equal("diagnostics" in error, false);
+      return true;
+    },
+  );
+});
+
+test("a conflicting reporter configuration fails before staff-suite egress", () => {
+  assert.throws(
+    () =>
+      runStaffSuite("/not-an-executable", {
+        environment: { NODE_OPTIONS: "--test-reporter=spec" },
+      }),
+    failure("STAFF_SUITE_REPORTER_CONFIGURATION_INVALID"),
   );
 });
 
@@ -129,6 +237,7 @@ test("native wrapper uses an explicit socket, safe arguments, and named PG envir
     /^#!\/bin\/sh\nexec \/usr\/bin\/docker --host unix:\/\/\/var\/run\/docker.sock exec --interactive /u,
   );
   assert.match(wrapper, /--env PGPASSWORD /u);
+  assert.match(wrapper, /--env PGTZ /u);
   assert.doesNotMatch(wrapper, /PGPASSWORD=|--env-file|--tty|\$\(/u);
   assert.match(wrapper, /\/usr\/lib\/postgresql\/bin\/pg_dump "\$@"\n$/u);
   await boundedCommand("/bin/sh", ["-n"], { input: wrapper, timeoutMs: 5_000 });
@@ -144,6 +253,33 @@ test("native wrapper uses an explicit socket, safe arguments, and named PG envir
       ),
     failure("NATIVE_WRAPPER_INVALID"),
   );
+});
+
+test("fixture session timezones preserve explicit UTC export without mutating requests", async () => {
+  const calls = [];
+  const runner = withSessionTimezone(async (request) => {
+    calls.push(request);
+    return Buffer.from("synthetic result");
+  }, "Asia/Tokyo");
+  const observation = Object.freeze({
+    executable: "/operator-tools/psql",
+    environment: Object.freeze({ LANG: "C", PGHOST: "127.0.0.1" }),
+  });
+  const dump = Object.freeze({
+    executable: "/operator-tools/pg_dump",
+    environment: Object.freeze({ LANG: "C", PGHOST: "127.0.0.1", PGTZ: "UTC" }),
+  });
+  const originalTimezone = process.env.PGTZ;
+  assert.equal((await runner(observation)).toString(), "synthetic result");
+  await runner(dump);
+  assert.deepEqual(
+    calls.map((call) => call.environment.PGTZ),
+    ["Asia/Tokyo", "UTC"],
+  );
+  assert.equal(observation.environment.PGTZ, undefined);
+  assert.equal(dump.environment.PGTZ, "UTC");
+  assert.equal(process.env.PGTZ, originalTimezone);
+  assert.notEqual(calls[0].environment, observation.environment);
 });
 
 const emptyRootDiagnostic =

@@ -615,7 +615,19 @@ const COPY_COLUMNS = Object.freeze({
   ],
   profiles: ["id", "display_name", "seed_key", "auth_user_id"],
   student_sessions: ["id", "workspace_id", "test_id", "state", "seed_key"],
-  tests: ["id", "workspace_id", "created_by_profile_id", "title", "seed_key"],
+  tests: [
+    "id",
+    "workspace_id",
+    "created_by_profile_id",
+    "title",
+    "seed_key",
+    "lifecycle",
+    "revision",
+    "created_at",
+    "opened_at",
+    "ended_at",
+    "creation_request_id",
+  ],
   workspaces: [
     "id",
     "kind",
@@ -644,6 +656,7 @@ const NULLABLE_COPY_COLUMNS = Object.freeze({
     "updated_at",
   ]),
   profiles: Object.freeze(["auth_user_id"]),
+  tests: Object.freeze(["opened_at", "ended_at", "creation_request_id"]),
 });
 
 function archiveContentError() {
@@ -846,10 +859,40 @@ function canonicalEntityPayload(tables, counts) {
           };
         },
       ),
-    tables.get("tests").map(([id, workspaceId, creatorId, title, seedKey]) => ({
-      parts: ["test", seedKey, id, workspaceId, creatorId, title],
-      seedKey,
-    })),
+    tables
+      .get("tests")
+      .map(
+        ([
+          id,
+          workspaceId,
+          creatorId,
+          title,
+          seedKey,
+          lifecycle,
+          revision,
+          createdAt,
+          openedAt,
+          endedAt,
+          creationRequestId,
+        ]) => {
+          // Native pg_dump COPY text is fixed by the export's process-local UTC.
+          // Validate the new metadata independently of the published framing.
+          if (
+            lifecycle !== "draft" ||
+            revision !== "1" ||
+            createdAt !== "2000-01-01 00:00:00+00" ||
+            [openedAt, endedAt, creationRequestId].some(
+              (value) => value !== POSTGRES_NULL,
+            )
+          ) {
+            archiveContentError();
+          }
+          return {
+            parts: ["test", seedKey, id, workspaceId, creatorId, title],
+            seedKey,
+          };
+        },
+      ),
     tables
       .get("student_sessions")
       .map(([id, workspaceId, testId, state, seedKey]) => ({
@@ -1104,7 +1147,10 @@ export function createPostgresBackupAdapter(
           "--serializable-deferrable",
           ...SYNTHETIC_TABLES.map((table) => `--table=desmoslock_v2.${table}`),
         ],
-        environment: connectionEnvironment(profile.connection),
+        environment: {
+          ...connectionEnvironment(profile.connection),
+          PGTZ: "UTC",
+        },
         executable: parsed.executablePaths.pgDump,
         input: null,
         maxOutputBytes: MAX_ARCHIVE_BYTES,

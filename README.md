@@ -95,17 +95,22 @@ clusters, then runs the staff-auth suite without reseeding. The eight-migration
 baseline passed this real roundtrip on both
 [source `5b5722b`](https://github.com/danielholguin31/desmoslock/actions/runs/34189874469)
 and [merged main `73d8b8a`](https://github.com/danielholguin31/desmoslock/actions/runs/34190379428).
-The nine-migration School settings extension still requires its own exact-commit
-runtime run. CI owns startup and unconditional shutdown. The command verifies
+The nine-migration School settings extension passed all 12 required source jobs,
+599 fresh SQL assertions and the full restored-target staff suite on
+[source `6939c59`](https://github.com/danielholguin31/desmoslock/actions/runs/34194857958),
+then merged as [`d8fadca`](https://github.com/danielholguin31/desmoslock/commit/d8fadcafe8aa5fbc7ef6ca6717d61899677b49fc).
+The ten-migration [Test workspace candidate](docs/product-completion/test-workspace.md)
+requires its own exact-commit runtime run. CI owns startup and unconditional shutdown. The command verifies
 database schema/RPC lifecycle contracts, local Auth/PostgREST/health prerequisites,
 observed two-connection authorization races, Edge handler behavior, unit tests,
 then real-provider invitation, PKCE recovery and revocation journeys. The final
 composed suite requires a freshly reset stack;
 its append-only audit fixtures remain until the disposable stack is stopped or
 reset. CLI startup output is sanitized so generated local keys are not printed.
-The School settings candidate has not executed those database/provider journeys
-locally. The merged baseline includes an actual-entrypoint browser against the
-disposable backend; School rename browser/runtime coverage remains pending.
+The School settings gate included its actual-entrypoint browser against the
+disposable backend. Nested restored-suite counters are withheld; no separate
+unobserved browser/provider counts are claimed. The Test workspace extension
+has not executed its new database/provider/browser journeys locally.
 Hosted email and configuration remain separate acceptance gates. See
 [`auth-integration-evidence.md`](docs/product-completion/auth-integration-evidence.md)
 for the selected contract, evidence limits and in-place rollout prerequisite.

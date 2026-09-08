@@ -100,9 +100,9 @@ COPY desmoslock_v2.student_sessions (id, workspace_id, test_id, state, seed_key)
 40000000-0000-4000-8000-000000000001\t10000000-0000-4000-8000-000000000001\t30000000-0000-4000-8000-000000000001\tcreated\tsession.alpha.algebra
 40000000-0000-4000-8000-000000000002\t10000000-0000-4000-8000-000000000002\t30000000-0000-4000-8000-000000000002\tcreated\tsession.beta.algebra
 \\.
-COPY desmoslock_v2.tests (id, workspace_id, created_by_profile_id, title, seed_key) FROM stdin;
-30000000-0000-4000-8000-000000000001\t10000000-0000-4000-8000-000000000001\t20000000-0000-4000-8000-000000000003\tSynthetic Alpha Algebra Test\ttest.alpha.algebra
-30000000-0000-4000-8000-000000000002\t10000000-0000-4000-8000-000000000002\t20000000-0000-4000-8000-000000000013\tSynthetic Beta Algebra Test\ttest.beta.algebra
+COPY desmoslock_v2.tests (id, workspace_id, created_by_profile_id, title, seed_key, lifecycle, revision, created_at, opened_at, ended_at, creation_request_id) FROM stdin;
+30000000-0000-4000-8000-000000000001\t10000000-0000-4000-8000-000000000001\t20000000-0000-4000-8000-000000000003\tSynthetic Alpha Algebra Test\ttest.alpha.algebra\tdraft\t1\t2000-01-01 00:00:00+00\t\\N\t\\N\t\\N
+30000000-0000-4000-8000-000000000002\t10000000-0000-4000-8000-000000000002\t20000000-0000-4000-8000-000000000013\tSynthetic Beta Algebra Test\ttest.beta.algebra\tdraft\t1\t2000-01-01 00:00:00+00\t\\N\t\\N\t\\N
 \\.
 COPY desmoslock_v2.workspaces (id, kind, slug, display_name, seed_key, settings_revision) FROM stdin;
 10000000-0000-4000-8000-000000000001\tschool\tsynthetic-alpha\tSynthetic Alpha School\tschool.alpha\t1
@@ -507,6 +507,10 @@ test("Postgres adapter keeps credentials out of argv and exposes only symbolic d
   assert.equal(calls[1].arguments.includes("--data-only"), true);
   assert.equal(calls[1].arguments.includes("--serializable-deferrable"), true);
   assert.deepEqual(
+    calls.map((call) => call.environment.PGTZ),
+    [undefined, "UTC", undefined, undefined, undefined],
+  );
+  assert.deepEqual(
     calls[1].arguments.filter((argument) => argument.startsWith("--table=")),
     SYNTHETIC_TABLES.map((table) => `--table=desmoslock_v2.${table}`),
   );
@@ -540,6 +544,11 @@ test("Postgres adapter keeps credentials out of argv and exposes only symbolic d
   assert.equal(calls[4].environment.PGSSLROOTCERT, undefined);
   const observationQuery = calls[0].arguments.at(-1);
   const transactionInput = calls[4].input.toString("utf8");
+  const testCopyBlock = syntheticArchiveSql()
+    .toString("utf8")
+    .match(/COPY desmoslock_v2\.tests [\s\S]*?\n\\\.\n/u)?.[0];
+  assert.ok(testCopyBlock);
+  assert.equal(transactionInput.includes(testCopyBlock), true);
   for (const table of RUNTIME_LIFECYCLE_TABLES) {
     assert.match(
       observationQuery,
@@ -704,6 +713,10 @@ test("Postgres adapter rejects hostile archive contents before any database conn
     "COPY desmoslock_v2.workspaces (id, kind, slug, display_name, seed_key, settings_revision) FROM stdin;";
   const workspaceRow =
     "10000000-0000-4000-8000-000000000001\tschool\tsynthetic-alpha\tSynthetic Alpha School\tschool.alpha\t1";
+  const testHeader =
+    "COPY desmoslock_v2.tests (id, workspace_id, created_by_profile_id, title, seed_key, lifecycle, revision, created_at, opened_at, ended_at, creation_request_id) FROM stdin;";
+  const testRow =
+    "30000000-0000-4000-8000-000000000001\t10000000-0000-4000-8000-000000000001\t20000000-0000-4000-8000-000000000003\tSynthetic Alpha Algebra Test\ttest.alpha.algebra\tdraft\t1\t2000-01-01 00:00:00+00\t\\N\t\\N\t\\N";
   const hostileArchives = {
     "altered foundation marker": validSql.replace(
       "desmoslock-v2-foundation",
@@ -770,6 +783,78 @@ test("Postgres adapter rejects hostile archive contents before any database conn
           archiveWithRowValue(validSql, workspaceRow, 5, value),
         ],
       ),
+    ),
+    "stale five-column Test COPY layout": validSql
+      .replace(
+        testHeader,
+        "COPY desmoslock_v2.tests (id, workspace_id, created_by_profile_id, title, seed_key) FROM stdin;",
+      )
+      .replaceAll("\tdraft\t1\t2000-01-01 00:00:00+00\t\\N\t\\N\t\\N\n", "\n"),
+    "extra Test COPY column": validSql.replace(
+      testHeader,
+      testHeader.replace(
+        "creation_request_id)",
+        "creation_request_id, unexpected)",
+      ),
+    ),
+    "reordered Test COPY columns": validSql.replace(
+      testHeader,
+      testHeader.replace("lifecycle, revision", "revision, lifecycle"),
+    ),
+    "missing Test row value": validSql.replace(testRow, testRow.slice(0, -3)),
+    "extra Test row value": validSql.replace(testRow, `${testRow}\t\\N`),
+    ...Object.fromEntries(
+      ["\\N", "NULL", "", "open", "ended", "unknown", "Draft"].map(
+        (value, index) => [
+          `nonpristine Test lifecycle ${index + 1}`,
+          archiveWithRowValue(validSql, testRow, 5, value),
+        ],
+      ),
+    ),
+    ...Object.fromEntries(
+      ["\\N", "NULL", "", "0", "2", "01", "1.0", "+1", "1e0", " "].map(
+        (value, index) => [
+          `noncanonical Test revision ${index + 1}`,
+          archiveWithRowValue(validSql, testRow, 6, value),
+        ],
+      ),
+    ),
+    ...Object.fromEntries(
+      [
+        "\\N",
+        "NULL",
+        "",
+        "2000-01-01 00:00:01+00",
+        "2000-01-01T00:00:00.000000Z",
+        "2000-01-01 00:00:00.000000+00",
+        "1999-12-31 19:00:00-05",
+        "2000-01-01 09:00:00+09",
+        "2000-01-01 00:00:00+00:00",
+        "2000-01-01 00:00:00",
+        "2000-01-01 00:00:00.000001+00",
+      ].map((value, index) => [
+        `noncanonical Test created_at ${index + 1}`,
+        archiveWithRowValue(validSql, testRow, 7, value),
+      ]),
+    ),
+    ...Object.fromEntries(
+      [8, 9, 10].flatMap((column) =>
+        [
+          "NULL",
+          "",
+          "2000-01-01 00:00:00+00",
+          "a1000000-0000-4000-8000-000000000001",
+        ].map((value, index) => [
+          `nonnull Test metadata column ${column} value ${index + 1}`,
+          archiveWithRowValue(validSql, testRow, column, value),
+        ]),
+      ),
+    ),
+    ...Object.fromEntries(
+      [0, 1, 2, 3, 4].map((column) => [
+        `null marker in required Test field ${column}`,
+        archiveWithRowValue(validSql, testRow, column, "\\N"),
+      ]),
     ),
     "stale membership COPY layout": validSql.replace(
       membershipHeader,

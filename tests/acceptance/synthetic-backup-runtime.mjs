@@ -5,6 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import {
+  parseStaffSuiteDiagnostics,
+  staffSuiteNodeOptions,
+} from "./staff-suite-diagnostics-reporter.mjs";
 
 const TARGET_PROJECT = "desmoslock-v2";
 const SOURCE_PORT = "55322";
@@ -14,11 +18,27 @@ const SOURCE_EXCLUSIONS =
 const MAX_COMMAND_BYTES = 2 * 1024 * 1024;
 const PG_BINARY_ROOT = "/usr/lib/postgresql/bin";
 const DOCKER_BINARY = "/usr/bin/docker";
+const STAFF_SUITE_DIAGNOSTICS = Symbol("staff-suite-diagnostics");
 
 export class FixtureFailure extends Error {
   constructor(code) {
     super(code);
     this.code = code;
+  }
+
+  withCode(code) {
+    return new FixtureFailure(code);
+  }
+}
+
+export class StaffSuiteCommandFailure extends FixtureFailure {
+  constructor(code, diagnostics) {
+    super(code);
+    this.diagnostics = diagnostics;
+  }
+
+  withCode(code) {
+    return new StaffSuiteCommandFailure(code, this.diagnostics);
   }
 }
 
@@ -47,7 +67,8 @@ export function isExpectedInvalidRootCertificate(exitCode, stdout, stderr) {
   );
 }
 
-// No subprocess output is relayed. Native/provider errors may carry secrets.
+// No raw subprocess output is relayed. Native/provider errors may carry secrets.
+// Only runStaffSuite enables the closed reporter-record failure projection.
 // On cancellation/timeout/overflow kill the entire client process group; the
 // controller subsequently removes its exact named tool container as well.
 export function boundedCommand(
@@ -61,6 +82,7 @@ export function boundedCommand(
     maxBytes = MAX_COMMAND_BYTES,
     environment = process.env,
     expectInvalidRootCertificate = false,
+    [STAFF_SUITE_DIAGNOSTICS]: staffSuiteDiagnostics = false,
   } = {},
 ) {
   return new Promise((resolve, reject) => {
@@ -85,7 +107,14 @@ export function boundedCommand(
         child?.stdout?.destroy();
         child?.stderr?.destroy();
         child?.unref();
-        reject(new FixtureFailure(failure));
+        reject(
+          staffSuiteDiagnostics && failure === "FIXTURE_COMMAND_FAILED"
+            ? new StaffSuiteCommandFailure(
+                failure,
+                parseStaffSuiteDiagnostics(Buffer.concat(output)),
+              )
+            : new FixtureFailure(failure),
+        );
       } else resolve(Buffer.concat(output));
     };
     const abort = () => finish("FIXTURE_COMMAND_ABORTED");
@@ -141,6 +170,26 @@ export function boundedCommand(
     });
     child.stdin.on("error", () => finish("FIXTURE_COMMAND_IO_FAILED"));
     child.stdin.end(input);
+  });
+}
+
+export function runStaffSuite(npm, options) {
+  const environment = options.environment ?? process.env;
+  let nodeOptions;
+  try {
+    nodeOptions = staffSuiteNodeOptions(
+      environment.NODE_OPTIONS,
+      fileURLToPath(
+        new URL("./staff-suite-diagnostics-reporter.mjs", import.meta.url),
+      ),
+    );
+  } catch {
+    throw new FixtureFailure("STAFF_SUITE_REPORTER_CONFIGURATION_INVALID");
+  }
+  return boundedCommand(npm, ["run", "test:staff-auth"], {
+    ...options,
+    environment: { ...environment, NODE_OPTIONS: nodeOptions },
+    [STAFF_SUITE_DIAGNOSTICS]: true,
   });
 }
 
@@ -234,6 +283,7 @@ export function nativeClientWrapper(container, binary) {
     "PGPASSWORD",
     "PGSSLMODE",
     "PGSSLROOTCERT",
+    "PGTZ",
   ];
   return `#!/bin/sh\nexec ${DOCKER_BINARY} --host unix:///var/run/docker.sock exec --interactive ${names.map((name) => `--env ${name}`).join(" ")} ${container} ${PG_BINARY_ROOT}/${binary} "$@"\n`;
 }
@@ -627,6 +677,7 @@ export async function runBackupRoundtrip(repositoryRoot, testSignal) {
         "TLS_VERIFY",
         "TLS_INVALID_CA_PROBE",
         "CLUSTER_IDENTITIES",
+        "SESSION_TIMEZONES",
         "TARGET_ATTESTATION",
         "EXPORT",
         "RESTORE",
@@ -641,6 +692,8 @@ export async function runBackupRoundtrip(repositoryRoot, testSignal) {
     requireFixture(
       receipt.status === "restored" &&
         receipt.tlsVerified === true &&
+        receipt.distinctSessionTimezones === true &&
+        receipt.testMetadataPreserved === true &&
         receipt.secondRestoreRefused === true &&
         receipt.restoreMarkerRetired === true &&
         /^[a-f0-9]{64}$/u.test(receipt.artifactSha256 ?? "") &&
@@ -650,12 +703,18 @@ export async function runBackupRoundtrip(repositoryRoot, testSignal) {
     // The existing suite observes public health and then performs all three real
     // provider journeys on the restored fixture. Never reset/seed between these.
     stage = "STAFF_SUITE";
-    await run(npm, ["run", "test:staff-auth"], { timeoutMs: 600_000 });
+    await runStaffSuite(npm, {
+      cwd: repositoryRoot,
+      environment,
+      signal,
+      timeoutMs: 600_000,
+    });
     receipt = { ...receipt, staffAuthSuiteOnRestoredTarget: true };
   } catch (error) {
-    primaryFailure = new FixtureFailure(
-      `${stage}_${error instanceof FixtureFailure ? error.code : "FAILED"}`,
-    );
+    primaryFailure =
+      error instanceof FixtureFailure
+        ? error.withCode(`${stage}_${error.code}`)
+        : new FixtureFailure(`${stage}_FAILED`);
   } finally {
     const cleanup = async (action) => {
       try {
@@ -712,7 +771,7 @@ export async function runBackupRoundtrip(repositoryRoot, testSignal) {
     process.removeListener("SIGINT", interrupt);
   }
   if (primaryFailure)
-    throw new FixtureFailure(
+    throw primaryFailure.withCode(
       cleanupFailures.length
         ? `${primaryFailure.code}_AND_CLEANUP_FAILED`
         : primaryFailure.code,
@@ -734,6 +793,22 @@ function pgEnvironment(connection, sslMode, sslRootCert) {
     ...(sslRootCert ? { PGSSLROOTCERT: sslRootCert } : {}),
   };
 }
+
+export function withSessionTimezone(runProcess, timezone) {
+  return (request) =>
+    runProcess({
+      ...request,
+      // Exercise an ambient session timezone while preserving the adapter's
+      // explicit UTC export override. Never modify the process or database.
+      environment: { PGTZ: timezone, ...request.environment },
+    });
+}
+
+const PRISTINE_TEST_METADATA_QUERY = `select count(*) = 2 and bool_and(
+  lifecycle = 'draft' and revision = 1
+  and created_at = '2000-01-01T00:00:00.000000Z'::timestamptz
+  and opened_at is null and ended_at is null and creation_request_id is null
+) from desmoslock_v2.tests;`;
 
 export async function operatorWorker(
   configuration,
@@ -823,12 +898,16 @@ export async function operatorWorker(
       maxOutputBytes: 1024,
       timeoutMs: 5_000,
     });
-    const sourceEnv = pgEnvironment(
-      configuration.source,
-      "verify-full",
-      "/trust/ca.crt",
-    );
-    const targetEnv = pgEnvironment(configuration.target, "disable");
+    const sourceTimezone = "Asia/Tokyo";
+    const targetTimezone = "America/Los_Angeles";
+    const sourceEnv = {
+      ...pgEnvironment(configuration.source, "verify-full", "/trust/ca.crt"),
+      PGTZ: sourceTimezone,
+    };
+    const targetEnv = {
+      ...pgEnvironment(configuration.target, "disable"),
+      PGTZ: targetTimezone,
+    };
     const query = async (environment, statement) =>
       (
         await runBoundedSubprocess({
@@ -908,6 +987,24 @@ export async function operatorWorker(
         "EMPTY_AUTH_REQUIRED",
       );
     }
+    stage = "SESSION_TIMEZONES";
+    for (const [environment, timezone, localTimestamp] of [
+      [sourceEnv, sourceTimezone, "2000-01-01 09:00:00+09"],
+      [targetEnv, targetTimezone, "1999-12-31 16:00:00-08"],
+    ]) {
+      requireFixture(
+        (await query(environment, "show timezone;")) === timezone &&
+          (await query(
+            environment,
+            "select '2000-01-01T00:00:00.000000Z'::timestamptz::text;",
+          )) === localTimestamp,
+        "DISTINCT_SESSION_TIMEZONES_REQUIRED",
+      );
+    }
+    requireFixture(
+      (await query(sourceEnv, PRISTINE_TEST_METADATA_QUERY)) === "t",
+      "PRISTINE_SOURCE_TEST_METADATA_REQUIRED",
+    );
     stage = "TARGET_ATTESTATION";
     requireFixture(
       (await query(
@@ -920,29 +1017,35 @@ export async function operatorWorker(
       targetEnv,
       `insert into desmoslock_v2.local_restore_target_attestation (id,marker,database_name,system_identifier) select 1,'${configuration.marker}',current_database(),system_identifier::text from pg_control_system();`,
     );
-    const source = createPostgresBackupAdapter({
-      executablePaths: paths,
-      profiles: {
-        staging: {
-          environment: "staging",
-          connection: {
-            ...configuration.source,
-            sslMode: "verify-full",
-            sslRootCert: "/trust/ca.crt",
+    const source = createPostgresBackupAdapter(
+      {
+        executablePaths: paths,
+        profiles: {
+          staging: {
+            environment: "staging",
+            connection: {
+              ...configuration.source,
+              sslMode: "verify-full",
+              sslRootCert: "/trust/ca.crt",
+            },
           },
         },
       },
-    });
-    const target = createPostgresBackupAdapter({
-      executablePaths: { psql: paths.psql, pgRestore: paths.pgRestore },
-      profiles: {
-        "local-restore": {
-          environment: "local",
-          localRestoreMarker: configuration.marker,
-          connection: { ...configuration.target, sslMode: "disable" },
+      withSessionTimezone(runBoundedSubprocess, sourceTimezone),
+    );
+    const target = createPostgresBackupAdapter(
+      {
+        executablePaths: { psql: paths.psql, pgRestore: paths.pgRestore },
+        profiles: {
+          "local-restore": {
+            environment: "local",
+            localRestoreMarker: configuration.marker,
+            connection: { ...configuration.target, sslMode: "disable" },
+          },
         },
       },
-    });
+      withSessionTimezone(runBoundedSubprocess, targetTimezone),
+    );
     const before = await target.observeDatabase("local-restore");
     requireFixture(
       before.applicationState === "empty",
@@ -986,6 +1089,15 @@ export async function operatorWorker(
           workspaces: 2,
         }),
       "RESTORED_COUNTS_REQUIRED",
+    );
+    requireFixture(
+      (await query(targetEnv, "show timezone;")) === targetTimezone &&
+        (await query(targetEnv, PRISTINE_TEST_METADATA_QUERY)) === "t" &&
+        (await query(
+          targetEnv,
+          "select bool_and(created_at::text = '1999-12-31 16:00:00-08') from desmoslock_v2.tests;",
+        )) === "t",
+      "RESTORED_TEST_METADATA_REQUIRED",
     );
     stage = "SECOND_RESTORE";
     let refused = false;
@@ -1073,6 +1185,8 @@ select not exists(select 1 from desmoslock_v2.local_restore_target_attestation);
       tlsVerified: true,
       invalidCaRejected: true,
       distinctClusters: true,
+      distinctSessionTimezones: true,
+      testMetadataPreserved: true,
       secondRestoreRefused: true,
       restoreMarkerRetired: true,
     };
