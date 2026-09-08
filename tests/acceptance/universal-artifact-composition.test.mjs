@@ -56,7 +56,14 @@ const knownIdentity = Object.freeze({
 });
 let activeFixture;
 const asars = new Map();
+const fixtureUid = process.getuid();
 const state = {
+  process: {
+    platform: "darwin",
+    arch: "arm64",
+    env: Object.freeze({}),
+    getuid: () => fixtureUid,
+  },
   fs: {
     ...fs,
     async open(destination, flags, mode) {
@@ -205,6 +212,14 @@ export function getCurrentFuseWire() { throw new Error("Actual fuse wire reads a
     )
       return nextResolve(exactRecordSource, context);
     return nextResolve(specifier, context);
+  },
+  load(url, context, nextLoad) {
+    const loaded = nextLoad(url, context);
+    if (url !== helperUrl) return loaded;
+    return {
+      ...loaded,
+      source: `const process = globalThis[Symbol.for("desmoslock.universal-artifact.synthetic-test")].process;\n${loaded.source}`,
+    };
   },
 });
 const {
@@ -1065,6 +1080,42 @@ await test("universal composition uses synthetic files and mocked packager, ASAR
           inspectUniversalDesktop(inspectOptions(current)),
           /Compiler output/,
         );
+      },
+    );
+    await t.test(
+      "rejects a synthetic Linux host before entering packaging, hardening or output creation",
+      async () => {
+        const current = await make({ packageOnly: true });
+        const before = await fs.readdir(current.root);
+        const actualHost = process.platform;
+        const previousPlatform = state.process.platform;
+        const previousMkdir = state.fs.mkdir;
+        let outputEntries = 0;
+        state.process.platform = "linux";
+        state.fs.mkdir = async () => {
+          outputEntries += 1;
+          throw new Error("Unexpected synthetic Linux output creation");
+        };
+        try {
+          await assert.rejects(
+            packageUnsignedUniversalDesktop(packageOptions(current)),
+            /Universal packaging requires macOS/,
+          );
+          assert.equal(current.packageCalls, 0);
+          assert.equal(current.hardenCalls, 0);
+          assert.equal(outputEntries, 0);
+          assert.deepEqual(await fs.readdir(current.root), before);
+          for (const directory of [
+            current.stageRoot,
+            current.outputRoot,
+            current.temporaryRoot,
+          ])
+            await assert.rejects(fs.lstat(directory), { code: "ENOENT" });
+          assert.equal(process.platform, actualHost);
+        } finally {
+          state.process.platform = previousPlatform;
+          state.fs.mkdir = previousMkdir;
+        }
       },
     );
     await t.test(

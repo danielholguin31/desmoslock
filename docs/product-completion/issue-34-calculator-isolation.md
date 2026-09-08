@@ -141,17 +141,34 @@ adapter can provide scoped containment; it does not fall back to leader-only ter
 
 This automated evidence does not complete issue 34 and does not claim physical black-box
 calculator interaction in the package. Exact packaged, externally observable graphing
-acceptance remains a human/physical gate (tracked with issue 37): the approved OS-input
-runner must drive the exact signed/notarized `.app` or mounted-DMG application on a visible clean Mac using
-OS-delivered clicks and typing, capture window screenshots, and prove visible plot
+acceptance remains a human/physical gate (tracked with issue 37): a locally present
+operator, or a separately verified OS-input runner, must drive the exact
+signed/notarized `.app` or mounted-DMG application on a visible clean Mac using
+OS-delivered clicks and typing and prove visible plot
 creation, zoom change, intended removal preserving another plot, unsupported-input
 rejection and continued graphing after the hostile probe through observations
 bound to the exact artifact. Enter through actual admission and trusted Start;
-observe graph withdrawal on negative authority/end/recovery. The fixture's
-direct attachment and injected JavaScript do not qualify. macOS Accessibility/Automation
-and likely Screen Recording approval are required human gates; no shipped diagnostic
-or test seam substitutes for them. The clean-Mac launch must use no sandbox-disabling
-control, but its UI receipt remains separate from an active Chromium-sandbox attestation.
+observe graph withdrawal on negative authority/end/recovery. For the navigation
+subcase, observe recovery to the initial `y=x` at 100%, then add visible `(4,-2)`
+while preserving that restored baseline; do not require the former six forms at
+125% to survive the document reset. If no approved exact-package method can drive
+the hostile subcase without injection or weakened protection, keep it pending.
+The fixture's direct attachment and injected JavaScript do not qualify.
+
+For protected portions, use external-camera photos or footage with a locally
+present operator's account of the action and visible outcome. Bind each original
+capture's path, byte count and SHA-256 to the case/run ID, host and architecture,
+OS version, exact app/DMG hash and build identity, synthetic School/Test/StudentSession
+and epoch, and observation time. Do not capture real personal data or secrets.
+This is witnessed camera evidence, not an OS screenshot, native attestation or
+automated pixel-oracle result. Keep pre/post app screenshots only where permitted.
+AAC screenshot blocking must remain intact: Screen Recording approval does not
+make protected screenshots an acceptance requirement or authorize an exception.
+Use only the Accessibility/Automation or capture permissions required by the
+selected operator path; its ability to deliver input under AAC must be verified
+without relaxing protection. No shipped diagnostic or test seam substitutes for
+physical observations. The clean-Mac launch must use no sandbox-disabling control,
+but its UI receipt remains separate from an active Chromium-sandbox attestation.
 Until that protected exact-artifact receipt exists, every issue 34 completion
 record must report the packaged journey as unmet. Third-party rights/assets
 remain conditional on using third-party content; no issue closure follows from
