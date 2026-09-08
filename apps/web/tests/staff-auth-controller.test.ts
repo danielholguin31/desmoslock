@@ -34,7 +34,11 @@ function identity(
       role,
       status: "active",
     },
-    school: { id: "school-1", label: "Synthetic High School" },
+    school: {
+      id: "school-1",
+      label: "Synthetic High School",
+      settingsRevision: 1,
+    },
   };
 }
 
@@ -2389,7 +2393,11 @@ describe("staff auth controller", () => {
             ...(field === "email" ? { email: "different@example.test" } : {}),
             ...(field === "school"
               ? {
-                  school: { id: "different-school", label: "Different School" },
+                  school: {
+                    id: "different-school",
+                    label: "Different School",
+                    settingsRevision: 1,
+                  },
                 }
               : {}),
           };
@@ -2454,7 +2462,6 @@ describe("staff auth controller", () => {
     "profile-name",
     "membership",
     "school",
-    "school-label",
     "generation",
     "session",
     "aal",
@@ -2491,13 +2498,11 @@ describe("staff auth controller", () => {
             }
           : {}),
         ...(field === "school"
-          ? { school: { id: "other-school", label: "Other School" } }
-          : {}),
-        ...(field === "school-label"
           ? {
               school: {
-                ...initiating.identity.school,
+                id: "other-school",
                 label: "Other School",
+                settingsRevision: 1,
               },
             }
           : {}),
@@ -2853,7 +2858,7 @@ describe("staff auth controller", () => {
     const administrator: StaffAuthBoundaryIdentity = {
       ...identity("admin", "admin@other-school.test"),
       accountId: "account-admin-school-2",
-      school: { id: "school-2", label: "Other School" },
+      school: { id: "school-2", label: "Other School", settingsRevision: 1 },
     };
 
     adapter.read = async () =>
@@ -3909,4 +3914,47 @@ describe("composed authentication outcome separation", () => {
       controller.dispose();
     },
   );
+});
+
+it("accepts a durable invitation after its same School was renamed", async () => {
+  const invited = identity("teacher", "invited@example.test");
+  const controller = createController(
+    createAdapter({ kind: "signed_out" }, async (request) =>
+      request.type === "inspect_invitation"
+        ? invitationReady(request.operationId)
+        : access("teacher", {
+            email: "invited@example.test",
+            identity: {
+              ...invited,
+              school: {
+                ...invited.school,
+                label: "Renamed High School",
+                settingsRevision: 2,
+              },
+            },
+          }),
+    ),
+  );
+  await controller.dispatch({ type: "bootstrap" });
+  await controller.dispatch({
+    type: "inspect_invitation",
+    callbackUrl: `https://app.example.test/?auth=invite#token_hash=${invitationTokenHash}`,
+  });
+  await controller.dispatch({
+    type: "accept_invitation",
+    displayName: "Invited Teacher",
+    password: "synthetic-password",
+  });
+  expect(controller.getSnapshot()).toMatchObject({
+    kind: "authenticated",
+    identity: {
+      accountId: "account-teacher",
+      school: {
+        id: "school-1",
+        label: "Renamed High School",
+        settingsRevision: 2,
+      },
+    },
+  });
+  controller.dispose();
 });

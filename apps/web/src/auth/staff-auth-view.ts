@@ -1027,6 +1027,58 @@ interface RenderedManagement {
 // recovery and MFA surfaces never enter this cache, and identity changes drop it.
 const renderedManagement = new WeakMap<HTMLElement, RenderedManagement>();
 
+type SchoolLabelSnapshot = Extract<
+  StaffAuthSnapshot,
+  {
+    kind:
+      | "confirming_staff_membership_role_change"
+      | "confirming_staff_membership_revocation"
+      | "confirming_staff_invitation_revocation"
+      | "staff_membership_role_changed"
+      | "staff_invitation_created"
+      | "staff_invitation_revoked"
+      | "staff_membership_revoked";
+  }
+>;
+
+interface RenderedSchoolLabel {
+  readonly message: HTMLParagraphElement;
+  onIntent: (intent: StaffAuthViewIntent) => Promise<void> | void;
+  snapshot: SchoolLabelSnapshot;
+  view: StaffAuthViewModel;
+}
+
+// These surfaces contain no editable or secret fields. Only the School label
+// and publication revision may change without replacing their controls.
+const renderedSchoolLabels = new WeakMap<HTMLElement, RenderedSchoolLabel>();
+
+function hasSchoolLabel(
+  snapshot: StaffAuthSnapshot,
+): snapshot is SchoolLabelSnapshot {
+  return (
+    snapshot.kind === "confirming_staff_membership_role_change" ||
+    snapshot.kind === "confirming_staff_membership_revocation" ||
+    snapshot.kind === "confirming_staff_invitation_revocation" ||
+    snapshot.kind === "staff_membership_role_changed" ||
+    snapshot.kind === "staff_invitation_created" ||
+    snapshot.kind === "staff_invitation_revoked" ||
+    snapshot.kind === "staff_membership_revoked"
+  );
+}
+
+function schoolLabelFacts(snapshot: SchoolLabelSnapshot): string {
+  const { revision, schoolLabel, ...facts } = snapshot;
+  void revision;
+  void schoolLabel;
+  return JSON.stringify(facts);
+}
+
+function viewStructure(view: StaffAuthViewModel): string {
+  const { message, ...structure } = view;
+  void message;
+  return JSON.stringify(structure);
+}
+
 function sameManagementAuthority(
   left: AuthenticatedSnapshot,
   right: AuthenticatedSnapshot,
@@ -1242,6 +1294,20 @@ export function renderStaffAuthView(
 ): void {
   const document = root.ownerDocument;
   const view = createStaffAuthViewModel(snapshot);
+  const previousLabel = renderedSchoolLabels.get(root);
+  if (
+    previousLabel !== undefined &&
+    hasSchoolLabel(snapshot) &&
+    schoolLabelFacts(previousLabel.snapshot) === schoolLabelFacts(snapshot) &&
+    viewStructure(previousLabel.view) === viewStructure(view)
+  ) {
+    previousLabel.message.textContent = view.message;
+    previousLabel.snapshot = snapshot;
+    previousLabel.view = view;
+    previousLabel.onIntent = onIntent;
+    return;
+  }
+  renderedSchoolLabels.delete(root);
   const previous = renderedManagement.get(root);
   const invitationSelectionChanged =
     snapshot.kind === "authenticated" &&
@@ -1286,6 +1352,7 @@ export function renderStaffAuthView(
     renderedManagement.delete(root);
   }
   let management: RenderedManagement | undefined;
+  let schoolLabel: RenderedSchoolLabel | undefined;
   const section = document.createElement("section");
   section.className = "staff-auth";
   section.dataset.authStatus = view.status;
@@ -1319,6 +1386,7 @@ export function renderStaffAuthView(
     Record<"invitation" | "membership", HTMLElement>
   > = {};
   const reportIntentFailure = () => {
+    renderedSchoolLabels.delete(root);
     section.dataset.authTone = "danger";
     message.setAttribute("aria-live", "assertive");
     message.textContent =
@@ -1327,8 +1395,9 @@ export function renderStaffAuthView(
     message.focus();
   };
   const emit = (action: StaffAuthViewActionId) => {
-    const currentView = management?.view ?? view;
-    const currentSnapshot = management?.snapshot ?? snapshot;
+    const currentView = management?.view ?? schoolLabel?.view ?? view;
+    const currentSnapshot =
+      management?.snapshot ?? schoolLabel?.snapshot ?? snapshot;
     const currentAction = currentView.actions.find(
       (candidate) => candidate.id === action,
     );
@@ -1393,7 +1462,9 @@ export function renderStaffAuthView(
     }
     let outcome: Promise<void> | void;
     try {
-      outcome = (management?.onIntent ?? onIntent)(intent);
+      outcome = (management?.onIntent ?? schoolLabel?.onIntent ?? onIntent)(
+        intent,
+      );
     } catch {
       reportIntentFailure();
       return;
@@ -1505,6 +1576,10 @@ export function renderStaffAuthView(
     section.append(controls);
   }
   root.replaceChildren(section);
+  if (hasSchoolLabel(snapshot)) {
+    schoolLabel = { message, onIntent, snapshot, view };
+    renderedSchoolLabels.set(root, schoolLabel);
+  }
   if (snapshot.kind === "authenticated") {
     management = {
       attached: true,
@@ -1700,6 +1775,7 @@ export function bindStaffAuthView(
     unsubscribe();
     controller.dispose();
     renderedManagement.delete(root);
+    renderedSchoolLabels.delete(root);
     root.replaceChildren();
   };
 }

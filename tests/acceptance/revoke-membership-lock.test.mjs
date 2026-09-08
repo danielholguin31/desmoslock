@@ -142,7 +142,7 @@ from pg_stat_activity a where a.pid=${actor.pid} and a.application_name='${actor
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(
-    "The actual Membership RPC never demonstrated the required target lock wait",
+    "The actual RPC never demonstrated the required target lock wait",
   );
 }
 
@@ -316,6 +316,226 @@ rollback;`);
           check(
             closed.every((result) => result.status === "fulfilled"),
             "Concurrency backend shutdown failed; CI must stop the disposable stack",
+          );
+          cleanup(fixture, names);
+        }
+      });
+    }
+  },
+);
+
+const schoolScenarios = [
+  { action: "owner-update", expected: "school_display_name_updated" },
+  {
+    action: "admin-update",
+    actorRole: "admin",
+    expected: "school_display_name_updated",
+  },
+  {
+    action: "unchanged-name",
+    name: "Synthetic Lock School",
+    expected: "school_display_name_unchanged",
+  },
+  {
+    action: "stale-revision",
+    mutation: "rename",
+    expected: "school_settings_revision_conflict",
+  },
+  {
+    action: "stale-same-name",
+    mutation: "rename-same",
+    expected: "school_settings_revision_conflict",
+  },
+  {
+    action: "admin-downgrade",
+    actorRole: "admin",
+    mutation: "downgrade",
+    expected: "forbidden",
+  },
+  {
+    action: "actor-revocation",
+    mutation: "membership",
+    expected: "membership_inactive",
+  },
+  {
+    action: "session-expiry",
+    mutation: "session",
+    expected: "session_expired",
+  },
+  { action: "mfa-loss", mutation: "factor", expected: "step_up_required" },
+];
+const schoolReportableCodes = new Set([
+  ...schoolScenarios.map((scenario) => scenario.expected),
+  ...reportableCodes,
+]);
+
+function schoolSnapshotQuery(fixture) {
+  return `select jsonb_build_object(
+'school', (select to_jsonb(w) || jsonb_build_object('tuple', w.ctid::text)
+from desmoslock_v2.workspaces w where w.id = ${sqlUuid(fixture.workspace)}),
+'audit', coalesce((select jsonb_agg(to_jsonb(e) || jsonb_build_object('tuple', e.ctid::text) order by e.id)
+from desmoslock_v2.staff_audit_events e where e.workspace_id = ${sqlUuid(fixture.workspace)}), '[]'::jsonb));`;
+}
+
+function schoolCompetitorMutation(fixture, action) {
+  if (action === "rename" || action === "rename-same")
+    return `update desmoslock_v2.workspaces set display_name='${action === "rename-same" ? "Renamed Lock School" : "Competing School Name"}',settings_revision=settings_revision+1
+where id=${sqlUuid(fixture.workspace)};`;
+  if (action === "downgrade")
+    return `update desmoslock_v2.memberships set role='teacher',role_revision=role_revision+1,updated_at=clock_timestamp()
+where workspace_id=${sqlUuid(fixture.workspace)} and profile_id=${sqlUuid(fixture.owner)};`;
+  return authorityMutation(fixture, action);
+}
+
+// These cases contend on the School row itself. The second connection proves
+// the real RPC is blocked before committing its synthetic competitor transition.
+// No helper replacement, artificial authorization result, or audit deletion is used.
+test(
+  "School settings recheck live authority and settings revision after an observed PostgreSQL School-row lock wait",
+  { timeout: 180_000 },
+  async (t) => {
+    verifyDisposableDatabase();
+    freshBaseline();
+    for (const scenario of schoolScenarios) {
+      await t.test(scenario.action, { timeout: 25_000 }, async () => {
+        const fixture = Object.fromEntries(
+          ["user", "session", "factor", "workspace", "owner", "target"].map(
+            (key) => [key, randomUUID()],
+          ),
+        );
+        fixture.actorRole = scenario.actorRole ?? "owner";
+        const namespace = randomUUID();
+        const names = [`lock-${namespace}-actor`, `lock-${namespace}-blocker`];
+        let actor;
+        let blocker;
+        try {
+          blocker = await openConnection(names[1]);
+          await blocker.query(setupQuery(fixture));
+          const beforeRows = await blocker.query(schoolSnapshotQuery(fixture));
+          check(
+            beforeRows.length === 1,
+            "Initial School snapshot is incomplete",
+          );
+          const before = parseJson(beforeRows[0]);
+          check(
+            before.school?.seed_key === null &&
+              before.school.settings_revision === 1 &&
+              before.school.display_name === "Synthetic Lock School" &&
+              before.audit?.length === 0,
+            "School concurrency fixture did not begin with an unaudited runtime School",
+          );
+          const lockedRows = await blocker.query(`begin;
+select id::text from desmoslock_v2.workspaces
+where id=${sqlUuid(fixture.workspace)} for update;`);
+          check(
+            lockedRows.length === 1 && lockedRows[0] === fixture.workspace,
+            "The blocker did not lock the exact target School",
+          );
+          actor = await openConnection(names[0]);
+          const claims = JSON.stringify({
+            sub: fixture.user,
+            session_id: fixture.session,
+            role: "authenticated",
+            aal: "aal2",
+            exp: Math.floor(Date.now() / 1000) + 3600,
+          });
+          const resultPromise = actor.query(`begin;
+set local "request.jwt.claim.sub"='';
+set local "request.jwt.claims"='${claims}';
+set local role authenticated;
+select code from desmoslock_v2.update_school_display_name(${sqlUuid(fixture.workspace)},'${scenario.name ?? "Renamed Lock School"}',1);
+reset role;
+${schoolSnapshotQuery(fixture)}
+rollback;`);
+          void resultPromise.catch(() => {});
+          await waitForTargetLock(blocker, actor);
+          const competitorRows = await blocker.query(
+            `${schoolCompetitorMutation(fixture, scenario.mutation)}\n${schoolSnapshotQuery(fixture)}`,
+          );
+          check(
+            competitorRows.length === 1,
+            "School competitor snapshot is incomplete",
+          );
+          const competitorState = parseJson(competitorRows[0]);
+          // A successful audit must use a new clock after this observed wait,
+          // rather than the actor transaction's earlier statement timestamp.
+          const releaseRows = await blocker.query(
+            "select clock_timestamp()::text;",
+          );
+          check(
+            releaseRows.length === 1,
+            "School lock release clock is absent",
+          );
+          const releaseTime = Date.parse(releaseRows[0]);
+          check(
+            Number.isFinite(releaseTime),
+            "School lock release clock is invalid",
+          );
+          await blocker.query("commit;");
+          const results = await resultPromise;
+          const observedCode = schoolReportableCodes.has(results[0])
+            ? results[0]
+            : "unrecognized";
+          check(
+            results.length === 2 && results[0] === scenario.expected,
+            `Actual School result violated post-lock authorization (expected ${scenario.expected}; observed ${observedCode}; rows ${Math.min(results.length, 999)})`,
+          );
+          const after = parseJson(results[1]);
+          if (scenario.expected === "school_display_name_updated") {
+            const event = after.audit?.[0];
+            check(
+              after.school?.display_name === "Renamed Lock School" &&
+                after.school.settings_revision === 2 &&
+                after.school.tuple !== before.school.tuple &&
+                after.audit?.length === 1 &&
+                event.event_type === "school_display_name_updated" &&
+                event.result_code === "school_display_name_updated" &&
+                event.workspace_id === fixture.workspace &&
+                event.actor_profile_id === fixture.owner &&
+                event.session_id === fixture.session &&
+                event.subject_profile_id === null &&
+                event.invitation_id === null &&
+                event.previous_settings_revision === 1 &&
+                event.new_settings_revision === 2 &&
+                event.previous_role === null &&
+                event.new_role === null &&
+                event.previous_role_revision === null &&
+                event.new_role_revision === null &&
+                Date.parse(event.occurred_at) >= releaseTime,
+              "School positive control did not produce one revision and the fresh typed audit",
+            );
+            const expectedSchool = {
+              ...before.school,
+              display_name: "Renamed Lock School",
+              settings_revision: 2,
+              tuple: after.school.tuple,
+            };
+            check(
+              isDeepStrictEqual(after.school, expectedSchool),
+              "School rename changed identity or unrelated columns",
+            );
+          } else {
+            check(
+              isDeepStrictEqual(after, competitorState),
+              "Denied or unchanged post-lock School mutation changed the competitor's School or audit tuple",
+            );
+          }
+          const restoredRows = await blocker.query(
+            schoolSnapshotQuery(fixture),
+          );
+          check(
+            restoredRows.length === 1 &&
+              isDeepStrictEqual(parseJson(restoredRows[0]), competitorState),
+            "The actor transaction did not roll back its School and audit changes",
+          );
+        } finally {
+          const closed = await Promise.allSettled([
+            actor?.close(),
+            blocker?.close(),
+          ]);
+          check(
+            closed.every((result) => result.status === "fulfilled"),
+            "School concurrency backend shutdown failed; CI must stop the disposable stack",
           );
           cleanup(fixture, names);
         }

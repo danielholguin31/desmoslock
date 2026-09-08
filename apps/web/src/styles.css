@@ -1,4 +1,5 @@
 @import "./auth/staff-auth.css";
+@import "./school-settings/school-settings.css";
 
 :root {
   color: #172033;

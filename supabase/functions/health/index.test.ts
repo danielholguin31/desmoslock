@@ -111,7 +111,7 @@ Deno.test(
                 fixture_valid: true,
                 fixture_version: "internal-baseline-v2",
                 migration_set_sha256:
-                  "7c3e7403b61d5c66123b15d2fe4de28ee2259d71a304ce8695d16630f5353a56",
+                  "9264f3b4933e4f1bb207d5a1a130ab0b3edafea787ac37fb25268b09afba2538",
                 schema_generation: 4,
               },
             ]),
@@ -181,7 +181,7 @@ Deno.test(
                     fixture_valid: true,
                     fixture_version: "internal-baseline-v2",
                     migration_set_sha256:
-                      "7c3e7403b61d5c66123b15d2fe4de28ee2259d71a304ce8695d16630f5353a56",
+                      "9264f3b4933e4f1bb207d5a1a130ab0b3edafea787ac37fb25268b09afba2538",
                     schema_generation: 4,
                   },
                 ]),
@@ -195,40 +195,45 @@ Deno.test(
   },
 );
 
-Deno.test(
-  "backend probe rejects a well-formed but unattested migration set",
-  async () => {
-    const probe = createBackendProbe(
-      {
-        DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN:
-          "https://abcdefghijklmnopqrst.supabase.co",
-        SUPABASE_SERVICE_ROLE_KEY: "synthetic-test-only-key",
-        SUPABASE_URL: "https://abcdefghijklmnopqrst.supabase.co",
-      },
-      (input) =>
-        Promise.resolve(
-          String(input).endsWith("/auth/v1/health")
-            ? new Response(null, { status: 200 })
-            : new Response(
-                JSON.stringify([
-                  {
-                    fixture_digest:
-                      "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
-                    fixture_valid: true,
-                    fixture_version: "internal-baseline-v2",
-                    migration_set_sha256: "0".repeat(64),
-                    schema_generation: 4,
-                  },
-                ]),
-                { status: 200 },
-              ),
-        ),
-      () => new AbortController().signal,
-    );
+for (const migrationSetSha256 of [
+  "0".repeat(64),
+  "7c3e7403b61d5c66123b15d2fe4de28ee2259d71a304ce8695d16630f5353a56",
+]) {
+  Deno.test(
+    `backend probe rejects an unattested or historical migration set: ${migrationSetSha256}`,
+    async () => {
+      const probe = createBackendProbe(
+        {
+          DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN:
+            "https://abcdefghijklmnopqrst.supabase.co",
+          SUPABASE_SERVICE_ROLE_KEY: "synthetic-test-only-key",
+          SUPABASE_URL: "https://abcdefghijklmnopqrst.supabase.co",
+        },
+        (input) =>
+          Promise.resolve(
+            String(input).endsWith("/auth/v1/health")
+              ? new Response(null, { status: 200 })
+              : new Response(
+                  JSON.stringify([
+                    {
+                      fixture_digest:
+                        "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
+                      fixture_valid: true,
+                      fixture_version: "internal-baseline-v2",
+                      migration_set_sha256: migrationSetSha256,
+                      schema_generation: 4,
+                    },
+                  ]),
+                  { status: 200 },
+                ),
+          ),
+        () => new AbortController().signal,
+      );
 
-    await assertRejects(() => probe());
-  },
-);
+      await assertRejects(() => probe());
+    },
+  );
+}
 
 Deno.test(
   "health endpoint sanitizes a timed-out backend dependency",
@@ -346,7 +351,7 @@ Deno.test(
                   fixture_valid: true,
                   fixture_version: "internal-baseline-v2",
                   migration_set_sha256:
-                    "7c3e7403b61d5c66123b15d2fe4de28ee2259d71a304ce8695d16630f5353a56",
+                    "9264f3b4933e4f1bb207d5a1a130ab0b3edafea787ac37fb25268b09afba2538",
                   schema_generation: 4,
                 },
               ]),
@@ -387,7 +392,7 @@ Deno.test(
                 fixture_valid: true,
                 fixture_version: "internal-baseline-v2",
                 migration_set_sha256:
-                  "7c3e7403b61d5c66123b15d2fe4de28ee2259d71a304ce8695d16630f5353a56",
+                  "9264f3b4933e4f1bb207d5a1a130ab0b3edafea787ac37fb25268b09afba2538",
                 schema_generation: 4,
               },
             ]),

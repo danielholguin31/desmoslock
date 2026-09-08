@@ -19,6 +19,10 @@ import type {
 } from "../src/auth/staff-auth-controller.js";
 
 import { createStaffAuthViewModel } from "../src/auth/staff-auth-view.js";
+import type {
+  SchoolSettingsController,
+  SchoolSettingsPort,
+} from "../src/school-settings/school-settings-controller.js";
 import {
   createSupabaseStaffAuthAdapter,
   type SupabaseStaffAuthPort,
@@ -46,7 +50,11 @@ function syntheticAccess(
         status: "active",
       },
       profile: { displayName: "Synthetic Owner", id: "profile-owner" },
-      school: { id: "school-1", label: "Synthetic High School" },
+      school: {
+        id: "school-1",
+        label: "Synthetic High School",
+        settingsRevision: 1,
+      },
     },
     identityGeneration: "identity-owner",
     kind: "access_granted",
@@ -196,6 +204,11 @@ function createHarness(
       root: HTMLElement,
       controller: StaffAuthController,
     ) => () => void;
+    readonly bindSchoolSettingsView?: (
+      root: HTMLElement,
+      controller: SchoolSettingsController,
+    ) => () => void;
+    readonly schoolSettingsPort?: SchoolSettingsPort;
     readonly callbackHistoryMarkerPresent?: boolean;
     readonly callbackUrl?: string;
     readonly callbackWasScrubbed?: boolean;
@@ -211,8 +224,16 @@ function createHarness(
 ) {
   const elements = options.elements ?? createElements();
   const bindView = vi.fn(options.bindView ?? (() => vi.fn()));
+  const bindSchoolSettingsView = vi.fn(
+    options.bindSchoolSettingsView ?? (() => vi.fn()),
+  );
   let adapterIndex = 0;
-  const createAdapterFactory = vi.fn(() => {
+  const createAdapterFactory = vi.fn<
+    (
+      configuration: unknown,
+      operationIds: unknown,
+    ) => StaffAuthApplicationAdapter
+  >(() => {
     const configuredAdapter = options.adapters?.[adapterIndex];
     adapterIndex += 1;
     return configuredAdapter ?? options.adapter ?? createAdapter().adapter;
@@ -257,11 +278,26 @@ function createHarness(
       runtimeOrigin: "http://localhost:43173",
       storage: options.storage ?? createStorage(),
     },
-    { bindView, createAdapter: createAdapterFactory, observeHealth },
+    {
+      bindView,
+      bindSchoolSettingsView,
+      createStaffServices: (configuration, operationIds) => ({
+        adapter: createAdapterFactory(configuration, operationIds),
+        schoolSettingsPort: options.schoolSettingsPort ?? {
+          captureSchoolSettingsAuthority: async () => ({
+            status: "unavailable",
+          }),
+          updateSchoolDisplayName: async () => null,
+          releaseSchoolSettingsAuthority() {},
+        },
+      }),
+      observeHealth,
+    },
   );
   return {
     application,
     bindView,
+    bindSchoolSettingsView,
     createAdapterFactory,
     elements,
     lifecycleListeners,
@@ -288,6 +324,7 @@ function createRecoveryNotificationHarness() {
       role_revision: null,
       school_id: null,
       school_name: null,
+      school_settings_revision: null,
       school_slug: null,
     },
   ]);
@@ -301,6 +338,9 @@ function createRecoveryNotificationHarness() {
     },
     operationIds: { next: () => operationId },
     port: {
+      captureSchoolSettingsAuthority: unavailable,
+      updateSchoolDisplayName: unavailable,
+      releaseSchoolSettingsAuthority() {},
       acceptInvitation: unavailable,
       beginPasswordRecovery: unavailable,
       capturePasswordAuthority,
@@ -1022,12 +1062,13 @@ describe("staff auth application composition", () => {
     const controller = harness.bindView.mock.calls[0]?.[1];
     expect(controller).toBeDefined();
     if (controller === undefined) return;
-    const result = deferred<ReturnType<StaffAuthController["getSnapshot"]>>();
+    const result =
+      deferred<Awaited<ReturnType<StaffAuthController["refreshMembership"]>>>();
     const refresh = vi
       .spyOn(controller, "refreshMembership")
       .mockImplementationOnce(() => result.promise)
       .mockRejectedValueOnce(new Error("synthetic unavailable refresh"))
-      .mockResolvedValue(controller.getSnapshot());
+      .mockResolvedValue({ kind: "unavailable" });
 
     const first = harness.application.refreshMembership();
     const coalesced = harness.application.refreshMembership();
@@ -1035,7 +1076,7 @@ describe("staff auth application composition", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(refresh).toHaveBeenCalledOnce();
-    result.resolve(controller.getSnapshot());
+    result.resolve({ kind: "unavailable" });
     await first;
     await expect(
       harness.application.refreshMembership(),
@@ -1063,7 +1104,7 @@ describe("staff auth application composition", () => {
     if (controller === undefined) return;
     const refresh = vi
       .spyOn(controller, "refreshMembership")
-      .mockResolvedValue(controller.getSnapshot());
+      .mockResolvedValue({ kind: "unavailable" });
     bootstrap.resolve({ kind: "signed_out" });
     await queuedRefresh;
     await harness.application.ready;
@@ -1086,7 +1127,7 @@ describe("staff auth application composition", () => {
     expect(previousController).toBeDefined();
     if (previousController === undefined) return;
     const oldResult =
-      deferred<ReturnType<StaffAuthController["getSnapshot"]>>();
+      deferred<Awaited<ReturnType<StaffAuthController["refreshMembership"]>>>();
     const previousRefresh = vi
       .spyOn(previousController, "refreshMembership")
       .mockImplementation(() => oldResult.promise);
@@ -1102,10 +1143,10 @@ describe("staff auth application composition", () => {
     if (currentController === undefined) return;
     const currentRefresh = vi
       .spyOn(currentController, "refreshMembership")
-      .mockResolvedValue(currentController.getSnapshot());
+      .mockResolvedValue({ kind: "unavailable" });
     await harness.application.refreshMembership();
     expect(currentRefresh).toHaveBeenCalledOnce();
-    oldResult.resolve(previousController.getSnapshot());
+    oldResult.resolve({ kind: "unavailable" });
     await pendingRefresh;
     expect(harness.bindView).toHaveBeenCalledTimes(2);
     expect(first.dispose).toHaveBeenCalledOnce();
@@ -1459,3 +1500,355 @@ describe("staff auth application composition", () => {
     expect(harness.lifecycleListeners).toHaveLength(0);
   });
 });
+
+function settingsAccess(
+  displayName = "Synthetic High School",
+  settingsRevision = 1,
+): StaffAuthAccessGrant {
+  const grant = syntheticAccess();
+  return {
+    ...grant,
+    identity: {
+      ...grant.identity,
+      school: {
+        id: "70000000-0000-4000-8000-000000000001",
+        label: displayName,
+        settingsRevision,
+      },
+    },
+  };
+}
+
+function settingsPort(): SchoolSettingsPort & {
+  captureSchoolSettingsAuthority: ReturnType<
+    typeof vi.fn<SchoolSettingsPort["captureSchoolSettingsAuthority"]>
+  >;
+  updateSchoolDisplayName: ReturnType<
+    typeof vi.fn<SchoolSettingsPort["updateSchoolDisplayName"]>
+  >;
+  releaseSchoolSettingsAuthority: ReturnType<
+    typeof vi.fn<SchoolSettingsPort["releaseSchoolSettingsAuthority"]>
+  >;
+} {
+  return {
+    captureSchoolSettingsAuthority: vi.fn(async () => ({
+      status: "ready",
+      authorityHandle: "synthetic-school-handle",
+    })),
+    updateSchoolDisplayName: vi.fn(async () => [
+      { code: "school_display_name_updated" },
+    ]),
+    releaseSchoolSettingsAuthority: vi.fn(),
+  };
+}
+
+describe("School settings through the actual auth application lifecycle", () => {
+  it("keeps an immutable Save busy during its synchronous post-write auth publication", async () => {
+    let current = settingsAccess();
+    const read = vi.fn(async () => current);
+    const port = settingsPort();
+    port.updateSchoolDisplayName.mockImplementation(async (request) => {
+      current = settingsAccess(request.displayName, 2);
+      return [{ code: "school_display_name_updated" }];
+    });
+    const h = createHarness({
+      adapter: createAdapter({ read }).adapter,
+      schoolSettingsPort: port,
+    });
+    await h.application.ready;
+    const auth = h.bindView.mock.calls[0]?.[1];
+    const product = h.bindSchoolSettingsView.mock.calls[0]?.[1];
+    if (auth === undefined || product === undefined)
+      throw new Error("Missing composed controllers");
+    const beforeAuthority = auth.getProductAccess();
+    await product.dispatch({ type: "edit_name", value: "Renamed School" });
+    const observed: string[] = [];
+    const attempts: Promise<unknown>[] = [];
+    auth.subscribe((snapshot) => {
+      if (
+        snapshot.kind !== "authenticated" ||
+        snapshot.identity.school.settingsRevision !== 2
+      )
+        return;
+      const pending = product.getSnapshot();
+      observed.push(pending.kind);
+      expect(pending).toMatchObject({
+        kind: "saving",
+        phase: "refreshing",
+        draft: "Renamed School",
+      });
+      attempts.push(
+        product.dispatch({
+          type: "keep_draft",
+          snapshotRevision: pending.revision,
+        }),
+      );
+      attempts.push(
+        product.dispatch({ type: "save", snapshotRevision: pending.revision }),
+      );
+      expect(product.getSnapshot()).toBe(pending);
+    });
+    await product.dispatch({
+      type: "save",
+      snapshotRevision: product.getSnapshot().revision,
+    });
+    await Promise.all(attempts);
+    expect(observed).toEqual(["saving"]);
+    expect(product.getSnapshot()).toMatchObject({
+      kind: "editing",
+      draft: "Renamed School",
+      notice: "updated",
+      school: { settingsRevision: 2 },
+    });
+    expect(port.updateSchoolDisplayName).toHaveBeenCalledExactlyOnceWith(
+      {
+        schoolId: current.identity.school.id,
+        displayName: "Renamed School",
+        expectedSettingsRevision: 1,
+      },
+      "synthetic-school-handle",
+    );
+    expect(port.captureSchoolSettingsAuthority).toHaveBeenCalledExactlyOnceWith(
+      "account-owner",
+    );
+    expect(port.releaseSchoolSettingsAuthority).toHaveBeenCalledExactlyOnceWith(
+      "synthetic-school-handle",
+    );
+    expect(read).toHaveBeenCalledTimes(3);
+    expect(h.bindSchoolSettingsView).toHaveBeenCalledOnce();
+    const afterAuthority = auth.getProductAccess();
+    if (beforeAuthority.kind !== "ready" || afterAuthority.kind !== "ready")
+      throw new Error("Missing verified authority");
+    expect(afterAuthority.access.authority).toEqual(
+      beforeAuthority.access.authority,
+    );
+    h.application.dispose();
+  });
+
+  it("detaches on a Membership pause, refuses skipped-read Save, and restores only the same private draft", async () => {
+    const grant = settingsAccess();
+    const read = vi.fn(async () => grant);
+    const pending = deferred<StaffAuthMutationResult>();
+    const perform = vi.fn<StaffAuthAdapter["perform"]>(() => pending.promise);
+    const port = settingsPort();
+    const disposeView = vi.fn();
+    const h = createHarness({
+      adapter: createAdapter({ read, perform }).adapter,
+      schoolSettingsPort: port,
+      bindSchoolSettingsView: () => disposeView,
+    });
+    await h.application.ready;
+    const auth = h.bindView.mock.calls[0]?.[1];
+    const product = h.bindSchoolSettingsView.mock.calls[0]?.[1];
+    if (auth === undefined || product === undefined)
+      throw new Error("Missing composed controllers");
+    await product.dispatch({
+      type: "edit_name",
+      value: "Private unsaved School name",
+    });
+    const invitation = auth.dispatch({
+      type: "create_staff_invitation",
+      email: "teacher@example.test",
+      schoolId: grant.identity.school.id,
+      targetRole: "teacher",
+    });
+    await vi.waitFor(() => expect(perform).toHaveBeenCalledOnce());
+    expect(product.getSnapshot()).toMatchObject({ kind: "paused" });
+    expect(JSON.stringify(product.getSnapshot())).not.toContain(
+      "Private unsaved",
+    );
+    expect(disposeView).toHaveBeenCalledOnce();
+    expect(h.elements.protectedSchoolDataRoot.hidden).toBe(true);
+    expect(await auth.refreshMembership()).toEqual({ kind: "paused" });
+    await product.dispatch({
+      type: "save",
+      snapshotRevision: product.getSnapshot().revision,
+    });
+    expect(port.captureSchoolSettingsAuthority).not.toHaveBeenCalled();
+    expect(port.updateSchoolDisplayName).not.toHaveBeenCalled();
+    const request = perform.mock.calls[0]?.[0];
+    if (request === undefined) throw new Error("Missing invitation request");
+    pending.resolve({
+      operationId: request.operationId,
+      result: { kind: "staff_invitation_rejected", actor: grant },
+    });
+    await invitation;
+    expect(product.getSnapshot()).toMatchObject({
+      kind: "editing",
+      draft: "Private unsaved School name",
+    });
+    expect(h.bindSchoolSettingsView).toHaveBeenCalledTimes(2);
+    expect(h.elements.protectedSchoolDataRoot.hidden).toBe(false);
+    h.application.dispose();
+    expect(product.getSnapshot()).toMatchObject({ kind: "unavailable" });
+    expect(disposeView).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["membership_inactive", "session_revoked"] as const)(
+    "scrubs the product before publishing %s and never retains its draft on reentry",
+    async (kind) => {
+      const read = vi.fn<StaffAuthAdapter["read"]>(async () =>
+        settingsAccess(),
+      );
+      const disposeView = vi.fn();
+      const h = createHarness({
+        adapter: createAdapter({ read }).adapter,
+        bindSchoolSettingsView: () => disposeView,
+      });
+      await h.application.ready;
+      const auth = h.bindView.mock.calls[0]?.[1];
+      const product = h.bindSchoolSettingsView.mock.calls[0]?.[1];
+      if (auth === undefined || product === undefined)
+        throw new Error("Missing composed controllers");
+      await product.dispatch({
+        type: "edit_name",
+        value: "Private discarded name",
+      });
+      auth.subscribe((snapshot) => {
+        if (snapshot.kind === kind) {
+          expect(product.getSnapshot()).toMatchObject({ kind: "unavailable" });
+          expect(disposeView).toHaveBeenCalledOnce();
+          expect(h.elements.protectedSchoolDataRoot.hidden).toBe(true);
+        }
+      });
+      read.mockResolvedValue({ kind });
+      await h.application.refreshMembership();
+      expect(product.getSnapshot()).toMatchObject({ kind: "unavailable" });
+      expect(JSON.stringify(product.getSnapshot())).not.toContain(
+        "Private discarded",
+      );
+      read.mockResolvedValue(settingsAccess());
+      await auth.dispatch({ type: "back_to_sign_in" });
+      await auth.dispatch({ type: "bootstrap" });
+      expect(product.getSnapshot()).toMatchObject({
+        kind: "editing",
+        draft: "Synthetic High School",
+      });
+      h.application.dispose();
+    },
+  );
+});
+
+it("resumes a School draft after an obsolete pre-save read and a later unchanged coalesced read", async () => {
+  const grant = settingsAccess();
+  const current: StaffAuthAccessGrant = {
+    ...grant,
+    manageableStaff: [
+      {
+        profile: {
+          id: "profile-target",
+          email: "target@example.test",
+          displayName: "Target Teacher",
+        },
+        schoolId: grant.identity.school.id,
+        role: "teacher",
+        roleRevision: 1,
+      },
+    ],
+  };
+  const read = vi.fn<StaffAuthAdapter["read"]>(async () => current);
+  const pending = deferred<StaffAuthAccessGrant>();
+  const port = settingsPort();
+  const h = createHarness({
+    adapter: createAdapter({ read }).adapter,
+    schoolSettingsPort: port,
+  });
+  await h.application.ready;
+  const auth = h.bindView.mock.calls[0]?.[1];
+  const product = h.bindSchoolSettingsView.mock.calls[0]?.[1];
+  if (auth === undefined || product === undefined)
+    throw new Error("Missing composed controllers");
+  await product.dispatch({ type: "edit_name", value: "Retained draft" });
+  read.mockImplementationOnce(() => pending.promise);
+  const saving = product.dispatch({
+    type: "save",
+    snapshotRevision: product.getSnapshot().revision,
+  });
+  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  await auth.dispatch({
+    type: "review_staff_membership_role_change",
+    profileId: "profile-target",
+    schoolId: grant.identity.school.id,
+  });
+  expect(auth.getSnapshot().kind).toBe(
+    "confirming_staff_membership_role_change",
+  );
+  pending.resolve(current);
+  await saving;
+  expect(product.getSnapshot().kind).toBe("paused");
+  expect(port.captureSchoolSettingsAuthority).not.toHaveBeenCalled();
+  expect(port.updateSchoolDisplayName).not.toHaveBeenCalled();
+  const publications = vi.fn();
+  auth.subscribe(publications);
+  const count = publications.mock.calls.length;
+  const first = h.application.refreshMembership();
+  const second = h.application.refreshMembership();
+  expect(first).toBe(second);
+  await first;
+  expect(publications).toHaveBeenCalledTimes(count);
+  expect(read).toHaveBeenCalledTimes(3);
+  expect(product.getSnapshot()).toMatchObject({
+    kind: "editing",
+    draft: "Retained draft",
+  });
+  expect(auth.getSnapshot().kind).toBe(
+    "confirming_staff_membership_role_change",
+  );
+  expect(port.updateSchoolDisplayName).not.toHaveBeenCalled();
+  h.application.dispose();
+});
+
+it.each(["suspend", "dispose"] as const)(
+  "scrubs and releases a School Save on %s even if view cleanup throws, ignoring the late response",
+  async (exit) => {
+    const read = vi.fn(async () => settingsAccess());
+    const pending = deferred<unknown>();
+    const port = settingsPort();
+    port.updateSchoolDisplayName.mockImplementation(() => pending.promise);
+    const disposeView = vi.fn(() => {
+      throw new Error("Synthetic view cleanup failure");
+    });
+    const h = createHarness({
+      adapter: createAdapter({ read }).adapter,
+      schoolSettingsPort: port,
+      bindSchoolSettingsView: () => disposeView,
+    });
+    await h.application.ready;
+    const product = h.bindSchoolSettingsView.mock.calls[0]?.[1];
+    if (product === undefined) throw new Error("Missing composed controller");
+    await product.dispatch({
+      type: "edit_name",
+      value: "Discarded pending name",
+    });
+    const saving = product.dispatch({
+      type: "save",
+      snapshotRevision: product.getSnapshot().revision,
+    });
+    await vi.waitFor(() =>
+      expect(port.updateSchoolDisplayName).toHaveBeenCalledOnce(),
+    );
+    h.application[exit]();
+    expect(disposeView).toHaveBeenCalledOnce();
+    expect(h.elements.protectedSchoolDataRoot.hidden).toBe(true);
+    expect(product.getSnapshot()).toMatchObject({ kind: "unavailable" });
+    expect(port.releaseSchoolSettingsAuthority).toHaveBeenCalledExactlyOnceWith(
+      "synthetic-school-handle",
+    );
+    const closed = product.getSnapshot();
+    pending.resolve([{ code: "school_display_name_updated" }]);
+    await saving;
+    expect(product.getSnapshot()).toBe(closed);
+    expect(h.bindSchoolSettingsView).toHaveBeenCalledOnce();
+    expect(read).toHaveBeenCalledTimes(2);
+    if (exit === "suspend") {
+      await h.application.resume();
+      const fresh = h.bindSchoolSettingsView.mock.calls[1]?.[1];
+      expect(fresh).not.toBe(product);
+      expect(fresh?.getSnapshot()).toMatchObject({
+        kind: "editing",
+        draft: "Synthetic High School",
+      });
+      h.application.dispose();
+    }
+  },
+);

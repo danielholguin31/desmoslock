@@ -119,6 +119,7 @@ async function harness() {
           role_revision: role === "owner" ? 8 : 9,
           school_id: schoolId,
           school_name: "Synthetic School",
+          school_settings_revision: 1,
           school_slug: "synthetic-school",
         },
       ];
@@ -285,7 +286,7 @@ describe("composed Membership authority read deadlines", () => {
     });
     expect(signal.aborted).toBe(true);
     expect(h.clear).toHaveBeenCalledOnce();
-    await expect(refresh).resolves.toBe(h.controller.getSnapshot());
+    await expect(refresh).resolves.toEqual({ kind: "unavailable" });
 
     const recovered = await h.controller.dispatch({ type: "bootstrap" });
     expect(recovered).toMatchObject({
@@ -301,7 +302,14 @@ describe("composed Membership authority read deadlines", () => {
     expect(h.controller.getSnapshot()).toBe(recovered);
     expect(h.published).toEqual(publications);
 
-    await expect(h.controller.refreshMembership()).resolves.toBe(recovered);
+    await expect(h.controller.refreshMembership()).resolves.toMatchObject({
+      kind: "fresh_authorized",
+      access: {
+        authority: { role: "teacher" },
+        school: { settingsRevision: 1 },
+      },
+    });
+    expect(h.controller.getSnapshot()).toBe(recovered);
     expect(h.contextRequests()).toHaveLength(3);
     expect(h.published).toEqual(publications);
   });
@@ -344,7 +352,14 @@ describe("composed Membership authority read deadlines", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(h.controller.getSnapshot()).toBe(recovered);
     expect(h.published).toEqual(publications);
-    await expect(h.controller.refreshMembership()).resolves.toBe(recovered);
+    await expect(h.controller.refreshMembership()).resolves.toMatchObject({
+      kind: "fresh_authorized",
+      access: {
+        authority: { role: "teacher" },
+        school: { settingsRevision: 1 },
+      },
+    });
+    expect(h.controller.getSnapshot()).toBe(recovered);
     expect(h.contextRequests()).toHaveLength(3);
   });
 });

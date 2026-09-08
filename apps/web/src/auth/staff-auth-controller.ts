@@ -10,6 +10,11 @@ import {
   type StaffRecoveryFlowStore,
 } from "./staff-auth-callback.js";
 
+import type {
+  StaffProductAccessState,
+  StaffProductRefreshResult,
+} from "./staff-product-access.js";
+
 export { parseStaffDisplayName };
 
 export type StorageStaffRole = "owner" | "admin" | "teacher";
@@ -35,6 +40,7 @@ export interface StaffAuthBoundaryIdentity {
   readonly school: {
     readonly id: string;
     readonly label: string;
+    readonly settingsRevision: number;
   };
 }
 
@@ -53,6 +59,7 @@ export interface StaffAuthIdentity {
   readonly school: {
     readonly id: string;
     readonly label: string;
+    readonly settingsRevision: number;
   };
 }
 
@@ -677,7 +684,8 @@ export type StaffAuthAction =
 
 export interface StaffAuthController {
   dispatch(action: StaffAuthAction): Promise<StaffAuthSnapshot>;
-  refreshMembership(): Promise<StaffAuthSnapshot>;
+  refreshMembership(): Promise<StaffProductRefreshResult>;
+  getProductAccess(): StaffProductAccessState;
   getSnapshot(): StaffAuthSnapshot;
   subscribe(listener: (snapshot: StaffAuthSnapshot) => void): () => void;
   dispose(): void;
@@ -814,7 +822,7 @@ export function createStaffAuthController(dependencies: {
   let revalidationRevision = 0;
   let completedRevalidationRevision = 0;
   let revalidationRead: Promise<void> | null = null;
-  let membershipRead: Promise<StaffAuthSnapshot> | null = null;
+  let membershipRead: Promise<StaffProductRefreshResult> | null = null;
   const issuedOperationIds = new Set<string>();
   const listeners = new Set<(snapshot: StaffAuthSnapshot) => void>();
 
@@ -1037,6 +1045,8 @@ export function createStaffAuthController(dependencies: {
       !validText(identity.profile.id, 256) ||
       !validText(identity.school.id, 256) ||
       !validText(identity.school.label, 200) ||
+      !Number.isSafeInteger(identity.school.settingsRevision) ||
+      identity.school.settingsRevision < 1 ||
       !validText(identity.membership.id, 256) ||
       identity.membership.status !== "active"
     ) {
@@ -1061,6 +1071,7 @@ export function createStaffAuthController(dependencies: {
       school: {
         id: identity.school.id,
         label: identity.school.label,
+        settingsRevision: identity.school.settingsRevision,
       },
     };
   }
@@ -1077,8 +1088,7 @@ export function createStaffAuthController(dependencies: {
       left.membership.id === right.membership.id &&
       left.membership.role === right.membership.role &&
       left.membership.status === right.membership.status &&
-      left.school.id === right.school.id &&
-      left.school.label === right.school.label
+      left.school.id === right.school.id
     );
   }
 
@@ -1329,8 +1339,7 @@ export function createStaffAuthController(dependencies: {
       grant.identity.accountId === invitation.intendedAccountId &&
       grant.identity.email === invitation.intendedEmail &&
       grant.identity.membership.role === invitation.role &&
-      grant.identity.school.id === invitation.school.id &&
-      grant.identity.school.label === invitation.school.label
+      grant.identity.school.id === invitation.school.id
     );
   }
 
@@ -1840,37 +1849,104 @@ export function createStaffAuthController(dependencies: {
     );
   }
 
-  function refreshMembership(): Promise<StaffAuthSnapshot> {
+  function isMembershipRefreshState(): boolean {
+    return !(
+      snapshot.kind !== "authenticated" &&
+      snapshot.kind !== "confirming_staff_membership_revocation" &&
+      snapshot.kind !== "confirming_staff_invitation_revocation" &&
+      snapshot.kind !== "confirming_staff_membership_role_change" &&
+      snapshot.kind !== "staff_invitation_created" &&
+      snapshot.kind !== "staff_invitation_rejected" &&
+      snapshot.kind !== "staff_invitation_delivery" &&
+      snapshot.kind !== "staff_invitation_revoked" &&
+      snapshot.kind !== "staff_invitation_revocation_rejected" &&
+      snapshot.kind !== "staff_membership_revoked" &&
+      snapshot.kind !== "staff_membership_revocation_rejected" &&
+      snapshot.kind !== "staff_membership_role_changed" &&
+      snapshot.kind !== "staff_membership_role_change_rejected" &&
+      snapshot.kind !== "staff_membership_revision_conflict"
+    );
+  }
+
+  function getProductAccess(): StaffProductAccessState {
+    if (disposed || pendingCallback !== null || activeGrant === null) {
+      return { kind: "unavailable" };
+    }
+    const identity = normalizeIdentity(activeGrant.identity);
+    if (
+      identity === null ||
+      activeGrant.secondFactor !== "satisfied" ||
+      (identity.membership.role !== "teacher" &&
+        activeGrant.assuranceLevel !== "aal2")
+    ) {
+      return { kind: "unavailable" };
+    }
+    const authority = {
+      accountId: identity.accountId,
+      profileId: identity.profile.id,
+      membershipId: identity.membership.id,
+      schoolId: identity.school.id,
+      role: identity.membership.role,
+      assuranceLevel: activeGrant.assuranceLevel,
+      identityGeneration: activeGrant.identityGeneration,
+      sessionGeneration: activeGrant.sessionGeneration,
+    };
+    if (isMembershipRefreshState()) {
+      return {
+        kind: "ready",
+        access: {
+          authority,
+          school: {
+            schoolId: identity.school.id,
+            displayName: identity.school.label,
+            settingsRevision: identity.school.settingsRevision,
+          },
+        },
+      };
+    }
+    if (
+      snapshot.kind === "creating_staff_invitation" ||
+      snapshot.kind === "revoking_staff_invitation" ||
+      snapshot.kind === "revoking_staff_membership" ||
+      snapshot.kind === "changing_staff_membership_role"
+    ) {
+      return { kind: "paused", authority };
+    }
+    return { kind: "unavailable" };
+  }
+
+  function skippedProductRefresh(): StaffProductRefreshResult {
+    return {
+      kind:
+        getProductAccess().kind === "unavailable" ? "unavailable" : "paused",
+    };
+  }
+
+  function completedProductRefresh(): StaffProductRefreshResult {
+    const access = getProductAccess();
+    return access.kind === "ready"
+      ? { kind: "fresh_authorized", access: access.access }
+      : skippedProductRefresh();
+  }
+
+  function refreshMembership(): Promise<StaffProductRefreshResult> {
     if (membershipRead !== null) return membershipRead;
     if (
       disposed ||
       activeGrant === null ||
       pendingCallback !== null ||
-      (snapshot.kind !== "authenticated" &&
-        snapshot.kind !== "confirming_staff_membership_revocation" &&
-        snapshot.kind !== "confirming_staff_invitation_revocation" &&
-        snapshot.kind !== "confirming_staff_membership_role_change" &&
-        snapshot.kind !== "staff_invitation_created" &&
-        snapshot.kind !== "staff_invitation_rejected" &&
-        snapshot.kind !== "staff_invitation_delivery" &&
-        snapshot.kind !== "staff_invitation_revoked" &&
-        snapshot.kind !== "staff_invitation_revocation_rejected" &&
-        snapshot.kind !== "staff_membership_revoked" &&
-        snapshot.kind !== "staff_membership_revocation_rejected" &&
-        snapshot.kind !== "staff_membership_role_changed" &&
-        snapshot.kind !== "staff_membership_role_change_rejected" &&
-        snapshot.kind !== "staff_membership_revision_conflict")
+      !isMembershipRefreshState()
     ) {
-      return Promise.resolve(snapshot);
+      return Promise.resolve(skippedProductRefresh());
     }
     const epoch = operationEpoch;
     const previous = activeGrant;
     membershipRead = (async () => {
       const result = await readBoundary(epoch, { kind: "bootstrap" });
-      if (!isCurrent(epoch)) return snapshot;
+      if (!isCurrent(epoch)) return skippedProductRefresh();
       if (result === null) {
         clearProtectedSchoolData();
-        return snapshot;
+        return completedProductRefresh();
       }
       if (result.kind !== "access_granted") {
         activeGrant = null;
@@ -1878,10 +1954,10 @@ export function createStaffAuthController(dependencies: {
         clearInvitationRevocation();
         if (!clearProtectedSchoolData()) {
           fail("bootstrap", "dependency_unavailable");
-          return snapshot;
+          return completedProductRefresh();
         }
         applyBootstrapResult(result);
-        return snapshot;
+        return completedProductRefresh();
       }
       if (
         !sameAuthority(previous, result) ||
@@ -1894,7 +1970,7 @@ export function createStaffAuthController(dependencies: {
         clearInvitationRevocation();
         if (!clearProtectedSchoolData()) {
           fail("bootstrap", "dependency_unavailable");
-          return snapshot;
+          return completedProductRefresh();
         }
         if (identity !== null && result.secondFactor === "satisfied") {
           if (!publishAuthenticated(result, identity, "staff_access_changed")) {
@@ -1903,7 +1979,7 @@ export function createStaffAuthController(dependencies: {
         } else if (!acceptEntry(result)) {
           rejectBoundaryResult("bootstrap", result);
         }
-        return snapshot;
+        return completedProductRefresh();
       }
       const membershipIntent =
         pendingMembershipRoleChange ?? pendingMembershipRevocation;
@@ -1928,7 +2004,7 @@ export function createStaffAuthController(dependencies: {
           if (identity !== null)
             publishAuthenticated(result, identity, "staff_selection_changed");
         }
-        return snapshot;
+        return completedProductRefresh();
       }
       if (pendingMembershipRoleChange !== null) {
         pendingMembershipRoleChange = {
@@ -1948,6 +2024,10 @@ export function createStaffAuthController(dependencies: {
           actor: result,
         };
       }
+      const presentationChanged =
+        previous.identity.school.label !== result.identity.school.label ||
+        previous.identity.school.settingsRevision !==
+          result.identity.school.settingsRevision;
       const listsChanged =
         previous.manageableStaff.length !== result.manageableStaff.length ||
         previous.manageableStaff.some(
@@ -1962,22 +2042,45 @@ export function createStaffAuthController(dependencies: {
             result.manageableInvitations[index] === undefined ||
             !sameInvitationTarget(entry, result.manageableInvitations[index]!),
         );
-      if (snapshot.kind === "authenticated" && listsChanged) {
+      if (
+        snapshot.kind === "authenticated" &&
+        (listsChanged || presentationChanged)
+      ) {
         const identity = normalizeIdentity(result.identity);
-        if (identity !== null) publishAuthenticated(result, identity);
+        if (identity !== null) {
+          transition({
+            ...snapshot,
+            identity,
+            manageableInvitations: normalizeManagedInvitations(
+              result.manageableInvitations,
+            ),
+            manageableStaff: normalizeManagedStaff(result.manageableStaff),
+          });
+        }
       } else if (
         snapshot.kind === "staff_membership_role_changed" &&
-        listsChanged
+        (listsChanged || presentationChanged)
       ) {
         transition({
           kind: "staff_membership_role_changed",
           manageableStaff: normalizeManagedStaff(result.manageableStaff),
-          schoolLabel: snapshot.schoolLabel,
+          schoolLabel: result.identity.school.label,
           targetName: snapshot.targetName,
           targetRole: snapshot.targetRole,
         });
       }
-      return snapshot;
+      if (
+        presentationChanged &&
+        (snapshot.kind === "confirming_staff_membership_role_change" ||
+          snapshot.kind === "confirming_staff_membership_revocation" ||
+          snapshot.kind === "confirming_staff_invitation_revocation" ||
+          snapshot.kind === "staff_invitation_created" ||
+          snapshot.kind === "staff_invitation_revoked" ||
+          snapshot.kind === "staff_membership_revoked")
+      ) {
+        transition({ ...snapshot, schoolLabel: result.identity.school.label });
+      }
+      return completedProductRefresh();
     })().finally(() => {
       membershipRead = null;
     });
@@ -3135,6 +3238,7 @@ export function createStaffAuthController(dependencies: {
   return {
     dispatch,
     refreshMembership,
+    getProductAccess,
     getSnapshot() {
       return snapshot;
     },
@@ -3343,7 +3447,11 @@ function decodeIdentity(value: unknown): StaffAuthBoundaryIdentity | null {
     "role",
     "status",
   ]);
-  const school = snapshotExactRecord(record.school, ["id", "label"]);
+  const school = snapshotExactRecord(record.school, [
+    "id",
+    "label",
+    "settingsRevision",
+  ]);
   if (
     !validText(record.accountId, 256) ||
     !validText(record.email, 320) ||
@@ -3356,7 +3464,10 @@ function decodeIdentity(value: unknown): StaffAuthBoundaryIdentity | null {
     membership.status !== "active" ||
     school === null ||
     !validText(school.id, 256) ||
-    !validText(school.label, 200)
+    !validText(school.label, 200) ||
+    typeof school.settingsRevision !== "number" ||
+    !Number.isSafeInteger(school.settingsRevision) ||
+    school.settingsRevision < 1
   ) {
     return null;
   }
@@ -3372,7 +3483,11 @@ function decodeIdentity(value: unknown): StaffAuthBoundaryIdentity | null {
       displayName: profile.displayName,
       id: profile.id,
     },
-    school: { id: school.id, label: school.label },
+    school: {
+      id: school.id,
+      label: school.label,
+      settingsRevision: school.settingsRevision,
+    },
   };
 }
 

@@ -313,6 +313,7 @@ select is(
     'school_id',
     'school_slug',
     'school_name',
+    'school_settings_revision',
     'membership_role',
     'role_revision'
   ]::text[],

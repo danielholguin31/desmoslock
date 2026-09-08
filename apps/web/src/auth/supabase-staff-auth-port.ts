@@ -7,6 +7,7 @@ import type {
   RequestStaffPasswordRecoveryRequest,
   RevokeStaffInvitationRequest,
   RevokeStaffMembershipRequest,
+  UpdateSchoolDisplayNameRequest,
 } from "@desmoslock/contracts";
 import {
   parseCreateStaffInvitationResponse,
@@ -552,7 +553,7 @@ export function createSupabaseStaffAuthPort(
   }
 
   let authorityGeneration = 0;
-  type AuthorityPurpose = "password" | "staff_management";
+  type AuthorityPurpose = "password" | "staff_management" | "school_settings";
   const capturedAuthorities = new Map<
     string,
     {
@@ -594,6 +595,12 @@ export function createSupabaseStaffAuthPort(
 
   function releaseStaffManagementAuthority(handle: string): void {
     if (capturedAuthorities.get(handle)?.purpose === "staff_management") {
+      releaseCapturedAuthority(handle);
+    }
+  }
+
+  function releaseSchoolSettingsAuthority(handle: string): void {
+    if (capturedAuthorities.get(handle)?.purpose === "school_settings") {
       releaseCapturedAuthority(handle);
     }
   }
@@ -861,6 +868,10 @@ export function createSupabaseStaffAuthPort(
     captureStaffManagementAuthority(expectedAccountId: string) {
       return captureAccountAuthority(expectedAccountId, "staff_management");
     },
+    captureSchoolSettingsAuthority(expectedAccountId: string) {
+      return captureAccountAuthority(expectedAccountId, "school_settings");
+    },
+    releaseSchoolSettingsAuthority,
     releaseStaffManagementAuthority,
     clearPrivateAuthContinuations() {
       authorityGeneration += 1;
@@ -1407,6 +1418,24 @@ export function createSupabaseStaffAuthPort(
         role: request.role === "administrator" ? "admin" : request.role,
         workspace_id: request.schoolId,
       });
+    },
+    async updateSchoolDisplayName(
+      request: UpdateSchoolDisplayNameRequest,
+      authorityHandle: string,
+    ) {
+      const authority = capturedAuthority(authorityHandle, "school_settings");
+      if (authority === null) return null;
+      const result = await directAuthorityRequest(
+        authority.accessToken,
+        "/rest/v1/rpc/update_school_display_name",
+        "POST",
+        {
+          display_name: request.displayName,
+          expected_settings_revision: request.expectedSettingsRevision,
+          workspace_id: request.schoolId,
+        },
+      );
+      return result?.status === 200 ? result.body : null;
     },
     async signIn(input: { readonly email: string; readonly password: string }) {
       try {

@@ -28,7 +28,11 @@ function access(
         status: "active",
       },
       profile: { displayName: "Current Staff", id: "profile-current" },
-      school: { id: "school-alpha", label: "Alpha School" },
+      school: {
+        id: "school-alpha",
+        label: "Alpha School",
+        settingsRevision: 1,
+      },
     },
     identityGeneration: `identity-${role}`,
     kind: "access_granted",
@@ -187,7 +191,9 @@ describe("quiet Membership authority refresh", () => {
       expect(before.kind).toBe("authenticated");
       h.resetObservations();
 
-      expect(await h.controller.refreshMembership()).toBe(before);
+      expect(await h.controller.refreshMembership()).toMatchObject({
+        kind: "fresh_authorized",
+      });
 
       expect(h.read).toHaveBeenCalledTimes(2);
       expect(h.controller.getSnapshot()).toBe(before);
@@ -206,7 +212,9 @@ describe("quiet Membership authority refresh", () => {
       expect(before.kind).toBe(kind);
       h.resetObservations();
 
-      expect(await h.controller.refreshMembership()).toBe(before);
+      expect(await h.controller.refreshMembership()).toMatchObject({
+        kind: "fresh_authorized",
+      });
       expect(h.controller.getSnapshot()).toBe(before);
       expect(h.published).toEqual([]);
       expect(h.clear).not.toHaveBeenCalled();
@@ -229,11 +237,16 @@ describe("quiet Membership authority refresh", () => {
     expect(h.published).toEqual([]);
 
     pending.resolve(access());
-    expect(await Promise.all([first, second, third])).toEqual([
-      before,
-      before,
-      before,
-    ]);
+    expect(first).toBe(second);
+    expect(second).toBe(third);
+    const results = await Promise.all([first, second, third]);
+    const product = h.controller.getProductAccess();
+    expect(product.kind).toBe("ready");
+    if (product.kind !== "ready") throw new Error("Expected product access");
+    expect(results).toEqual(
+      Array(3).fill({ kind: "fresh_authorized", access: product.access }),
+    );
+    expect(h.controller.getSnapshot()).toBe(before);
     await h.controller.refreshMembership();
     expect(h.read).toHaveBeenCalledTimes(3);
     expect(h.published).toEqual([]);
@@ -253,7 +266,7 @@ describe("quiet Membership authority refresh", () => {
       expect(cancelled.kind).toBe("authenticated");
       h.resetObservations();
       pending.resolve(access("owner", 2));
-      await refresh;
+      expect(await refresh).toEqual({ kind: "paused" });
 
       expect(h.controller.getSnapshot()).toBe(cancelled);
       expect(h.published).toEqual([]);
@@ -468,4 +481,91 @@ describe("quiet Membership authority refresh", () => {
     ).toBe(false);
     expect(h.perform).not.toHaveBeenCalled();
   });
+});
+
+describe("School presentation through Membership authority", () => {
+  it.each(confirmations)(
+    "updates only the School label in an unchanged $name intent",
+    async ({ kind, review }) => {
+      const h = harness();
+      await h.controller.dispatch({ type: "bootstrap" });
+      await h.controller.dispatch(review);
+      const before = h.controller.getSnapshot();
+      const beforeAccess = h.controller.getProductAccess();
+      const renamed = access();
+      const next = {
+        ...renamed,
+        identity: {
+          ...renamed.identity,
+          school: {
+            ...renamed.identity.school,
+            label: "Renamed Alpha",
+            settingsRevision: 2,
+          },
+        },
+      };
+      h.read.mockResolvedValue(next);
+      h.resetObservations();
+      expect(await h.controller.refreshMembership()).toMatchObject({
+        kind: "fresh_authorized",
+        access: {
+          school: { displayName: "Renamed Alpha", settingsRevision: 2 },
+        },
+      });
+      expect(h.controller.getSnapshot()).toEqual({
+        ...before,
+        schoolLabel: "Renamed Alpha",
+        revision: before.revision + 1,
+      });
+      expect(h.controller.getSnapshot().kind).toBe(kind);
+      const afterAccess = h.controller.getProductAccess();
+      if (beforeAccess.kind !== "ready" || afterAccess.kind !== "ready")
+        throw new Error("Expected verified access");
+      expect(afterAccess.access.authority).toEqual(
+        beforeAccess.access.authority,
+      );
+      expect(h.clear).not.toHaveBeenCalled();
+      const type =
+        kind === "confirming_staff_membership_role_change"
+          ? "confirm_staff_membership_role_change"
+          : kind === "confirming_staff_membership_revocation"
+            ? "confirm_staff_membership_revocation"
+            : "confirm_staff_invitation_revocation";
+      await h.controller.dispatch({ type });
+      expect(h.perform).toHaveBeenCalledOnce();
+      expect(h.perform.mock.calls[0]?.[0]).toMatchObject({
+        expectedIdentityGeneration: "identity-owner",
+        expectedSessionGeneration: "session-current",
+        schoolId: "school-alpha",
+        ...(kind === "confirming_staff_invitation_revocation"
+          ? { invitationId: "invitation-teacher" }
+          : { profileId: "profile-target", expectedRoleRevision: 1 }),
+      });
+    },
+  );
+
+  it.each([undefined, null, 0, -1, 1.5, "1", Number.MAX_SAFE_INTEGER + 1])(
+    "rejects context presentation revision %j without product access",
+    async (settingsRevision) => {
+      const current = access();
+      const malformed = {
+        ...current,
+        identity: {
+          ...current.identity,
+          school: { ...current.identity.school, settingsRevision },
+        },
+      };
+      const h = harness(malformed as unknown as StaffAuthBoundaryResult);
+      await h.controller.dispatch({ type: "bootstrap" });
+      expect(h.controller.getSnapshot()).toMatchObject({
+        kind: "dependency_failure",
+        code: "invalid_backend_result",
+      });
+      expect(h.controller.getProductAccess()).toEqual({ kind: "unavailable" });
+      expect(await h.controller.refreshMembership()).toEqual({
+        kind: "unavailable",
+      });
+      expect(h.perform).not.toHaveBeenCalled();
+    },
+  );
 });

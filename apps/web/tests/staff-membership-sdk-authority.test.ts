@@ -160,6 +160,7 @@ async function harness() {
           role_revision: 8,
           school_id: schoolId,
           school_name: "Synthetic School",
+          school_settings_revision: 1,
           school_slug: "synthetic-school",
         },
       ]);
