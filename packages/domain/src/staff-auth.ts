@@ -25,6 +25,7 @@ export const staffAuthSuccessCodes = [
   "invitation_revoked",
   "login_succeeded",
   "membership_revoked",
+  "membership_role_changed",
   "recovery_completed",
   "recovery_requested",
   "school_selected",
@@ -43,6 +44,7 @@ export const staffAuthErrorCodes = [
   "invitation_delivery_unconfirmed",
   "invitation_delivery_rejected",
   "invitation_not_found",
+  "membership_revision_conflict",
   "rate_limited",
   "service_unavailable",
   "session_expired",
@@ -94,7 +96,7 @@ export function toPersistedStaffRole(
 }
 
 export function authorizeStaffInvitation(input: {
-  readonly actorMembershipStatus: "active" | "suspended" | "removed";
+  readonly actorMembershipStatus: "active" | "revoked";
   readonly actorRole: ProductStaffRole;
   readonly actorSchoolId: string;
   readonly stepUp: StaffMutationStepUp;
@@ -109,7 +111,9 @@ export function authorizeStaffInvitation(input: {
     > {
   if (
     input.actorMembershipStatus !== "active" ||
-    input.actorRole !== "owner" ||
+    (input.actorRole !== "owner" &&
+      (input.actorRole !== "administrator" ||
+        input.targetRole !== "teacher")) ||
     input.actorSchoolId !== input.targetSchoolId
   ) {
     return { code: "authorization_denied", ok: false };

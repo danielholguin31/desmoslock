@@ -305,6 +305,8 @@ function createRecoveryNotificationHarness() {
       beginPasswordRecovery: unavailable,
       capturePasswordAuthority,
       captureSignOutAuthority: unavailable,
+      captureStaffManagementAuthority: unavailable,
+      changeMembershipRole: unavailable,
       clearPrivateAuthContinuations: () => undefined,
       challengeTotp: unavailable,
       enrollTotp: unavailable,
@@ -337,6 +339,9 @@ function createRecoveryNotificationHarness() {
       readSession: async () => ({ status: "authenticated" }),
       readTotpFactors: unavailable,
       releasePasswordAuthority,
+      releaseStaffManagementAuthority() {
+        throw new Error("unexpected staff management authority release");
+      },
       removeTotpFactor: unavailable,
       resendEmailVerification: unavailable,
       revokeAllStaffSessions: unavailable,
@@ -485,7 +490,8 @@ describe("staff auth application composition", () => {
           resolveMutation = resolve;
         }),
     );
-    const { adapter } = createAdapter({ perform });
+    const read = vi.fn(async () => ({ kind: "signed_out" as const }));
+    const { adapter } = createAdapter({ perform, read });
     const history = { replaceState: vi.fn() };
     const flowId = "0123456789abcdef0123456789abcdef";
     const harness = createHarness({
@@ -507,6 +513,12 @@ describe("staff auth application composition", () => {
     expect(controller?.getSnapshot()).toMatchObject({
       kind: "callback_confirmation_required",
     });
+    await harness.application.refreshMembership();
+    expect(read).not.toHaveBeenCalled();
+    expect(perform).not.toHaveBeenCalled();
+    expect(controller?.getSnapshot()).toMatchObject({
+      kind: "callback_confirmation_required",
+    });
     const confirmation = controller?.dispatch({ type: "confirm_callback" });
     expect(perform).toHaveBeenCalledOnce();
     expect(perform.mock.calls[0]?.[0]).toMatchObject({
@@ -516,6 +528,9 @@ describe("staff auth application composition", () => {
     });
     expect(harness.bindView).toHaveBeenCalledOnce();
     expect(harness.observeHealth).toHaveBeenCalledOnce();
+    await harness.application.refreshMembership();
+    expect(read).not.toHaveBeenCalled();
+    expect(perform).toHaveBeenCalledOnce();
 
     resolveMutation?.({
       operationId,
@@ -976,6 +991,7 @@ describe("staff auth application composition", () => {
     expect(harness.elements.protectedSchoolDataRoot.hidden).toBe(true);
 
     await harness.application.ready;
+    await harness.application.refreshMembership();
     harness.application.dispose();
 
     expect(harness.createAdapterFactory).not.toHaveBeenCalled();
@@ -998,6 +1014,105 @@ describe("staff auth application composition", () => {
       configuration,
       expect.objectContaining({ next: expect.any(Function) }),
     );
+  });
+
+  it("coalesces Membership refresh in the current generation and permits retry after a rejected read", async () => {
+    const harness = createHarness();
+    await harness.application.ready;
+    const controller = harness.bindView.mock.calls[0]?.[1];
+    expect(controller).toBeDefined();
+    if (controller === undefined) return;
+    const result = deferred<ReturnType<StaffAuthController["getSnapshot"]>>();
+    const refresh = vi
+      .spyOn(controller, "refreshMembership")
+      .mockImplementationOnce(() => result.promise)
+      .mockRejectedValueOnce(new Error("synthetic unavailable refresh"))
+      .mockResolvedValue(controller.getSnapshot());
+
+    const first = harness.application.refreshMembership();
+    const coalesced = harness.application.refreshMembership();
+    expect(coalesced).toBe(first);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(refresh).toHaveBeenCalledOnce();
+    result.resolve(controller.getSnapshot());
+    await first;
+    await expect(
+      harness.application.refreshMembership(),
+    ).resolves.toBeUndefined();
+    await harness.application.refreshMembership();
+    expect(refresh).toHaveBeenCalledTimes(3);
+    expect(harness.createAdapterFactory).toHaveBeenCalledOnce();
+    expect(harness.bindView).toHaveBeenCalledOnce();
+    harness.application.dispose();
+  });
+
+  it("does not dispatch a queued Membership refresh into a suspended initialization", async () => {
+    const bootstrap = deferred<{ readonly kind: "signed_out" }>();
+    const first = createAdapter({ read: () => bootstrap.promise });
+    const second = createAdapter();
+    const harness = createHarness({
+      adapters: [first.adapter, second.adapter],
+    });
+    const queuedRefresh = harness.application.refreshMembership();
+    harness.application.suspend();
+    await harness.application.refreshMembership();
+    await harness.application.resume();
+    const controller = harness.bindView.mock.calls[0]?.[1];
+    expect(controller).toBeDefined();
+    if (controller === undefined) return;
+    const refresh = vi
+      .spyOn(controller, "refreshMembership")
+      .mockResolvedValue(controller.getSnapshot());
+    bootstrap.resolve({ kind: "signed_out" });
+    await queuedRefresh;
+    await harness.application.ready;
+    expect(refresh).not.toHaveBeenCalled();
+    expect(first.dispose).toHaveBeenCalledOnce();
+    expect(harness.bindView).toHaveBeenCalledOnce();
+    await harness.application.refreshMembership();
+    expect(refresh).toHaveBeenCalledOnce();
+    harness.application.dispose();
+  });
+
+  it("refreshes a replacement generation independently of an unresolved disposed generation", async () => {
+    const first = createAdapter();
+    const second = createAdapter();
+    const harness = createHarness({
+      adapters: [first.adapter, second.adapter],
+    });
+    await harness.application.ready;
+    const previousController = harness.bindView.mock.calls[0]?.[1];
+    expect(previousController).toBeDefined();
+    if (previousController === undefined) return;
+    const oldResult =
+      deferred<ReturnType<StaffAuthController["getSnapshot"]>>();
+    const previousRefresh = vi
+      .spyOn(previousController, "refreshMembership")
+      .mockImplementation(() => oldResult.promise);
+    const pendingRefresh = harness.application.refreshMembership();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(previousRefresh).toHaveBeenCalledOnce();
+
+    harness.application.suspend();
+    await harness.application.resume();
+    const currentController = harness.bindView.mock.calls[1]?.[1];
+    expect(currentController).toBeDefined();
+    if (currentController === undefined) return;
+    const currentRefresh = vi
+      .spyOn(currentController, "refreshMembership")
+      .mockResolvedValue(currentController.getSnapshot());
+    await harness.application.refreshMembership();
+    expect(currentRefresh).toHaveBeenCalledOnce();
+    oldResult.resolve(previousController.getSnapshot());
+    await pendingRefresh;
+    expect(harness.bindView).toHaveBeenCalledTimes(2);
+    expect(first.dispose).toHaveBeenCalledOnce();
+    harness.application.dispose();
+    await harness.application.refreshMembership();
+    expect(currentRefresh).toHaveBeenCalledOnce();
+    expect(second.dispose).toHaveBeenCalledOnce();
   });
 
   it("synchronously hides and deeply scrubs held DOM references before suspending a generation", async () => {
@@ -1163,6 +1278,7 @@ describe("staff auth application composition", () => {
 
   it("revokes an in-progress TOTP QR and clears ceremony inputs on suspension", async () => {
     const revokeQr = vi.fn();
+    const read = vi.fn(async () => syntheticAccess("enrollment_required"));
     const first = createAdapter({
       perform: async (request) => ({
         operationId: request.operationId,
@@ -1175,7 +1291,7 @@ describe("staff auth application composition", () => {
           },
         },
       }),
-      read: async () => syntheticAccess("enrollment_required"),
+      read,
     });
     const qr = createFakeDomElement("img", {
       alt: "Authenticator enrollment QR",
@@ -1207,6 +1323,14 @@ describe("staff auth application composition", () => {
     });
     authRoot.children = [qr, code];
 
+    await harness.application.refreshMembership();
+    expect(read).toHaveBeenCalledOnce();
+    expect(revokeQr).not.toHaveBeenCalled();
+    expect(code.value).toBe("123456");
+    expect(controller?.getSnapshot()).toMatchObject({
+      kind: "totp_provisioning",
+      qrBlobUrl: "blob:synthetic-totp-qr",
+    });
     harness.application.suspend();
 
     expect(qr.src).toBe("");

@@ -47,6 +47,7 @@ function manageableStaff(): StaffAuthBoundaryManagedStaff[] {
         id: "profile-target-admin",
       },
       role: "admin",
+      roleRevision: 7,
       schoolId: "school-1",
     },
     {
@@ -56,6 +57,7 @@ function manageableStaff(): StaffAuthBoundaryManagedStaff[] {
         id: "profile-target-teacher",
       },
       role: "teacher",
+      roleRevision: 11,
       schoolId: "school-1",
     },
   ];
@@ -105,7 +107,12 @@ function access(
     kind: "access_granted" as const,
     manageableInvitations: options.manageableInvitations ?? [],
     manageableStaff:
-      options.manageableStaff ?? (role === "owner" ? manageableStaff() : []),
+      options.manageableStaff ??
+      (role === "owner" &&
+      assuranceLevel === "aal2" &&
+      secondFactor === "satisfied"
+        ? manageableStaff()
+        : []),
     sessionGeneration: options.sessionGeneration ?? `session-${role}`,
   };
   if (secondFactor === "challenge_required") {
@@ -1741,7 +1748,7 @@ describe("staff auth controller", () => {
     },
   );
 
-  it("does not give an Administrator client-side invitation authority", async () => {
+  it("does not allow an Administrator to invite another Administrator", async () => {
     const perform = vi.fn();
     const adapter = createAdapter(access("admin"));
     adapter.perform = perform;
@@ -1750,7 +1757,7 @@ describe("staff auth controller", () => {
     await controller.dispatch({
       email: "target@example.test",
       schoolId: "school-1",
-      targetRole: "teacher",
+      targetRole: "admin",
       type: "create_staff_invitation",
     });
 
@@ -1812,6 +1819,8 @@ describe("staff auth controller", () => {
     await controller.dispatch({ type: "confirm_staff_invitation_revocation" });
 
     expect(requests[0]).toMatchObject({
+      expectedIdentityGeneration: "identity-owner",
+      expectedSessionGeneration: "session-owner",
       invitationId: "invitation-pending",
       schoolId: "school-1",
       type: "revoke_staff_invitation",
@@ -1917,6 +1926,7 @@ describe("staff auth controller", () => {
         id: `profile-${index}`,
       },
       role: "teacher" as const,
+      roleRevision: index + 1,
       schoolId: "school-1",
     }));
     const atLimit = createController(
@@ -2103,6 +2113,9 @@ describe("staff auth controller", () => {
         targetRole: targetRole === "admin" ? "administrator" : "teacher",
       });
       expect(requests[0]).toMatchObject({
+        expectedIdentityGeneration: "identity-owner",
+        expectedRoleRevision: targetRole === "admin" ? 7 : 11,
+        expectedSessionGeneration: "session-owner",
         profileId: `profile-target-${targetRole}`,
         schoolId: "school-1",
         type: "revoke_staff_membership",
@@ -3055,6 +3068,776 @@ describe("staff auth controller", () => {
       kind: "dependency_failure",
       operation: "invitation",
     });
+  });
+});
+
+describe("Membership administration confirmations", () => {
+  it.each([
+    ["admin", "teacher", 7],
+    ["teacher", "admin", 11],
+  ] as const)(
+    "lets an Owner review a %s to %s role change with private revision binding",
+    async (currentRole, targetRole, expectedRoleRevision) => {
+      const target = manageableStaff().find(
+        (entry) => entry.role === currentRole,
+      )!;
+      const updatedStaff = manageableStaff().map((entry) =>
+        entry.profile.id === target.profile.id
+          ? {
+              ...entry,
+              role: targetRole,
+              roleRevision: expectedRoleRevision + 1,
+            }
+          : entry,
+      );
+      const requests: StaffAuthMutation[] = [];
+      const controller = createController(
+        createAdapter(access("owner"), async (request) => {
+          requests.push(request);
+          return {
+            actor: access("owner", { manageableStaff: updatedStaff }),
+            changedRole: targetRole,
+            kind: "staff_membership_role_changed",
+            profileId: target.profile.id,
+            schoolId: "school-1",
+          };
+        }),
+      );
+      await controller.dispatch({ type: "bootstrap" });
+      await controller.dispatch({
+        profileId: target.profile.id,
+        schoolId: "school-1",
+        type: "review_staff_membership_role_change",
+      });
+
+      expect(controller.getSnapshot()).toMatchObject({
+        kind: "confirming_staff_membership_role_change",
+        schoolLabel: "Synthetic High School",
+        target: {
+          displayName: target.profile.displayName,
+          email: target.profile.email,
+          role: currentRole === "admin" ? "administrator" : "teacher",
+        },
+        targetRole: targetRole === "admin" ? "administrator" : "teacher",
+      });
+      expect(JSON.stringify(controller.getSnapshot())).not.toMatch(
+        /profile-target|school-1|roleRevision|identity-owner|session-owner/,
+      );
+      expect(requests).toHaveLength(0);
+      await controller.dispatch({
+        type: "confirm_staff_membership_role_change",
+      });
+
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toEqual({
+        expectedIdentityGeneration: "identity-owner",
+        expectedRoleRevision,
+        expectedSessionGeneration: "session-owner",
+        operationId: "operation-1",
+        profileId: target.profile.id,
+        schoolId: "school-1",
+        targetRole,
+        type: "change_staff_membership_role",
+      });
+      expect(controller.getSnapshot()).toMatchObject({
+        kind: "staff_membership_role_changed",
+        manageableStaff: expect.arrayContaining([
+          expect.objectContaining({
+            profile: target.profile,
+            role: targetRole === "admin" ? "administrator" : "teacher",
+            roleRevision: expectedRoleRevision + 1,
+          }),
+        ]),
+        targetName: target.profile.displayName,
+        targetRole: targetRole === "admin" ? "administrator" : "teacher",
+      });
+      controller.dispose();
+    },
+  );
+
+  it.each([
+    [
+      "role change",
+      {
+        profileId: "profile-target-teacher",
+        schoolId: "school-1",
+        type: "review_staff_membership_role_change",
+      },
+      "confirm_staff_membership_role_change",
+      "change_staff_membership_role",
+      "staff_membership_role_change_rejected",
+    ],
+    [
+      "Membership revocation",
+      {
+        profileId: "profile-target-teacher",
+        schoolId: "school-1",
+        type: "review_staff_membership_revocation",
+      },
+      "confirm_staff_membership_revocation",
+      "revoke_staff_membership",
+      "staff_membership_revocation_rejected",
+    ],
+    [
+      "invitation revocation",
+      {
+        invitationId: "invitation-pending",
+        schoolId: "school-1",
+        type: "review_staff_invitation_revocation",
+      },
+      "confirm_staff_invitation_revocation",
+      "revoke_staff_invitation",
+      "staff_invitation_revocation_rejected",
+    ],
+  ] as const)(
+    "waits for fresh authority and coalesces repeated confirmation of %s",
+    async (_label, review, confirmType, mutationType, rejectedKind) => {
+      const owner = access("owner", {
+        manageableInvitations: manageableInvitations(),
+      });
+      const fresh = deferred<StaffAuthBoundaryResult>();
+      const adapter = createAdapter(owner, async () => ({
+        actor: owner,
+        kind: rejectedKind,
+      }));
+      const perform = vi.spyOn(adapter, "perform");
+      const controller = createController(adapter);
+      await controller.dispatch({ type: "bootstrap" });
+      await controller.dispatch(review);
+      const read = vi.fn(() => fresh.promise);
+      adapter.read = read;
+
+      const confirmation = controller.dispatch({ type: confirmType });
+      const repeatedConfirmation = controller.dispatch({ type: confirmType });
+      expect(read).toHaveBeenCalledOnce();
+      expect(perform).not.toHaveBeenCalled();
+      fresh.resolve(owner);
+      await Promise.all([confirmation, repeatedConfirmation]);
+
+      expect(perform).toHaveBeenCalledOnce();
+      expect(perform.mock.calls[0]?.[0]).toMatchObject({
+        expectedIdentityGeneration: "identity-owner",
+        expectedSessionGeneration: "session-owner",
+        type: mutationType,
+      });
+      expect(controller.getSnapshot()).toMatchObject({ kind: rejectedKind });
+      controller.dispose();
+    },
+  );
+
+  it.each([
+    [
+      "review_staff_membership_role_change",
+      "confirm_staff_membership_role_change",
+    ],
+    [
+      "review_staff_membership_revocation",
+      "confirm_staff_membership_revocation",
+    ],
+  ] as const)(
+    "cancels a stale target revision before %s can mutate",
+    async (reviewType, confirmType) => {
+      const adapter = createAdapter(access("owner"));
+      const perform = vi.spyOn(adapter, "perform");
+      const controller = createController(adapter);
+      await controller.dispatch({ type: "bootstrap" });
+      await controller.dispatch({
+        profileId: "profile-target-teacher",
+        schoolId: "school-1",
+        type: reviewType,
+      });
+      adapter.read = async () =>
+        access("owner", {
+          manageableStaff: manageableStaff().map((entry) =>
+            entry.role === "teacher"
+              ? { ...entry, roleRevision: entry.roleRevision + 1 }
+              : entry,
+          ),
+        });
+
+      await controller.dispatch({ type: confirmType });
+      expect(controller.getSnapshot()).toMatchObject({
+        kind: "staff_membership_revision_conflict",
+      });
+      expect(perform).not.toHaveBeenCalled();
+      await controller.dispatch({ type: confirmType });
+      expect(perform).not.toHaveBeenCalled();
+      controller.dispose();
+    },
+  );
+
+  it("keeps an unchanged role-change target selected when unrelated staff changes", async () => {
+    const adapter = createAdapter(access("owner"), async () => ({
+      actor: access("owner"),
+      kind: "staff_membership_role_change_rejected",
+    }));
+    const perform = vi.spyOn(adapter, "perform");
+    const controller = createController(adapter);
+    await controller.dispatch({ type: "bootstrap" });
+    await controller.dispatch({
+      profileId: "profile-target-teacher",
+      schoolId: "school-1",
+      type: "review_staff_membership_role_change",
+    });
+    const confirmation = controller.getSnapshot();
+    const publish = vi.fn();
+    controller.subscribe(publish);
+    publish.mockClear();
+    adapter.read = async () =>
+      access("owner", {
+        manageableStaff: manageableStaff().map((entry) =>
+          entry.role === "admin"
+            ? { ...entry, roleRevision: entry.roleRevision + 1 }
+            : entry,
+        ),
+      });
+
+    await controller.refreshMembership();
+    expect(controller.getSnapshot()).toBe(confirmation);
+    expect(publish).not.toHaveBeenCalled();
+    await controller.dispatch({ type: "confirm_staff_membership_role_change" });
+    expect(perform).toHaveBeenCalledOnce();
+    expect(perform.mock.calls[0]?.[0]).toMatchObject({
+      expectedRoleRevision: 11,
+      profileId: "profile-target-teacher",
+      targetRole: "admin",
+      type: "change_staff_membership_role",
+    });
+    controller.dispose();
+  });
+
+  it("refreshes an unknown role change without replay or inferred success", async () => {
+    const adapter = createAdapter(access("owner"), async () => ({
+      kind: "staff_membership_role_change_unconfirmed",
+    }));
+    const perform = vi.spyOn(adapter, "perform");
+    const controller = createController(adapter);
+    await controller.dispatch({ type: "bootstrap" });
+    await controller.dispatch({
+      profileId: "profile-target-teacher",
+      schoolId: "school-1",
+      type: "review_staff_membership_role_change",
+    });
+    await controller.dispatch({ type: "confirm_staff_membership_role_change" });
+    expect(controller.getSnapshot()).toMatchObject({
+      kind: "staff_membership_role_change_unconfirmed",
+    });
+    await controller.dispatch({ type: "retry" });
+    await controller.dispatch({ type: "confirm_staff_membership_role_change" });
+    expect(perform).toHaveBeenCalledOnce();
+    const read = vi.fn(async () =>
+      access("owner", {
+        manageableStaff: manageableStaff().map((entry) =>
+          entry.role === "teacher"
+            ? { ...entry, role: "admin", roleRevision: entry.roleRevision + 1 }
+            : entry,
+        ),
+      }),
+    );
+    adapter.read = read;
+
+    await controller.dispatch({ type: "refresh_staff" });
+    expect(read).toHaveBeenCalledOnce();
+    expect(perform).toHaveBeenCalledOnce();
+    expect(controller.getSnapshot()).toMatchObject({
+      kind: "authenticated",
+      manageableStaff: expect.arrayContaining([
+        expect.objectContaining({
+          profile: expect.objectContaining({ id: "profile-target-teacher" }),
+          role: "administrator",
+          roleRevision: 12,
+        }),
+      ]),
+    });
+    await controller.dispatch({ type: "confirm_staff_membership_role_change" });
+    expect(perform).toHaveBeenCalledOnce();
+    controller.dispose();
+  });
+
+  it.each(["role", "revision"] as const)(
+    "rejects a role-change success with contradictory refreshed target %s evidence",
+    async (field) => {
+      const staff = manageableStaff().map((entry) =>
+        entry.role !== "teacher"
+          ? entry
+          : ({
+              ...entry,
+              role: field === "role" ? "teacher" : "admin",
+              roleRevision: field === "revision" ? 11 : 12,
+            } as const),
+      );
+      const controller = createController(
+        createAdapter(access("owner"), async () => ({
+          actor: access("owner", { manageableStaff: staff }),
+          changedRole: "admin",
+          kind: "staff_membership_role_changed",
+          profileId: "profile-target-teacher",
+          schoolId: "school-1",
+        })),
+      );
+      await controller.dispatch({ type: "bootstrap" });
+      await controller.dispatch({
+        profileId: "profile-target-teacher",
+        schoolId: "school-1",
+        type: "review_staff_membership_role_change",
+      });
+      await controller.dispatch({
+        type: "confirm_staff_membership_role_change",
+      });
+      expect(controller.getSnapshot()).toMatchObject({
+        kind: "dependency_failure",
+        code: "invalid_backend_result",
+        operation: "staff_membership_role_change",
+      });
+      controller.dispose();
+    },
+  );
+
+  it.each(["later role change", "later revocation"] as const)(
+    "keeps acknowledged role-change success separate from fresh %s state",
+    async (laterChange) => {
+      const staff = manageableStaff().flatMap((entry) =>
+        entry.role !== "teacher"
+          ? [entry]
+          : laterChange === "later revocation"
+            ? []
+            : [{ ...entry, roleRevision: 13 }],
+      );
+      const controller = createController(
+        createAdapter(access("owner"), async () => ({
+          actor: access("owner", { manageableStaff: staff }),
+          changedRole: "admin",
+          kind: "staff_membership_role_changed",
+          profileId: "profile-target-teacher",
+          schoolId: "school-1",
+        })),
+      );
+      await controller.dispatch({ type: "bootstrap" });
+      await controller.dispatch({
+        profileId: "profile-target-teacher",
+        schoolId: "school-1",
+        type: "review_staff_membership_role_change",
+      });
+      await controller.dispatch({
+        type: "confirm_staff_membership_role_change",
+      });
+      const snapshot = controller.getSnapshot();
+      expect(snapshot).toMatchObject({
+        kind: "staff_membership_role_changed",
+        targetRole: "administrator",
+      });
+      if (snapshot.kind !== "staff_membership_role_changed")
+        throw new Error("Expected acknowledged role change");
+      expect(
+        snapshot.manageableStaff.find(
+          (entry) => entry.profile.id === "profile-target-teacher",
+        ),
+      ).toEqual(
+        laterChange === "later revocation"
+          ? undefined
+          : {
+              ...manageableStaff()[1]!,
+              roleRevision: 13,
+            },
+      );
+      controller.dispose();
+    },
+  );
+});
+
+describe("ended sessions during Membership management", () => {
+  it.each([
+    {
+      commandType: "create_staff_invitation",
+      review: null,
+      action: {
+        email: "teacher@example.test",
+        schoolId: "school-1",
+        targetRole: "teacher",
+        type: "create_staff_invitation",
+      },
+    },
+    {
+      commandType: "revoke_staff_invitation",
+      review: {
+        invitationId: "invitation-pending",
+        schoolId: "school-1",
+        type: "review_staff_invitation_revocation",
+      },
+      action: { type: "confirm_staff_invitation_revocation" },
+    },
+    {
+      commandType: "revoke_staff_membership",
+      review: {
+        profileId: "profile-target-teacher",
+        schoolId: "school-1",
+        type: "review_staff_membership_revocation",
+      },
+      action: { type: "confirm_staff_membership_revocation" },
+    },
+    {
+      commandType: "change_staff_membership_role",
+      review: {
+        profileId: "profile-target-teacher",
+        schoolId: "school-1",
+        type: "review_staff_membership_role_change",
+      },
+      action: { type: "confirm_staff_membership_role_change" },
+    },
+  ] as const)(
+    "returns to neutral signed out after $commandType without extra account actions",
+    async ({ action, commandType, review }) => {
+      const owner = access("owner", {
+        manageableInvitations: manageableInvitations(),
+      });
+      const adapter = createAdapter(owner, async () => ({
+        kind: "signed_out",
+      }));
+      const read = vi.spyOn(adapter, "read");
+      const perform = vi.spyOn(adapter, "perform");
+      const order: string[] = [];
+      const controller = createController(adapter, {
+        clear: () => {
+          order.push("clear");
+        },
+      });
+      controller.subscribe((snapshot) => {
+        order.push(`state:${snapshot.kind}`);
+      });
+      await controller.dispatch({ type: "bootstrap" });
+      if (review !== null) await controller.dispatch(review);
+      order.splice(0);
+
+      await controller.dispatch(action);
+
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(perform).toHaveBeenCalledOnce();
+      expect(perform.mock.calls[0]?.[0]).toMatchObject({
+        expectedIdentityGeneration: "identity-owner",
+        expectedSessionGeneration: "session-owner",
+        type: commandType,
+      });
+      expect(controller.getSnapshot()).toEqual({
+        kind: "signed_out",
+        notice: null,
+        revision: expect.any(Number),
+      });
+      expect(order.slice(-2)).toEqual(["clear", "state:signed_out"]);
+      const ended = controller.getSnapshot();
+      await controller.dispatch({ type: "retry" });
+      await controller.dispatch({
+        type: "confirm_staff_invitation_revocation",
+      });
+      await controller.dispatch({
+        type: "confirm_staff_membership_revocation",
+      });
+      await controller.dispatch({
+        type: "confirm_staff_membership_role_change",
+      });
+      await controller.refreshMembership();
+      expect(controller.getSnapshot()).toBe(ended);
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(perform).toHaveBeenCalledOnce();
+      controller.dispose();
+    },
+  );
+});
+
+describe("Membership result freshness", () => {
+  it.each(["unchanged", "revoked"] as const)(
+    "revalidates a completed role-change receipt when authority is %s",
+    async (authorityState) => {
+      const freshActor = access("owner", {
+        manageableStaff: manageableStaff().map((entry) =>
+          entry.role === "teacher"
+            ? { ...entry, role: "admin", roleRevision: 12 }
+            : entry,
+        ),
+      });
+      const adapter = createAdapter(access("owner"), async () => ({
+        actor: freshActor,
+        changedRole: "admin",
+        kind: "staff_membership_role_changed",
+        profileId: "profile-target-teacher",
+        schoolId: "school-1",
+      }));
+      const perform = vi.spyOn(adapter, "perform");
+      const order: string[] = [];
+      const controller = createController(adapter, {
+        clear: () => {
+          order.push("clear");
+        },
+      });
+      await controller.dispatch({ type: "bootstrap" });
+      await controller.dispatch({
+        profileId: "profile-target-teacher",
+        schoolId: "school-1",
+        type: "review_staff_membership_role_change",
+      });
+      await controller.dispatch({
+        type: "confirm_staff_membership_role_change",
+      });
+      const receipt = controller.getSnapshot();
+      expect(receipt).toMatchObject({ kind: "staff_membership_role_changed" });
+      const publish = vi.fn();
+      controller.subscribe((snapshot) => {
+        publish(snapshot);
+        order.push(`state:${snapshot.kind}`);
+      });
+      publish.mockClear();
+      order.splice(0);
+      const read = vi.fn<StaffAuthAdapter["read"]>(async () =>
+        authorityState === "revoked"
+          ? { kind: "membership_inactive" }
+          : freshActor,
+      );
+      adapter.read = read;
+
+      await controller.refreshMembership();
+
+      expect(read).toHaveBeenCalledOnce();
+      expect(perform).toHaveBeenCalledOnce();
+      if (authorityState === "unchanged") {
+        expect(controller.getSnapshot()).toBe(receipt);
+        expect(publish).not.toHaveBeenCalled();
+        expect(order).toEqual([]);
+      } else {
+        expect(controller.getSnapshot()).toMatchObject({
+          kind: "membership_inactive",
+        });
+        expect(order).toEqual(["clear", "state:membership_inactive"]);
+        expect(JSON.stringify(controller.getSnapshot())).not.toMatch(
+          /Ada|Theo|profile-target|manageableStaff/,
+        );
+      }
+      controller.dispose();
+    },
+  );
+});
+
+describe("Administrator management authority", () => {
+  it("lets an active AAL2 Administrator invite a Teacher using initiating generations", async () => {
+    const actor = access("admin");
+    const adapter = createAdapter(actor, async () => ({
+      actor,
+      invitedRole: "teacher",
+      kind: "staff_invitation_created",
+    }));
+    const perform = vi.spyOn(adapter, "perform");
+    const controller = createController(adapter);
+    await controller.dispatch({ type: "bootstrap" });
+    await controller.dispatch({
+      email: "new-teacher@example.test",
+      schoolId: "school-1",
+      targetRole: "teacher",
+      type: "create_staff_invitation",
+    });
+    expect(perform).toHaveBeenCalledOnce();
+    expect(perform.mock.calls[0]?.[0]).toEqual({
+      email: "new-teacher@example.test",
+      expectedIdentityGeneration: "identity-admin",
+      expectedSessionGeneration: "session-admin",
+      operationId: "operation-1",
+      schoolId: "school-1",
+      targetRole: "teacher",
+      type: "create_staff_invitation",
+    });
+    expect(controller.getSnapshot()).toMatchObject({
+      kind: "staff_invitation_created",
+      targetRole: "teacher",
+    });
+    controller.dispose();
+  });
+
+  it.each(["Membership", "invitation"] as const)(
+    "lets an active AAL2 Administrator revoke a selected Teacher %s",
+    async (selectionKind) => {
+      const actor = access("admin", {
+        manageableStaff: manageableStaff().filter(
+          (entry) => entry.role === "teacher",
+        ),
+        manageableInvitations: manageableInvitations(),
+      });
+      const adapter = createAdapter(actor, async () =>
+        selectionKind === "Membership"
+          ? {
+              actor,
+              kind: "staff_membership_revoked",
+              profileId: "profile-target-teacher",
+              revokedRole: "teacher",
+              schoolId: "school-1",
+            }
+          : {
+              actor,
+              kind: "staff_invitation_revoked",
+              invitationId: "invitation-pending",
+              revokedRole: "teacher",
+              schoolId: "school-1",
+            },
+      );
+      const perform = vi.spyOn(adapter, "perform");
+      const controller = createController(adapter);
+      await controller.dispatch({ type: "bootstrap" });
+      await controller.dispatch(
+        selectionKind === "Membership"
+          ? {
+              profileId: "profile-target-teacher",
+              schoolId: "school-1",
+              type: "review_staff_membership_revocation",
+            }
+          : {
+              invitationId: "invitation-pending",
+              schoolId: "school-1",
+              type: "review_staff_invitation_revocation",
+            },
+      );
+      expect(perform).not.toHaveBeenCalled();
+      await controller.dispatch({
+        type:
+          selectionKind === "Membership"
+            ? "confirm_staff_membership_revocation"
+            : "confirm_staff_invitation_revocation",
+      });
+      expect(perform).toHaveBeenCalledOnce();
+      expect(perform.mock.calls[0]?.[0]).toEqual({
+        expectedIdentityGeneration: "identity-admin",
+        expectedSessionGeneration: "session-admin",
+        operationId: "operation-1",
+        schoolId: "school-1",
+        ...(selectionKind === "Membership"
+          ? {
+              expectedRoleRevision: 11,
+              profileId: "profile-target-teacher",
+              type: "revoke_staff_membership",
+            }
+          : {
+              invitationId: "invitation-pending",
+              type: "revoke_staff_invitation",
+            }),
+      });
+      expect(controller.getSnapshot()).toMatchObject({
+        kind:
+          selectionKind === "Membership"
+            ? "staff_membership_revoked"
+            : "staff_invitation_revoked",
+        targetRole: "teacher",
+      });
+      controller.dispose();
+    },
+  );
+
+  it("keeps role changes Owner-only even for a manageable Teacher", async () => {
+    const adapter = createAdapter(
+      access("admin", {
+        manageableStaff: manageableStaff().filter(
+          (entry) => entry.role === "teacher",
+        ),
+      }),
+    );
+    const perform = vi.spyOn(adapter, "perform");
+    const controller = createController(adapter);
+    await controller.dispatch({ type: "bootstrap" });
+    const initial = controller.getSnapshot();
+    await controller.dispatch({
+      profileId: "profile-target-teacher",
+      schoolId: "school-1",
+      type: "review_staff_membership_role_change",
+    });
+    await controller.dispatch({ type: "confirm_staff_membership_role_change" });
+    expect(controller.getSnapshot()).toBe(initial);
+    expect(perform).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it.each(["staff", "invitations"] as const)(
+    "rejects an Administrator grant exposing Administrator %s",
+    async (listKind) => {
+      const actor = access("admin", {
+        manageableStaff: listKind === "staff" ? manageableStaff() : [],
+        manageableInvitations:
+          listKind === "invitations"
+            ? [{ ...manageableInvitations()[0]!, role: "admin" }]
+            : [],
+      });
+      const adapter = createAdapter(actor);
+      const perform = vi.spyOn(adapter, "perform");
+      const controller = createController(adapter);
+      await controller.dispatch({ type: "bootstrap" });
+      expect(controller.getSnapshot()).toMatchObject({
+        kind: "dependency_failure",
+        code: "invalid_backend_result",
+        operation: "bootstrap",
+      });
+      await controller.dispatch({
+        invitationId: "invitation-pending",
+        schoolId: "school-1",
+        type: "review_staff_invitation_revocation",
+      });
+      await controller.dispatch({
+        type: "confirm_staff_invitation_revocation",
+      });
+      await controller.dispatch({
+        profileId: "profile-target-admin",
+        schoolId: "school-1",
+        type: "review_staff_membership_revocation",
+      });
+      await controller.dispatch({
+        type: "confirm_staff_membership_revocation",
+      });
+      expect(perform).not.toHaveBeenCalled();
+      controller.dispose();
+    },
+  );
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER + 1,
+    "11",
+    11n,
+    undefined,
+    null,
+    true,
+  ])(
+    "rejects an invalid management revision %s before publishing a target",
+    async (roleRevision) => {
+      const actor = access("owner", {
+        manageableStaff: [
+          { ...manageableStaff()[1]!, roleRevision },
+        ] as unknown as StaffAuthBoundaryManagedStaff[],
+      });
+      const controller = createController(createAdapter(actor));
+      await controller.dispatch({ type: "bootstrap" });
+      expect(controller.getSnapshot()).toMatchObject({
+        kind: "dependency_failure",
+        code: "invalid_backend_result",
+        operation: "bootstrap",
+      });
+      expect(JSON.stringify(controller.getSnapshot())).not.toContain(
+        "profile-target-teacher",
+      );
+      controller.dispose();
+    },
+  );
+
+  it("rejects a management target with its revision omitted", async () => {
+    const { profile, role, schoolId } = manageableStaff()[1]!;
+    const actor = access("owner", {
+      manageableStaff: [
+        { profile, role, schoolId },
+      ] as unknown as StaffAuthBoundaryManagedStaff[],
+    });
+    const controller = createController(createAdapter(actor));
+    await controller.dispatch({ type: "bootstrap" });
+    expect(controller.getSnapshot()).toMatchObject({
+      kind: "dependency_failure",
+      code: "invalid_backend_result",
+      operation: "bootstrap",
+    });
+    controller.dispose();
   });
 });
 

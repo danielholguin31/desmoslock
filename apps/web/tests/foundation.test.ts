@@ -43,6 +43,57 @@ function readIndexHtml(): string {
   return readFileSync(indexHtmlPath, "utf8");
 }
 
+function createLifecycleRuntime(initialVisibility = "visible") {
+  const windowListeners = new Map<string, EventListener>();
+  const documentListeners = new Map<string, EventListener>();
+  const timers = new Map<number, () => void>();
+  let nextTimer = 0;
+  const documentRoot = {
+    addEventListener(type: string, listener: EventListener) {
+      documentListeners.set(type, listener);
+    },
+    removeEventListener: vi.fn((type: string) => {
+      documentListeners.delete(type);
+    }),
+    visibilityState: initialVisibility,
+  };
+  const runtime = {
+    addEventListener(type: string, listener: EventListener) {
+      windowListeners.set(type, listener);
+    },
+    clearInterval: vi.fn((id: number) => {
+      timers.delete(id);
+    }),
+    document: documentRoot,
+    removeEventListener: vi.fn((type: string) => {
+      windowListeners.delete(type);
+    }),
+    setInterval: vi.fn((callback: () => void) => {
+      const id = ++nextTimer;
+      timers.set(id, callback);
+      return id;
+    }),
+  };
+  return {
+    documentListeners,
+    documentRoot,
+    emit(type: string, event: Partial<PageTransitionEvent> = {}) {
+      windowListeners.get(type)?.(event as Event);
+    },
+    runtime,
+    timers,
+    visibility(state: "hidden" | "visible") {
+      documentRoot.visibilityState = state;
+      documentListeners.get("visibilitychange")?.({} as Event);
+    },
+    windowListeners,
+  };
+}
+
+async function completeLifecycleMicrotasks(): Promise<void> {
+  for (let index = 0; index < 8; index += 1) await Promise.resolve();
+}
+
 function readEarlyBootstrapSource(): string {
   const match = /<script data-staff-auth-bootstrap>([\s\S]*?)<\/script>/u.exec(
     readIndexHtml(),
@@ -397,50 +448,179 @@ describe("web v2 foundation", () => {
   });
 
   it("suspends and resumes BFCache entries but disposes on a terminal page hide", async () => {
-    const handlers: {
-      pageHide?: (event: PageTransitionEvent) => void;
-      pageShow?: (event: PageTransitionEvent) => void;
-    } = {};
-    const runtime = {
-      addEventListener(type: string, listener: EventListener) {
-        if (type === "pagehide") {
-          handlers.pageHide = listener as (event: PageTransitionEvent) => void;
-        }
-        if (type === "pageshow") {
-          handlers.pageShow = listener as (event: PageTransitionEvent) => void;
-        }
-      },
-      removeEventListener: vi.fn(),
-    } as unknown as Window;
+    const harness = createLifecycleRuntime();
     const application = {
       dispose: vi.fn(),
+      refreshMembership: vi.fn(async () => undefined),
       resume: vi.fn(async () => undefined),
       suspend: vi.fn(),
     };
-    const unregister = registerWebApplicationLifecycle(runtime, application);
+    const unregister = registerWebApplicationLifecycle(
+      harness.runtime as unknown as Window,
+      application,
+    );
 
-    handlers.pageHide?.({ persisted: true } as PageTransitionEvent);
+    expect(harness.timers.size).toBe(1);
+    harness.emit("pagehide", { persisted: true });
     expect(application.suspend).toHaveBeenCalledOnce();
     expect(application.dispose).not.toHaveBeenCalled();
+    expect(harness.timers.size).toBe(0);
 
-    handlers.pageShow?.({ persisted: false } as PageTransitionEvent);
+    harness.emit("pageshow", { persisted: false });
     expect(application.resume).not.toHaveBeenCalled();
-    handlers.pageShow?.({ persisted: true } as PageTransitionEvent);
+    harness.emit("pageshow", { persisted: true });
     expect(application.resume).toHaveBeenCalledOnce();
-    await Promise.resolve();
+    await completeLifecycleMicrotasks();
+    expect(harness.timers.size).toBe(1);
 
-    handlers.pageHide?.({ persisted: false } as PageTransitionEvent);
+    harness.emit("pagehide", { persisted: false });
     expect(application.dispose).toHaveBeenCalledOnce();
+    expect(harness.timers.size).toBe(0);
 
     unregister();
-    expect(runtime.removeEventListener).toHaveBeenCalledWith(
+    expect(harness.runtime.removeEventListener).toHaveBeenCalledWith(
       "pagehide",
       expect.any(Function),
     );
-    expect(runtime.removeEventListener).toHaveBeenCalledWith(
+    expect(harness.runtime.removeEventListener).toHaveBeenCalledWith(
       "pageshow",
       expect.any(Function),
     );
+    expect(harness.runtime.removeEventListener).toHaveBeenCalledWith(
+      "focus",
+      expect.any(Function),
+    );
+    expect(harness.documentRoot.removeEventListener).toHaveBeenCalledWith(
+      "visibilitychange",
+      expect.any(Function),
+    );
+    expect(harness.windowListeners.size).toBe(0);
+    expect(harness.documentListeners.size).toBe(0);
+  });
+
+  it("refreshes visible Membership on a 15-second timer and coalesces focus and visibility triggers", async () => {
+    const harness = createLifecycleRuntime("hidden");
+    let finishRefresh: () => void = () => undefined;
+    const pendingRefresh = new Promise<void>((resolve) => {
+      finishRefresh = resolve;
+    });
+    const application = {
+      dispose: vi.fn(),
+      refreshMembership: vi
+        .fn(async (): Promise<void> => undefined)
+        .mockImplementationOnce(() => pendingRefresh),
+      resume: vi.fn(async () => undefined),
+      suspend: vi.fn(),
+    };
+    const unregister = registerWebApplicationLifecycle(
+      harness.runtime as unknown as Window,
+      application,
+    );
+    expect(harness.timers.size).toBe(0);
+    harness.emit("focus");
+    await completeLifecycleMicrotasks();
+    expect(application.refreshMembership).not.toHaveBeenCalled();
+
+    harness.visibility("visible");
+    expect(harness.runtime.setInterval).toHaveBeenCalledExactlyOnceWith(
+      expect.any(Function),
+      15_000,
+    );
+    const tick = [...harness.timers.values()][0];
+    harness.emit("focus");
+    tick?.();
+    await completeLifecycleMicrotasks();
+    expect(application.refreshMembership).toHaveBeenCalledOnce();
+    harness.visibility("hidden");
+    expect(harness.timers.size).toBe(0);
+    tick?.();
+    harness.emit("focus");
+    finishRefresh();
+    await completeLifecycleMicrotasks();
+    expect(application.refreshMembership).toHaveBeenCalledOnce();
+
+    harness.visibility("visible");
+    await completeLifecycleMicrotasks();
+    expect(application.refreshMembership).toHaveBeenCalledTimes(2);
+    for (const callback of harness.timers.values()) callback();
+    await completeLifecycleMicrotasks();
+    expect(application.refreshMembership).toHaveBeenCalledTimes(3);
+    expect(application.suspend).not.toHaveBeenCalled();
+    expect(application.resume).not.toHaveBeenCalled();
+    expect(application.dispose).not.toHaveBeenCalled();
+    expect(harness.timers.size).toBe(1);
+    unregister();
+  });
+
+  it("keeps refresh stopped until the current BFCache resumption finishes", async () => {
+    const harness = createLifecycleRuntime();
+    let finishResume: () => void = () => undefined;
+    const pendingResume = new Promise<void>((resolve) => {
+      finishResume = resolve;
+    });
+    const application = {
+      dispose: vi.fn(),
+      refreshMembership: vi.fn(async () => undefined),
+      resume: vi
+        .fn(async (): Promise<void> => undefined)
+        .mockImplementationOnce(() => pendingResume),
+      suspend: vi.fn(),
+    };
+    const unregister = registerWebApplicationLifecycle(
+      harness.runtime as unknown as Window,
+      application,
+    );
+    const oldTick = [...harness.timers.values()][0];
+    harness.emit("pagehide", { persisted: true });
+    harness.emit("pageshow", { persisted: true });
+    harness.emit("focus");
+    harness.visibility("visible");
+    oldTick?.();
+    await completeLifecycleMicrotasks();
+    expect(harness.timers.size).toBe(0);
+    expect(application.refreshMembership).not.toHaveBeenCalled();
+
+    harness.emit("pagehide", { persisted: true });
+    finishResume();
+    await completeLifecycleMicrotasks();
+    expect(harness.timers.size).toBe(0);
+    harness.emit("pageshow", { persisted: true });
+    await completeLifecycleMicrotasks();
+    expect(harness.timers.size).toBe(1);
+    expect(application.refreshMembership).not.toHaveBeenCalled();
+    unregister();
+  });
+
+  it("disposes queued refresh and resume continuations without leaving timers or listeners", async () => {
+    const harness = createLifecycleRuntime();
+    let finishResume: () => void = () => undefined;
+    const application = {
+      dispose: vi.fn(),
+      refreshMembership: vi.fn(async () => undefined),
+      resume: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finishResume = resolve;
+          }),
+      ),
+      suspend: vi.fn(),
+    };
+    const unregister = registerWebApplicationLifecycle(
+      harness.runtime as unknown as Window,
+      application,
+    );
+    const tick = [...harness.timers.values()][0];
+    harness.emit("focus");
+    harness.emit("pagehide", { persisted: true });
+    harness.emit("pageshow", { persisted: true });
+    unregister();
+    finishResume();
+    tick?.();
+    await completeLifecycleMicrotasks();
+    expect(application.refreshMembership).not.toHaveBeenCalled();
+    expect(harness.timers.size).toBe(0);
+    expect(harness.windowListeners.size).toBe(0);
+    expect(harness.documentListeners.size).toBe(0);
   });
 
   it("has no implicit loopback backend when build configuration is absent", () => {

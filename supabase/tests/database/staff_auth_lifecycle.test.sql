@@ -50,6 +50,24 @@ select has_table(
   'staff_audit_events',
   'a minimized staff authentication audit exists'
 );
+select results_eq(
+  $$
+    select column_name::text collate "C", data_type::text collate "C", is_nullable::text collate "C"
+    from information_schema.columns
+    where table_schema = 'desmoslock_v2' and table_name = 'staff_audit_events'
+      and column_name in (
+        'previous_role', 'new_role', 'previous_role_revision', 'new_role_revision'
+      )
+    order by 1
+  $$,
+  $$values
+    ('new_role'::text collate "C", 'text'::text collate "C", 'YES'::text collate "C"),
+    ('new_role_revision'::text collate "C", 'bigint'::text collate "C", 'YES'::text collate "C"),
+    ('previous_role'::text collate "C", 'text'::text collate "C", 'YES'::text collate "C"),
+    ('previous_role_revision'::text collate "C", 'bigint'::text collate "C", 'YES'::text collate "C")
+  $$,
+  'Membership role-change audit fields have exact nullable role and revision types'
+);
 select has_table(
   'desmoslock_v2',
   'staff_password_recovery_operations',
@@ -132,7 +150,7 @@ select ok(
     'desmoslock_v2.current_manageable_staff()',
     'EXECUTE'
   ),
-  'authenticated can request the Owner-scoped manageable staff projection'
+  'authenticated can request the Owner-and-Administrator manageable staff projection'
 );
 select ok(
   has_function_privilege(
@@ -140,7 +158,7 @@ select ok(
     'desmoslock_v2.current_manageable_staff_invitations()',
     'EXECUTE'
   ),
-  'authenticated can request the Owner-scoped manageable invitation projection'
+  'authenticated can request the Owner-and-Administrator manageable invitation projection'
 );
 select ok(
   has_function_privilege(
@@ -313,7 +331,8 @@ select is(
     'profile_id',
     'display_name',
     'email',
-    'membership_role'
+    'membership_role',
+    'role_revision'
   ]::text[],
   'the manageable staff projection keeps its exact PostgREST row keys'
 );
@@ -1066,7 +1085,7 @@ select is(
 );
 select results_eq(
   $$
-    select code, school_id, profile_id, display_name, email, membership_role
+    select code, school_id, profile_id, display_name, email, membership_role, role_revision
     from desmoslock_v2.current_manageable_staff()
   $$,
   $$values (
@@ -1075,7 +1094,8 @@ select results_eq(
     null::uuid,
     null::text,
     null::text,
-    null::text
+    null::text,
+    null::bigint
   )$$,
   'an uninvited user cannot enumerate staff through the Owner projection'
 );
@@ -1160,7 +1180,7 @@ select is(
 );
 select results_eq(
   $$
-    select code, school_id, profile_id, display_name, email, membership_role
+    select code, school_id, profile_id, display_name, email, membership_role, role_revision
     from desmoslock_v2.current_manageable_staff()
   $$,
   $$values (
@@ -1169,7 +1189,8 @@ select results_eq(
     null::uuid,
     null::text,
     null::text,
-    null::text
+    null::text,
+    null::bigint
   )$$,
   'an Owner cannot enumerate staff without current AAL2 and verified TOTP'
 );
@@ -1901,7 +1922,8 @@ select is(
     select code
     from desmoslock_v2.revoke_membership(
       '11000000-0000-4000-8000-000000000001',
-      '21000000-0000-4000-8000-000000000003'
+      '21000000-0000-4000-8000-000000000003',
+      1
     )
   ),
   'step_up_required',
@@ -1984,7 +2006,8 @@ select results_eq(
       profile_id,
       display_name,
       email,
-      membership_role
+      membership_role,
+      role_revision
     from desmoslock_v2.current_manageable_staff()
   $$,
   $$
@@ -1994,7 +2017,8 @@ select results_eq(
       profile_id,
       'Synthetic Accepted Administrator'::text,
       'invitee@staff.invalid'::text,
-      'admin'::text
+      'admin'::text,
+      1::bigint
     from pg_temp.staff_auth_test_results
     where label = 'accepted'
   $$,
@@ -2012,43 +2036,13 @@ select pg_temp.set_staff_claims(
   'aal2'
 );
 set local role authenticated;
-select results_eq(
-  $$
-    select code, school_id, profile_id, display_name, email, membership_role
-    from desmoslock_v2.current_manageable_staff()
-  $$,
-  $$values (
-    'forbidden'::text,
-    null::uuid,
-    null::uuid,
-    null::text,
-    null::text,
-    null::text
-  )$$,
-  'an Administrator cannot enumerate manageable staff'
+select is_empty(
+  $$select * from desmoslock_v2.current_manageable_staff()$$,
+  'an Administrator sees no manageable Teachers before any Teacher accepts'
 );
-select results_eq(
-  $$
-    select
-      code,
-      invitation_id,
-      school_id,
-      invited_email,
-      invited_role,
-      invitation_status,
-      expires_at
-    from desmoslock_v2.current_manageable_staff_invitations()
-  $$,
-  $$values (
-    'forbidden'::text,
-    null::uuid,
-    null::uuid,
-    null::text,
-    null::text,
-    null::text,
-    null::timestamp with time zone
-  )$$,
-  'an Administrator cannot enumerate manageable invitations'
+select is_empty(
+  $$select * from desmoslock_v2.current_manageable_staff_invitations()$$,
+  'an Administrator sees no live Teacher invitations in its own School'
 );
 reset role;
 
@@ -2147,12 +2141,12 @@ select is(
     from desmoslock_v2.begin_staff_invitation(
       '11000000-0000-4000-8000-000000000001',
       'admin-cannot-invite@staff.invalid',
-      'teacher',
+      'admin',
       gen_random_uuid()
     )
   ),
   'forbidden',
-  'a live Administrator cannot initiate another staff invitation'
+  'a live Administrator cannot initiate an Administrator invitation'
 );
 reset role;
 
@@ -3122,7 +3116,8 @@ select is(
       (
         select profile_id from pg_temp.staff_auth_test_results
         where label = 'failure-unavailable'
-      )
+      ),
+      1
     )
   ),
   'membership_revoked',
@@ -3437,7 +3432,7 @@ select pg_temp.set_staff_claims(
 set local role authenticated;
 select results_eq(
   $$
-    select school_id::text, profile_id, email, membership_role
+    select school_id::text, profile_id, email, membership_role, role_revision
     from desmoslock_v2.current_manageable_staff()
   $$,
   $$
@@ -3445,7 +3440,8 @@ select results_eq(
       '11000000-0000-4000-8000-000000000001'::text,
       profile_id,
       'invitee@staff.invalid'::text,
-      'admin'::text
+      'admin'::text,
+      1::bigint
     from pg_temp.staff_auth_test_results
     where label = 'accepted'
   $$,
@@ -3460,7 +3456,8 @@ select is(
         select profile_id
         from pg_temp.staff_auth_test_results
         where label = 'accepted'
-      )
+      ),
+      1
     )
   ),
   'membership_revoked',
@@ -3550,7 +3547,7 @@ select pg_temp.set_staff_claims(
 set local role authenticated;
 select results_eq(
   $$
-    select school_id::text, profile_id, email, membership_role
+    select school_id::text, profile_id, email, membership_role, role_revision
     from desmoslock_v2.current_manageable_staff()
   $$,
   $$
@@ -3558,7 +3555,8 @@ select results_eq(
       '11000000-0000-4000-8000-000000000002'::text,
       profile_id,
       'invitee@staff.invalid'::text,
-      'teacher'::text
+      'teacher'::text,
+      1::bigint
     from pg_temp.staff_auth_test_results
     where label = 'accepted'
   $$,

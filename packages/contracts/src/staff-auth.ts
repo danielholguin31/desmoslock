@@ -22,7 +22,15 @@ export interface AcceptStaffInvitationRequest {
 }
 
 export interface RevokeStaffMembershipRequest {
+  readonly expectedRoleRevision: number;
   readonly profileId: string;
+  readonly schoolId: string;
+}
+
+export interface ChangeStaffMembershipRoleRequest {
+  readonly expectedRoleRevision: number;
+  readonly profileId: string;
+  readonly role: InvitableStaffRole;
   readonly schoolId: string;
 }
 
@@ -64,6 +72,7 @@ export interface ManageableStaffMember {
   readonly email: string;
   readonly profileId: string;
   readonly role: InvitableStaffRole;
+  readonly roleRevision: number;
   readonly schoolId: string;
 }
 
@@ -85,6 +94,7 @@ export const staffAuthWireSuccessCodes = [
   "manageable_invitations_listed",
   "manageable_staff_listed",
   "membership_revoked",
+  "membership_role_changed",
   "recovery_completed",
   "recovery_requested",
   "school_selected",
@@ -123,7 +133,9 @@ export type ManageableStaffInvitationListResponse =
     }
   | StaffAuthFailure<(typeof managementListErrorCodes)[number]>;
 
-const createStaffInvitationErrorCodes = staffAuthErrorCodes;
+const createStaffInvitationErrorCodes = staffAuthErrorCodes.filter(
+  (code) => code !== "membership_revision_conflict",
+);
 const acceptStaffInvitationErrorCodes = [
   "authentication_required",
   "authorization_denied",
@@ -153,12 +165,14 @@ const revokeStaffMembershipErrorCodes = [
   "authentication_required",
   "authorization_denied",
   "invalid_request",
+  "membership_revision_conflict",
   "rate_limited",
   "service_unavailable",
   "session_expired",
   "session_revoked",
   "step_up_required",
 ] as const satisfies readonly StaffAuthErrorCode[];
+const changeStaffMembershipRoleErrorCodes = revokeStaffMembershipErrorCodes;
 const requestStaffPasswordRecoveryErrorCodes = [
   "invalid_request",
   "rate_limited",
@@ -207,6 +221,10 @@ export type RevokeStaffInvitationResponse = StaffAuthOperationResponse<
 export type RevokeStaffMembershipResponse = StaffAuthOperationResponse<
   "membership_revoked",
   (typeof revokeStaffMembershipErrorCodes)[number]
+>;
+export type ChangeStaffMembershipRoleResponse = StaffAuthOperationResponse<
+  "membership_role_changed",
+  (typeof changeStaffMembershipRoleErrorCodes)[number]
 >;
 export type RequestStaffPasswordRecoveryResponse = StaffAuthOperationResponse<
   "recovery_requested",
@@ -305,6 +323,7 @@ export const staffAuthRpcFailureCodes = [
   "invitation_expired",
   "invitation_not_found",
   "membership_inactive",
+  "membership_revision_conflict",
   "rate_limited",
   "session_expired",
   "session_revoked",
@@ -349,6 +368,7 @@ const rpcFailureToProductCode = {
   invitation_expired: "invitation_expired",
   invitation_not_found: "invitation_not_found",
   membership_inactive: "authorization_denied",
+  membership_revision_conflict: "membership_revision_conflict",
   rate_limited: "rate_limited",
   session_expired: "session_expired",
   session_revoked: "session_revoked",
@@ -377,9 +397,11 @@ export function mapStaffAuthInternalFailure(
 export function mapCreateStaffInvitationInternalResult(
   result: CreateStaffInvitationInternalResult,
 ): CreateStaffInvitationResponse {
-  return result.ok
-    ? { code: "invitation_created", ok: true }
-    : mapStaffAuthInternalFailure(result);
+  if (result.ok) return { code: "invitation_created", ok: true };
+  const failure = mapStaffAuthInternalFailure(result);
+  return failure.code === "membership_revision_conflict"
+    ? { code: "service_unavailable", ok: false }
+    : { code: failure.code, ok: false };
 }
 
 const staffPasswordRecoveryRpcFailureToProductCode = {
@@ -425,6 +447,12 @@ const recoveryBindingPattern = /^[A-Za-z0-9_-]{43}$/u;
 
 function parseCanonicalUuid(value: unknown): string | null {
   return typeof value === "string" && canonicalUuidPattern.test(value)
+    ? value
+    : null;
+}
+
+function parseRoleRevision(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1
     ? value
     : null;
 }
@@ -515,6 +543,7 @@ const manageableStaffRpcKeys = [
   "email",
   "membership_role",
   "profile_id",
+  "role_revision",
   "school_id",
 ] as const;
 const manageableInvitationRpcKeys = [
@@ -531,6 +560,7 @@ const manageableStaffItemKeys = [
   "email",
   "profileId",
   "role",
+  "roleRevision",
   "schoolId",
 ] as const;
 const manageableInvitationItemKeys = [
@@ -662,11 +692,13 @@ function parseManageableStaffItems(
     const displayName = parseStaffDisplayName(row.displayName);
     const email = parseCanonicalEmail(row.email);
     const profileId = parseCanonicalUuid(row.profileId);
+    const roleRevision = parseRoleRevision(row.roleRevision);
     const schoolId = parseCanonicalUuid(row.schoolId);
     if (
       displayName === null ||
       email === null ||
       profileId === null ||
+      roleRevision === null ||
       schoolId === null ||
       (row.role !== "administrator" && row.role !== "teacher")
     ) {
@@ -689,7 +721,14 @@ function parseManageableStaffItems(
     }
     profileByEmail.set(email, profileId);
     profileFacts.set(profileId, { displayName, email });
-    items.push({ displayName, email, profileId, role: row.role, schoolId });
+    items.push({
+      displayName,
+      email,
+      profileId,
+      role: row.role,
+      roleRevision,
+      schoolId,
+    });
   }
 
   return items;
@@ -797,6 +836,7 @@ export function mapCurrentManageableStaffRpcRows(
     const displayName = parseStaffDisplayName(row.display_name);
     const email = parseCanonicalEmail(row.email);
     const profileId = parseCanonicalUuid(row.profile_id);
+    const roleRevision = parseRoleRevision(row.role_revision);
     const schoolId = parseCanonicalUuid(row.school_id);
     const role =
       row.membership_role === "admin"
@@ -808,6 +848,7 @@ export function mapCurrentManageableStaffRpcRows(
       displayName === null ||
       email === null ||
       profileId === null ||
+      roleRevision === null ||
       schoolId === null ||
       role === null
     ) {
@@ -832,7 +873,7 @@ export function mapCurrentManageableStaffRpcRows(
     }
     profileByEmail.set(email, profileId);
     profileFacts.set(profileId, { displayName, email });
-    items.push({ displayName, email, profileId, role, schoolId });
+    items.push({ displayName, email, profileId, role, roleRevision, schoolId });
   }
 
   return { code: "manageable_staff_listed", items, ok: true };
@@ -1080,14 +1121,47 @@ export function parseAcceptStaffInvitationRequest(
 export function parseRevokeStaffMembershipRequest(
   value: unknown,
 ): RevokeStaffMembershipRequest | null {
-  const request = parseExactRecord(value, ["profileId", "schoolId"]);
+  const request = parseExactRecord(value, [
+    "expectedRoleRevision",
+    "profileId",
+    "schoolId",
+  ]);
   if (request === null) return null;
 
+  const expectedRoleRevision = parseRoleRevision(request.expectedRoleRevision);
   const profileId = parseCanonicalUuid(request.profileId);
   const schoolId = parseCanonicalUuid(request.schoolId);
-  return profileId === null || schoolId === null
+  return expectedRoleRevision === null ||
+    profileId === null ||
+    schoolId === null
     ? null
-    : { profileId, schoolId };
+    : { expectedRoleRevision, profileId, schoolId };
+}
+
+export function parseChangeStaffMembershipRoleRequest(
+  value: unknown,
+): ChangeStaffMembershipRoleRequest | null {
+  const request = parseExactRecord(value, [
+    "expectedRoleRevision",
+    "profileId",
+    "role",
+    "schoolId",
+  ]);
+  if (request === null) return null;
+
+  const expectedRoleRevision = parseRoleRevision(request.expectedRoleRevision);
+  const profileId = parseCanonicalUuid(request.profileId);
+  const schoolId = parseCanonicalUuid(request.schoolId);
+  if (
+    expectedRoleRevision === null ||
+    profileId === null ||
+    schoolId === null ||
+    (request.role !== "administrator" && request.role !== "teacher")
+  ) {
+    return null;
+  }
+
+  return { expectedRoleRevision, profileId, role: request.role, schoolId };
 }
 
 export function parseRevokeStaffInvitationRequest(
@@ -1207,6 +1281,16 @@ export function parseRevokeStaffMembershipResponse(
     value,
     "membership_revoked",
     revokeStaffMembershipErrorCodes,
+  );
+}
+
+export function parseChangeStaffMembershipRoleResponse(
+  value: unknown,
+): ChangeStaffMembershipRoleResponse | null {
+  return parseStaffAuthOperationResponse(
+    value,
+    "membership_role_changed",
+    changeStaffMembershipRoleErrorCodes,
   );
 }
 

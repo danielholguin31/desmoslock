@@ -53,27 +53,49 @@ describe("staff role boundary", () => {
     ]);
   });
 
-  it("allows only an active same-School Owner with current TOTP step-up", () => {
-    expect(
-      authorizeStaffInvitation({
-        actorMembershipStatus: "active",
-        actorRole: "owner",
-        actorSchoolId: "alpha-school",
-        stepUp: verifiedTotp,
-        targetSchoolId: "alpha-school",
-        targetRole: "administrator",
-      }),
-    ).toEqual({ code: "invitation_created", ok: true });
-    expect(
-      authorizeStaffInvitation({
-        actorMembershipStatus: "active",
-        actorRole: "administrator",
-        actorSchoolId: "alpha-school",
-        stepUp: verifiedTotp,
-        targetSchoolId: "alpha-school",
-        targetRole: "teacher",
-      }),
-    ).toEqual({ code: "authorization_denied", ok: false });
+  it.each([
+    ["owner", "administrator"],
+    ["owner", "teacher"],
+    ["administrator", "teacher"],
+  ] as const)(
+    "allows an active same-School %s to invite a %s with current TOTP step-up",
+    (actorRole, targetRole) => {
+      expect(
+        authorizeStaffInvitation({
+          actorMembershipStatus: "active",
+          actorRole,
+          actorSchoolId: "alpha-school",
+          stepUp: verifiedTotp,
+          targetSchoolId: "alpha-school",
+          targetRole,
+        }),
+      ).toEqual({ code: "invitation_created", ok: true });
+    },
+  );
+
+  it.each([
+    ["administrator", "administrator"],
+    ["administrator", "owner"],
+    ["teacher", "teacher"],
+    ["teacher", "administrator"],
+    ["teacher", "owner"],
+  ] as const)(
+    "denies an active %s permission to invite a %s",
+    (actorRole, targetRole) => {
+      expect(
+        authorizeStaffInvitation({
+          actorMembershipStatus: "active",
+          actorRole,
+          actorSchoolId: "alpha-school",
+          stepUp: verifiedTotp,
+          targetSchoolId: "alpha-school",
+          targetRole,
+        }),
+      ).toEqual({ code: "authorization_denied", ok: false });
+    },
+  );
+
+  it("preserves the unsupported Owner invitation result after Owner step-up", () => {
     expect(
       authorizeStaffInvitation({
         actorMembershipStatus: "active",
@@ -86,57 +108,65 @@ describe("staff role boundary", () => {
     ).toEqual({ code: "invitation_owner_role_unsupported", ok: false });
   });
 
-  it("denies cross-School scope before considering target details", () => {
-    expect(
-      authorizeStaffInvitation({
-        actorMembershipStatus: "active",
-        actorRole: "owner",
-        actorSchoolId: "alpha-school",
-        stepUp: verifiedTotp,
-        targetSchoolId: "beta-school",
-        targetRole: "teacher",
-      }),
-    ).toEqual({ code: "authorization_denied", ok: false });
-  });
-
-  it("requires signed AAL2 from the current verified TOTP factor", () => {
-    expect(
-      authorizeStaffInvitation({
-        actorMembershipStatus: "active",
-        actorRole: "owner",
-        actorSchoolId: "alpha-school",
-        stepUp: { ...verifiedTotp, isCurrentSession: false },
-        targetSchoolId: "alpha-school",
-        targetRole: "teacher",
-      }),
-    ).toEqual({ code: "step_up_required", ok: false });
-  });
-
-  it("denies invitation authority to Teachers and inactive memberships", () => {
-    expect(
-      authorizeStaffInvitation({
-        actorMembershipStatus: "active",
-        actorRole: "teacher",
-        actorSchoolId: "alpha-school",
-        stepUp: verifiedTotp,
-        targetSchoolId: "alpha-school",
-        targetRole: "teacher",
-      }),
-    ).toEqual({ code: "authorization_denied", ok: false });
-
-    for (const actorMembershipStatus of ["suspended", "removed"] as const) {
+  it.each([
+    ["owner", "teacher"],
+    ["owner", "owner"],
+    ["administrator", "teacher"],
+  ] as const)(
+    "denies a %s invitation for a %s in another School before target details or step-up",
+    (actorRole, targetRole) => {
       expect(
         authorizeStaffInvitation({
-          actorMembershipStatus,
-          actorRole: "owner",
+          actorMembershipStatus: "active",
+          actorRole,
+          actorSchoolId: "alpha-school",
+          stepUp: { ...verifiedTotp, assuranceLevel: "aal1" },
+          targetSchoolId: "beta-school",
+          targetRole,
+        }),
+      ).toEqual({ code: "authorization_denied", ok: false });
+    },
+  );
+
+  it.each(["owner", "administrator"] as const)(
+    "requires signed AAL2 from the current verified TOTP factor for a %s invitation",
+    (actorRole) => {
+      for (const stepUp of [
+        { ...verifiedTotp, assuranceLevel: "aal1" as const },
+        { ...verifiedTotp, evidenceSource: "untrusted_client" as const },
+        { ...verifiedTotp, factorStatus: "unverified" as const },
+        { ...verifiedTotp, factorType: null },
+        { ...verifiedTotp, isCurrentSession: false },
+      ]) {
+        expect(
+          authorizeStaffInvitation({
+            actorMembershipStatus: "active",
+            actorRole,
+            actorSchoolId: "alpha-school",
+            stepUp,
+            targetSchoolId: "alpha-school",
+            targetRole: "teacher",
+          }),
+        ).toEqual({ code: "step_up_required", ok: false });
+      }
+    },
+  );
+
+  it.each(["owner", "administrator", "teacher"] as const)(
+    "denies invitation authority to a revoked %s",
+    (actorRole) => {
+      expect(
+        authorizeStaffInvitation({
+          actorMembershipStatus: "revoked",
+          actorRole,
           actorSchoolId: "alpha-school",
           stepUp: verifiedTotp,
           targetSchoolId: "alpha-school",
           targetRole: "teacher",
         }),
       ).toEqual({ code: "authorization_denied", ok: false });
-    }
-  });
+    },
+  );
 });
 
 describe("staff invitation lifecycle", () => {
@@ -631,6 +661,7 @@ describe("staff auth public code stability", () => {
       "invitation_delivery_unconfirmed",
       "invitation_delivery_rejected",
       "invitation_not_found",
+      "membership_revision_conflict",
       "rate_limited",
       "service_unavailable",
       "session_expired",

@@ -13,11 +13,58 @@ import {
 
 // Real PostgreSQL lock contention with synthetic Auth-table fixtures. This does
 // not attest GoTrue login, JWT signature validation, mail, or browser behavior.
+// B's committed transitions are direct fixture SQL. The separate final provider
+// journey covers competing RPC commits that retain their immutable audits.
 const scenarios = [
   { action: "unchanged", expected: "membership_revoked" },
   { action: "membership", expected: "membership_inactive" },
   { action: "session", expected: "session_expired" },
   { action: "factor", expected: "step_up_required" },
+  {
+    action: "admin-revoke",
+    actorRole: "admin",
+    expected: "membership_revoked",
+  },
+  {
+    action: "admin-promoted-target",
+    actorRole: "admin",
+    mutation: "promote-target",
+    expected: "forbidden",
+  },
+  {
+    action: "revoke-stale-target",
+    mutation: "promote-target",
+    expected: "membership_revision_conflict",
+  },
+  {
+    action: "role-change-stale-target",
+    operation: "role-change",
+    mutation: "promote-target",
+    expected: "membership_revision_conflict",
+  },
+  {
+    action: "role-change",
+    operation: "role-change",
+    expected: "membership_role_changed",
+  },
+  {
+    action: "role-change-session",
+    operation: "role-change",
+    mutation: "session",
+    expected: "session_expired",
+  },
+  {
+    action: "role-change-factor",
+    operation: "role-change",
+    mutation: "factor",
+    expected: "step_up_required",
+  },
+  {
+    action: "role-change-membership",
+    operation: "role-change",
+    mutation: "membership",
+    expected: "membership_inactive",
+  },
 ];
 const reportableCodes = new Set([
   ...scenarios.map((scenario) => scenario.expected),
@@ -46,6 +93,10 @@ from desmoslock_v2.staff_audit_events e where e.subject_profile_id = ${sqlUuid(f
 }
 
 function setupQuery(fixture) {
+  check(
+    ["owner", "admin"].includes(fixture.actorRole),
+    "Invalid synthetic actor role",
+  );
   return `begin;
 insert into auth.users (instance_id,id,aud,role,email,encrypted_password,email_confirmed_at,raw_app_meta_data,raw_user_meta_data,created_at,updated_at)
 values ('00000000-0000-0000-0000-000000000000',${sqlUuid(fixture.user)},'authenticated','authenticated','lock-${fixture.user}@example.invalid','',clock_timestamp(),'{}','{}',clock_timestamp(),clock_timestamp());
@@ -59,12 +110,15 @@ insert into desmoslock_v2.profiles (id,display_name,seed_key,auth_user_id)
 values (${sqlUuid(fixture.owner)},'Synthetic Lock Owner',null,${sqlUuid(fixture.user)}),
 (${sqlUuid(fixture.target)},'Synthetic Lock Teacher',null,null);
 insert into desmoslock_v2.memberships (workspace_id,profile_id,role,seed_key)
-values (${sqlUuid(fixture.workspace)},${sqlUuid(fixture.owner)},'owner',null),
+values (${sqlUuid(fixture.workspace)},${sqlUuid(fixture.owner)},'${fixture.actorRole}',null),
 (${sqlUuid(fixture.workspace)},${sqlUuid(fixture.target)},'teacher',null);
 commit;`;
 }
 
 function authorityMutation(fixture, action) {
+  if (action === "promote-target")
+    return `update desmoslock_v2.memberships set role='admin',role_revision=role_revision+1,updated_at=clock_timestamp()
+where workspace_id=${sqlUuid(fixture.workspace)} and profile_id=${sqlUuid(fixture.target)};`;
   if (action === "membership")
     return `update desmoslock_v2.memberships
 set status='revoked',role_revision=role_revision+1,revoked_at=clock_timestamp(),
@@ -88,7 +142,7 @@ from pg_stat_activity a where a.pid=${actor.pid} and a.application_name='${actor
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(
-    "The actual revoke RPC never demonstrated the required target lock wait",
+    "The actual Membership RPC never demonstrated the required target lock wait",
   );
 }
 
@@ -126,8 +180,8 @@ and (not exists(select 1 from desmoslock_v2.profiles where id in (${sqlUuid(fixt
 }
 
 test(
-  "revoke_membership rechecks authority after an observed PostgreSQL lock wait",
-  { timeout: 120_000 },
+  "Membership mutations recheck authority, target role, and revision after an observed PostgreSQL lock wait",
+  { timeout: 180_000 },
   async (t) => {
     verifyDisposableDatabase();
     freshBaseline();
@@ -138,6 +192,7 @@ test(
             (key) => [key, randomUUID()],
           ),
         );
+        fixture.actorRole = scenario.actorRole ?? "owner";
         const namespace = randomUUID();
         const names = [`lock-${namespace}-actor`, `lock-${namespace}-blocker`];
         let actor;
@@ -153,6 +208,7 @@ test(
           const before = parseJson(beforeRows[0]);
           check(
             before.membership?.status === "active" &&
+              before.membership.role_revision === 1 &&
               before.audit?.length === 0,
             "Concurrency fixture did not begin with an active unaudited target",
           );
@@ -171,11 +227,16 @@ where workspace_id=${sqlUuid(fixture.workspace)} and profile_id=${sqlUuid(fixtur
             aal: "aal2",
             exp: Math.floor(Date.now() / 1000) + 3600,
           });
+          // Both operations carry the revision observed before B's transition.
+          const mutation =
+            scenario.operation === "role-change"
+              ? `select code from desmoslock_v2.change_membership_role(${sqlUuid(fixture.workspace)},${sqlUuid(fixture.target)},'admin',1);`
+              : `select code from desmoslock_v2.revoke_membership(${sqlUuid(fixture.workspace)},${sqlUuid(fixture.target)},1);`;
           const resultPromise = actor.query(`begin;
 set local "request.jwt.claim.sub"='';
 set local "request.jwt.claims"='${claims}';
 set local role authenticated;
-select code from desmoslock_v2.revoke_membership(${sqlUuid(fixture.workspace)},${sqlUuid(fixture.target)});
+${mutation}
 reset role;
 ${snapshotQuery(fixture)}
 rollback;`);
@@ -183,40 +244,68 @@ rollback;`);
           // immediately and still inspect the original promise after releasing B.
           void resultPromise.catch(() => {});
           await waitForTargetLock(blocker, actor);
-          await blocker.query(
-            `${authorityMutation(fixture, scenario.action)}\ncommit;`,
+          const competitorRows = await blocker.query(
+            `${authorityMutation(fixture, scenario.mutation ?? scenario.action)}\n${snapshotQuery(fixture)}`,
           );
+          check(
+            competitorRows.length === 1,
+            "Committed competitor snapshot is incomplete",
+          );
+          const competitorState = parseJson(competitorRows[0]);
+          await blocker.query("commit;");
           const results = await resultPromise;
           const observedCode = reportableCodes.has(results[0])
             ? results[0]
             : "unrecognized";
           check(
             results.length === 2 && results[0] === scenario.expected,
-            `Actual revoke result violated post-lock authorization (expected ${scenario.expected}; observed ${observedCode}; rows ${Math.min(results.length, 999)})`,
+            `Actual Membership result violated post-lock authorization (expected ${scenario.expected}; observed ${observedCode}; rows ${Math.min(results.length, 999)})`,
           );
           const after = parseJson(results[1]);
-          if (scenario.action === "unchanged") {
+          if (scenario.expected === "membership_revoked") {
             check(
               after.membership?.status === "revoked" &&
                 after.membership.role_revision ===
                   before.membership.role_revision + 1 &&
                 after.membership.revoked_by_profile_id === fixture.owner &&
+                after.membership.revocation_reason_code ===
+                  (fixture.actorRole === "admin"
+                    ? "administrator_action"
+                    : "owner_action") &&
                 after.audit?.length === 1 &&
                 after.audit[0].event_type === "membership_revoked" &&
                 after.audit[0].actor_profile_id === fixture.owner &&
                 after.audit[0].subject_profile_id === fixture.target,
               "Unchanged-authority positive control did not revoke and audit the target",
             );
+          } else if (scenario.expected === "membership_role_changed") {
+            check(
+              after.membership?.status === "active" &&
+                after.membership.role === "admin" &&
+                after.membership.role_revision === 2 &&
+                after.audit?.length === 1 &&
+                after.audit[0].event_type === "membership_role_changed" &&
+                after.audit[0].result_code === "membership_role_changed" &&
+                after.audit[0].actor_profile_id === fixture.owner &&
+                after.audit[0].subject_profile_id === fixture.target &&
+                after.audit[0].session_id === fixture.session &&
+                after.audit[0].previous_role === "teacher" &&
+                after.audit[0].new_role === "admin" &&
+                after.audit[0].previous_role_revision === 1 &&
+                after.audit[0].new_role_revision === 2 &&
+                after.audit[0].occurred_at === after.membership.updated_at,
+              "Role-change positive control did not produce the atomic typed audit",
+            );
           } else {
             check(
-              isDeepStrictEqual(after, before),
-              "Denied post-lock revocation changed a target Membership or audit tuple",
+              isDeepStrictEqual(after, competitorState),
+              "Denied post-lock mutation changed the competitor's Membership or audit tuple",
             );
           }
           const restoredRows = await blocker.query(snapshotQuery(fixture));
           check(
             restoredRows.length === 1 &&
-              isDeepStrictEqual(parseJson(restoredRows[0]), before),
+              isDeepStrictEqual(parseJson(restoredRows[0]), competitorState),
             "The actor transaction did not roll back its target and audit changes",
           );
         } finally {

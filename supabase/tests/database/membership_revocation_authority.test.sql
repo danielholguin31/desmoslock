@@ -181,13 +181,136 @@ $$;
 revoke all on function desmoslock_v2.internal_authorize_staff(uuid, text[], boolean)
   from public, anon, authenticated, service_role;
 
+-- Reuse the genuine-helper seam for the new Owner-only role-change RPC.
+-- Savepoints isolate each authority mutation from the original revocation cases.
+
+savepoint role_change_expired_session;
+update membership_revocation_probe set action = 'expired_session', calls = 0, first_code = null;
+set local role authenticated;
+select is(
+  (select code from desmoslock_v2.change_membership_role(
+    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002', 'admin', 1
+  )),
+  'session_expired',
+  'role change rejects provider session expiry after genuine initial authorization'
+);
+reset role;
+select results_eq(
+  $$select first_code, calls,
+      pg_temp.membership_revocation_snapshot('22000000-0000-4000-8000-000000000002') =
+        (select state from membership_revocation_snapshots where label = 'active-teacher')
+    from membership_revocation_probe$$,
+  $$values ('ok'::text, 2, true)$$,
+  'role-change revalidation after provider session expiry leaves the target tuple and audit untouched'
+);
+rollback to savepoint role_change_expired_session;
+release savepoint role_change_expired_session;
+
+savepoint role_change_revoked_session;
+update membership_revocation_probe set action = 'revoked_session', calls = 0, first_code = null;
+set local role authenticated;
+select is(
+  (select code from desmoslock_v2.change_membership_role(
+    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002', 'admin', 1
+  )),
+  'session_revoked',
+  'role change rejects concrete application-session revocation after genuine initial authorization'
+);
+reset role;
+select results_eq(
+  $$select first_code, calls,
+      pg_temp.membership_revocation_snapshot('22000000-0000-4000-8000-000000000002') =
+        (select state from membership_revocation_snapshots where label = 'active-teacher')
+    from membership_revocation_probe$$,
+  $$values ('ok'::text, 2, true)$$,
+  'role-change revalidation after concrete application-session revocation leaves the target tuple and audit untouched'
+);
+rollback to savepoint role_change_revoked_session;
+release savepoint role_change_revoked_session;
+
+savepoint role_change_unverified_factor;
+update membership_revocation_probe set action = 'unverified_factor', calls = 0, first_code = null;
+set local role authenticated;
+select is(
+  (select code from desmoslock_v2.change_membership_role(
+    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002', 'admin', 1
+  )),
+  'step_up_required',
+  'role change rejects loss of verified TOTP after genuine initial authorization'
+);
+reset role;
+select results_eq(
+  $$select first_code, calls,
+      pg_temp.membership_revocation_snapshot('22000000-0000-4000-8000-000000000002') =
+        (select state from membership_revocation_snapshots where label = 'active-teacher')
+    from membership_revocation_probe$$,
+  $$values ('ok'::text, 2, true)$$,
+  'role-change revalidation after loss of verified TOTP leaves the target tuple and audit untouched'
+);
+rollback to savepoint role_change_unverified_factor;
+release savepoint role_change_unverified_factor;
+
+savepoint role_change_revoked_owner;
+update membership_revocation_probe set action = 'revoked_owner', calls = 0, first_code = null;
+set local role authenticated;
+select is(
+  (select code from desmoslock_v2.change_membership_role(
+    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002', 'admin', 1
+  )),
+  'membership_inactive',
+  'role change rejects loss of Owner membership after genuine initial authorization'
+);
+reset role;
+select results_eq(
+  $$select first_code, calls,
+      pg_temp.membership_revocation_snapshot('22000000-0000-4000-8000-000000000002') =
+        (select state from membership_revocation_snapshots where label = 'active-teacher')
+    from membership_revocation_probe$$,
+  $$values ('ok'::text, 2, true)$$,
+  'role-change revalidation after loss of Owner membership leaves the target tuple and audit untouched'
+);
+rollback to savepoint role_change_revoked_owner;
+release savepoint role_change_revoked_owner;
+
+savepoint role_change_delayed_success;
+update membership_revocation_probe
+set action = 'delayed_success', calls = 0, first_code = null, observed_at = null;
+set local role authenticated;
+select is(
+  (select code from desmoslock_v2.change_membership_role(
+    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002', 'admin', 1
+  )),
+  'membership_role_changed',
+  'role change succeeds after the delay when the genuine Owner authority remains valid'
+);
+reset role;
+select results_eq(
+  $$select probe.first_code, probe.calls, membership.role, membership.status, membership.role_revision,
+      membership.updated_at >= probe.observed_at, event.occurred_at = membership.updated_at,
+      event.event_type, event.result_code, event.previous_role, event.new_role,
+      event.previous_role_revision, event.new_role_revision
+    from desmoslock_v2.memberships as membership cross join membership_revocation_probe as probe
+    join desmoslock_v2.staff_audit_events as event
+      on event.workspace_id = '12000000-0000-4000-8000-000000000001'
+      and event.subject_profile_id = '22000000-0000-4000-8000-000000000002'
+    where membership.workspace_id = '12000000-0000-4000-8000-000000000001'
+      and membership.profile_id = '22000000-0000-4000-8000-000000000002'$$,
+  $$values ('ok'::text, 2, 'admin'::text, 'active'::text, 2::bigint, true, true,
+    'membership_role_changed'::text, 'membership_role_changed'::text,
+    'teacher'::text, 'admin'::text, 1::bigint, 2::bigint)$$,
+  'role mutation and its sole typed audit share a fresh clock captured after the delay'
+);
+rollback to savepoint role_change_delayed_success;
+release savepoint role_change_delayed_success;
+
+
 savepoint revoked_application_session;
 update membership_revocation_probe
 set action = 'revoked_session', calls = 0, first_code = null;
 set local role authenticated;
 select is(
   (select code from desmoslock_v2.revoke_membership(
-    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002'
+    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002', 1
   )),
   'session_revoked',
   'revocation rejects concrete application-session revocation after genuine initial authorization'
@@ -211,7 +334,7 @@ release savepoint revoked_application_session;
 set local role authenticated;
 select is(
   (select code from desmoslock_v2.revoke_membership(
-    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002'
+    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002', 1
   )),
   'session_expired',
   'revocation rejects a provider session expired after genuine initial authorization'
@@ -232,7 +355,7 @@ set action = 'unverified_factor', calls = 0, first_code = null;
 set local role authenticated;
 select is(
   (select code from desmoslock_v2.revoke_membership(
-    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002'
+    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002', 1
   )),
   'step_up_required',
   'revocation rejects TOTP verification lost after genuine initial authorization'
@@ -253,7 +376,7 @@ set action = 'revoked_owner', calls = 0, first_code = null;
 set local role authenticated;
 select is(
   (select code from desmoslock_v2.revoke_membership(
-    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002'
+    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002', 1
   )),
   'membership_inactive',
   'revocation rejects Owner membership removed after genuine initial authorization'
@@ -278,7 +401,7 @@ set action = 'expired_session', calls = 0, first_code = null;
 set local role authenticated;
 select is(
   (select code from desmoslock_v2.revoke_membership(
-    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000099'
+    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000099', 1
   )),
   'session_expired',
   'post-lock authorization precedes disclosure of a missing target Membership'
@@ -299,7 +422,7 @@ set action = 'delayed_success', calls = 0, first_code = null, observed_at = null
 set local role authenticated;
 select is(
   (select code from desmoslock_v2.revoke_membership(
-    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002'
+    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002', 1
   )),
   'membership_revoked',
   'an Owner whose real authority remains valid can revoke the Teacher after the delay'
@@ -341,10 +464,10 @@ update membership_revocation_probe set action = 'none', calls = 0, first_code = 
 set local role authenticated;
 select is(
   (select code from desmoslock_v2.revoke_membership(
-    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002'
+    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002', 2
   )),
-  'membership_inactive',
-  'a valid Owner receives the existing inactive result for an already-revoked Teacher'
+  'forbidden',
+  'a valid Owner receives the generic denial for an already-revoked Teacher'
 );
 reset role;
 select is(
@@ -356,7 +479,7 @@ update membership_revocation_probe set action = 'none', calls = 0, first_code = 
 set local role authenticated;
 select is(
   (select code from desmoslock_v2.revoke_membership(
-    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000001'
+    '12000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000001', 1
   )),
   'forbidden',
   'valid Owner authority does not permit revoking an Owner target'

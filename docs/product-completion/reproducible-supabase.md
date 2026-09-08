@@ -2,18 +2,28 @@
 
 ## Scope and safety boundary
 
-This is the generation-4 internal-release backend for local development and a
-future synthetic staging project. It adds the reviewed staff authentication
-lifecycle foundation from issue 31 while remaining deliberately smaller than
-the future role-policy, Student Session capability, and calculator-isolation
-work in issues 32–34.
+This is the generation-4 internal-release backend for local development and
+approved synthetic staging. Its eight versioned migrations include the staff
+authentication lifecycle and the first Membership administration slice.
+Student Session capabilities and calculator isolation remain later work.
 
-Generation 4 includes the callback-completion follow-on migration while
-preserving the synthetic fixture. Repository implementation and migration
+Generation 4 preserves the synthetic fixture across these follow-on migrations.
+Repository implementation and migration
 attestations alone do not establish operational staff-auth readiness. Delivered
 invitations, completed callbacks, and cross-browser session revocation require
 separate runtime evidence; health and the local schema verification lane do not
 claim those journeys.
+
+Membership administration enforces authority separately for each School.
+Owners can invite and revoke Admins or Teachers and change those Membership
+roles; Admins can invite and revoke Teachers; Teachers cannot administer staff.
+Owner Memberships and self-directed Membership changes are protected. Role
+changes and revocations require the expected target revision and recheck live
+authority after locking the target. Manageable invitations come from durable
+database state, including pending delivery and acceptance, rather than a
+browser's previous submissions. These are versioned source contracts; this
+document does not claim the Membership browser journeys have run or that hosted
+staging matches the current source.
 
 The baseline contains exactly the generation-2 foundation marker, two fictional
 Schools, six fictional staff profiles and memberships, two Tests, and two
@@ -43,6 +53,7 @@ health function, and operator modules in this repository are the authority.
 - `supabase/migrations/20260907000100_staff_auth_callback_completion.sql`
 - `supabase/migrations/20260907000200_runtime_owner_bootstrap.sql`
 - `supabase/migrations/20260907000300_membership_revocation_authority.sql`
+- `supabase/migrations/20260907000400_membership_administration.sql`
 - `supabase/seed.sql`
 - `supabase/config.toml`
 - `supabase/functions/deno.json`
@@ -59,7 +70,7 @@ The fixture contract is generation `4`, version `internal-baseline-v2`, with
 SHA-256
 `f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201`.
 The exact discovered migration file set has normalized SHA-256
-`e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a`.
+`7c3e7403b61d5c66123b15d2fe4de28ee2259d71a304ce8695d16630f5353a56`.
 The published generation-3 migration retains its contemporaneous digest
 `06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49`;
 the original generation-4 migration likewise retains
@@ -72,12 +83,16 @@ The runtime-Owner-bootstrap migration retains its six-file digest
 `8d5fd99304ce8bbf9524dfb788080f890ab84565c096a8e6d4faf437a9b734dc`
 and raw SHA-256
 `43527d889ae0823057bba8ab7b4ed97eb9603220658c59c56cfda70889af75c9`.
-Only the Membership-revocation-authority migration records the current aggregate.
-Its raw SHA-256 is
+The Membership revocation authority migration retains its seven-file digest
+`e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a`
+and raw SHA-256
 `9c59c0192b4f960f925db8c64be1c7b2aa6843591d6214a98b29c2bac5a326ad`.
+Only the Membership administration migration records the current aggregate.
+Its raw SHA-256 is
+`078a886cc923b0d9349eca992ebf1d74b06e4bbd302ee165828b4003ca3326a5`.
 The repository contract pins each attested migration's raw SHA-256 and literal
-independently, then zeroes only those five delimited self-references when deriving
-the seven-file aggregate. The follow-on migration updates the existing singleton
+independently, then zeroes only those six delimited self-references when deriving
+the eight-file aggregate. The follow-on migration updates the existing singleton
 attestation without changing schema generation `4` or the seven-table fixture;
 the upgrade path does not depend on rewriting or replaying historical migrations.
 The seed takes a transaction advisory lock, refuses altered or partial targets,
@@ -383,7 +398,13 @@ email delivery, callback completion, or two-browser revocation journey. An
 agent carries the implementation, verification and receipt collection through
 the unresolved gates within the authorized scope. Human input is required for
 an actual authority boundary or unresolved material choice, not for checks the
-agent can perform:
+agent can perform.
+
+The existing approved target is `adlhhdbglpamaftcbmce`. Its last recorded public
+health response was generation 3, which is evidence of a version gap, not proof
+that the target is empty or ready for these migrations. Recheck its current
+inventory and identity before planning an upgrade; the local eight-migration
+foundation does not establish hosted state or require a replacement project.
 
 1. Verify and reuse an approved empty synthetic-only staging target when one is
    already available. Create a new project only when the reviewed requirements

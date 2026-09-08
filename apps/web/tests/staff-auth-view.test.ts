@@ -24,6 +24,8 @@ class FakeElement {
   noValidate = false;
   required = false;
   selected = false;
+  selectionStart: number | null = null;
+  selectionEnd: number | null = null;
   src = "";
   tabIndex = 0;
   textContent: string | null = null;
@@ -72,6 +74,33 @@ function descendants(root: FakeElement): FakeElement[] {
   return root.children.flatMap((child) => [child, ...descendants(child)]);
 }
 
+function namedControl(root: FakeElement, name: string): FakeElement {
+  const element = descendants(root).find((node) => node.name === name);
+  if (element === undefined) throw new Error(`expected ${name} control`);
+  return element;
+}
+
+function activateAuthAction(root: FakeElement, action: string): void {
+  const nodes = descendants(root);
+  const button = nodes.find(({ dataset }) => dataset.authAction === action);
+  if (button === undefined || button.disabled) {
+    throw new Error(`expected enabled ${action} action`);
+  }
+  const eventTarget =
+    button.type === "submit"
+      ? nodes.find(
+          (node) =>
+            node.tagName === "form" && descendants(node).includes(button),
+        )
+      : button;
+  const listener = eventTarget?.listeners.get(
+    button.type === "submit" ? "submit" : "click",
+  );
+  if (listener === undefined)
+    throw new Error(`expected ${action} event handler`);
+  listener({ preventDefault() {} } as Event);
+}
+
 function authenticatedSnapshot(role: "administrator" | "owner" | "teacher") {
   const roleId = role === "administrator" ? "admin" : role;
   return {
@@ -93,7 +122,7 @@ function authenticatedSnapshot(role: "administrator" | "owner" | "teacher") {
     identityGeneration: `identity-${role}`,
     kind: "authenticated" as const,
     manageableInvitations:
-      role === "owner"
+      role !== "teacher"
         ? [
             {
               email: "pending@example.test",
@@ -106,15 +135,21 @@ function authenticatedSnapshot(role: "administrator" | "owner" | "teacher") {
           ]
         : [],
     manageableStaff:
-      role === "owner"
+      role !== "teacher"
         ? [
             {
               profile: {
-                displayName: "Ada Administrator",
-                email: "ada@example.test",
+                displayName:
+                  role === "owner" ? "Ada Administrator" : "Terry Teacher",
+                email:
+                  role === "owner" ? "ada@example.test" : "terry@example.test",
                 id: "profile-target",
               },
-              role: "administrator" as const,
+              role:
+                role === "owner"
+                  ? ("administrator" as const)
+                  : ("teacher" as const),
+              roleRevision: 1,
               schoolId: "school-1",
             },
           ]
@@ -522,11 +557,17 @@ describe("staff auth view", () => {
     );
 
     expect(view).toMatchObject({
-      actions: [
-        { id: "sign_out_local", label: "Sign out here" },
-        { id: "revoke_all_sessions", label: "Sign out everywhere" },
-      ],
-      fields: [],
+      actions: expect.arrayContaining([
+        expect.objectContaining({
+          id: "sign_out_local",
+          label: "Sign out here",
+        }),
+        expect.objectContaining({
+          id: "revoke_all_sessions",
+          label: "Sign out everywhere",
+        }),
+      ]),
+      fields: [{ id: "target_email" }],
       heading: "Administrator access",
       message:
         "Signed in as admin@example.test at Synthetic High School with step-up verification.",
@@ -750,7 +791,7 @@ describe("staff auth view", () => {
     );
   });
 
-  it("shows invitation and revocation commands only to an Owner", () => {
+  it("gives Owners both managed roles and Administrators Teacher-only commands", () => {
     const owner = createStaffAuthViewModel(authenticatedSnapshot("owner"));
     const administrator = createStaffAuthViewModel(
       authenticatedSnapshot("administrator"),
@@ -761,6 +802,7 @@ describe("staff auth view", () => {
       "create_teacher_invitation",
       "review_staff_invitation_revocation",
       "review_staff_membership_revocation",
+      "review_staff_membership_role_change",
       "sign_out_local",
       "revoke_all_sessions",
     ]);
@@ -792,10 +834,151 @@ describe("staff auth view", () => {
     });
     expect(owner.actions.map(({ id }) => id)).not.toContain("invite_owner");
     expect(administrator.actions.map(({ id }) => id)).toEqual([
+      "create_teacher_invitation",
+      "review_staff_invitation_revocation",
+      "review_staff_membership_revocation",
+      "sign_out_local",
+      "revoke_all_sessions",
+    ]);
+    expect(administrator.fields.map(({ id }) => id)).toEqual(["target_email"]);
+    expect(administrator.selects?.map(({ options }) => options)).toEqual([
+      expect.arrayContaining([
+        expect.objectContaining({ invitationId: "invitation-pending" }),
+      ]),
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "Terry Teacher — terry@example.test — Teacher",
+        }),
+      ]),
+    ]);
+    expect(administrator.actions.map(({ id }) => id)).not.toContain(
+      "review_staff_membership_role_change",
+    );
+  });
+
+  it.each(["owner", "administrator", "teacher"] as const)(
+    "does not expose management controls to an AAL1 %s",
+    (role) => {
+      const view = createStaffAuthViewModel({
+        ...authenticatedSnapshot(role),
+        assuranceLevel: "aal1",
+      });
+
+      expect(view.fields).toEqual([]);
+      expect(view.selects ?? []).toEqual([]);
+      expect(view.actions.map(({ id }) => id)).toEqual([
+        "sign_out_local",
+        "revoke_all_sessions",
+      ]);
+    },
+  );
+
+  it("keeps Teacher access free of management controls even at AAL2", () => {
+    const view = createStaffAuthViewModel(authenticatedSnapshot("teacher"));
+
+    expect(view.fields).toEqual([]);
+    expect(view.selects ?? []).toEqual([]);
+    expect(view.actions.map(({ id }) => id)).toEqual([
       "sign_out_local",
       "revoke_all_sessions",
     ]);
   });
+
+  it("filters Administrator targets to Teachers even when a supplied list contains Administrators", () => {
+    const administrator = authenticatedSnapshot("administrator");
+    const owner = authenticatedSnapshot("owner");
+    const view = createStaffAuthViewModel({
+      ...administrator,
+      manageableInvitations: [
+        ...administrator.manageableInvitations,
+        {
+          email: "pending-admin@example.test",
+          expiresAt: "2026-09-14T12:00:00.000Z",
+          invitationId: "invitation-admin",
+          role: "administrator",
+          schoolId: "school-1",
+          state: "pending",
+        },
+      ],
+      manageableStaff: [
+        ...administrator.manageableStaff,
+        ...owner.manageableStaff.map((entry) => ({
+          ...entry,
+          profile: { ...entry.profile, id: "profile-admin" },
+        })),
+      ],
+    });
+
+    expect(
+      view.selects?.find(({ id }) => id === "staff_membership")?.options,
+    ).toEqual([
+      expect.objectContaining({
+        label: "Terry Teacher — terry@example.test — Teacher",
+        value: "profile-target",
+      }),
+    ]);
+    expect(
+      view.selects?.find(({ id }) => id === "staff_invitation")?.options,
+    ).toEqual([expect.objectContaining({ value: "invitation-pending" })]);
+    expect(JSON.stringify(view)).not.toContain("pending-admin@example.test");
+    expect(JSON.stringify(view)).not.toContain("ada@example.test");
+  });
+
+  it.each(["owner", "administrator"] as const)(
+    "explains empty %s lists and disables actions that need a target",
+    (role) => {
+      const snapshot = {
+        ...authenticatedSnapshot(role),
+        manageableInvitations: [],
+        manageableStaff: [],
+      };
+      const view = createStaffAuthViewModel(snapshot);
+      const document = new FakeDocument();
+      const root = new FakeElement(document, "main");
+      const intents: StaffAuthViewIntent[] = [];
+      renderStaffAuthView(
+        root as unknown as HTMLElement,
+        snapshot,
+        (intent) => {
+          intents.push(intent);
+        },
+      );
+      const nodes = descendants(root);
+
+      expect(view.groupMessages?.invitation).toEqual(expect.any(String));
+      expect(view.groupMessages?.membership).toEqual(expect.any(String));
+      expect(view.groupMessages?.invitation?.length).toBeGreaterThan(0);
+      expect(view.groupMessages?.membership?.length).toBeGreaterThan(0);
+      for (const action of view.actions.filter(({ id }) =>
+        id.startsWith("review_"),
+      )) {
+        expect(action.disabled).toBe(true);
+        expect(
+          nodes.find(({ dataset }) => dataset.authAction === action.id)
+            ?.disabled,
+        ).toBe(true);
+      }
+      expect(
+        nodes.find(({ name }) => name === "staff_invitation")?.disabled,
+      ).toBe(true);
+      expect(
+        nodes.find(({ name }) => name === "staff_membership")?.disabled,
+      ).toBe(true);
+      expect(
+        view.actions.find(({ id }) => id === "create_teacher_invitation")
+          ?.disabled,
+      ).not.toBe(true);
+      const membershipForm = nodes.find(
+        (node) =>
+          node.tagName === "form" &&
+          descendants(node).some(({ name }) => name === "staff_membership"),
+      );
+      membershipForm?.listeners.get("submit")?.({
+        preventDefault() {},
+      } as Event);
+      expect(intents).toEqual([]);
+    },
+  );
 
   it.each([
     [
@@ -959,13 +1142,18 @@ describe("staff auth view", () => {
       ({ dataset }) =>
         dataset.authAction === "review_staff_invitation_revocation",
     );
+    const reviewRoleChange = nodes.find(
+      ({ dataset }) =>
+        dataset.authAction === "review_staff_membership_role_change",
+    );
     if (
       email === undefined ||
       pendingInvitation === undefined ||
       membership === undefined ||
       inviteTeacher === undefined ||
       reviewRevocation === undefined ||
-      reviewInvitationRevocation === undefined
+      reviewInvitationRevocation === undefined ||
+      reviewRoleChange === undefined
     ) {
       throw new Error("expected Owner staff-management controls");
     }
@@ -995,6 +1183,7 @@ describe("staff auth view", () => {
     membershipForm?.listeners.get("submit")?.({
       preventDefault() {},
     } as Event);
+    reviewRoleChange.listeners.get("click")?.({ preventDefault() {} } as Event);
 
     expect(intents).toEqual([
       {
@@ -1013,7 +1202,14 @@ describe("staff auth view", () => {
         schoolId: "school-1",
         type: "review_staff_membership_revocation",
       },
+      {
+        profileId: "profile-target",
+        schoolId: "school-1",
+        type: "review_staff_membership_role_change",
+      },
     ]);
+    expect(reviewRoleChange.type).toBe("button");
+    expect(JSON.stringify(intents)).not.toContain("roleRevision");
     expect(JSON.stringify(intents)).not.toContain('"targetRole":"owner"');
     expect(
       nodes
@@ -1029,6 +1225,472 @@ describe("staff auth view", () => {
     ).not.toContain("invitation-pending");
     expect(reviewRevocation.dataset.authActionTone).toBe("danger");
     expect(reviewInvitationRevocation.dataset.authActionTone).toBe("danger");
+  });
+
+  it("retains input and select nodes, draft, caret and focus while an unrelated staff entry changes", () => {
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    const original = authenticatedSnapshot("owner");
+    const intents: StaffAuthViewIntent[] = [];
+    const onIntent = (intent: StaffAuthViewIntent) => {
+      intents.push(intent);
+    };
+    renderStaffAuthView(root as unknown as HTMLElement, original, onIntent);
+    const email = namedControl(root, "target_email");
+    const membership = namedControl(root, "staff_membership");
+    const invitation = namedControl(root, "staff_invitation");
+    email.value = "new-teacher@example.test";
+    email.selectionStart = 4;
+    email.selectionEnd = 11;
+    membership.value = "profile-target";
+    invitation.value = "invitation-pending";
+    email.focus();
+
+    const refreshed = {
+      ...original,
+      manageableStaff: [
+        ...original.manageableStaff,
+        {
+          profile: {
+            displayName: "New Teacher",
+            email: "other@example.test",
+            id: "profile-other",
+          },
+          role: "teacher" as const,
+          roleRevision: 2,
+          schoolId: "school-1",
+        },
+      ],
+      revision: original.revision + 1,
+    };
+    renderStaffAuthView(root as unknown as HTMLElement, refreshed, onIntent);
+
+    expect(namedControl(root, "target_email")).toBe(email);
+    expect(namedControl(root, "staff_membership")).toBe(membership);
+    expect(namedControl(root, "staff_invitation")).toBe(invitation);
+    expect(email.value).toBe("new-teacher@example.test");
+    expect(email.selectionStart).toBe(4);
+    expect(email.selectionEnd).toBe(11);
+    expect(membership.value).toBe("profile-target");
+    expect(invitation.value).toBe("invitation-pending");
+    expect(document.activeElement).toBe(email);
+    expect(
+      membership.children.some(({ value }) => value === "profile-other"),
+    ).toBe(true);
+    membership.value = "profile-other";
+    const review = descendants(root).find(
+      ({ dataset }) =>
+        dataset.authAction === "review_staff_membership_role_change",
+    );
+    review?.listeners.get("click")?.({ preventDefault() {} } as Event);
+    expect(intents).toEqual([
+      {
+        profileId: "profile-other",
+        schoolId: "school-1",
+        type: "review_staff_membership_role_change",
+      },
+    ]);
+  });
+
+  it.each(["account", "session"] as const)(
+    "discards the old management draft and selected target when the %s changes",
+    (change) => {
+      const document = new FakeDocument();
+      const root = new FakeElement(document, "main");
+      const original = authenticatedSnapshot("owner");
+      renderStaffAuthView(
+        root as unknown as HTMLElement,
+        original,
+        () => undefined,
+      );
+      const email = namedControl(root, "target_email");
+      const membership = namedControl(root, "staff_membership");
+      email.value = "old-draft@example.test";
+      membership.value = "profile-target";
+      membership.focus();
+      const replacement = {
+        ...original,
+        ...(change === "account"
+          ? {
+              identity: {
+                ...original.identity,
+                accountId: "account-other-owner",
+                email: "other-owner@example.test",
+                profile: {
+                  displayName: "Other Owner",
+                  id: "profile-other-owner",
+                },
+              },
+              identityGeneration: "identity-other-owner",
+            }
+          : { sessionGeneration: "session-other-owner" }),
+        revision: original.revision + 1,
+      };
+      renderStaffAuthView(
+        root as unknown as HTMLElement,
+        replacement,
+        () => undefined,
+      );
+
+      const nextEmail = namedControl(root, "target_email");
+      const nextMembership = namedControl(root, "staff_membership");
+      expect(nextEmail).not.toBe(email);
+      expect(nextMembership).not.toBe(membership);
+      expect(nextEmail.value).toBe("");
+      expect(nextMembership.value).toBe("");
+      expect(document.activeElement).toBe(nextEmail);
+    },
+  );
+
+  it("clears a selected staff target whose revision changed while keeping the unrelated invitation draft", () => {
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    const original = authenticatedSnapshot("owner");
+    renderStaffAuthView(
+      root as unknown as HTMLElement,
+      original,
+      () => undefined,
+    );
+    const email = namedControl(root, "target_email");
+    const membership = namedControl(root, "staff_membership");
+    email.value = "new-teacher@example.test";
+    membership.value = "profile-target";
+    membership.focus();
+
+    renderStaffAuthView(
+      root as unknown as HTMLElement,
+      {
+        ...original,
+        manageableStaff: original.manageableStaff.map((entry) => ({
+          ...entry,
+          roleRevision: entry.roleRevision + 1,
+        })),
+        notice: "staff_selection_changed",
+        revision: original.revision + 1,
+      },
+      () => undefined,
+    );
+
+    expect(namedControl(root, "target_email")).toBe(email);
+    expect(email.value).toBe("new-teacher@example.test");
+    expect(namedControl(root, "staff_membership")).toBe(membership);
+    expect(membership.value).toBe("");
+    expect(document.activeElement).toBe(membership);
+  });
+
+  it("restores the unchanged management draft and review-button focus after Cancel", () => {
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    const original = authenticatedSnapshot("owner");
+    const intents: StaffAuthViewIntent[] = [];
+    const onIntent = (intent: StaffAuthViewIntent): void => {
+      intents.push(intent);
+      if (intent.type === "review_staff_membership_role_change") {
+        renderStaffAuthView(
+          root as unknown as HTMLElement,
+          {
+            kind: "confirming_staff_membership_role_change",
+            revision: 2,
+            schoolLabel: "Synthetic High School",
+            target: {
+              displayName: "Ada Administrator",
+              email: "ada@example.test",
+              role: "administrator",
+            },
+            targetRole: "teacher",
+          },
+          onIntent,
+        );
+      } else if (intent.type === "cancel_staff_membership_role_change") {
+        renderStaffAuthView(
+          root as unknown as HTMLElement,
+          { ...original, revision: 3 },
+          onIntent,
+        );
+      }
+    };
+    renderStaffAuthView(root as unknown as HTMLElement, original, onIntent);
+    const email = namedControl(root, "target_email");
+    const membership = namedControl(root, "staff_membership");
+    email.value = "new-teacher@example.test";
+    membership.value = "profile-target";
+    const review = descendants(root).find(
+      ({ dataset }) =>
+        dataset.authAction === "review_staff_membership_role_change",
+    );
+    if (review === undefined) throw new Error("expected role-review button");
+    review.focus();
+    review.listeners.get("click")?.({ preventDefault() {} } as Event);
+    const cancel = descendants(root).find(
+      ({ dataset }) =>
+        dataset.authAction === "cancel_staff_membership_role_change",
+    );
+    if (cancel === undefined)
+      throw new Error("expected role-change cancellation");
+    cancel.listeners.get("click")?.({ preventDefault() {} } as Event);
+
+    expect(namedControl(root, "target_email")).toBe(email);
+    expect(namedControl(root, "staff_membership")).toBe(membership);
+    expect(email.value).toBe("new-teacher@example.test");
+    expect(membership.value).toBe("profile-target");
+    expect(document.activeElement).toBe(review);
+    expect(intents.map(({ type }) => type)).toEqual([
+      "review_staff_membership_role_change",
+      "cancel_staff_membership_role_change",
+    ]);
+  });
+
+  it("preserves unrelated drafts through a preconfirm role conflict and refreshes to an unselected staff control", () => {
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    const original = authenticatedSnapshot("owner");
+    const intents: StaffAuthViewIntent[] = [];
+    const onIntent = (intent: StaffAuthViewIntent): void => {
+      intents.push(intent);
+      if (intent.type === "review_staff_membership_role_change") {
+        renderStaffAuthView(
+          root as unknown as HTMLElement,
+          {
+            kind: "confirming_staff_membership_role_change",
+            revision: 2,
+            schoolLabel: "Synthetic High School",
+            target: {
+              displayName: "Ada Administrator",
+              email: "ada@example.test",
+              role: "administrator",
+            },
+            targetRole: "teacher",
+          },
+          onIntent,
+        );
+      } else if (intent.type === "confirm_staff_membership_role_change") {
+        renderStaffAuthView(
+          root as unknown as HTMLElement,
+          {
+            kind: "staff_membership_revision_conflict",
+            revision: 3,
+          },
+          onIntent,
+        );
+      } else if (intent.type === "refresh_staff") {
+        renderStaffAuthView(
+          root as unknown as HTMLElement,
+          {
+            kind: "bootstrapping",
+            revision: 4,
+          },
+          onIntent,
+        );
+        renderStaffAuthView(
+          root as unknown as HTMLElement,
+          {
+            ...original,
+            manageableStaff: original.manageableStaff.map((entry) => ({
+              ...entry,
+              roleRevision: entry.roleRevision + 1,
+            })),
+            revision: 5,
+          },
+          onIntent,
+        );
+      }
+    };
+    renderStaffAuthView(root as unknown as HTMLElement, original, onIntent);
+    const email = namedControl(root, "target_email");
+    const membership = namedControl(root, "staff_membership");
+    const invitation = namedControl(root, "staff_invitation");
+    email.value = "unrelated-draft@example.test";
+    membership.value = "profile-target";
+    invitation.value = "invitation-pending";
+
+    activateAuthAction(root, "review_staff_membership_role_change");
+    activateAuthAction(root, "confirm_staff_membership_role_change");
+    expect(descendants(root).some(({ name }) => name === "target_email")).toBe(
+      false,
+    );
+    activateAuthAction(root, "refresh_staff");
+
+    expect(namedControl(root, "target_email")).toBe(email);
+    expect(email.value).toBe("unrelated-draft@example.test");
+    expect(namedControl(root, "staff_membership")).toBe(membership);
+    expect(membership.value).toBe("");
+    expect(namedControl(root, "staff_invitation")).toBe(invitation);
+    expect(invitation.value).toBe("invitation-pending");
+    expect(document.activeElement).toBe(membership);
+    expect(intents.map(({ type }) => type)).toEqual([
+      "review_staff_membership_role_change",
+      "confirm_staff_membership_role_change",
+      "refresh_staff",
+    ]);
+  });
+
+  it("preserves a valid draft when changed invitation facts cancel an open confirmation", () => {
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    const original = authenticatedSnapshot("owner");
+    const intents: StaffAuthViewIntent[] = [];
+    const onIntent = (intent: StaffAuthViewIntent): void => {
+      intents.push(intent);
+      if (intent.type === "review_staff_invitation_revocation") {
+        renderStaffAuthView(
+          root as unknown as HTMLElement,
+          {
+            kind: "confirming_staff_invitation_revocation",
+            revision: 2,
+            schoolLabel: "Synthetic High School",
+            target: { email: "pending@example.test", role: "teacher" },
+          },
+          onIntent,
+        );
+      }
+    };
+    renderStaffAuthView(root as unknown as HTMLElement, original, onIntent);
+    const email = namedControl(root, "target_email");
+    const membership = namedControl(root, "staff_membership");
+    const invitation = namedControl(root, "staff_invitation");
+    email.value = "unrelated-draft@example.test";
+    membership.value = "profile-target";
+    invitation.value = "invitation-pending";
+    activateAuthAction(root, "review_staff_invitation_revocation");
+
+    renderStaffAuthView(
+      root as unknown as HTMLElement,
+      {
+        ...original,
+        manageableInvitations: original.manageableInvitations.map((entry) => ({
+          ...entry,
+          expiresAt: "2026-09-15T12:00:00.000Z",
+        })),
+        notice: "staff_selection_changed",
+        revision: 3,
+      },
+      onIntent,
+    );
+
+    expect(namedControl(root, "target_email")).toBe(email);
+    expect(email.value).toBe("unrelated-draft@example.test");
+    expect(namedControl(root, "staff_invitation")).toBe(invitation);
+    expect(invitation.value).toBe("");
+    expect(namedControl(root, "staff_membership")).toBe(membership);
+    expect(membership.value).toBe("profile-target");
+    expect(document.activeElement).toBe(invitation);
+    expect(
+      descendants(root).some(
+        ({ dataset }) =>
+          dataset.authAction === "confirm_staff_invitation_revocation",
+      ),
+    ).toBe(false);
+    expect(intents.map(({ type }) => type)).toEqual([
+      "review_staff_invitation_revocation",
+    ]);
+  });
+
+  it("discards the retained management form once a confirmed role change enters its busy state", () => {
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    const original = authenticatedSnapshot("owner");
+    const onIntent = (intent: StaffAuthViewIntent): void => {
+      if (intent.type === "review_staff_membership_role_change") {
+        renderStaffAuthView(
+          root as unknown as HTMLElement,
+          {
+            kind: "confirming_staff_membership_role_change",
+            revision: 2,
+            schoolLabel: "Synthetic High School",
+            target: {
+              displayName: "Ada Administrator",
+              email: "ada@example.test",
+              role: "administrator",
+            },
+            targetRole: "teacher",
+          },
+          onIntent,
+        );
+      } else if (intent.type === "confirm_staff_membership_role_change") {
+        renderStaffAuthView(
+          root as unknown as HTMLElement,
+          {
+            kind: "changing_staff_membership_role",
+            revision: 3,
+            targetRole: "teacher",
+          },
+          onIntent,
+        );
+      } else if (intent.type === "refresh_staff") {
+        renderStaffAuthView(
+          root as unknown as HTMLElement,
+          { kind: "bootstrapping", revision: 5 },
+          onIntent,
+        );
+        renderStaffAuthView(
+          root as unknown as HTMLElement,
+          { ...original, revision: 6 },
+          onIntent,
+        );
+      }
+    };
+    renderStaffAuthView(root as unknown as HTMLElement, original, onIntent);
+    const email = namedControl(root, "target_email");
+    const membership = namedControl(root, "staff_membership");
+    email.value = "old-draft@example.test";
+    membership.value = "profile-target";
+    activateAuthAction(root, "review_staff_membership_role_change");
+    activateAuthAction(root, "confirm_staff_membership_role_change");
+    expect(
+      descendants(root).filter(({ tagName }) => tagName === "button"),
+    ).toEqual([]);
+    renderStaffAuthView(
+      root as unknown as HTMLElement,
+      {
+        kind: "staff_membership_revision_conflict",
+        revision: 4,
+      },
+      onIntent,
+    );
+    activateAuthAction(root, "refresh_staff");
+
+    expect(namedControl(root, "target_email")).not.toBe(email);
+    expect(namedControl(root, "target_email").value).toBe("");
+    expect(namedControl(root, "staff_membership")).not.toBe(membership);
+    expect(namedControl(root, "staff_membership").value).toBe("");
+  });
+
+  it("removes management controls and their focused draft when an Administrator becomes a Teacher", () => {
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    const original = authenticatedSnapshot("administrator");
+    renderStaffAuthView(
+      root as unknown as HTMLElement,
+      original,
+      () => undefined,
+    );
+    const email = namedControl(root, "target_email");
+    email.value = "old-draft@example.test";
+    email.focus();
+    renderStaffAuthView(
+      root as unknown as HTMLElement,
+      {
+        ...original,
+        identity: {
+          ...original.identity,
+          membership: { ...original.identity.membership, role: "teacher" },
+        },
+        manageableInvitations: [],
+        manageableStaff: [],
+        notice: "staff_access_changed",
+        revision: original.revision + 1,
+      },
+      () => undefined,
+    );
+
+    expect(descendants(root).some(({ name }) => name === "target_email")).toBe(
+      false,
+    );
+    expect(
+      descendants(root).some(({ name }) => name === "staff_membership"),
+    ).toBe(false);
+    expect(document.activeElement).not.toBe(email);
+    expect(document.activeElement?.tagName).toBe("h1");
   });
 
   it("requires an identity-and-School confirmation before destructive revocation", () => {
@@ -1057,6 +1719,177 @@ describe("staff auth view", () => {
         "Revoke Administrator access for Ada Administrator (ada@example.test) at Synthetic High School?",
     });
     expect(JSON.stringify(view)).not.toContain("profile-target");
+  });
+
+  it("shows the person, School and both roles before a role change and emits only explicit confirmation or cancellation", () => {
+    const snapshot: StaffAuthSnapshot = {
+      kind: "confirming_staff_membership_role_change",
+      revision: 2,
+      schoolLabel: "Synthetic High School",
+      target: {
+        displayName: "Ada Administrator",
+        email: "ada@example.test",
+        role: "administrator",
+      },
+      targetRole: "teacher",
+    };
+    const view = createStaffAuthViewModel(snapshot);
+    expect(view.actions.map(({ id }) => id)).toEqual([
+      "confirm_staff_membership_role_change",
+      "cancel_staff_membership_role_change",
+    ]);
+    expect(view.message).toContain("Ada Administrator");
+    expect(view.message).toContain("ada@example.test");
+    expect(view.message).toContain("Synthetic High School");
+    expect(view.message).toContain("Administrator");
+    expect(view.message).toContain("Teacher");
+    expect(view.fields).toEqual([]);
+    expect(view.selects ?? []).toEqual([]);
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    const intents: StaffAuthViewIntent[] = [];
+    renderStaffAuthView(root as unknown as HTMLElement, snapshot, (intent) => {
+      intents.push(intent);
+    });
+    const nodes = descendants(root);
+    const form = nodes.find(({ tagName }) => tagName === "form");
+    const cancel = nodes.find(
+      ({ dataset }) =>
+        dataset.authAction === "cancel_staff_membership_role_change",
+    );
+    expect(intents).toEqual([]);
+    expect(document.activeElement?.tagName).toBe("h1");
+    cancel?.listeners.get("click")?.({ preventDefault() {} } as Event);
+    form?.listeners.get("submit")?.({ preventDefault() {} } as Event);
+    expect(intents).toEqual([
+      { type: "cancel_staff_membership_role_change" },
+      { type: "confirm_staff_membership_role_change" },
+    ]);
+  });
+
+  it("withholds role-change commands while the change is pending", () => {
+    const view = createStaffAuthViewModel({
+      kind: "changing_staff_membership_role",
+      revision: 3,
+      targetRole: "teacher",
+    });
+
+    expect(view.actions).toEqual([]);
+    expect(view.fields).toEqual([]);
+    expect(`${view.heading} ${view.message}`).toContain("Teacher");
+    expect(view.tone).not.toBe("success");
+  });
+
+  it("identifies the confirmed role change and requires a read before returning to staff management", () => {
+    const view = createStaffAuthViewModel({
+      kind: "staff_membership_role_changed",
+      manageableStaff: [],
+      revision: 4,
+      schoolLabel: "Synthetic High School",
+      targetName: "Ada Administrator",
+      targetRole: "teacher",
+    });
+
+    expect(view.tone).toBe("success");
+    expect(view.message).toBe(
+      "Changed Ada Administrator’s role to Teacher at Synthetic High School.",
+    );
+    expect(view.actions.map(({ id }) => id)).toContain("refresh_staff");
+    expect(view.actions.map(({ id }) => id)).not.toContain(
+      "confirm_staff_membership_role_change",
+    );
+  });
+
+  it("describes the completed change historically when the authoritative list has a newer opposite role", () => {
+    const confirmedRoleRevision = 7;
+    const view = createStaffAuthViewModel({
+      kind: "staff_membership_role_changed",
+      manageableStaff: [
+        {
+          profile: {
+            displayName: "Taylor Staff",
+            email: "taylor@example.test",
+            id: "profile-target",
+          },
+          role: "administrator",
+          roleRevision: confirmedRoleRevision + 2,
+          schoolId: "school-1",
+        },
+      ],
+      revision: 4,
+      schoolLabel: "Synthetic High School",
+      targetName: "Taylor Staff",
+      targetRole: "teacher",
+    });
+
+    expect(view.message).toBe(
+      "Changed Taylor Staff’s role to Teacher at Synthetic High School.",
+    );
+    expect(view.message).not.toMatch(/is now|currently|current role/i);
+    expect(view.actions).toEqual([
+      { id: "refresh_staff", label: "Refresh staff" },
+    ]);
+    expect(view.tone).toBe("success");
+  });
+
+  it("distinguishes a rejected role change, an unconfirmed write and a stale target without replay actions", () => {
+    const kinds = [
+      "staff_membership_role_change_rejected",
+      "staff_membership_role_change_unconfirmed",
+      "staff_membership_revision_conflict",
+    ] as const;
+    const views = kinds.map((kind) =>
+      createStaffAuthViewModel({ kind, revision: 4 }),
+    );
+
+    expect(new Set(views.map(({ heading }) => heading)).size).toBe(3);
+    for (const view of views) {
+      expect(view.tone).not.toBe("success");
+      expect(view.actions.map(({ id }) => id)).toContain("refresh_staff");
+      expect(view.actions.map(({ id }) => id)).not.toContain("retry");
+      expect(view.actions.map(({ id }) => id)).not.toContain(
+        "confirm_staff_membership_role_change",
+      );
+    }
+    expect(views[1]?.message).toMatch(/confirm|unknown|uncertain/i);
+    expect(views[1]?.message).not.toMatch(
+      /no (?:access |role )?change was made/i,
+    );
+    expect(`${views[2]?.heading} ${views[2]?.message}`).toMatch(
+      /changed|stale|refresh/i,
+    );
+  });
+
+  it("refreshes staff after an unconfirmed role change without resubmitting the write", () => {
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    const intents: StaffAuthViewIntent[] = [];
+    renderStaffAuthView(
+      root as unknown as HTMLElement,
+      {
+        kind: "staff_membership_role_change_unconfirmed",
+        revision: 4,
+      },
+      (intent) => {
+        intents.push(intent);
+      },
+    );
+    const nodes = descendants(root);
+    const refresh = nodes.find(
+      ({ dataset }) => dataset.authAction === "refresh_staff",
+    );
+    if (refresh === undefined) throw new Error("expected staff refresh action");
+    expect(intents).toEqual([]);
+    if (refresh.type === "submit") {
+      const form = nodes.find(
+        (node) =>
+          node.tagName === "form" && descendants(node).includes(refresh),
+      );
+      form?.listeners.get("submit")?.({ preventDefault() {} } as Event);
+    } else {
+      refresh.listeners.get("click")?.({ preventDefault() {} } as Event);
+    }
+    expect(intents).toEqual([{ type: "refresh_staff" }]);
   });
 
   it("requires email, role, and School confirmation before revoking an invitation", () => {
@@ -1098,6 +1931,9 @@ describe("staff auth view", () => {
       },
       dispose,
       getSnapshot() {
+        return initial;
+      },
+      async refreshMembership() {
         return initial;
       },
       subscribe() {
@@ -1156,6 +1992,9 @@ describe("staff auth view", () => {
       },
       dispose() {},
       getSnapshot() {
+        return initial;
+      },
+      async refreshMembership() {
         return initial;
       },
       subscribe() {

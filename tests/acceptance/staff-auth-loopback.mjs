@@ -337,7 +337,7 @@ export async function authDenied(operation, expectedCode) {
   );
 }
 
-export async function rpc(supabase, name, args = {}) {
+export async function rpcRows(supabase, name, args = {}) {
   let result;
   try {
     result = await supabase.schema("desmoslock_v2").rpc(name, args);
@@ -345,12 +345,29 @@ export async function rpc(supabase, name, args = {}) {
     throw new Error("Product RPC did not complete; details redacted");
   }
   check(
-    result?.error === null &&
-      Array.isArray(result.data) &&
-      result.data.length === 1,
+    result?.error === null && Array.isArray(result.data),
     "Product RPC response failed; details redacted",
   );
-  return result.data[0];
+  return result.data;
+}
+
+export async function rpc(supabase, name, args = {}) {
+  const rows = await rpcRows(supabase, name, args);
+  check(rows.length === 1, "Product RPC did not return exactly one outcome");
+  return rows[0];
+}
+
+export async function rpcDenied(supabase, name, args, expectedCodes) {
+  let result;
+  try {
+    result = await supabase.schema("desmoslock_v2").rpc(name, args);
+  } catch {
+    throw new Error("Product RPC denial was not observed; details redacted");
+  }
+  check(
+    result?.data === null && expectedCodes.includes(result.error?.code),
+    "Product RPC did not reject the inaccessible signature or role",
+  );
 }
 
 export function code(row, expected) {
@@ -398,18 +415,22 @@ export async function stepUp(supabase) {
   const challenge = await auth(() =>
     supabase.auth.mfa.challenge({ factorId: enrollment.id }),
   );
-  const counter = Buffer.alloc(8);
-  counter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30_000)));
-  const digest = createHmac("sha1", key).update(counter).digest();
-  const offset = digest[digest.length - 1] & 15;
-  const otp = String(
-    (digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000,
-  ).padStart(6, "0");
+  const otpAt = (time) => {
+    const counter = Buffer.alloc(8);
+    counter.writeBigUInt64BE(BigInt(Math.floor(time / 30_000)));
+    const digest = createHmac("sha1", key).update(counter).digest();
+    const offset = digest[digest.length - 1] & 15;
+    return String(
+      (digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000,
+    ).padStart(6, "0");
+  };
+  const verifiedAt = Date.now();
+  let lastPeriod = Math.floor(verifiedAt / 30_000);
   await auth(() =>
     supabase.auth.mfa.verify({
       factorId: enrollment.id,
       challengeId: challenge.id,
-      code: otp,
+      code: otpAt(verifiedAt),
     }),
   );
   const { session } = await auth(() => supabase.auth.getSession());
@@ -417,6 +438,18 @@ export async function stepUp(supabase) {
     sessionClaims(session).aal === "aal2",
     "Real TOTP verification did not produce AAL2",
   );
+  // Reuse the real factor through the browser's normal challenge UI, without
+  // injecting an SDK session or reusing a provider-rejected TOTP time step.
+  return {
+    async nextCode() {
+      const period = Math.floor(Date.now() / 30_000);
+      if (period <= lastPeriod)
+        await delay((lastPeriod + 1) * 30_000 - Date.now() + 200);
+      const nextAt = Date.now();
+      lastPeriod = Math.floor(nextAt / 30_000);
+      return otpAt(nextAt);
+    },
+  };
 }
 
 // Mailpit is the CLI's disposable SMTP sink, with no relay configured. These
