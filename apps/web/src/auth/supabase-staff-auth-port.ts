@@ -650,6 +650,7 @@ export function createSupabaseStaffAuthPort(
     | "test_workspace"
     | "auth_read"
     | "mfa";
+  type BoundAuthorityPurpose = Exclude<AuthorityPurpose, "password">;
   const capturedAuthorities = new Map<
     string,
     {
@@ -811,7 +812,7 @@ export function createSupabaseStaffAuthPort(
     name: string,
     args: Readonly<Record<string, unknown>>,
   ): Promise<unknown> {
-    const authority = capturedAuthority(handle, "staff_management");
+    const authority = await currentBoundAuthority(handle, "staff_management");
     if (authority === null) return null;
     const result = await directAuthorityRequest(
       authority.accessToken,
@@ -819,7 +820,10 @@ export function createSupabaseStaffAuthPort(
       "POST",
       args,
     );
-    return result?.status === 200 ? result.body : null;
+    return result?.status === 200 &&
+      (await currentBoundAuthority(handle, "staff_management")) === authority
+      ? result.body
+      : null;
   }
 
   async function testWorkspaceRpc(
@@ -833,7 +837,7 @@ export function createSupabaseStaffAuthPort(
       | "end_test",
     args: Readonly<Record<string, unknown>>,
   ): Promise<unknown> {
-    const authority = capturedAuthority(handle, "test_workspace");
+    const authority = await currentBoundAuthority(handle, "test_workspace");
     if (authority === null) return null;
     const result = await directAuthorityRequest(
       authority.accessToken,
@@ -841,7 +845,10 @@ export function createSupabaseStaffAuthPort(
       "POST",
       args,
     );
-    return result?.status === 200 ? result.body : null;
+    return result?.status === 200 &&
+      (await currentBoundAuthority(handle, "test_workspace")) === authority
+      ? result.body
+      : null;
   }
 
   async function snapshotSessionAuthority(): Promise<
@@ -943,7 +950,7 @@ export function createSupabaseStaffAuthPort(
 
   async function currentBoundAuthority(
     handle: string,
-    purpose: "auth_read" | "mfa",
+    purpose: BoundAuthorityPurpose,
   ) {
     const authority = capturedAuthority(handle, purpose);
     const storage = dependencies.sessionStorage;
@@ -959,7 +966,7 @@ export function createSupabaseStaffAuthPort(
   }
 
   async function captureBoundAuthority(
-    purpose: "auth_read" | "mfa",
+    purpose: BoundAuthorityPurpose,
     expected?: readonly [string, string],
   ) {
     const storage = dependencies.sessionStorage;
@@ -988,10 +995,11 @@ export function createSupabaseStaffAuthPort(
       if (
         objectProperty(stored, "access_token") !== session.accessToken ||
         objectProperty(objectProperty(stored, "user"), "id") !==
-          session.accountId ||
-        (expected !== undefined && session.accountId !== expected[0])
+          session.accountId
       )
         return { status: "unavailable" } as const;
+      if (expected !== undefined && session.accountId !== expected[0])
+        return { status: "rejected" } as const;
       const verified = await directAuthorityRequest(
         session.accessToken,
         "/auth/v1/user",
@@ -1012,20 +1020,34 @@ export function createSupabaseStaffAuthPort(
         session.accessToken,
         session.accountId,
       );
+      const verifiedAccountId = objectProperty(user, "id");
       if (
-        account === null ||
+        typeof verifiedAccountId !== "string" ||
+        verifiedAccountId.length === 0
+      )
+        return { status: "unavailable" } as const;
+      if (verifiedAccountId !== session.accountId)
+        return { status: "rejected" } as const;
+      const providerSessionId = verifiedProviderSessionId(
+        session.accessToken,
+        session.accountId,
+      );
+      if (
+        ((purpose === "auth_read" || purpose === "mfa") && account === null) ||
+        providerSessionId === null ||
         !isNonArrayObject(user) ||
-        (expected !== undefined && account.providerSessionId !== expected[1]) ||
         capturedAuthorities.size >= 16
       )
         return { status: "unavailable" } as const;
+      if (expected !== undefined && providerSessionId !== expected[1])
+        return { status: "rejected" } as const;
       const authorityHandle = crypto.randomUUID();
       capturedAuthorities.set(authorityHandle, {
         accessToken: session.accessToken,
-        accountId: account.accountId,
+        accountId: session.accountId,
         binding: {
           snapshot: storeSnapshot,
-          providerSessionId: account.providerSessionId,
+          providerSessionId,
           user,
         },
         expiresAt: Date.now() + 60_000,
@@ -1040,6 +1062,25 @@ export function createSupabaseStaffAuthPort(
     } catch {
       return { status: "unavailable" } as const;
     }
+  }
+
+  async function captureProductAuthority(
+    purpose: "test_workspace" | "school_settings" | "staff_management",
+    expectedAccountId: string,
+    expectedProviderSessionId: string,
+  ) {
+    const captured = await captureBoundAuthority(purpose, [
+      expectedAccountId,
+      expectedProviderSessionId,
+    ]);
+    if (captured.status === "ready")
+      return {
+        status: "ready",
+        authorityHandle: captured.authorityHandle,
+      } as const;
+    return {
+      status: captured.status === "signed_out" ? "ended" : captured.status,
+    } as const;
   }
 
   async function invokeProductFunction(
@@ -1134,8 +1175,9 @@ export function createSupabaseStaffAuthPort(
         /* The port remains terminal even if owned cleanup fails. */
       }
     },
-    captureAuthReadAuthority() {
-      return captureBoundAuthority("auth_read");
+    async captureAuthReadAuthority() {
+      const result = await captureBoundAuthority("auth_read");
+      return result.status === "rejected" ? { status: "unavailable" } : result;
     },
     async isAuthReadAuthorityCurrent(handle: string) {
       return (await currentBoundAuthority(handle, "auth_read")) !== null;
@@ -1169,30 +1211,30 @@ export function createSupabaseStaffAuthPort(
       expectedAccountId: string,
       expectedProviderSessionId: string,
     ) {
-      return captureAccountAuthority(
+      return captureProductAuthority(
+        "staff_management",
         expectedAccountId,
         expectedProviderSessionId,
-        "staff_management",
       );
     },
     captureSchoolSettingsAuthority(
       expectedAccountId: string,
       expectedProviderSessionId: string,
     ) {
-      return captureAccountAuthority(
+      return captureProductAuthority(
+        "school_settings",
         expectedAccountId,
         expectedProviderSessionId,
-        "school_settings",
       );
     },
     async captureTestWorkspaceAuthority(
       expectedAccountId: string,
       expectedProviderSessionId: string,
     ) {
-      const result = await captureAccountAuthority(
+      const result = await captureProductAuthority(
+        "test_workspace",
         expectedAccountId,
         expectedProviderSessionId,
-        "test_workspace",
       );
       return result.status === "ready" ? result : { status: "unavailable" };
     },
@@ -1530,7 +1572,10 @@ export function createSupabaseStaffAuthPort(
       request: CreateStaffInvitationRequest,
       authorityHandle: string,
     ) {
-      const authority = capturedAuthority(authorityHandle, "staff_management");
+      const authority = await currentBoundAuthority(
+        authorityHandle,
+        "staff_management",
+      );
       if (authority === null) return { code: "service_unavailable", ok: false };
       const result = await directAuthorityRequest(
         authority.accessToken,
@@ -1540,6 +1585,8 @@ export function createSupabaseStaffAuthPort(
       );
       const parsed = parseCreateStaffInvitationResponse(result?.body);
       return result !== null &&
+        (await currentBoundAuthority(authorityHandle, "staff_management")) ===
+          authority &&
         parsed !== null &&
         ((result.status >= 200 && result.status < 300) || !parsed.ok)
         ? parsed
@@ -1811,7 +1858,10 @@ export function createSupabaseStaffAuthPort(
       request: UpdateSchoolDisplayNameRequest,
       authorityHandle: string,
     ) {
-      const authority = capturedAuthority(authorityHandle, "school_settings");
+      const authority = await currentBoundAuthority(
+        authorityHandle,
+        "school_settings",
+      );
       if (authority === null) return null;
       const result = await directAuthorityRequest(
         authority.accessToken,
@@ -1823,7 +1873,11 @@ export function createSupabaseStaffAuthPort(
           workspace_id: request.schoolId,
         },
       );
-      return result?.status === 200 ? result.body : null;
+      return result?.status === 200 &&
+        (await currentBoundAuthority(authorityHandle, "school_settings")) ===
+          authority
+        ? result.body
+        : null;
     },
     readSchoolTests(request: ReadSchoolTestsRequest, authorityHandle: string) {
       return testWorkspaceRpc(authorityHandle, "current_school_tests", {

@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { runBackupRoundtrip } from "./synthetic-backup-runtime.mjs";
+import {
+  runBackupRoundtrip,
+  StaffSuiteCommandFailure,
+} from "./synthetic-backup-runtime.mjs";
 
 test(
   "real synthetic export preserves Test metadata across distinct session timezones before the complete staff Auth suite",
@@ -12,7 +15,21 @@ test(
       path.dirname(fileURLToPath(import.meta.url)),
       "../..",
     );
-    const receipt = await runBackupRoundtrip(repositoryRoot, context.signal);
+    let receipt;
+    try {
+      receipt = await runBackupRoundtrip(repositoryRoot, context.signal);
+    } catch (error) {
+      // runBackupRoundtrip has completed cleanup before returning this closed,
+      // staff-suite-only projection. Never render nested names/errors/output.
+      if (error instanceof StaffSuiteCommandFailure)
+        context.diagnostic(
+          JSON.stringify({
+            staffSuiteFailure: error.code,
+            diagnostics: error.diagnostics,
+          }),
+        );
+      throw error;
+    }
     assert.equal(receipt.distinctSessionTimezones, true);
     assert.equal(receipt.testMetadataPreserved, true);
     // Hashes and static boolean results only; never print database/CLI responses.

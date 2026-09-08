@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 
 import { createClient, GoTrueClient } from "@supabase/supabase-js";
 import { describe, expect, it, vi } from "vitest";
+import { createStaffAuthSessionStorageFixture } from "./helpers/staff-auth-session-storage-fixture.js";
 
 import { prepareStaffRecoveryCallback } from "../src/auth/staff-auth-callback.js";
 import * as staffSessionStorage from "../src/auth/staff-auth-session-storage.js";
@@ -116,10 +117,19 @@ function fakeClient(
   };
 }
 
+function unitSessionStorage(session: unknown): StaffAuthSessionStorage {
+  return createStaffAuthSessionStorageFixture(
+    "synthetic-port-session",
+    new Map([["synthetic-port-session", JSON.stringify(session)]]),
+  );
+}
+
 function createPort(
   client: SupabaseStaffAuthClient,
   recoveryFetch: typeof fetch = async () => new Response(null, { status: 503 }),
-  sessionStorage?: StaffAuthSessionStorage,
+  sessionStorage: StaffAuthSessionStorage = unitSessionStorage(
+    accountSession().data.session,
+  ),
   disposeOwnedResources?: () => void,
 ) {
   return createSupabaseStaffAuthPort({
@@ -128,7 +138,7 @@ function createPort(
     origin: "https://app.example.test",
     publishableKey,
     url: backendUrl,
-    ...(sessionStorage === undefined ? {} : { sessionStorage }),
+    sessionStorage,
     ...(disposeOwnedResources === undefined ? {} : { disposeOwnedResources }),
   });
 }
@@ -692,19 +702,34 @@ describe("Supabase staff auth port", () => {
     },
   );
 
-  it("requires the new store for read and MFA captures without any legacy SDK fallback", async () => {
+  it("requires the new store for read, MFA and product captures without any legacy SDK fallback", async () => {
     const client = fakeClient({
       auth: { getSession: async () => accountSession() },
     });
     const getSession = vi.spyOn(client.auth, "getSession");
     const providerFetch = vi.fn<typeof fetch>();
-    const port = createPort(client, providerFetch);
+    const port = createSupabaseStaffAuthPort({
+      client,
+      fetch: providerFetch,
+      origin: "https://app.example.test",
+      publishableKey,
+      url: backendUrl,
+    });
     await expect(port.captureAuthReadAuthority()).resolves.toEqual({
       status: "unavailable",
     });
     await expect(
       port.captureMfaAuthority(accountId, providerSessionId),
     ).resolves.toBeNull();
+    await expect(
+      port.captureTestWorkspaceAuthority(accountId, providerSessionId),
+    ).resolves.toEqual({ status: "unavailable" });
+    await expect(
+      port.captureSchoolSettingsAuthority(accountId, providerSessionId),
+    ).resolves.toEqual({ status: "unavailable" });
+    await expect(
+      port.captureStaffManagementAuthority(accountId, providerSessionId),
+    ).resolves.toEqual({ status: "unavailable" });
     expect(getSession).not.toHaveBeenCalled();
     expect(providerFetch).not.toHaveBeenCalled();
   });
@@ -748,6 +773,7 @@ describe("Supabase staff auth port", () => {
       const port = createPort(
         fakeClient({ auth: { getSession: async () => snapshot } }),
         providerFetch,
+        unitSessionStorage(snapshot.data.session),
       );
       await expect(port.readAccount()).resolves.toBeNull();
       await expect(
@@ -781,6 +807,7 @@ describe("Supabase staff auth port", () => {
       const port = createPort(
         fakeClient({ auth: { getSession: async () => snapshot } }),
         providerFetch,
+        unitSessionStorage(snapshot.data.session),
       );
       await expect(port.readAccount()).resolves.toBeNull();
       await expect(
@@ -859,9 +886,14 @@ describe("Supabase staff auth port", () => {
           { url: String(input) },
         ),
       );
+      const storage = unitSessionStorage({
+        access_token: token,
+        user: { id: accountId },
+      });
       const port = createPort(
         fakeClient({ auth: { getSession } }),
         providerFetch,
+        storage,
       );
       try {
         const failed =
@@ -890,6 +922,10 @@ describe("Supabase staff auth port", () => {
           session_id: providerSessionId,
           refreshed: true,
         });
+        await storage.setItem(
+          storage.storageKey,
+          JSON.stringify({ access_token: token, user: { id: accountId } }),
+        );
         const ready = await port[method](accountId, providerSessionId);
         expect(ready).toEqual(
           method === "capturePasswordAuthority"
