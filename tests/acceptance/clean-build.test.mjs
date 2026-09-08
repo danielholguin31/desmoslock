@@ -23,7 +23,10 @@ const expectedOutputs = [
   "apps/desktop/dist/renderer.js",
   "apps/desktop/dist/styles.css",
   ...(process.platform === "darwin"
-    ? ["apps/desktop/dist/native/durable-record.node"]
+    ? [
+        "apps/desktop/dist/native/aac-protection.node",
+        "apps/desktop/dist/native/durable-record.node",
+      ]
     : []),
   "apps/web/dist/auth/staff-auth.css",
   "apps/web/dist/school-settings/school-settings.css",
@@ -124,13 +127,12 @@ test("the documented aggregate app build succeeds without generated workspace ar
     const stat = await fs.stat(path.join(repositoryRoot, relativePath));
     assert.equal(stat.isFile(), true, `${relativePath} must be built`);
   }
-  if (process.platform !== "darwin")
-    await assert.rejects(() =>
-      fs.access(
-        path.join(
-          repositoryRoot,
-          "apps/desktop/dist/native/durable-record.node",
+  if (process.platform !== "darwin") {
+    for (const filename of ["aac-protection.node", "durable-record.node"])
+      await assert.rejects(() =>
+        fs.access(
+          path.join(repositoryRoot, "apps/desktop/dist/native", filename),
         ),
-      ),
-    );
+      );
+  }
 });

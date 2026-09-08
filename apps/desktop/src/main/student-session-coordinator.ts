@@ -4,20 +4,70 @@ import {
   parseStudentJoinCode,
   type StudentJoinAccepted,
   type StudentJoinRequest,
+  type StudentSessionScope,
   type StudentSessionViewState,
 } from "@desmoslock/contracts";
 
 import type { StudentSessionCrypto } from "./student-session-crypto.js";
 import type { StudentSessionTransport } from "./student-session-transport.js";
-import type {
-  PendingStudentIntent,
-  StoredStudentAuthority,
-  StudentSessionRecord,
-  StudentSessionStore,
-  StudentSessionSuccessor,
+import {
+  parseProtectionTransition,
+  protectionFactCapacity,
+  protectionFactReservation,
+  type ProtectionTransition,
+  type ProtectionFact,
+  type StoredNativeProtection,
+  type PendingStudentIntent,
+  type StoredStudentAuthority,
+  type StudentSessionRecord,
+  type StudentSessionStore,
+  type StudentSessionSuccessor,
 } from "./student-session-store.js";
 
-export interface StudentSessionCoordinator {
+export interface StudentAdmissionSnapshot {
+  readonly scope: StudentSessionScope;
+  readonly admissionGeneration: number;
+  readonly sessionRevision: number;
+  readonly capabilityDeadline: number;
+}
+export interface FreshStudentAdmission extends StudentAdmissionSnapshot {
+  readonly observationSequence: number;
+  readonly readStartedAt: number;
+  readonly observationDeadline: number;
+}
+export type FreshAdmissionResult =
+  | { readonly status: "fresh"; readonly authority: FreshStudentAdmission }
+  | { readonly status: "unavailable" };
+export type StudentAdmissionObservation =
+  | { readonly status: "fresh"; readonly authority: FreshStudentAdmission }
+  | { readonly status: "invalidated" };
+export interface StudentProtectionAccess {
+  readProtectionContext(): {
+    readonly admission: StudentAdmissionSnapshot | null;
+    readonly freshAdmission: FreshStudentAdmission | null;
+    readonly observationSequence: number;
+    readonly protection: Readonly<StoredNativeProtection> | null;
+  };
+  readFreshAdmission(
+    expected: StudentAdmissionSnapshot,
+    afterObservationSequence?: number,
+  ): Promise<FreshAdmissionResult>;
+  isCurrentAdmission(
+    receipt: FreshStudentAdmission,
+    use?: "grant" | "sustain",
+  ): boolean;
+  subscribeAdmissionObservation(
+    listener: (observation: StudentAdmissionObservation) => void,
+  ): () => void;
+  commitProtectionTransition(
+    command: ProtectionTransition,
+  ): Promise<
+    | { readonly status: "committed"; readonly protectionRevision: number }
+    | { readonly status: "unavailable" }
+  >;
+}
+
+export interface StudentSessionCoordinator extends StudentProtectionAccess {
   initialize(): Promise<void>;
   joinInitial(code: string): Promise<void>;
   beginTargetedReadmission(
@@ -42,6 +92,7 @@ function successor(record: StudentSessionRecord): StudentSessionSuccessor {
     pending: record.pending,
     lastReservedCounter: record.lastReservedCounter,
     terminal: record.terminal,
+    nativeProtection: record.nativeProtection,
   };
 }
 function sameRecord(
@@ -77,6 +128,23 @@ export function createStudentSessionCoordinator(options: {
   } | null = null;
   let capabilityDeadline = 0;
   let lastMaintenanceAt = Number.NEGATIVE_INFINITY;
+  let admissionGeneration = 1;
+  let admissionAvailable = false;
+  let admissionSnapshot: StudentAdmissionSnapshot | null = null;
+  const admissionSnapshots = new WeakSet<object>();
+  let issuedAdmission: FreshStudentAdmission | null = null;
+  let observationSequence = 0;
+  let ownedRenewal = false;
+  let priorProcessUncertain = false;
+  const ownedProtectionAttempts = new Set<string>();
+  type ReadOwner = {
+    sequence: number | null;
+    receipt: FreshStudentAdmission | null;
+  };
+  let activeReadOwner: ReadOwner | null = null;
+  const admissionListeners = new Set<
+    (value: StudentAdmissionObservation) => void
+  >();
   const listeners = new Set<(view: StudentSessionViewState) => void>();
   let view: StudentSessionViewState = Object.freeze({
     revision: 1,
@@ -87,8 +155,132 @@ export function createStudentSessionCoordinator(options: {
     pendingOperation: null,
   });
 
+  function sameScope(a: StudentSessionScope, b: StudentSessionScope): boolean {
+    return (
+      a.schoolId === b.schoolId &&
+      a.testId === b.testId &&
+      a.studentSessionId === b.studentSessionId &&
+      a.deviceSessionId === b.deviceSessionId &&
+      a.epoch === b.epoch
+    );
+  }
+
+  function notifyAdmission(value: StudentAdmissionObservation): void {
+    for (const listener of [...admissionListeners]) {
+      try {
+        listener(value);
+      } catch {
+        /* One observer cannot prevent containment. */
+      }
+    }
+  }
+
+  function invalidateAdmission(): void {
+    const hadAuthority =
+      admissionAvailable ||
+      issuedAdmission !== null ||
+      admissionSnapshot !== null;
+    admissionAvailable = false;
+    admissionSnapshot = null;
+    issuedAdmission = null;
+    ownedRenewal = false;
+    if (admissionGeneration < Number.MAX_SAFE_INTEGER) admissionGeneration += 1;
+    if (hadAuthority) notifyAdmission(Object.freeze({ status: "invalidated" }));
+  }
+
+  function admissionMatches(expected: StudentAdmissionSnapshot): boolean {
+    return (
+      typeof expected === "object" &&
+      expected !== null &&
+      admissionSnapshots.has(expected) &&
+      !stopping &&
+      !needsReload &&
+      !recoveryLatched &&
+      admissionAvailable &&
+      record?.current != null &&
+      !record.terminal &&
+      admissionGeneration < Number.MAX_SAFE_INTEGER &&
+      expected.admissionGeneration === admissionGeneration &&
+      sameScope(expected.scope, record.current.scope) &&
+      capabilityDeadline > now()
+    );
+  }
+
+  function expireObservation(): void {
+    if (
+      issuedAdmission !== null &&
+      (now() >= issuedAdmission.observationDeadline ||
+        now() >= issuedAdmission.capabilityDeadline)
+    )
+      invalidateAdmission();
+  }
+
+  function captureAdmission(): StudentAdmissionSnapshot | null {
+    expireObservation();
+    if (admissionAvailable && capabilityDeadline <= now())
+      invalidateAdmission();
+    if (
+      !admissionAvailable ||
+      stopping ||
+      needsReload ||
+      recoveryLatched ||
+      record?.current == null ||
+      record.terminal ||
+      capabilityDeadline <= now() ||
+      admissionGeneration === Number.MAX_SAFE_INTEGER
+    )
+      return null;
+    if (
+      admissionSnapshot === null ||
+      admissionSnapshot.sessionRevision !== record.current.sessionRevision ||
+      admissionSnapshot.capabilityDeadline !== capabilityDeadline
+    ) {
+      admissionSnapshot = Object.freeze({
+        scope: Object.freeze({ ...record.current.scope }),
+        admissionGeneration,
+        sessionRevision: record.current.sessionRevision,
+        capabilityDeadline,
+      });
+      admissionSnapshots.add(admissionSnapshot);
+    }
+    return admissionSnapshot;
+  }
+
+  function isCurrentAdmission(
+    receipt: FreshStudentAdmission,
+    use: "grant" | "sustain" = "grant",
+  ): boolean {
+    if (
+      receipt != null &&
+      receipt === issuedAdmission &&
+      (now() >= receipt.observationDeadline ||
+        now() >= receipt.capabilityDeadline)
+    )
+      invalidateAdmission();
+    if (
+      receipt === null ||
+      receipt !== issuedAdmission ||
+      !admissionMatches(receipt) ||
+      now() >= receipt.observationDeadline ||
+      now() >= receipt.capabilityDeadline ||
+      (record?.pending !== null &&
+        !(ownedRenewal && record?.pending?.kind === "reconnect"))
+    )
+      return false;
+    return (
+      use === "sustain" ||
+      (use === "grant" &&
+        !ownedRenewal &&
+        record?.pending === null &&
+        receipt.sessionRevision === record.current?.sessionRevision &&
+        receipt.capabilityDeadline === capabilityDeadline)
+    );
+  }
+
   function publish(phase: StudentSessionViewState["phase"]): void {
     if (stopping) return;
+    if (phase !== "active") invalidateAdmission();
+    else admissionAvailable = true;
     const current = record?.current;
     view = Object.freeze({
       revision: view.revision + 1,
@@ -121,6 +313,7 @@ export function createStudentSessionCoordinator(options: {
 
   function run(
     work: (generation: number, signal: AbortSignal) => Promise<void>,
+    readOwner: ReadOwner | null = null,
   ): Promise<void> {
     if (stopping) return Promise.resolve();
     if (active !== null) return active;
@@ -146,10 +339,12 @@ export function createStudentSessionCoordinator(options: {
       }
     });
     active = pending;
+    activeReadOwner = readOwner;
     void pending.finally(() => {
       if (active === pending) {
         active = null;
         abort = null;
+        activeReadOwner = null;
       }
     });
     return pending;
@@ -177,11 +372,14 @@ export function createStudentSessionCoordinator(options: {
       return true;
     } catch {
       needsReload = true;
+      invalidateAdmission();
       throw new Error("Student session durability unavailable");
     }
   }
 
   async function load(generation: number): Promise<boolean> {
+    const firstLoad = !initialized;
+    invalidateAdmission();
     const loaded = await options.store.load();
     if (!alive(generation)) return false;
     initialized = true;
@@ -190,6 +388,7 @@ export function createStudentSessionCoordinator(options: {
       return false;
     }
     if (loaded.kind === "recovery_required") {
+      if (firstLoad) priorProcessUncertain = true;
       storeGeneration = loaded.generation;
       needsReload = false;
       record = null;
@@ -202,6 +401,20 @@ export function createStudentSessionCoordinator(options: {
       (found?.generation ?? (loaded.kind === "empty" && loaded.generation)) ||
       0;
     record = found;
+    if (firstLoad) {
+      const attempt = found?.nativeProtection?.latestAttempt;
+      if (
+        attempt != null &&
+        !(
+          attempt.cleanup === "complete" &&
+          (attempt.nativeDisposition === "ended" ||
+            attempt.nativeDisposition === "failed_to_begin" ||
+            attempt.nativeDisposition ===
+              "disposed_without_terminal_observation")
+        )
+      )
+        priorProcessUncertain = true;
+    }
     needsReload = false;
     capabilityDeadline = 0; // A process restart cannot inherit a monotonic lease.
     if (attemptedWrite !== null) {
@@ -349,6 +562,126 @@ export function createStudentSessionCoordinator(options: {
       : null;
   }
 
+  async function attemptRead(
+    generation: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    expireObservation();
+    if (record?.current == null || record.pending !== null || record.terminal)
+      return;
+    const counter = await reserve(generation);
+    if (
+      counter === null ||
+      record?.current == null ||
+      record.pending !== null ||
+      !alive(generation)
+    )
+      return;
+    const current = record.current;
+    const readGeneration = admissionGeneration;
+    const id = requestId();
+    const digest = options.crypto.digestLogicalOperation({
+      kind: "read",
+      requestId: id,
+      scope: current.scope,
+      capabilityDigest: options.crypto.digestCapability(
+        current.capabilityToken,
+      ),
+    });
+    const proof = options.crypto.signMaintenance(record.device, {
+      kind: "maintenance",
+      operation: "read",
+      requestId: id,
+      scope: current.scope,
+      logicalOperationDigest: digest,
+      counter,
+    });
+    if (!alive(generation)) return;
+    if (observationSequence === Number.MAX_SAFE_INTEGER) {
+      publish("recovery_required");
+      return;
+    }
+    const reservedObservation = ++observationSequence;
+    const readStartedAt = now();
+    if (activeReadOwner !== null)
+      activeReadOwner.sequence = reservedObservation;
+    const result = await options.transport.read(
+      {
+        requestId: id,
+        scope: current.scope,
+        capabilityToken: current.capabilityToken,
+        deviceProof: proof,
+      },
+      current.capabilityExpiresAtMs,
+      signal,
+    );
+    if (!alive(generation)) return;
+    expireObservation();
+    if (
+      result.status !== "accepted" ||
+      readGeneration !== admissionGeneration
+    ) {
+      publish(
+        result.status === "accepted" ? "unconfirmed" : resultPhase(result),
+      );
+      return;
+    }
+    if (
+      !(await write(
+        {
+          ...successor(record),
+          current: {
+            ...current,
+            sessionRevision: result.sessionRevision,
+            syntheticDisplayName: result.syntheticDisplayName,
+          },
+        },
+        generation,
+      ))
+    )
+      return;
+    expireObservation();
+    capabilityDeadline = Math.min(
+      capabilityDeadline,
+      readStartedAt + result.capabilityExpiresAtMs - result.serverNowMs,
+    );
+    const observationDeadline = Math.min(
+      capabilityDeadline,
+      readStartedAt + 30_000,
+    );
+    if (
+      !alive(generation) ||
+      readGeneration !== admissionGeneration ||
+      record.current == null ||
+      record.pending !== null ||
+      !sameScope(current.scope, record.current.scope) ||
+      now() >= observationDeadline
+    ) {
+      publish("unconfirmed");
+      return;
+    }
+    ownedRenewal = false;
+    admissionAvailable = true;
+    const admission = captureAdmission();
+    if (admission === null) {
+      publish("unconfirmed");
+      return;
+    }
+    const receipt: FreshStudentAdmission = Object.freeze({
+      ...admission,
+      observationSequence: reservedObservation,
+      readStartedAt,
+      observationDeadline,
+    });
+    admissionSnapshots.add(receipt);
+    issuedAdmission = receipt;
+    if (activeReadOwner !== null) activeReadOwner.receipt = receipt;
+    notifyAdmission(Object.freeze({ status: "fresh", authority: receipt }));
+    // Private observers can synchronously abandon/dispose. Never resurrect that
+    // authority or publish active after delivering an invalidated receipt.
+    if (alive(generation) && isCurrentAdmission(receipt)) publish("active");
+  }
+
   async function attemptMaintenance(
     generation: number,
     signal: AbortSignal,
@@ -358,6 +691,7 @@ export function createStudentSessionCoordinator(options: {
     if (!force && now() - lastMaintenanceAt < 15_000) return;
     lastMaintenanceAt = now();
     if (record.pending === null && capabilityDeadline - now() <= 60_000) {
+      ownedRenewal = true;
       const pending: PendingStudentIntent = {
         kind: "reconnect",
         requestId: requestId(),
@@ -366,6 +700,11 @@ export function createStudentSessionCoordinator(options: {
       };
       if (!(await write({ ...successor(record), pending }, generation))) return;
     }
+    if (record.pending === null) {
+      await attemptRead(generation, signal);
+      return;
+    }
+    ownedRenewal = record.pending.kind === "reconnect";
     const counter = await reserve(generation);
     if (counter === null || record?.current == null || !alive(generation))
       return;
@@ -448,7 +787,7 @@ export function createStudentSessionCoordinator(options: {
         return;
       capabilityDeadline =
         sentAt + Math.max(0, result.capabilityExpiresAtMs - result.serverNowMs);
-      publish(capabilityDeadline > now() ? "active" : "unconfirmed");
+      await attemptRead(generation, signal);
     } else if (pending?.kind === "forfeit") {
       const result = await options.transport.forfeit(
         {
@@ -477,43 +816,6 @@ export function createStudentSessionCoordinator(options: {
         )
       )
         publish("forfeited");
-    } else {
-      const result = await options.transport.read(
-        {
-          requestId: id,
-          scope: current.scope,
-          capabilityToken: current.capabilityToken,
-          deviceProof: proof,
-        },
-        current.capabilityExpiresAtMs,
-        signal,
-      );
-      if (!alive(generation)) return;
-      if (result.status !== "accepted") {
-        publish(resultPhase(result));
-        return;
-      }
-      // Read cannot extend expiry. Persist only its authoritative revision/name;
-      // the already reserved counter survives any lost read response.
-      if (
-        !(await write(
-          {
-            ...successor(record),
-            current: {
-              ...current,
-              sessionRevision: result.sessionRevision,
-              syntheticDisplayName: result.syntheticDisplayName,
-            },
-          },
-          generation,
-        ))
-      )
-        return;
-      capabilityDeadline = Math.min(
-        capabilityDeadline,
-        sentAt + result.capabilityExpiresAtMs - result.serverNowMs,
-      );
-      publish(capabilityDeadline > now() ? "active" : "unconfirmed");
     }
   }
 
@@ -522,6 +824,341 @@ export function createStudentSessionCoordinator(options: {
     if ((!initialized || needsReload) && !(await load(generation))) return;
     if (record?.pending?.kind === "join") await attemptJoin(generation, signal);
     else await attemptMaintenance(generation, signal, true);
+  }
+
+  async function readFreshAdmission(
+    expected: StudentAdmissionSnapshot,
+    afterObservationSequence?: number,
+  ): Promise<FreshAdmissionResult> {
+    if (
+      afterObservationSequence !== undefined &&
+      (!Number.isSafeInteger(afterObservationSequence) ||
+        afterObservationSequence < 0)
+    )
+      return { status: "unavailable" };
+    const fence = afterObservationSequence ?? -1;
+    expireObservation();
+    if (
+      !admissionMatches(expected) ||
+      (record?.pending !== null && !ownedRenewal)
+    )
+      return { status: "unavailable" };
+    while (active !== null) {
+      const owner = activeReadOwner;
+      await active;
+      if (!admissionMatches(expected)) return { status: "unavailable" };
+      if (
+        owner?.sequence !== null &&
+        owner?.sequence !== undefined &&
+        owner.sequence > fence
+      ) {
+        return owner.receipt !== null && isCurrentAdmission(owner.receipt)
+          ? { status: "fresh", authority: owner.receipt }
+          : { status: "unavailable" };
+      }
+    }
+    if (
+      !admissionMatches(expected) ||
+      record?.pending !== null ||
+      !options.transport.isIdle()
+    )
+      return { status: "unavailable" };
+    const owner: ReadOwner = { sequence: null, receipt: null };
+    await run(async (generation, signal) => {
+      if (admissionMatches(expected) && record?.pending === null)
+        await attemptMaintenance(generation, signal, true);
+    }, owner);
+    return owner.receipt !== null &&
+      owner.receipt.observationSequence > fence &&
+      admissionMatches(expected) &&
+      isCurrentAdmission(owner.receipt)
+      ? { status: "fresh", authority: owner.receipt }
+      : { status: "unavailable" };
+  }
+
+  function protectionSuccessor(
+    command: ProtectionTransition,
+  ): StoredNativeProtection | null {
+    const protection = record?.nativeProtection;
+    const revision = protection?.revision ?? 0;
+    if (
+      record === null ||
+      needsReload ||
+      command.expectedProtectionRevision !== revision ||
+      revision === Number.MAX_SAFE_INTEGER
+    )
+      return null;
+    const facts = protection?.facts ?? [];
+    let attempt = protection?.latestAttempt ?? null;
+    let slot: ProtectionFact["slot"];
+    let nativeEvent: ProtectionFact["nativeEvent"] = null;
+    let cause: ProtectionFact["cause"] = "none";
+    let categories = facts.at(-1)?.categories;
+    if (command.kind === "engaging") {
+      if (
+        priorProcessUncertain ||
+        !isCurrentAdmission(command.authority) ||
+        facts.length > protectionFactCapacity - protectionFactReservation ||
+        facts.some((fact) => fact.attemptId === command.attemptId) ||
+        (attempt !== null &&
+          !(
+            attempt.cleanup === "complete" &&
+            (attempt.nativeDisposition === "ended" ||
+              attempt.nativeDisposition === "failed_to_begin" ||
+              attempt.nativeDisposition ===
+                "disposed_without_terminal_observation")
+          ))
+      )
+        return null;
+      if (command.categories.aac.status === "confirmed") return null;
+      attempt = {
+        attemptId: command.attemptId,
+        scope: command.authority.scope,
+        phase: "engaging",
+        nativeDisposition: "pending",
+        nativeSequence: null,
+        cleanup: "not_requested",
+        abandonment: "none",
+      };
+      categories = command.categories;
+      slot = "engaging";
+    } else {
+      if (attempt === null || attempt.attemptId !== command.attemptId)
+        return null;
+      const oldFact = (wanted: ProtectionFact["slot"]) =>
+        facts.find(
+          (fact) =>
+            fact.attemptId === command.attemptId && fact.slot === wanted,
+        );
+      switch (command.kind) {
+        case "locked":
+          if (
+            attempt.phase !== "engaging" ||
+            attempt.nativeDisposition !== "active" ||
+            attempt.nativeSequence !== command.nativeSequence ||
+            !isCurrentAdmission(command.authority) ||
+            !sameScope(attempt.scope, command.authority.scope) ||
+            !Object.values(command.categories).every(
+              (category) => category.status === "confirmed",
+            )
+          )
+            return null;
+          attempt = { ...attempt, phase: "locked" };
+          categories = command.categories;
+          slot = "locked";
+          break;
+        case "began": {
+          const previous = oldFact("began");
+          if (previous !== undefined)
+            return previous.nativeSequence === command.event.sequence
+              ? protection!
+              : null;
+          if (
+            attempt.nativeDisposition === "ended" ||
+            attempt.nativeDisposition === "failed_to_begin" ||
+            attempt.nativeDisposition ===
+              "disposed_without_terminal_observation" ||
+            command.event.sequence <= (attempt.nativeSequence ?? 0)
+          )
+            return null;
+          attempt = {
+            ...attempt,
+            nativeDisposition: "active",
+            nativeSequence: command.event.sequence,
+          };
+          nativeEvent = "did_begin";
+          slot = "began";
+          break;
+        }
+        case "native_terminal": {
+          const previous = oldFact("native_terminal");
+          if (previous !== undefined)
+            return previous.nativeSequence === command.event.sequence &&
+              previous.nativeEvent === command.event.type
+              ? protection!
+              : null;
+          if (
+            command.event.sequence <= (attempt.nativeSequence ?? 0) ||
+            (command.event.type === "failed_to_begin" &&
+              oldFact("began") !== undefined)
+          )
+            return null;
+          attempt = {
+            ...attempt,
+            phase:
+              command.event.type === "failed_to_begin" ? "failed" : "ending",
+            nativeDisposition:
+              command.event.type === "did_end" ? "ended" : "failed_to_begin",
+            nativeSequence: command.event.sequence,
+            cleanup: "pending",
+          };
+          nativeEvent = command.event.type;
+          slot = "native_terminal";
+          break;
+        }
+        case "ending":
+          if (oldFact("end_requested") !== undefined) return protection!;
+          if (
+            attempt.cleanup === "complete" ||
+            attempt.nativeDisposition === "ended" ||
+            attempt.nativeDisposition === "failed_to_begin"
+          )
+            return null;
+          attempt = { ...attempt, phase: "ending", cleanup: "pending" };
+          cause = command.cause;
+          slot = "end_requested";
+          break;
+        case "failure":
+          if (oldFact("failure") !== undefined) return protection!;
+          attempt = {
+            ...attempt,
+            phase: "recovery_required",
+            cleanup: "unconfirmed",
+          };
+          cause = command.cause;
+          slot = "failure";
+          break;
+        case "abandoned":
+          if (command.cause !== "emergency_abandonment") return null;
+          if (oldFact("abandoned") !== undefined) return protection!;
+          attempt = {
+            ...attempt,
+            phase: "recovery_required",
+            abandonment: "requested",
+          };
+          cause = command.cause;
+          slot = "abandoned";
+          break;
+        case "disposed_without_terminal_observation":
+          if (
+            priorProcessUncertain ||
+            !ownedProtectionAttempts.has(command.attemptId) ||
+            oldFact("native_terminal") !== undefined
+          )
+            return null;
+          if (oldFact("cleanup") !== undefined)
+            return attempt.nativeDisposition ===
+              "disposed_without_terminal_observation" &&
+              attempt.cleanup === "complete"
+              ? protection!
+              : null;
+          attempt = {
+            ...attempt,
+            phase: "failed",
+            nativeDisposition: "disposed_without_terminal_observation",
+            cleanup: "complete",
+          };
+          slot = "cleanup";
+          break;
+        case "cleanup":
+          if (command.outcome === "complete") {
+            if (
+              attempt.nativeDisposition !== "ended" &&
+              attempt.nativeDisposition !== "failed_to_begin"
+            )
+              return null;
+            if (oldFact("cleanup") !== undefined) return protection!;
+            attempt = {
+              ...attempt,
+              phase: attempt.nativeDisposition === "ended" ? "ended" : "failed",
+              cleanup: "complete",
+            };
+            slot = "cleanup";
+          } else {
+            if (attempt.cleanup === "complete") return null;
+            if (
+              attempt.cleanup === "unconfirmed" &&
+              oldFact("failure") !== undefined
+            )
+              return protection!;
+            attempt = {
+              ...attempt,
+              phase: "recovery_required",
+              cleanup: "unconfirmed",
+            };
+            if (oldFact("failure") !== undefined)
+              return {
+                ...protection!,
+                revision: revision + 1,
+                latestAttempt: attempt,
+              };
+            cause = "persistence_unavailable";
+            slot = "failure";
+          }
+          break;
+      }
+    }
+    if (
+      categories === undefined ||
+      facts.length >= protectionFactCapacity ||
+      (protection?.nextFactSequence ?? 1) === Number.MAX_SAFE_INTEGER
+    )
+      return null;
+    const fact: ProtectionFact = {
+      sequence: protection?.nextFactSequence ?? 1,
+      eventId: requestId(),
+      attemptId: attempt.attemptId,
+      scope: attempt.scope,
+      policyVersion: 1,
+      slot,
+      phase: attempt.phase,
+      nativeEvent,
+      nativeSequence: attempt.nativeSequence,
+      categories,
+      cause,
+    };
+    return {
+      policyVersion: 1,
+      revision: revision + 1,
+      latestAttempt: attempt,
+      nextFactSequence: fact.sequence + 1,
+      facts: [...facts, fact],
+    };
+  }
+
+  async function commitProtectionTransition(
+    input: ProtectionTransition,
+  ): ReturnType<StudentProtectionAccess["commitProtectionTransition"]> {
+    const command = parseProtectionTransition(input);
+    if (command === null || stopping) return { status: "unavailable" };
+    if (
+      command.kind === "abandoned" &&
+      command.cause === "emergency_abandonment" &&
+      record?.nativeProtection?.latestAttempt?.attemptId ===
+        command.attemptId &&
+      record.nativeProtection.revision === command.expectedProtectionRevision
+    )
+      invalidateAdmission();
+    while (active !== null) await active;
+    if (stopping || !options.transport.isIdle())
+      return { status: "unavailable" };
+    let result: Awaited<
+      ReturnType<StudentProtectionAccess["commitProtectionTransition"]>
+    > = { status: "unavailable" };
+    await run(async (generation) => {
+      const next = protectionSuccessor(command);
+      if (next === null || record === null) return;
+      // Retain ownership even if the barrier outcome is uncertain. Only this
+      // process can later prove disposal of the attempt it actually authored.
+      if (command.kind === "engaging")
+        ownedProtectionAttempts.add(command.attemptId);
+      if (
+        next !== record.nativeProtection &&
+        !(await write(
+          { ...successor(record), nativeProtection: next },
+          generation,
+        ))
+      )
+        return;
+      if (
+        !alive(generation) ||
+        ((command.kind === "engaging" || command.kind === "locked") &&
+          !isCurrentAdmission(command.authority))
+      )
+        return;
+      result = { status: "committed", protectionRevision: next.revision };
+    });
+    return result;
   }
 
   return {
@@ -540,7 +1177,7 @@ export function createStudentSessionCoordinator(options: {
         )
           return;
         const next: StudentSessionSuccessor = {
-          version: 1,
+          version: 2,
           apiOrigin: options.apiOrigin,
           device: options.crypto.createEnrollment(),
           current: null,
@@ -553,6 +1190,7 @@ export function createStudentSessionCoordinator(options: {
           },
           lastReservedCounter: 0,
           terminal: false,
+          nativeProtection: null,
         };
         publish("joining");
         if (await write(next, generation))
@@ -563,6 +1201,7 @@ export function createStudentSessionCoordinator(options: {
         const parsedCode = parseStudentJoinCode(code);
         if (
           !initialized ||
+          priorProcessUncertain ||
           view.revision !== snapshotRevision ||
           !["recovery_required", "unavailable", "forfeited"].includes(
             view.phase,
@@ -571,11 +1210,23 @@ export function createStudentSessionCoordinator(options: {
         )
           return;
         if (
+          record?.nativeProtection?.latestAttempt != null &&
+          record.nativeProtection.latestAttempt.cleanup !== "complete"
+        )
+          return;
+        invalidateAdmission();
+        if (
           needsReload &&
           !(await load(generation)) &&
           view.phase !== "recovery_required"
         )
           return;
+        if (
+          record?.nativeProtection?.latestAttempt != null &&
+          record.nativeProtection.latestAttempt.cleanup !== "complete"
+        )
+          return;
+        const retainedProtection = record?.nativeProtection ?? null;
         // Deliberate recovery is the only path that may replace local identity;
         // the targeted server material still selects the existing StudentSession.
         try {
@@ -591,7 +1242,7 @@ export function createStudentSessionCoordinator(options: {
         attemptedWrite = null;
         capabilityDeadline = 0;
         const next: StudentSessionSuccessor = {
-          version: 1,
+          version: 2,
           apiOrigin: options.apiOrigin,
           device: options.crypto.createEnrollment(),
           current: null,
@@ -604,19 +1255,24 @@ export function createStudentSessionCoordinator(options: {
           },
           lastReservedCounter: 0,
           terminal: false,
+          nativeProtection: retainedProtection,
         };
         publish("joining");
         if (await write(next, generation))
           await attemptJoin(generation, signal);
       }),
-    retryPending: () => run(retry),
+    retryPending: () => run(retry, { sequence: null, receipt: null }),
     refresh: () =>
-      run(async (generation, signal) => {
-        if (recoveryLatched) return;
-        if ((!initialized || needsReload) && !(await load(generation))) return;
-        if (record?.pending != null) return; // Only explicit retry resubmits intent.
-        await attemptMaintenance(generation, signal, false);
-      }),
+      run(
+        async (generation, signal) => {
+          if (recoveryLatched) return;
+          if ((!initialized || needsReload) && !(await load(generation)))
+            return;
+          if (record?.pending != null) return; // Only explicit retry resubmits intent.
+          await attemptMaintenance(generation, signal, false);
+        },
+        { sequence: null, receipt: null },
+      ),
     forfeit: (snapshotRevision) =>
       run(async (generation, signal) => {
         if (
@@ -626,6 +1282,7 @@ export function createStudentSessionCoordinator(options: {
           record.pending !== null
         )
           return;
+        invalidateAdmission();
         const pending: PendingStudentIntent = {
           kind: "forfeit",
           requestId: requestId(),
@@ -635,6 +1292,29 @@ export function createStudentSessionCoordinator(options: {
           await attemptMaintenance(generation, signal, true);
       }),
     readView: () => view,
+    readProtectionContext() {
+      expireObservation();
+      const admission = captureAdmission();
+      return Object.freeze({
+        admission,
+        freshAdmission:
+          issuedAdmission !== null &&
+          isCurrentAdmission(issuedAdmission, "sustain")
+            ? issuedAdmission
+            : null,
+        observationSequence,
+        protection: record?.nativeProtection ?? null,
+      });
+    },
+    readFreshAdmission,
+    isCurrentAdmission,
+    subscribeAdmissionObservation(listener) {
+      admissionListeners.add(listener);
+      return () => {
+        admissionListeners.delete(listener);
+      };
+    },
+    commitProtectionTransition,
     subscribe(listener) {
       listeners.add(listener);
       return () => {
@@ -645,6 +1325,8 @@ export function createStudentSessionCoordinator(options: {
       if (stopping) return false;
       stopping = true;
       lifetime += 1;
+      invalidateAdmission();
+      admissionListeners.clear();
       listeners.clear();
       abort?.abort();
       let timer: ReturnType<typeof setTimeout> | undefined;

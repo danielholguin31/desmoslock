@@ -8,7 +8,7 @@ import {
   type WebContents,
 } from "electron";
 
-import { createElectronCalculatorSurface } from "../../../../apps/desktop/src/main/electron-calculator-surface.js";
+import { prepareElectronCalculatorSurface } from "../../../../apps/desktop/src/main/electron-calculator-surface.js";
 
 interface StartupProbe {
   calculatorWebContents: number;
@@ -62,7 +62,7 @@ async function runProbe(): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
   };
-  const creation = createElectronCalculatorSurface({
+  const preparation = prepareElectronCalculatorSurface({
     bounds: { height: 400, width: 600, x: 0, y: 0 },
     onCleanupFailure: () => app.exit(1),
     outputDirectory,
@@ -71,7 +71,7 @@ async function runProbe(): Promise<void> {
   setTimeout(() => parent.close(), 20);
 
   try {
-    await creation;
+    await preparation;
     probe.outcome = "resolved";
   } catch {
     probe.outcome = "rejected";

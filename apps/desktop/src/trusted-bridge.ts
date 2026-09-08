@@ -1,8 +1,9 @@
+import { parseStudentJoinCode } from "@desmoslock/contracts";
+
 import {
-  parseStudentJoinCode,
-  parseStudentSessionViewState,
-  type StudentSessionViewState,
-} from "@desmoslock/contracts";
+  parseDesktopStudentView,
+  type DesktopStudentView,
+} from "./assessment-protection-view-state.js";
 
 export const trustedAssessmentLockChannel =
   "desmoslock:assessment:request-lock" as const;
@@ -15,6 +16,10 @@ export const studentSessionChannels = Object.freeze({
   refresh: "desmoslock:student:refresh",
   forfeit: "desmoslock:student:forfeit",
   changed: "desmoslock:student:view-changed",
+  start: "desmoslock:assessment:start",
+  emergencyReview: "desmoslock:assessment:emergency-review",
+  emergencyCancel: "desmoslock:assessment:emergency-cancel",
+  emergencyConfirm: "desmoslock:assessment:emergency-confirm",
 } as const);
 export type StudentSessionRequestChannel = Exclude<
   (typeof studentSessionChannels)[keyof typeof studentSessionChannels],
@@ -27,21 +32,33 @@ export type TrustedBridgeResult =
 export interface TrustedDesktopBridge {
   readonly requestAssessmentLock: () => Promise<TrustedBridgeResult>;
   readonly version: "2.0.0";
-  readStudentSessionView(): Promise<StudentSessionViewState | null>;
+  readStudentSessionView(): Promise<DesktopStudentView | null>;
   joinTest(request: {
     readonly code: string;
-  }): Promise<StudentSessionViewState | null>;
+  }): Promise<DesktopStudentView | null>;
   beginTargetedReadmission(request: {
     readonly code: string;
     readonly snapshotRevision: number;
-  }): Promise<StudentSessionViewState | null>;
-  retryStudentSession(): Promise<StudentSessionViewState | null>;
-  refreshStudentSession(): Promise<StudentSessionViewState | null>;
+  }): Promise<DesktopStudentView | null>;
+  retryStudentSession(): Promise<DesktopStudentView | null>;
+  refreshStudentSession(): Promise<DesktopStudentView | null>;
   forfeitStudentSession(request: {
     readonly snapshotRevision: number;
-  }): Promise<StudentSessionViewState | null>;
+  }): Promise<DesktopStudentView | null>;
+  startAssessment(request: {
+    readonly snapshotRevision: number;
+  }): Promise<DesktopStudentView | null>;
+  reviewEmergencyEnd(request: {
+    readonly snapshotRevision: number;
+  }): Promise<DesktopStudentView | null>;
+  cancelEmergencyEnd(request: {
+    readonly snapshotRevision: number;
+  }): Promise<DesktopStudentView | null>;
+  confirmEmergencyEnd(request: {
+    readonly snapshotRevision: number;
+  }): Promise<DesktopStudentView | null>;
   onStudentSessionViewChanged(
-    listener: (view: StudentSessionViewState) => void,
+    listener: (view: DesktopStudentView) => void,
   ): () => void;
 }
 
@@ -98,7 +115,11 @@ export function parseStudentSessionIpcArguments(
       ? ["code"]
       : channel === studentSessionChannels.recover
         ? ["code", "snapshotRevision"]
-        : channel === studentSessionChannels.forfeit
+        : channel === studentSessionChannels.forfeit ||
+            channel === studentSessionChannels.start ||
+            channel === studentSessionChannels.emergencyReview ||
+            channel === studentSessionChannels.emergencyCancel ||
+            channel === studentSessionChannels.emergencyConfirm
           ? ["snapshotRevision"]
           : null;
   if (keys === null) return null;
@@ -114,13 +135,6 @@ export function parseStudentSessionIpcArguments(
   )
     return null;
   return [Object.freeze(request)];
-}
-
-function immutableStudentView(value: unknown): StudentSessionViewState | null {
-  const parsed = parseStudentSessionViewState(value);
-  if (parsed === null) return null;
-  if (parsed.session !== null) Object.freeze(parsed.session);
-  return Object.freeze(parsed);
 }
 
 function parseTrustedBridgeResult(response: unknown): TrustedBridgeResult {
@@ -162,11 +176,11 @@ export function createTrustedDesktopBridge(
   async function student(
     channel: StudentSessionRequestChannel,
     args: readonly unknown[],
-  ): Promise<StudentSessionViewState | null> {
+  ): Promise<DesktopStudentView | null> {
     const parsed = parseStudentSessionIpcArguments(channel, args);
     if (parsed === null) return null;
     try {
-      return immutableStudentView(await invoke(channel, ...parsed));
+      return parseDesktopStudentView(await invoke(channel, ...parsed));
     } catch {
       return null;
     }
@@ -189,17 +203,24 @@ export function createTrustedDesktopBridge(
       student(studentSessionChannels.refresh, args),
     forfeitStudentSession: (...args: readonly unknown[]) =>
       student(studentSessionChannels.forfeit, args),
-    onStudentSessionViewChanged(
-      listener: (view: StudentSessionViewState) => void,
-    ) {
+    startAssessment: (...args: readonly unknown[]) =>
+      student(studentSessionChannels.start, args),
+    reviewEmergencyEnd: (...args: readonly unknown[]) =>
+      student(studentSessionChannels.emergencyReview, args),
+    cancelEmergencyEnd: (...args: readonly unknown[]) =>
+      student(studentSessionChannels.emergencyCancel, args),
+    confirmEmergencyEnd: (...args: readonly unknown[]) =>
+      student(studentSessionChannels.emergencyConfirm, args),
+    onStudentSessionViewChanged(listener: (view: DesktopStudentView) => void) {
       if (typeof listener !== "function") return () => undefined;
       let active = true;
       const unsubscribe = watchStudentView((value) => {
         if (!active) return;
-        const parsed = immutableStudentView(value);
-        if (parsed !== null) listener(parsed);
+        const parsed = parseDesktopStudentView(value);
+        if (active && parsed !== null) listener(parsed);
       });
       return () => {
+        if (!active) return;
         active = false;
         unsubscribe();
       };

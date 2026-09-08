@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
 import { buildDesktopDurableRecord } from "./build-desktop-durable-record.mjs";
+import { buildDesktopAACProtection } from "./build-desktop-aac-protection.mjs";
 
 import {
   parsePublicBackendConfiguration,
@@ -183,6 +184,7 @@ async function runCommandLine() {
 
   if (appName === "desktop") {
     await buildDesktopDurableRecord();
+    await buildDesktopAACProtection();
     await build({
       bundle: true,
       define: browserDefine,

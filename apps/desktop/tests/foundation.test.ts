@@ -12,7 +12,7 @@ import {
 } from "../src/trusted-bridge.js";
 
 describe("desktop v2 foundation", () => {
-  it("exposes only named admission methods and the legacy lock intent", async () => {
+  it("exposes only named student actions and the legacy lock intent", async () => {
     const invocations: Array<{ channel: string; request: unknown }> = [];
     const bridge = createTrustedDesktopBridge(async (channel, request) => {
       invocations.push({ channel, request });
@@ -21,13 +21,17 @@ describe("desktop v2 foundation", () => {
 
     expect(bridge).toEqual({
       beginTargetedReadmission: expect.any(Function),
+      cancelEmergencyEnd: expect.any(Function),
+      confirmEmergencyEnd: expect.any(Function),
       forfeitStudentSession: expect.any(Function),
       joinTest: expect.any(Function),
       onStudentSessionViewChanged: expect.any(Function),
       readStudentSessionView: expect.any(Function),
       refreshStudentSession: expect.any(Function),
       requestAssessmentLock: expect.any(Function),
+      reviewEmergencyEnd: expect.any(Function),
       retryStudentSession: expect.any(Function),
+      startAssessment: expect.any(Function),
       version: "2.0.0",
     });
     await expect(bridge.requestAssessmentLock()).resolves.toEqual({ ok: true });
@@ -121,6 +125,8 @@ describe("desktop v2 foundation", () => {
     const bridge = createTrustedDesktopBridge(async () => ({ ok: true }));
     expect(Object.keys(bridge).sort()).toEqual([
       "beginTargetedReadmission",
+      "cancelEmergencyEnd",
+      "confirmEmergencyEnd",
       "forfeitStudentSession",
       "joinTest",
       "onStudentSessionViewChanged",
@@ -128,6 +134,8 @@ describe("desktop v2 foundation", () => {
       "refreshStudentSession",
       "requestAssessmentLock",
       "retryStudentSession",
+      "reviewEmergencyEnd",
+      "startAssessment",
       "version",
     ]);
     expect("readBackendHealth" in bridge).toBe(false);

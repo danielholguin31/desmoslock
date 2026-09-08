@@ -72,19 +72,25 @@ const forbiddenPackagedSwitches = Object.freeze([
 ]);
 const diagnosticEndpointPattern =
   /(?:Debugger|DevTools) listening|ws:\/\/[^\s]+\/devtools\//i;
+const nativeDistributionFiles = [
+  "native/aac-protection.node",
+  "native/durable-record.node",
+];
 const expectedDistributionFiles = [
   "calculator/host.js",
   "calculator/index.html",
   "calculator/styles.css",
   "index.html",
   "main.js",
-  ...(process.platform === "darwin" ? ["native/durable-record.node"] : []),
+  ...(process.platform === "darwin" ? nativeDistributionFiles : []),
   "preload.cjs",
   "renderer.js",
   "styles.css",
 ];
 const studentBridgeKeys = [
   "beginTargetedReadmission",
+  "cancelEmergencyEnd",
+  "confirmEmergencyEnd",
   "forfeitStudentSession",
   "joinTest",
   "onStudentSessionViewChanged",
@@ -92,8 +98,69 @@ const studentBridgeKeys = [
   "refreshStudentSession",
   "requestAssessmentLock",
   "retryStudentSession",
+  "reviewEmergencyEnd",
+  "startAssessment",
   "version",
 ];
+
+function assertDetachedStudentView(
+  view,
+  expectedAdmissionPhase,
+  expectedProtectionPhase,
+) {
+  assert.notEqual(
+    view,
+    null,
+    "The configured production shell must publish a composed Student view",
+  );
+  assert.deepEqual(Object.keys(view).sort(), [
+    "admission",
+    "protection",
+    "revision",
+  ]);
+  assert.ok(Number.isSafeInteger(view.revision) && view.revision >= 1);
+  assert.deepEqual(view.admission, {
+    phase: expectedAdmissionPhase,
+    session: null,
+    pendingOperation: null,
+  });
+  assert.deepEqual(Object.keys(view.protection).sort(), [
+    "calculatorVisible",
+    "categories",
+    "cleanup",
+    "emergencyReview",
+    "evidence",
+    "failure",
+    "nativeEndObserved",
+    "phase",
+  ]);
+  assert.equal(view.protection.phase, expectedProtectionPhase);
+  assert.equal(view.protection.calculatorVisible, false);
+  assert.equal(view.protection.nativeEndObserved, false);
+  assert.equal(view.protection.emergencyReview, false);
+  assert.deepEqual(Object.keys(view.protection.categories).sort(), [
+    "aac",
+    "applications",
+    "persistence",
+    "shortcuts",
+    "windowNetwork",
+  ]);
+  for (const category of Object.values(view.protection.categories)) {
+    assert.deepEqual(Object.keys(category).sort(), ["code", "status"]);
+    assert.ok(
+      ["pending", "confirmed", "failed", "unavailable"].includes(
+        category.status,
+      ),
+    );
+    assert.equal(typeof category.code, "string");
+  }
+  assert.notEqual(view.protection.categories.aac.status, "confirmed");
+  if (expectedProtectionPhase === "idle") {
+    assert.equal(view.protection.failure, null);
+    assert.equal(view.protection.cleanup, "not_requested");
+    assert.equal(view.protection.evidence, "none");
+  }
+}
 
 async function selectExistingElectronArchive(electronVersion) {
   assert.equal(
@@ -200,7 +267,9 @@ async function selectExistingElectronArchive(electronVersion) {
   return { directory: await fs.realpath(directory), filename, sha256, bytes };
 }
 
-async function inspectNativeRecordArtifact(filename) {
+async function inspectNativeArtifact(root, relativePath) {
+  assert.ok(nativeDistributionFiles.includes(relativePath));
+  const filename = path.join(root, relativePath);
   const status = await fs.lstat(filename);
   assert.equal(
     status.isSymbolicLink(),
@@ -230,10 +299,10 @@ async function inspectNativeRecordArtifact(filename) {
   assert.equal(
     bytes.readUInt32LE(12),
     8,
-    "Native storage must be a Mach-O bundle",
+    "Native artifact must be a Mach-O bundle",
   );
   return {
-    path: "dist/native/durable-record.node",
+    path: `dist/${relativePath}`,
     architecture: process.arch,
     sha256: createHash("sha256").update(bytes).digest("hex"),
     bytes: bytes.length,
@@ -545,7 +614,11 @@ async function launchSyntheticCalculatorBuild(userDataDirectory, fixturePath) {
   });
 }
 
-async function inspectProductionShell(application, expectedPhase) {
+async function inspectProductionShell(
+  application,
+  expectedPhase,
+  expectedProtectionPhase = "idle",
+) {
   const shell = await application.firstWindow();
   await shell.waitForFunction(
     (phase) =>
@@ -562,9 +635,8 @@ async function inspectProductionShell(application, expectedPhase) {
       studentView: await bridge?.readStudentSessionView(),
       manualLockControls:
         globalThis.document.querySelectorAll("[data-lock-intent]").length,
-      protection: globalThis.document.querySelector(
-        ".student-session__protection h3",
-      )?.textContent,
+      protection:
+        globalThis.document.querySelector("#protection-status")?.textContent,
       phase:
         globalThis.document.querySelector(".student-session")?.dataset.phase,
     };
@@ -576,22 +648,32 @@ async function inspectProductionShell(application, expectedPhase) {
     reason: "native-protection-unavailable",
   });
   assert.equal(shellBoundary.manualLockControls, 0);
-  assert.equal(shellBoundary.protection, "Assessment protection unavailable");
+  assert.equal(
+    shellBoundary.protection,
+    expectedProtectionPhase === "idle"
+      ? "Protection not started"
+      : "Recovery required",
+  );
   assert.equal(shellBoundary.phase, expectedPhase);
-  assert.deepEqual(Object.keys(shellBoundary.studentView).sort(), [
-    "calculatorEligible",
-    "pendingOperation",
-    "phase",
-    "protection",
-    "revision",
-    "session",
-  ]);
-  assert.equal(shellBoundary.studentView.phase, expectedPhase);
-  assert.equal(shellBoundary.studentView.protection, "unavailable");
-  assert.equal(shellBoundary.studentView.calculatorEligible, false);
-  assert.equal(shellBoundary.studentView.session, null);
-  assert.equal(shellBoundary.studentView.pendingOperation, null);
-  assert.ok(Number.isSafeInteger(shellBoundary.studentView.revision));
+  assertDetachedStudentView(
+    shellBoundary.studentView,
+    expectedPhase,
+    expectedProtectionPhase,
+  );
+  if (expectedProtectionPhase === "idle") {
+    const start = shell.locator('[data-action="start-assessment"]');
+    assert.equal(await start.isVisible(), true);
+    assert.equal(await start.isDisabled(), true);
+    assert.equal(
+      await shell.locator('[data-action="review-emergency"]').isVisible(),
+      false,
+    );
+  } else {
+    assert.equal(
+      await shell.locator('[data-action="start-assessment"]').isVisible(),
+      false,
+    );
+  }
   const boundary = await application.evaluate(
     ({ BrowserWindow, webContents }, url) => ({
       calculators: webContents
@@ -1051,18 +1133,20 @@ await runWithIndependentCleanup(async () => {
   const productionRuntimeText = (
     await Promise.all(
       expectedDistributionFiles.map((relativePath) =>
-        relativePath === "native/durable-record.node"
+        nativeDistributionFiles.includes(relativePath)
           ? ""
           : fs.readFile(path.join(distributionRoot, relativePath), "utf8"),
       ),
     )
   ).join("\n");
-  const nativeArtifact =
+  const nativeArtifacts =
     process.platform === "darwin"
-      ? await inspectNativeRecordArtifact(
-          path.join(distributionRoot, "native/durable-record.node"),
+      ? await Promise.all(
+          nativeDistributionFiles.map((relativePath) =>
+            inspectNativeArtifact(distributionRoot, relativePath),
+          ),
         )
-      : null;
+      : [];
   for (const prohibited of [
     /authorized local fixture/i,
     /controlled calculator/i,
@@ -1116,7 +1200,9 @@ await runWithIndependentCleanup(async () => {
     arch: process.arch,
     asar:
       process.platform === "darwin"
-        ? { unpack: "dist/native/durable-record.node" }
+        ? // ASAR matches absolute source names with matchBase. These two fixed
+          // basenames are constrained by the exact dist and unpacked inventories.
+          { unpack: "{aac-protection,durable-record}.node" }
         : true,
     dir: stagingRoot,
     electronVersion: electronManifest.version,
@@ -1137,34 +1223,35 @@ await runWithIndependentCleanup(async () => {
     process.platform === "darwin"
       ? path.join(packagedArtifact.appBundle, "Contents/Resources")
       : path.join(packageDirectories[0], "resources");
-  if (nativeArtifact !== null) {
-    assert.equal(
-      statFile(
-        path.join(resourcesDirectory, "app.asar"),
-        "dist/native/durable-record.node",
-      ).unpacked,
-      true,
-    );
+  if (nativeArtifacts.length > 0) {
     assert.deepEqual(
       await listFiles(path.join(resourcesDirectory, "app.asar.unpacked")),
-      ["dist/native/durable-record.node"],
+      nativeDistributionFiles.map((relativePath) => `dist/${relativePath}`),
     );
-    assert.deepEqual(
-      await inspectNativeRecordArtifact(
-        path.join(
-          resourcesDirectory,
-          "app.asar.unpacked/dist/native/durable-record.node",
+    for (const [index, relativePath] of nativeDistributionFiles.entries()) {
+      assert.equal(
+        statFile(
+          path.join(resourcesDirectory, "app.asar"),
+          `dist/${relativePath}`,
+        ).unpacked,
+        true,
+      );
+      assert.deepEqual(
+        await inspectNativeArtifact(
+          path.join(resourcesDirectory, "app.asar.unpacked/dist"),
+          relativePath,
         ),
-      ),
-      nativeArtifact,
-    );
+        nativeArtifacts[index],
+      );
+    }
   } else {
-    assert.throws(() =>
-      statFile(
-        path.join(resourcesDirectory, "app.asar"),
-        "dist/native/durable-record.node",
-      ),
-    );
+    for (const relativePath of nativeDistributionFiles)
+      assert.throws(() =>
+        statFile(
+          path.join(resourcesDirectory, "app.asar"),
+          `dist/${relativePath}`,
+        ),
+      );
   }
   const executablePath = packagedArtifact.executable;
   if (process.platform === "darwin") {
@@ -1214,6 +1301,7 @@ await runWithIndependentCleanup(async () => {
     application = await launchInternalProductionBuild(userDataDirectory);
     productionRecovery = await inspectProductionShell(
       application,
+      "recovery_required",
       "recovery_required",
     );
     assert.equal(
@@ -1360,7 +1448,7 @@ await runWithIndependentCleanup(async () => {
       : "Actual production join/recovery shell keeps the calculator detached; separately synthetic calculator isolation and exact packaged launch policy checks passed without a sandbox-disabling launch control. OS encryption enrollment/continuity, physical protection and signed/notarized packaged UI acceptance remain unproven.\n",
   );
   process.stdout.write(
-    `${JSON.stringify({ nativeArtifact, electronArchive: { filename: electronArchive.filename, sha256: electronArchive.sha256, bytes: electronArchive.bytes }, actualMain: { entry: productionShell.shellBoundary.phase, recovery: productionRecovery?.shellBoundary.phase ?? null, calculatorEligible: false }, calculatorEvidence: "synthetic-isolation-fixture-only" })}\n`,
+    `${JSON.stringify({ nativeArtifacts, electronArchive: { filename: electronArchive.filename, sha256: electronArchive.sha256, bytes: electronArchive.bytes }, actualMain: { entry: productionShell.shellBoundary.phase, recovery: productionRecovery?.shellBoundary.phase ?? null, calculatorVisible: false }, calculatorEvidence: "synthetic-isolation-fixture-only" })}\n`,
   );
 }, [
   async () => {

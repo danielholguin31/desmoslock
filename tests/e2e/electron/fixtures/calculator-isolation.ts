@@ -3,7 +3,7 @@
 import path from "node:path";
 import { app, BrowserWindow, ipcMain, protocol, session } from "electron";
 
-import { createElectronCalculatorSurface } from "../../../../apps/desktop/src/main/electron-calculator-surface.js";
+import { prepareElectronCalculatorSurface } from "../../../../apps/desktop/src/main/electron-calculator-surface.js";
 import { createTrustedShellWebPreferences } from "../../../../apps/desktop/src/main/hardened-web-preferences.js";
 import {
   denyByDefaultCapabilityPolicy,
@@ -90,12 +90,13 @@ void app
     );
     await parent.loadURL(shellUrl);
     const { width, height } = parent.getContentBounds();
-    const surface = await createElectronCalculatorSurface({
+    const surface = await prepareElectronCalculatorSurface({
       bounds: { height: Math.max(1, height - 140), width, x: 0, y: 140 },
       onCleanupFailure: () => app.exit(1),
       outputDirectory,
       parent,
     });
+    surface.attach();
     let quitting = false;
     app.on("before-quit", (event) => {
       if (quitting) return;
