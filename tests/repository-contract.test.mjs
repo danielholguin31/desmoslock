@@ -734,7 +734,7 @@ test("the runbook names every runtime-only staff and Student backup guard", () =
   }
 });
 
-test("unsigned artifact Node suites remain invoked by required static CI", () => {
+test("unsigned and universal artifact Node suites remain invoked by required static CI", () => {
   const rootPackage = readJson("package.json");
   const workflow = readText(".github/workflows/ci.yml");
   assert.doesNotThrow(() =>
@@ -744,8 +744,18 @@ test("unsigned artifact Node suites remain invoked by required static CI", () =>
     "tests/acceptance/unsigned-artifact-collector.test.mjs",
     "tests/acceptance/unsigned-artifact-evidence.test.mjs",
     "tests/acceptance/unsigned-artifact-cli.test.mjs",
+    "tests/acceptance/desktop-native-build-targets.test.mjs",
+    "tests/acceptance/universal-artifact-composition.test.mjs",
+    "tests/acceptance/universal-artifact-cli.test.mjs",
   ];
   for (const file of required) {
+    const command = rootPackage.scripts["test:repository"];
+    const removed = command.replace(` ${file}`, "");
+    assert.notEqual(
+      removed,
+      command,
+      `Required suite must be present: ${file}`,
+    );
     assert.throws(
       () =>
         assertUnsignedArtifactCiInvocation(
@@ -753,21 +763,19 @@ test("unsigned artifact Node suites remain invoked by required static CI", () =>
             ...rootPackage,
             scripts: {
               ...rootPackage.scripts,
-              "test:repository": rootPackage.scripts["test:repository"].replace(
-                ` ${file}`,
-                "",
-              ),
+              "test:repository": removed,
             },
           },
           workflow,
         ),
-      /must execute all three unsigned artifact Node suites/u,
+      /must execute all required unsigned and universal artifact Node suites/u,
       file,
     );
   }
   for (const command of [
     rootPackage.scripts["test:repository"].replace("node --test", "echo"),
     `${rootPackage.scripts["test:repository"]} || true`,
+    `${rootPackage.scripts["test:repository"]} ${required[3]}`,
   ]) {
     assert.throws(
       () =>
@@ -775,7 +783,7 @@ test("unsigned artifact Node suites remain invoked by required static CI", () =>
           { ...rootPackage, scripts: { "test:repository": command } },
           workflow,
         ),
-      /must execute all three unsigned artifact Node suites/u,
+      /must execute all required unsigned and universal artifact Node suites/u,
     );
   }
   assert.throws(
@@ -784,7 +792,7 @@ test("unsigned artifact Node suites remain invoked by required static CI", () =>
         rootPackage,
         workflow.replace("      - run: npm run test:repository\n", ""),
       ),
-    /must execute all three unsigned artifact Node suites/u,
+    /must execute all required unsigned and universal artifact Node suites/u,
   );
   for (const option of ["if: false", "continue-on-error: true"]) {
     for (const altered of [
@@ -796,7 +804,7 @@ test("unsigned artifact Node suites remain invoked by required static CI", () =>
     ]) {
       assert.throws(
         () => assertUnsignedArtifactCiInvocation(rootPackage, altered),
-        /must execute all three unsigned artifact Node suites/u,
+        /must execute all required unsigned and universal artifact Node suites/u,
         `Repository invocation cannot be disabled or ignored: ${option}`,
       );
     }

@@ -134,6 +134,9 @@ export function assertUnsignedArtifactCiInvocation(rootPackage, ciWorkflow) {
     "tests/acceptance/unsigned-artifact-collector.test.mjs",
     "tests/acceptance/unsigned-artifact-evidence.test.mjs",
     "tests/acceptance/unsigned-artifact-cli.test.mjs",
+    "tests/acceptance/desktop-native-build-targets.test.mjs",
+    "tests/acceptance/universal-artifact-composition.test.mjs",
+    "tests/acceptance/universal-artifact-cli.test.mjs",
   ];
   const staticJob = readCiJob(ciWorkflow, "static");
   const invocation = /^ {6}- run: npm run test:repository$/mu.exec(staticJob);
@@ -155,7 +158,7 @@ export function assertUnsignedArtifactCiInvocation(rootPackage, ciWorkflow) {
     /^ {8}(?:if|continue-on-error)\s*:/mu.test(invocationOptions)
   ) {
     fail(
-      "Required static CI must execute all three unsigned artifact Node suites through test:repository",
+      "Required static CI must execute all required unsigned and universal artifact Node suites through test:repository",
     );
   }
 }

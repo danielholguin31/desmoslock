@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   canonicalClientBuildIdentity,
   canonicalClientBuildInputs,
+  canonicalClientUniversalBuildInputs,
   parseClientBuildIdentity,
   parseClientBuildInputs,
+  parseClientUniversalBuildInputs,
 } from "../src/build-identity.js";
 
 const hex = (character: string, length = 64) => character.repeat(length);
@@ -95,6 +97,164 @@ describe("client build identity", () => {
     );
     expect(
       parseClientBuildIdentity({ ...identity, artifactSha256: hex("f") }),
+    ).toBeNull();
+  });
+});
+
+function universalInputs() {
+  const { architecture, ...common } = structuredClone(inputs);
+  return {
+    ...common,
+    kind: "desktop-universal",
+    hostArchitecture: architecture,
+    tools: {
+      ...common.tools,
+      electron: { version: common.tools.electron.version },
+      universal: { version: "3.0.6" },
+      lipo: { sha256: hex("7") },
+      codesign: { sha256: hex("8") },
+    },
+    slices: {
+      arm64: {
+        architecture: "arm64",
+        electronArchiveSha256: hex("3"),
+        deploymentTarget: "13.0",
+        napiVersion: 8,
+      },
+      x64: {
+        architecture: "x64",
+        electronArchiveSha256: hex("9"),
+        deploymentTarget: "13.0",
+        napiVersion: 8,
+      },
+    },
+    composition: { mergeASARs: true, nativeLayout: "fixed-addons-v1" },
+  };
+}
+
+describe("universal build input canonical grammar", () => {
+  it("copies every branch and retains two exact target identities", () => {
+    const original = universalInputs();
+    const parsed = parseClientUniversalBuildInputs(original)!;
+    expect(parsed).toEqual(original);
+    expect(parsed.slices.x64).not.toBe(original.slices.x64);
+    expect(Object.isFrozen(parsed.tools.codesign)).toBe(true);
+    expect(Object.isFrozen(parsed.slices.arm64)).toBe(true);
+    expect(Object.isFrozen(parsed.composition)).toBe(true);
+    original.slices.x64.electronArchiveSha256 = hex("a");
+    expect(parsed.slices.x64.electronArchiveSha256).toBe(hex("9"));
+    expect(parseClientBuildInputs(parsed)).toBeNull();
+    expect(parseClientUniversalBuildInputs(inputs)).toBeNull();
+  });
+
+  it("uses recursively sorted compact JSON and a separate domain hash", () => {
+    const original = universalInputs();
+    const canonical = canonicalClientUniversalBuildInputs(original)!;
+    const reversed = {
+      ...Object.fromEntries(Object.entries(original).reverse()),
+      tools: Object.fromEntries(Object.entries(original.tools).reverse()),
+      slices: { x64: original.slices.x64, arm64: original.slices.arm64 },
+    };
+    expect(canonicalClientUniversalBuildInputs(reversed)).toBe(canonical);
+    expect(canonical.endsWith("\n")).toBe(false);
+    // Independently reproduced with Python sorted-key compact JSON and one NUL.
+    expect(
+      createHash("sha256")
+        .update("desmoslock:universal-build:v1\0")
+        .update(canonical)
+        .digest("hex"),
+    ).toBe("0889c7ae2aafa83beeb0159fa790881fa435b25076c6c05df4ab38d4d22d45c3");
+    expect(canonical).not.toContain("buildId");
+    expect(canonical).not.toContain("artifactSha256");
+  });
+
+  it.each([
+    (value: ReturnType<typeof universalInputs>) => ({
+      ...value,
+      architecture: "universal",
+    }),
+    (value: ReturnType<typeof universalInputs>) => ({
+      ...value,
+      kind: "desktop-native",
+    }),
+    (value: ReturnType<typeof universalInputs>) => ({
+      ...value,
+      hostArchitecture: "universal",
+    }),
+    (value: ReturnType<typeof universalInputs>) => ({
+      ...value,
+      composition: { ...value.composition, mergeASARs: false },
+    }),
+    (value: ReturnType<typeof universalInputs>) => ({
+      ...value,
+      composition: { ...value.composition, singleArchFiles: "*.bin" },
+    }),
+    (value: ReturnType<typeof universalInputs>) => ({
+      ...value,
+      tools: { ...value.tools, electron: inputs.tools.electron },
+    }),
+    (value: ReturnType<typeof universalInputs>) => ({
+      ...value,
+      tools: { ...value.tools, lipo: { sha256: hex("0") } },
+    }),
+    (value: ReturnType<typeof universalInputs>) => ({
+      ...value,
+      tools: { ...value.tools, codesign: { sha256: hex("A") } },
+    }),
+    (value: ReturnType<typeof universalInputs>) => ({
+      ...value,
+      slices: { arm64: value.slices.arm64 },
+    }),
+    (value: ReturnType<typeof universalInputs>) => ({
+      ...value,
+      slices: { arm64: value.slices.x64, x64: value.slices.arm64 },
+    }),
+    (value: ReturnType<typeof universalInputs>) => ({
+      ...value,
+      slices: { ...value.slices, x64: { ...value.slices.x64, napiVersion: 9 } },
+    }),
+    (value: ReturnType<typeof universalInputs>) => ({
+      ...value,
+      slices: {
+        ...value.slices,
+        arm64: { ...value.slices.arm64, deploymentTarget: "14.0" },
+      },
+    }),
+  ])("rejects noncanonical composition or target grammar %#", (change) => {
+    expect(
+      parseClientUniversalBuildInputs(change(universalInputs())),
+    ).toBeNull();
+  });
+
+  it("does not call nested getters or permit symbols, sparse arrays and throwing proxies", () => {
+    const value = universalInputs();
+    Object.defineProperty(value.slices, "x64", {
+      enumerable: true,
+      get() {
+        throw new Error("must not call");
+      },
+    });
+    expect(parseClientUniversalBuildInputs(value)).toBeNull();
+    expect(
+      parseClientUniversalBuildInputs({
+        ...universalInputs(),
+        [Symbol("extra")]: 1,
+      }),
+    ).toBeNull();
+    expect(
+      parseClientUniversalBuildInputs({
+        ...universalInputs(),
+        slices: new Array(2),
+      }),
+    ).toBeNull();
+    expect(
+      parseClientUniversalBuildInputs(
+        new Proxy(universalInputs(), {
+          getOwnPropertyDescriptor() {
+            throw new Error("synthetic");
+          },
+        }),
+      ),
     ).toBeNull();
   });
 });

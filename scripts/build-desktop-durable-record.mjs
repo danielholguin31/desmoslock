@@ -29,10 +29,166 @@ async function selectedXcodeArgument(argument) {
   return value;
 }
 
-export async function buildDesktopDurableRecord() {
-  const outputDirectory = path.join(repositoryRoot, "apps/desktop/dist/native");
+function targetOptions(value) {
+  if (value === undefined) return null;
+  function exact(input, keys) {
+    if (
+      input === null ||
+      typeof input !== "object" ||
+      Array.isArray(input) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(input))
+    )
+      throw new Error();
+    const names = Reflect.ownKeys(input);
+    if (
+      names.length !== keys.length ||
+      names.some((key) => !keys.includes(key))
+    )
+      throw new Error();
+    const copy = Object.create(null);
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(input, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, "value"))
+        throw new Error();
+      copy[key] = descriptor.value;
+    }
+    return copy;
+  }
+  function absolute(filename) {
+    if (
+      typeof filename !== "string" ||
+      !path.isAbsolute(filename) ||
+      path.normalize(filename) !== filename ||
+      [...filename].some(
+        (character) =>
+          character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+      ) ||
+      filename.endsWith("/")
+    )
+      throw new Error();
+    return filename;
+  }
+  try {
+    const row = exact(value, ["architecture", "outputDirectory", "toolchain"]);
+    const tools = exact(row.toolchain, ["compiler", "sdk", "nodeHeaders"]);
+    if (!["arm64", "x64"].includes(row.architecture)) throw new Error();
+    const outputDirectory = absolute(row.outputDirectory);
+    const parts = path
+      .relative(repositoryRoot, outputDirectory)
+      .split(path.sep);
+    if (
+      parts.length !== 6 ||
+      parts[0] !== "artifacts" ||
+      parts[1] !== "universal-artifact-runs" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+        parts[2],
+      ) ||
+      parts[3] !== "slices" ||
+      parts[4] !== row.architecture ||
+      parts[5] !== "native"
+    )
+      throw new Error();
+    return Object.freeze({
+      architecture: row.architecture,
+      outputDirectory,
+      toolchain: Object.freeze({
+        compiler: absolute(tools.compiler),
+        sdk: absolute(tools.sdk),
+        nodeHeaders: absolute(tools.nodeHeaders),
+      }),
+    });
+  } catch {
+    throw new Error(
+      "Explicit native build targets require exact owned slice options",
+    );
+  }
+}
+
+async function targetDirectory(filename, privateDirectory) {
+  const status = await fs.lstat(filename);
+  const withinCheckout =
+    filename === repositoryRoot || filename.startsWith(`${repositoryRoot}/`);
+  if (
+    !status.isDirectory() ||
+    status.isSymbolicLink() ||
+    (withinCheckout
+      ? status.uid !== process.geteuid()
+      : ![0, process.geteuid()].includes(status.uid)) ||
+    (status.mode & (privateDirectory ? 0o077 : 0o022)) !== 0 ||
+    (await fs.realpath(filename)) !== filename
+  ) {
+    throw new Error(
+      "Explicit native build ancestors must be unchanged owned directories",
+    );
+  }
+  return { filename, privateDirectory, dev: status.dev, ino: status.ino };
+}
+
+async function targetDirectories(outputDirectory) {
+  const entries = [];
+  let current = path.parse(outputDirectory).root;
+  const privateRoot = path.join(
+    repositoryRoot,
+    "artifacts/universal-artifact-runs",
+  );
+  for (const component of outputDirectory
+    .slice(current.length)
+    .split(path.sep)) {
+    current = path.join(current, component);
+    entries.push(
+      await targetDirectory(
+        current,
+        current === privateRoot || current.startsWith(`${privateRoot}/`),
+      ),
+    );
+  }
+  return entries;
+}
+
+async function unchangedTarget(entries) {
+  for (const entry of entries) {
+    const current = await targetDirectory(
+      entry.filename,
+      entry.privateDirectory,
+    );
+    if (current.dev !== entry.dev || current.ino !== entry.ino)
+      throw new Error("Explicit native build output directory changed");
+  }
+}
+
+async function absentTarget(outputFile) {
+  try {
+    await fs.lstat(outputFile);
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    throw error;
+  }
+  throw new Error("Explicit native build target already exists");
+}
+
+async function compiledTarget(outputFile) {
+  const status = await fs.lstat(outputFile);
+  if (
+    !status.isFile() ||
+    status.isSymbolicLink() ||
+    status.uid !== process.geteuid() ||
+    status.nlink !== 1 ||
+    status.size < 1 ||
+    (await fs.realpath(outputFile)) !== outputFile
+  )
+    throw new Error("Explicit native compiler output is invalid");
+  return status;
+}
+
+export async function buildDesktopDurableRecord(options) {
+  const selected = targetOptions(options);
+  const outputDirectory =
+    selected?.outputDirectory ??
+    path.join(repositoryRoot, "apps/desktop/dist/native");
   const outputFile = path.join(outputDirectory, "durable-record.node");
   if (process.platform !== "darwin") {
+    if (selected !== null)
+      throw new Error("Explicit native build targets require macOS");
     try {
       await fs.lstat(outputFile);
     } catch (error) {
@@ -53,57 +209,74 @@ export async function buildDesktopDurableRecord() {
       "Native storage builds require the selected Node 24.20.0 toolchain and macOS architecture",
     );
   }
+  const architecture = selected?.architecture ?? process.arch;
+  const targetChain =
+    selected === null ? null : await targetDirectories(outputDirectory);
+  if (selected !== null) await absentTarget(outputFile);
   const compiler = await existingFile(
-    process.env.DESMOSLOCK_NATIVE_CLANG ??
+    selected?.toolchain.compiler ??
+      process.env.DESMOSLOCK_NATIVE_CLANG ??
       (await selectedXcodeArgument(["--find", "clang"])),
     "compiler",
   );
   const sdk = await fs.realpath(
-    process.env.DESMOSLOCK_NATIVE_SDK ??
+    selected?.toolchain.sdk ??
+      process.env.DESMOSLOCK_NATIVE_SDK ??
       (await selectedXcodeArgument(["--sdk", "macosx", "--show-sdk-path"])),
   );
   const headers = await fs.realpath(
-    process.env.DESMOSLOCK_NATIVE_NODE_HEADERS ??
+    selected?.toolchain.nodeHeaders ??
+      process.env.DESMOSLOCK_NATIVE_NODE_HEADERS ??
       path.resolve(path.dirname(process.execPath), "../include/node"),
   );
   await existingFile(path.join(headers, "node_api.h"), "Node headers");
   await existingFile(path.join(sdk, "usr/include/sys/fcntl.h"), "macOS SDK");
   const actualRepository = await fs.realpath(repositoryRoot);
-  let ancestor = actualRepository;
-  for (const component of ["apps", "desktop", "dist", "native"]) {
-    ancestor = path.join(ancestor, component);
-    try {
-      const status = await fs.lstat(ancestor);
-      if (!status.isDirectory() || status.isSymbolicLink()) {
-        throw new Error(
-          "Native build output ancestors must be owned directories",
-        );
+  if (selected === null) {
+    let ancestor = actualRepository;
+    for (const component of ["apps", "desktop", "dist", "native"]) {
+      ancestor = path.join(ancestor, component);
+      try {
+        const status = await fs.lstat(ancestor);
+        if (!status.isDirectory() || status.isSymbolicLink()) {
+          throw new Error(
+            "Native build output ancestors must be owned directories",
+          );
+        }
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+        await fs.mkdir(ancestor);
       }
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-      await fs.mkdir(ancestor);
+      if ((await fs.realpath(ancestor)) !== ancestor) {
+        throw new Error("Native build output must remain inside this checkout");
+      }
     }
-    if ((await fs.realpath(ancestor)) !== ancestor) {
-      throw new Error("Native build output must remain inside this checkout");
-    }
-  }
+  } else await unchangedTarget(targetChain);
   const actualOutput = await fs.realpath(outputDirectory);
   if (
-    actualOutput !== path.join(actualRepository, "apps/desktop/dist/native")
+    actualOutput !==
+    (selected?.outputDirectory ??
+      path.join(actualRepository, "apps/desktop/dist/native"))
   ) {
     throw new Error("Native build output must remain inside this checkout");
   }
   const temporaryDirectory = await fs.mkdtemp(
     path.join(actualOutput, ".build-"),
   );
+  if (selected !== null) {
+    targetChain.push(await targetDirectory(temporaryDirectory, true));
+    await unchangedTarget(targetChain);
+  }
   const temporaryOutput = path.join(temporaryDirectory, "durable-record.node");
+  let compilerCompleted = false;
+  let compiledIdentity = null;
   try {
     await execute(
       compiler,
       [
         "-std=c11",
         "-arch",
-        process.arch === "x64" ? "x86_64" : "arm64",
+        architecture === "x64" ? "x86_64" : "arm64",
         "-mmacosx-version-min=13.0",
         "-fno-modules",
         "-Wall",
@@ -138,11 +311,35 @@ export async function buildDesktopDurableRecord() {
         maxBuffer: 1024 * 1024,
       },
     );
-    await fs.rename(temporaryOutput, outputFile);
+    compilerCompleted = true;
+    if (selected === null) await fs.rename(temporaryOutput, outputFile);
+    else {
+      await unchangedTarget(targetChain);
+      compiledIdentity = await compiledTarget(temporaryOutput);
+      // Exclusive link publication cannot replace a target created by another
+      // builder. Removing our temporary link leaves the final artifact single-linked.
+      await fs.link(temporaryOutput, outputFile);
+    }
   } finally {
-    await fs.rm(temporaryDirectory, { recursive: true, force: true });
+    if (selected === null || compilerCompleted) {
+      if (selected !== null) await unchangedTarget(targetChain);
+      await fs.rm(temporaryDirectory, { recursive: true, force: true });
+    }
+    // A failed explicit compiler invocation may still have unknown descendants.
+    // Preserve its private output for the coordinator's retained checkout lease.
   }
-  return { supported: true, architecture: process.arch, napi: 8, outputFile };
+  if (selected !== null) {
+    await unchangedTarget(targetChain.slice(0, -1));
+    const published = await compiledTarget(outputFile);
+    if (
+      published.dev !== compiledIdentity.dev ||
+      published.ino !== compiledIdentity.ino
+    )
+      throw new Error(
+        "Explicit native compiler output changed during publication",
+      );
+  }
+  return { supported: true, architecture, napi: 8, outputFile };
 }
 
 if (process.argv[1] === scriptPath) {

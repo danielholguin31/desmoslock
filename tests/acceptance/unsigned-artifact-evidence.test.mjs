@@ -41,6 +41,8 @@ const hooks = registerHooks({
 const {
   openUnsignedArtifactEvidence,
   openUnsignedArtifactEvidenceForTesting,
+  openUnsignedUniversalArtifactEvidence,
+  openUnsignedUniversalArtifactEvidenceForTesting,
   unsignedEvidenceCaseIds,
   unsignedEvidenceLimits,
   unsignedEvidenceNativePath,
@@ -117,7 +119,7 @@ function deferred() {
   });
   return { promise, resolve };
 }
-async function fixture(t) {
+async function fixture(t, universal = false) {
   const root = await fs.mkdtemp(
     path.join(
       await fs.realpath(os.tmpdir()),
@@ -125,7 +127,11 @@ async function fixture(t) {
     ),
   );
   await fs.chmod(root, 0o700);
-  const runRoot = path.join(root, "unsigned-artifact-runs", runId);
+  const runRoot = path.join(
+    root,
+    universal ? "universal-artifact-runs" : "unsigned-artifact-runs",
+    runId,
+  );
   const records = new Map();
   const native = {
     maximumRecordBytes: 65536,
@@ -215,10 +221,10 @@ async function fixture(t) {
     native,
     completions,
     async open(patch = {}) {
-      const owner = await openUnsignedArtifactEvidenceForTesting(
-        { ...options, ...patch },
-        native,
-      );
+      const open = universal
+        ? openUnsignedUniversalArtifactEvidenceForTesting
+        : openUnsignedArtifactEvidenceForTesting;
+      const owner = await open({ ...options, ...patch }, native);
       owners.push(owner);
       return owner;
     },
@@ -226,6 +232,9 @@ async function fixture(t) {
       return JSON.parse(
         records.get(path.join(runRoot, "checkpoint")).toString(),
       );
+    },
+    storedBytes() {
+      return Buffer.from(records.get(path.join(runRoot, "checkpoint")));
     },
     replaceStored(value) {
       records.set(
@@ -1199,6 +1208,240 @@ test("uncertain output settlement preserves pending evidence and retains the pro
     closes: 0,
   });
   assert.deepEqual(await closed, { code: 0, signal: null });
+});
+
+test("native schema-one initial bytes and existing checkpoint resume remain unchanged", async (t) => {
+  const f = await fixture(t);
+  const owner = await f.open();
+  const expected = Buffer.from(
+    JSON.stringify({
+      schemaVersion: 1,
+      kind: "desmoslock-unsigned-artifact-evidence",
+      runId,
+      revision: 1,
+      identity,
+      candidate: null,
+      attempts: [],
+      pendingPhysicalCaseIds: [...pendingPhysicalCaseIds],
+    }),
+  );
+  assert.deepEqual(f.storedBytes(), expected);
+  const completed = await record(owner);
+  await owner.close();
+  const resumed = await f.open({ mode: "resume" });
+  const snapshot = await resumed.readSnapshot();
+  assert.equal(snapshot.kind, "desmoslock-unsigned-artifact-evidence");
+  assert.equal(snapshot.revision, completed.revision + 1);
+  assert.deepEqual(snapshot.attempts, completed.attempts);
+});
+
+test("universal checkpoint binds its distinct candidate and reopens through the shared barriers", async (t) => {
+  const f = await fixture(t, true);
+  const owner = await f.open();
+  const initial = await owner.readSnapshot();
+  assert.equal(initial.schemaVersion, 1);
+  assert.equal(initial.kind, "desmoslock-unsigned-universal-artifact-evidence");
+  assert.equal(initial.candidate, null);
+  assert.match(f.runRoot, /\/universal-artifact-runs\//u);
+  const bound = await owner.recordCase(
+    { expectedRevision: 1, caseId: "packaged-inventory" },
+    async (scope) => {
+      const inventory = await scope.writeEvidence(
+        Buffer.from('{"kind":"synthetic-two-slice-inventory"}'),
+      );
+      return {
+        state: "observed-pass",
+        evidence: [inventory],
+        candidate: {
+          kind: "unsigned-universal-app",
+          treeSha256: "b".repeat(64),
+          inventory,
+        },
+      };
+    },
+  );
+  assert.equal(bound.candidate.kind, "unsigned-universal-app");
+  const completed = await record(owner, "native-inventory");
+  assert.equal(
+    completed.attempts[1].candidateTreeSha256,
+    bound.candidate.treeSha256,
+  );
+  assert.deepEqual(completed.pendingPhysicalCaseIds, pendingPhysicalCaseIds);
+  await owner.close();
+  const resumed = await f.open({ mode: "resume" });
+  const snapshot = await resumed.readSnapshot();
+  assert.equal(snapshot.revision, completed.revision + 1);
+  assert.deepEqual(snapshot.candidate, completed.candidate);
+  assert.deepEqual(snapshot.attempts, completed.attempts);
+});
+
+for (const universal of [false, true]) {
+  const ownKind = universal
+    ? "desmoslock-unsigned-universal-artifact-evidence"
+    : "desmoslock-unsigned-artifact-evidence";
+  const foreignKind = universal
+    ? "desmoslock-unsigned-artifact-evidence"
+    : "desmoslock-unsigned-universal-artifact-evidence";
+  const ownCandidate = universal
+    ? "unsigned-universal-app"
+    : "unsigned-native-app";
+  const foreignCandidate = universal
+    ? "unsigned-native-app"
+    : "unsigned-universal-app";
+  for (const published of [false, true])
+    test(`${ownKind} refuses a cross-kind ${published ? "published" : "empty"} checkpoint without rewriting bytes`, async (t) => {
+      const f = await fixture(t, universal);
+      const owner = await f.open();
+      if (published)
+        await owner.recordCase(
+          { expectedRevision: 1, caseId: "packaged-inventory" },
+          async (scope) => {
+            const inventory = await scope.writeEvidence(
+              Buffer.from("synthetic bound inventory"),
+            );
+            return {
+              state: "observed-pass",
+              evidence: [inventory],
+              candidate: {
+                kind: ownCandidate,
+                treeSha256: "c".repeat(64),
+                inventory,
+              },
+            };
+          },
+        );
+      await owner.close();
+      f.replaceStored({ ...f.stored(), kind: foreignKind });
+      const before = f.storedBytes();
+      const writes = f.state.writes;
+      await assert.rejects(
+        f.open({ mode: "resume" }),
+        errorCode("OPEN_FAILED"),
+      );
+      assert.deepEqual(f.storedBytes(), before);
+      assert.equal(f.state.writes, writes);
+    });
+
+  test(`${ownKind} rejects a foreign candidate literal even with matching identity and digests`, async (t) => {
+    const f = await fixture(t, universal);
+    const owner = await f.open();
+    const valid = await owner.recordCase(
+      { expectedRevision: 1, caseId: "packaged-inventory" },
+      async (scope) => {
+        const inventory = await scope.writeEvidence(
+          Buffer.from("candidate-kind synthetic evidence"),
+        );
+        return {
+          state: "observed-pass",
+          evidence: [inventory],
+          candidate: {
+            kind: ownCandidate,
+            treeSha256: "d".repeat(64),
+            inventory,
+          },
+        };
+      },
+    );
+    await owner.close();
+    f.replaceStored({
+      ...valid,
+      candidate: { ...valid.candidate, kind: foreignCandidate },
+    });
+    const before = f.storedBytes();
+    const writes = f.state.writes;
+    await assert.rejects(f.open({ mode: "resume" }), errorCode("OPEN_FAILED"));
+    assert.deepEqual(f.storedBytes(), before);
+    assert.equal(f.state.writes, writes);
+  });
+
+  test(`${ownKind} has no caller-selected kind and refuses the other wrapper's run root`, async (t) => {
+    const f = await fixture(t, universal);
+    await assert.rejects(
+      f.open({ kind: foreignKind }),
+      errorCode("OPEN_FAILED"),
+    );
+    const otherSynthetic = universal
+      ? openUnsignedArtifactEvidenceForTesting
+      : openUnsignedUniversalArtifactEvidenceForTesting;
+    const otherProduction = universal
+      ? openUnsignedArtifactEvidence
+      : openUnsignedUniversalArtifactEvidence;
+    await assert.rejects(
+      otherSynthetic(f.options, f.native),
+      errorCode("OPEN_FAILED"),
+    );
+    await assert.rejects(otherProduction(f.options), errorCode("OPEN_FAILED"));
+    assert.equal(f.state.opens, 0);
+    assert.deepEqual(await fs.readdir(f.root), []);
+  });
+}
+
+test("native and universal wrappers share one process owner and cannot open competing helpers", async (t) => {
+  const native = await fixture(t);
+  const universal = await fixture(t, true);
+  const nativeOwner = await native.open();
+  await assert.rejects(universal.open(), errorCode("BUSY"));
+  assert.equal(universal.state.opens, 0);
+  await nativeOwner.close();
+  const universalOwner = await universal.open();
+  await assert.rejects(native.open({ mode: "resume" }), errorCode("BUSY"));
+  assert.equal(native.state.opens, 1);
+  await universalOwner.close();
+  const resumed = await native.open({ mode: "resume" });
+  assert.equal(
+    (await resumed.readSnapshot()).kind,
+    "desmoslock-unsigned-artifact-evidence",
+  );
+});
+
+test("universal uncertain publication cannot be healed or relabelled by readback", async (t) => {
+  const f = await fixture(t, true);
+  const owner = await f.open();
+  await assert.rejects(
+    owner.recordCase(
+      { expectedRevision: 1, caseId: "packaged-inventory" },
+      async (scope) => {
+        const inventory = await scope.writeEvidence(
+          Buffer.from("synthetic universal publication"),
+        );
+        f.state.writeFailure = "published";
+        return {
+          state: "observed-pass",
+          evidence: [inventory],
+          candidate: {
+            kind: "unsigned-universal-app",
+            treeSha256: "e".repeat(64),
+            inventory,
+          },
+        };
+      },
+    ),
+    errorCode("CHECKPOINT_UNCERTAIN"),
+  );
+  const published = f.storedBytes();
+  const writes = f.state.writes;
+  await assert.rejects(owner.readSnapshot(), errorCode("CHECKPOINT_UNCERTAIN"));
+  f.replaceStored({
+    ...f.stored(),
+    kind: "desmoslock-unsigned-artifact-evidence",
+  });
+  const foreign = f.storedBytes();
+  await assert.rejects(
+    owner.recoverAfterUncertainWrite(),
+    errorCode("RECOVERY_REQUIRED"),
+  );
+  assert.equal(f.state.writes, writes);
+  assert.deepEqual(f.storedBytes(), foreign);
+  await assert.rejects(owner.readSnapshot(), errorCode("CHECKPOINT_UNCERTAIN"));
+  f.replaceStored(published);
+  const recovered = await owner.recoverAfterUncertainWrite();
+  assert.equal(f.state.writes, writes + 1);
+  assert.equal(
+    recovered.kind,
+    "desmoslock-unsigned-universal-artifact-evidence",
+  );
+  assert.equal(recovered.candidate.kind, "unsigned-universal-app");
+  assert.equal(recovered.revision, JSON.parse(published).revision + 1);
 });
 
 test(

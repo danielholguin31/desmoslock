@@ -10,6 +10,10 @@ const cliUrl = new URL(
   "../../scripts/collect-unsigned-desktop.mjs",
   import.meta.url,
 ).href;
+const sharedUrl = new URL(
+  "../../scripts/unsigned-artifact-inputs.mjs",
+  import.meta.url,
+).href;
 const identitySource = new URL(
   "../../packages/contracts/src/build-identity.ts",
   import.meta.url,
@@ -21,7 +25,7 @@ const exactSource = new URL(
 const hooks = registerHooks({
   resolve(specifier, context, nextResolve) {
     if (
-      context.parentURL === cliUrl &&
+      [cliUrl, sharedUrl].includes(context.parentURL) &&
       specifier === "../packages/contracts/dist/build-identity.js"
     )
       return nextResolve(identitySource, context);
@@ -820,6 +824,7 @@ async function sourceFixture(t) {
       "electron-fuse-policy",
       "unsigned-artifact-evidence",
       "collect-unsigned-desktop",
+      "unsigned-artifact-inputs",
     ].map((name) => `scripts/${name}.mjs`),
   ].sort();
   for (const name of [
