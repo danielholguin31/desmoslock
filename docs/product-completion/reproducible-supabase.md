@@ -373,6 +373,17 @@ path replacement cannot make it delete an unowned inode. Never restore or
 reuse a refused backup name; an operator must inspect and move the quarantine
 through a separate approved cleanup procedure.
 
+## Disposable restore CI gate
+
+The required staff-auth CI lane now invokes `npm run test:backup:roundtrip`.
+It exports the pristine fixture from one fresh cluster through the real
+`verify-full` staging-profile adapter, restores a separate empty migrated
+cluster, refuses a second restore, and runs the unchanged complete staff-auth
+suite without reseeding. This lane requires a fresh disposable CI runner and
+must not target an existing local or hosted database. Actual execution is
+pending; see [source, operation and evidence boundaries](synthetic-restore-acceptance.md)
+for the exact imported candidate, TLS prerequisites and cleanup contract.
+
 ## Remote staging acceptance gate
 
 The guarded Supabase CLI 2.115.0 configuration pass applied only the intended
