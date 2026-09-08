@@ -127,6 +127,8 @@ export interface StudentSessionControllerDependencies {
     readonly schoolId: string;
     readonly testId: string;
   }) => void;
+  /** Presentation expiry only; server authority is established by the port. */
+  readonly now?: () => number;
   readonly issuance?: {
     nextCode(): string;
     nextRequestId(): string;
@@ -319,6 +321,7 @@ export function createStudentSessionController(
   let notice: StudentSessionNotice | null = null;
   let readUnavailable = false;
   let active: Work | null = null;
+  const now = dependencies.now ?? Date.now;
   const latest = new Map<string, StaffStudentSession>();
   const listeners = new Set<(snapshot: StudentSessionSnapshot) => void>();
   let snapshot: StudentSessionSnapshot = Object.freeze({
@@ -420,6 +423,11 @@ export function createStudentSessionController(
     );
   }
   function project(): void {
+    if (disclosure !== null) {
+      const nowMs = now();
+      if (!Number.isFinite(nowMs) || nowMs >= Date.parse(disclosure.expiresAt))
+        disclosure = null;
+    }
     if (
       mode !== "ready" ||
       school === null ||

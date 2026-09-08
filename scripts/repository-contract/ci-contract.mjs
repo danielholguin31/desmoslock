@@ -144,7 +144,7 @@ export function verifyCiContract(repositoryRoot) {
     rootPackage.scripts?.["test:staff-auth:stack"] !==
       "node --test tests/acceptance/staff-auth-stack.test.mjs" ||
     rootPackage.scripts?.["test:edge"] !==
-      "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts"
+      "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts supabase/functions/student-session-challenge/index.ts supabase/functions/student-session-join/index.ts supabase/functions/student-session-read/index.ts supabase/functions/student-session-reconnect/index.ts supabase/functions/student-session-forfeit/index.ts"
   ) {
     fail(
       "Root package does not expose the exact staff Auth schema and composed acceptance lane",

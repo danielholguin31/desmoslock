@@ -150,6 +150,7 @@ function harness(
   let test = testRow();
   let rows = initialRows;
   let serial = 0;
+  let now = Date.parse("2026-09-08T12:00:00.000Z");
   const refresh = vi.fn(async (): Promise<StaffProductRefreshResult> =>
     live.kind === "ready"
       ? { kind: "fresh_authorized", access: live.access }
@@ -262,6 +263,7 @@ function harness(
     getAccess: () => live,
     refreshAccess: refresh,
     requestSelectedTestRefresh: parentRefresh,
+    now: () => now,
     ...(useProductionIssuance
       ? {}
       : {
@@ -285,6 +287,9 @@ function harness(
     parentRefresh,
     test: () => test,
     rows: () => rows,
+    setNow(value: number) {
+      now = value;
+    },
     setRows(next: StaffStudentSession[]) {
       rows = next;
     },
@@ -310,6 +315,66 @@ function harness(
 }
 
 describe("StudentSession sibling controller", () => {
+  it.each(["join", "readmission"] as const)(
+    "clears only confirmed %s disclosure at expiry during shared refresh",
+    async (kind) => {
+      const h = harness([session(1, { state: "removed" })]);
+      await h.load();
+      await h.select();
+      await action(
+        h.controller,
+        kind === "join" ? "review_issue_code" : "review_prepare_readmission",
+      );
+      await action(h.controller, "confirm_review");
+      const disclosure = visible(h.controller.getSnapshot()).disclosure;
+      expect(disclosure?.kind).toBe(kind);
+      const expiresAt = Date.parse(disclosure!.expiresAt);
+      h.setNow(expiresAt - 1);
+      await h.controller.refreshFromStaff(await h.refresh());
+      expect(visible(h.controller.getSnapshot()).disclosure).toBe(disclosure);
+      const selected = visible(h.controller.getSnapshot()).selected;
+      const writes = h.issue.mock.calls.length + h.prepare.mock.calls.length;
+      h.setNow(expiresAt);
+      await h.controller.refreshFromStaff(await h.refresh());
+      const cleared = h.controller.getSnapshot();
+      expect(visible(cleared).disclosure).toBeNull();
+      expect(visible(cleared).selected).toEqual(selected);
+      expect(JSON.stringify(cleared)).not.toContain(disclosure!.code);
+      expect(h.issue.mock.calls.length + h.prepare.mock.calls.length).toBe(
+        writes,
+      );
+      // A later backwards wall-clock adjustment cannot reveal cleared material.
+      h.setNow(expiresAt - 1000);
+      h.setTest({
+        ...h.test(),
+        title: "Another label",
+        revision: h.test().revision + 1,
+      });
+      expect(visible(h.controller.getSnapshot()).disclosure).toBeNull();
+    },
+  );
+
+  it("retains exact uncertain issuance across expiry while withholding an expired retry receipt", async () => {
+    const h = harness();
+    await h.load();
+    await action(h.controller, "review_issue_code");
+    const issue = h.issue.getMockImplementation()!;
+    h.issue.mockImplementationOnce(async (request) => {
+      await issue(request);
+      return null;
+    });
+    await action(h.controller, "confirm_review");
+    h.setNow(Date.parse("2026-09-08T12:15:00.124Z"));
+    await h.controller.refreshFromStaff(await h.refresh());
+    expect(h.controller.getSnapshot().kind).toBe("unconfirmed");
+    const original = h.issue.mock.calls[0]?.[0];
+    await action(h.controller, "retry_issuance");
+    expect(h.issue.mock.calls[1]?.[0]).toEqual(original);
+    expect(visible(h.controller.getSnapshot()).disclosure).toBeNull();
+    expect(h.ids).toHaveBeenCalledTimes(1);
+    expect(h.code).toHaveBeenCalledTimes(1);
+  });
+
   it("uses synchronous setters without reads, admits Teacher AAL1 and rejects privileged AAL1", () => {
     const h = harness();
     h.setTest(testRow({ title: "New label", revision: 3 }));

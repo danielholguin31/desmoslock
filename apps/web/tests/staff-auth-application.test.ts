@@ -2044,7 +2044,9 @@ function studentCompositionPorts() {
           session_revision: null,
           test_revision: row.test_revision,
           epoch: null,
-          expires_at: "2026-09-08T01:00:00.123456Z",
+          expires_at: new Date(Date.now() + 15 * 60_000)
+            .toISOString()
+            .replace("Z", "000Z"),
         },
       ];
     }),
