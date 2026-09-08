@@ -1,0 +1,559 @@
+import { randomUUID } from "node:crypto";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+import { createStudentSessionCrypto } from "../../apps/desktop/src/main/student-session-crypto.ts";
+import {
+  accepted,
+  check,
+  createStudentHarness,
+  currentSession,
+  deniedResult,
+  same,
+  transitionCount,
+  unavailableResult,
+  withoutAttemptMetadata,
+} from "./student-session-harness.mjs";
+import {
+  client,
+  code,
+  createRuntimeHealthCheck,
+  openDisposableStack,
+  rpc,
+  rpcRows,
+} from "./staff-auth-loopback.mjs";
+
+// This exported hook runs inside the existing restored-target composed test.
+// Its runtime object is already provisioned; never call openDisposableStack
+// again after the prior provider groups have populated Auth and immutable audit.
+export async function runStudentSessionInterop(t, runtime) {
+  const harness = await createStudentHarness(runtime);
+  let target;
+  let material;
+  let joined;
+  let rotated;
+  let claimed;
+  try {
+    await t.test(
+      "Student: live staff issues a private code and exact retry preserves expiry",
+      async () => {
+        target = await harness.test();
+        material = await harness.issue(target);
+        const replay = await harness.staffMutation(
+          "issue_test_join_code",
+          material.request,
+          "join_code_already_issued",
+        );
+        same(
+          { ...replay, code: "join_code_issued" },
+          material.result,
+          "Exact issuance retry changed the original grant metadata",
+        );
+        const before = harness.snapshot(target);
+        code(
+          await rpc(
+            harness.foreignTeacher.client,
+            "issue_test_join_code",
+            material.request,
+          ),
+          "membership_inactive",
+        );
+        same(
+          harness.snapshot(target),
+          before,
+          "Foreign staff issuance changed target state",
+        );
+        for (const relation of [
+          "student_sessions",
+          "student_join_materials",
+          "student_device_bindings",
+          "student_bootstrap_challenges",
+          "student_bootstrap_limits",
+        ]) {
+          let result;
+          try {
+            result = await harness.teacher.client
+              .schema("desmoslock_v2")
+              .from(relation)
+              .select("*")
+              .limit(1);
+          } catch {
+            throw new Error(
+              "Direct-table denial could not be observed; details withheld",
+            );
+          }
+          check(
+            result.error !== null && result.data === null,
+            "Staff could bypass the exact Student RPC surface through direct table access",
+          );
+        }
+      },
+    );
+
+    await t.test(
+      "Student: colleague Owner and Administrator require live AAL2 for code issuance",
+      async () => {
+        for (const role of ["owner", "admin"]) {
+          const staff = await harness.actor(role, harness.schoolId, role, true);
+          const privateCode = harness.crypto.createJoinCode();
+          const detail = await rpc(staff.client, "current_school_test", {
+            workspace_id: target.schoolId,
+            test_id: target.testId,
+          });
+          const request = {
+            workspace_id: target.schoolId,
+            test_id: target.testId,
+            expected_test_revision: detail.test_revision,
+            issuance_request_id: randomUUID(),
+            join_material_digest: harness.crypto.digestJoinCode(privateCode),
+          };
+          const before = harness.snapshot(target);
+          const refusal = await rpc(
+            staff.aal1Client,
+            "issue_test_join_code",
+            request,
+          );
+          check(
+            refusal.code === "step_up_required" &&
+              Object.entries(refusal).every(
+                ([key, value]) => key === "code" || value === null,
+              ),
+            "Privileged staff AAL1 issuance did not fail with exact null authority fields",
+          );
+          same(
+            harness.snapshot(target),
+            before,
+            "Insufficient-assurance staff modified code authority",
+          );
+          await harness.staffMutation(
+            "issue_test_join_code",
+            request,
+            "join_code_issued",
+            staff,
+          );
+        }
+        material = await harness.issue(target);
+      },
+    );
+
+    await t.test(
+      "Student: actual Node signature reaches Deno and SQL; lost join response retries the exact intent",
+      async () => {
+        let droppedResult;
+        const lossTransport = harness.transport(async (input, init) => {
+          const response = await fetch(input, init);
+          if (
+            new URL(
+              input instanceof Request ? input.url : input,
+            ).pathname.endsWith("student-session-join") &&
+            response.status === 200
+          ) {
+            droppedResult = await response.clone().json();
+            accepted(droppedResult);
+            await response.body?.cancel();
+            throw new Error(
+              "Synthetic response loss after observed real join commit",
+            );
+          }
+          return response;
+        });
+        const lost = await harness.join(material, { transport: lossTransport });
+        unavailableResult(lost.result);
+        check(
+          droppedResult !== undefined,
+          "Join loss injection did not observe a real accepted backend response",
+        );
+        const committed = harness.snapshot(target);
+        check(
+          committed.sessions.length === 1 &&
+            committed.bindings.length === 1 &&
+            transitionCount(committed, "student_session_admitted") === 1,
+          "Lost response did not leave one atomic server identity and event",
+        );
+        joined = await harness.join(material, {
+          requestId: lost.request.requestId,
+          device: lost.device,
+          candidates: lost.candidates,
+        });
+        accepted(joined.result);
+        same(
+          withoutAttemptMetadata(joined.result),
+          withoutAttemptMetadata(droppedResult),
+          "Join recovery changed the original scope, revision or expiry",
+        );
+        const row = currentSession(
+          harness.snapshot(target),
+          joined.result.scope.studentSessionId,
+        );
+        check(
+          row.revision === 1 &&
+            row.epoch === 1 &&
+            row.last_accepted_proof_counter === 0 &&
+            row.maintenance_accepted_at.length === 0,
+          "Bootstrap allocated admitted maintenance counter or quota",
+        );
+        const replay = await harness.raw("join", joined.request);
+        check(replay.status === 403, "Consumed bootstrap proof was reused");
+        deniedResult(replay.result);
+      },
+    );
+
+    await t.test(
+      "Student: mode and candidate substitution cannot adopt the current join receipt",
+      async () => {
+        const before = harness.snapshot(target);
+        const changed = await harness.join(material, {
+          requestId: joined.request.requestId,
+          device: joined.device,
+          candidates: harness.candidates(),
+        });
+        deniedResult(changed.result);
+        const switched = await harness.join(material, {
+          requestId: joined.request.requestId,
+          device: joined.device,
+          candidates: joined.candidates,
+          mode: "readmission",
+        });
+        deniedResult(switched.result);
+        same(
+          harness.snapshot(target),
+          before,
+          "Mismatched exact-join recovery altered persisted authority",
+        );
+      },
+    );
+
+    await t.test(
+      "Student: signed own read, replay and signature/scope/key/operation substitutions",
+      async () => {
+        const first = harness.maintenance(joined, "read", 1);
+        accepted(await harness.send(joined, first), "STUDENT_SESSION_CURRENT");
+        const before = harness.snapshot(target);
+        deniedResult(await harness.send(joined, first));
+        same(
+          harness.snapshot(target),
+          before,
+          "Same-counter replay changed the proof window or tuple",
+        );
+        const valid = harness.maintenance(joined, "read", 2);
+        const signature = Buffer.from(
+          valid.request.deviceProof.signature,
+          "base64url",
+        );
+        signature[0] ^= 1;
+        const modifiedSignature = {
+          ...valid.request,
+          deviceProof: {
+            ...valid.request.deviceProof,
+            signature: signature.toString("base64url"),
+          },
+        };
+        deniedResult((await harness.raw("read", modifiedSignature)).result);
+        const foreignScope = {
+          ...valid.request,
+          scope: { ...valid.request.scope, schoolId: harness.foreignSchoolId },
+        };
+        deniedResult((await harness.raw("read", foreignScope)).result);
+        const attacker = {
+          ...harness.device(),
+          deviceSessionId: joined.device.deviceSessionId,
+        };
+        const copiedToken = harness.maintenance(joined, "read", 3, {
+          device: attacker,
+        });
+        deniedResult((await harness.raw("read", copiedToken.request)).result);
+        const wrongOriginCrypto = createStudentSessionCrypto({
+          environment: "local",
+          url: "http://127.0.0.1:1",
+        });
+        const wrongOrigin = {
+          ...valid.request,
+          deviceProof: wrongOriginCrypto.signMaintenance(joined.device, {
+            kind: "maintenance",
+            operation: "read",
+            requestId: valid.request.requestId,
+            scope: valid.request.scope,
+            logicalOperationDigest: valid.logicalOperationDigest,
+            counter: 2,
+          }),
+        };
+        deniedResult((await harness.raw("read", wrongOrigin)).result);
+        const wrongOperation = {
+          ...valid.request,
+          deviceProof: harness.crypto.signMaintenance(joined.device, {
+            kind: "maintenance",
+            operation: "forfeit",
+            requestId: valid.request.requestId,
+            scope: valid.request.scope,
+            logicalOperationDigest: valid.logicalOperationDigest,
+            counter: 2,
+          }),
+        };
+        deniedResult((await harness.raw("read", wrongOperation)).result);
+        for (const counter of [0, Number.MAX_SAFE_INTEGER + 1]) {
+          deniedResult(
+            (
+              await harness.raw("read", {
+                ...valid.request,
+                deviceProof: { ...valid.request.deviceProof, counter },
+              })
+            ).result,
+          );
+        }
+        deniedResult(
+          (
+            await harness.raw("read", {
+              ...valid.request,
+              deviceProof: {
+                ...valid.request.deviceProof,
+                publicKey: attacker.publicKey,
+              },
+            })
+          ).result,
+        );
+        same(
+          harness.snapshot(target),
+          before,
+          "Forgery, malformed proof or foreign scope charged victim capacity",
+        );
+        accepted(
+          await harness.send(joined, harness.maintenance(joined, "read", 7)),
+          "STUDENT_SESSION_CURRENT",
+        );
+        const row = currentSession(
+          harness.snapshot(target),
+          joined.result.scope.studentSessionId,
+        );
+        check(
+          row.revision === 1 &&
+            row.last_accepted_proof_counter === 7 &&
+            row.maintenance_accepted_at.length === 2,
+          "Accepted counter gap changed domain revision or failed to charge exactly one invocation",
+        );
+      },
+    );
+
+    await t.test(
+      "Student: exact lost reconnect response recovers consumed grant and original expiry",
+      async () => {
+        const next = harness.candidates();
+        const requestId = randomUUID();
+        const intent = harness.maintenance(joined, "reconnect", 8, {
+          next,
+          requestId,
+        });
+        let committedResult;
+        const lossTransport = harness.transport(async (input, init) => {
+          const response = await fetch(input, init);
+          if (response.status === 200) {
+            committedResult = await response.clone().json();
+            accepted(committedResult);
+            await response.body?.cancel();
+            throw new Error(
+              "Synthetic response loss after observed real rotation commit",
+            );
+          }
+          return response;
+        });
+        unavailableResult(await harness.send(joined, intent, lossTransport));
+        check(
+          committedResult !== undefined,
+          "Rotation loss injection did not observe the real commit",
+        );
+        const retry = harness.maintenance(joined, "reconnect", 9, {
+          next,
+          requestId,
+        });
+        const result = accepted(await harness.send(joined, retry));
+        same(
+          withoutAttemptMetadata(result),
+          withoutAttemptMetadata(committedResult),
+          "Consumed-grant receipt changed original issuance facts",
+        );
+        check(
+          result.acceptedProofCounter === 9,
+          "Receipt recovery failed to acknowledge this attempt's greater counter",
+        );
+        rotated = { ...joined, candidates: next, result };
+        const snapshot = harness.snapshot(target);
+        const row = currentSession(snapshot, result.scope.studentSessionId);
+        check(
+          row.revision === 2 &&
+            row.epoch === 1 &&
+            row.last_accepted_proof_counter === 9 &&
+            row.maintenance_accepted_at.length === 4 &&
+            transitionCount(snapshot, "student_session_reconnected") === 1,
+          "Reconnect retry duplicated a transition or reset proof accounting",
+        );
+        const mismatch = harness.maintenance(joined, "reconnect", 10, {
+          next: harness.candidates(),
+          requestId,
+        });
+        deniedResult(await harness.send(joined, mismatch));
+        same(
+          harness.snapshot(target),
+          snapshot,
+          "Changed rotation candidates stole an existing receipt",
+        );
+      },
+    );
+
+    await t.test(
+      "Student: staff remove and targeted recovery preserve identity and permanent device exclusion",
+      async () => {
+        const removed = await harness.remove(target, rotated);
+        const prepared = await harness.prepare(
+          target,
+          rotated,
+          removed.session_revision,
+        );
+        const replay = await harness.staffMutation(
+          "prepare_student_readmission",
+          prepared.request,
+          "student_readmission_already_prepared",
+        );
+        same(
+          { ...replay, code: "student_readmission_prepared" },
+          prepared.result,
+          "Prepare retry changed original targeted expiry",
+        );
+        deniedResult(
+          await harness.send(rotated, harness.maintenance(rotated, "read", 20)),
+        );
+        const wrongMode = await harness.join(prepared, { mode: "initial" });
+        deniedResult(wrongMode.result);
+        claimed = await harness.join(prepared, { mode: "readmission" });
+        accepted(claimed.result);
+        check(
+          claimed.result.scope.studentSessionId ===
+            joined.result.scope.studentSessionId &&
+            claimed.result.syntheticDisplayName ===
+              joined.result.syntheticDisplayName &&
+            claimed.result.scope.epoch === 3 &&
+            claimed.result.sessionRevision === 5,
+          "Targeted recovery changed identity, prepared epoch or revision accounting",
+        );
+        const before = harness.snapshot(target);
+        check(
+          before.bindings.length === 2,
+          "Rebinding erased the old permanent device mapping",
+        );
+        const oldDevice = await harness.join(material, {
+          device: joined.device,
+        });
+        deniedResult(oldDevice.result);
+        same(
+          harness.snapshot(target),
+          before,
+          "Old device binding created or revived another identity",
+        );
+        const rows = await rpcRows(
+          harness.teacher.client,
+          "current_test_student_sessions",
+          {
+            workspace_id: target.schoolId,
+            test_id: target.testId,
+            before_created_at: null,
+            before_session_id: null,
+          },
+        );
+        check(
+          rows.length === 1 &&
+            rows[0].session_id === claimed.result.scope.studentSessionId &&
+            rows[0].state === "active" &&
+            /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/u.test(
+              rows[0].created_at,
+            ) &&
+            Object.keys(rows[0]).sort().join(",") ===
+              [
+                "code",
+                "session_id",
+                "school_id",
+                "test_id",
+                "synthetic_display_name",
+                "state",
+                "epoch",
+                "session_revision",
+                "created_at",
+              ]
+                .sort()
+                .join(","),
+          "Staff roster disclosed authority fields or lost exact timestamp precision",
+        );
+      },
+    );
+
+    await t.test(
+      "Student: forfeit acknowledges backend admission only and end denies existing authority",
+      async () => {
+        accepted(
+          await harness.send(
+            claimed,
+            harness.maintenance(claimed, "forfeit", 1),
+          ),
+          "STUDENT_SESSION_FORFEITED",
+        );
+        const snapshot = harness.snapshot(target);
+        const row = currentSession(
+          snapshot,
+          claimed.result.scope.studentSessionId,
+        );
+        check(
+          row.state === "forfeited" &&
+            row.epoch === 4 &&
+            row.revision === 6 &&
+            row.capability_digest === null &&
+            row.reconnect_digest === null &&
+            row.last_accepted_proof_counter === 0 &&
+            row.maintenance_accepted_at.length === 0 &&
+            transitionCount(snapshot, "student_session_forfeited") === 1,
+          "Forfeit did not atomically invalidate the current device epoch",
+        );
+        deniedResult(
+          await harness.send(
+            claimed,
+            harness.maintenance(claimed, "forfeit", 2),
+          ),
+        );
+        const other = await harness.join(material);
+        accepted(other.result);
+        await harness.end(target);
+        const ended = harness.snapshot(target);
+        deniedResult(
+          await harness.send(other, harness.maintenance(other, "read", 1)),
+        );
+        deniedResult((await harness.join(material)).result);
+        same(
+          harness.snapshot(target),
+          ended,
+          "Parent end allowed a fresh admission, read or domain mutation",
+        );
+      },
+    );
+  } finally {
+    await harness.close();
+  }
+}
+
+// Standalone debug command requires a fresh already-running disposable stack.
+// The composed/restored chain imports the hook above and passes its live context.
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  test(
+    "real Node/Deno/PostgREST StudentSession interoperability",
+    { timeout: 180_000 },
+    async (t) => {
+      const { publishableKey, serviceKey } = openDisposableStack();
+      const admin = client(serviceKey);
+      await runStudentSessionInterop(t, {
+        admin,
+        publishableKey,
+        serviceKey,
+        checkRuntimeHealth: createRuntimeHealthCheck(admin, serviceKey),
+      });
+    },
+  );
+}

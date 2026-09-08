@@ -15,11 +15,12 @@ export const expectedMigrationFiles = Object.freeze([
   "20260907000400_membership_administration.sql",
   "20260908000100_school_display_name.sql",
   "20260908000200_test_workspace.sql",
+  "20260908000300_student_session_admission.sql",
 ]);
 export const expectedMigrationSetSha256 =
-  "5cf17174bf44e491a6bd78fe540326d8bdee169518d75c8082e5bd9b833f3f62";
+  "aa32ed754c87e7987199dbd6c5f685ae65236ba3f94921157fc6cb07ce67b308";
 
-const currentAttestationFile = "20260908000200_test_workspace.sql";
+const currentAttestationFile = "20260908000300_student_session_admission.sql";
 export const expectedMigrationAttestations = Object.freeze({
   "20260828000100_internal_release_backend.sql": Object.freeze({
     migrationSetSha256:
@@ -63,10 +64,16 @@ export const expectedMigrationAttestations = Object.freeze({
     rawSha256:
       "96febd78bbec6859771cb26ae095458553e19ddd75dbc438e99b54ee86549e18",
   }),
+  "20260908000200_test_workspace.sql": Object.freeze({
+    migrationSetSha256:
+      "5cf17174bf44e491a6bd78fe540326d8bdee169518d75c8082e5bd9b833f3f62",
+    rawSha256:
+      "233123dd9038740ef724432715cc17e32a5adc2be68160466fa11f5b2dfb865c",
+  }),
   [currentAttestationFile]: Object.freeze({
     migrationSetSha256: expectedMigrationSetSha256,
     rawSha256:
-      "233123dd9038740ef724432715cc17e32a5adc2be68160466fa11f5b2dfb865c",
+      "448d7697885eae07f04cc3b89531b7b3711e71fa67d56d80ac891df63458fb06",
   }),
 });
 const attestedMigrationFiles = Object.freeze(

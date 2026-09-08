@@ -10,6 +10,7 @@ import {
   FixtureFailure,
   isExpectedInvalidRootCertificate,
   nativeClientWrapper,
+  requireRestoredWorkerReceipt,
   runStaffSuite,
   sourceConfiguration,
   StaffSuiteCommandFailure,
@@ -21,6 +22,56 @@ const failure = (code) => (error) =>
   error instanceof FixtureFailure &&
   error.code === code &&
   error.message === code;
+
+test("worker receipt requires explicit metadata and empty authority-store evidence", () => {
+  const receipt = Object.freeze({
+    status: "restored",
+    tlsVerified: true,
+    distinctSessionTimezones: true,
+    testMetadataPreserved: true,
+    studentMetadataPreserved: true,
+    studentRuntimeStoresEmpty: true,
+    secondRestoreRefused: true,
+    restoreMarkerRetired: true,
+    artifactSha256: "a".repeat(64),
+    manifestSha256: "b".repeat(64),
+  });
+  assert.doesNotThrow(() => requireRestoredWorkerReceipt(receipt));
+  for (const field of [
+    "tlsVerified",
+    "distinctSessionTimezones",
+    "testMetadataPreserved",
+    "studentMetadataPreserved",
+    "studentRuntimeStoresEmpty",
+    "secondRestoreRefused",
+    "restoreMarkerRetired",
+  ]) {
+    const missing = { ...receipt };
+    delete missing[field];
+    assert.throws(
+      () => requireRestoredWorkerReceipt(missing),
+      failure("ROUNDTRIP_RECEIPT_INVALID"),
+    );
+    for (const value of [false, null, "true", 1]) {
+      assert.throws(
+        () => requireRestoredWorkerReceipt({ ...receipt, [field]: value }),
+        failure("ROUNDTRIP_RECEIPT_INVALID"),
+      );
+    }
+  }
+  for (const invalid of [
+    null,
+    undefined,
+    { ...receipt, status: "failed" },
+    { ...receipt, artifactSha256: "synthetic-private-value" },
+    { ...receipt, manifestSha256: "synthetic-private-value" },
+  ]) {
+    assert.throws(
+      () => requireRestoredWorkerReceipt(invalid),
+      failure("ROUNDTRIP_RECEIPT_INVALID"),
+    );
+  }
+});
 
 test("bounded command returns stdout without relaying stderr", async () => {
   const result = await boundedCommand(
@@ -72,15 +123,35 @@ test("only the real staff npm invocation returns closed failure locations after 
     );
     await fs.writeFile(path.join(directory, "user.npmrc"), "");
     await fs.writeFile(path.join(directory, "global.npmrc"), "");
+    const npm =
+      process.env.npm_execpath ?? path.join(path.dirname(node), "npm");
+    let executablePath = `${path.dirname(node)}:/usr/bin:/bin`;
+    if (process.env.npm_execpath) {
+      const bin = path.join(directory, "bin");
+      await fs.mkdir(bin);
+      const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+      await fs.writeFile(
+        path.join(bin, "npm"),
+        `#!/bin/sh\nexec ${shellQuote(node)} ${shellQuote(npm)} "$@"\n`,
+        { mode: 0o700 },
+      );
+      executablePath = `${bin}:${executablePath}`;
+    }
     const environment = {
-      PATH: `${path.dirname(node)}:/usr/bin:/bin`,
+      PATH: executablePath,
       NODE_OPTIONS: "--max-old-space-size=128",
       NPM_CONFIG_USERCONFIG: path.join(directory, "user.npmrc"),
       NPM_CONFIG_GLOBALCONFIG: path.join(directory, "global.npmrc"),
       NPM_CONFIG_CACHE: path.join(directory, "npm-cache"),
+      NPM_CONFIG_OFFLINE: "true",
+      NPM_CONFIG_UPDATE_NOTIFIER: "false",
+      NPM_CONFIG_AUDIT: "false",
+      NPM_CONFIG_FUND: "false",
+      NPM_CONFIG_LOGS_MAX: "0",
+      COREPACK_ENABLE_NETWORK: "0",
     };
     await assert.rejects(
-      runStaffSuite(path.join(path.dirname(node), "npm"), {
+      runStaffSuite(npm, {
         cwd: directory,
         environment,
         timeoutMs: 10_000,

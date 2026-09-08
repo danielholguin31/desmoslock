@@ -46,6 +46,22 @@ export function requireFixture(condition, code) {
   if (!condition) throw new FixtureFailure(code);
 }
 
+export function requireRestoredWorkerReceipt(receipt) {
+  requireFixture(
+    receipt?.status === "restored" &&
+      receipt.tlsVerified === true &&
+      receipt.distinctSessionTimezones === true &&
+      receipt.testMetadataPreserved === true &&
+      receipt.studentMetadataPreserved === true &&
+      receipt.studentRuntimeStoresEmpty === true &&
+      receipt.secondRestoreRefused === true &&
+      receipt.restoreMarkerRetired === true &&
+      /^[a-f0-9]{64}$/u.test(receipt.artifactSha256 ?? "") &&
+      /^[a-f0-9]{64}$/u.test(receipt.manifestSha256 ?? ""),
+    "ROUNDTRIP_RECEIPT_INVALID",
+  );
+}
+
 function decodeJson(bytes) {
   try {
     return JSON.parse(bytes.toString("utf8"));
@@ -689,17 +705,7 @@ export async function runBackupRoundtrip(repositoryRoot, testSignal) {
       requireFixture(stages.includes(receipt.stage), "WORKER_FAILURE_INVALID");
       throw new FixtureFailure(receipt.stage);
     }
-    requireFixture(
-      receipt.status === "restored" &&
-        receipt.tlsVerified === true &&
-        receipt.distinctSessionTimezones === true &&
-        receipt.testMetadataPreserved === true &&
-        receipt.secondRestoreRefused === true &&
-        receipt.restoreMarkerRetired === true &&
-        /^[a-f0-9]{64}$/u.test(receipt.artifactSha256 ?? "") &&
-        /^[a-f0-9]{64}$/u.test(receipt.manifestSha256 ?? ""),
-      "ROUNDTRIP_RECEIPT_INVALID",
-    );
+    requireRestoredWorkerReceipt(receipt);
     // The existing suite observes public health and then performs all three real
     // provider journeys on the restored fixture. Never reset/seed between these.
     stage = "STAFF_SUITE";
@@ -809,6 +815,42 @@ const PRISTINE_TEST_METADATA_QUERY = `select count(*) = 2 and bool_and(
   and created_at = '2000-01-01T00:00:00.000000Z'::timestamptz
   and opened_at is null and ended_at is null and creation_request_id is null
 ) from desmoslock_v2.tests;`;
+
+// Pin each complete fixture identity separately from its unchanged digest.
+// Every added column is checked; an admitted authority can never be pristine.
+const PRISTINE_STUDENT_METADATA_QUERY = `select count(*) = 2 and bool_and(coalesce(
+  (id, workspace_id, test_id, state, seed_key) in (
+    ('40000000-0000-4000-8000-000000000001'::uuid,
+      '10000000-0000-4000-8000-000000000001'::uuid,
+      '30000000-0000-4000-8000-000000000001'::uuid,
+      'created', 'session.alpha.algebra'),
+    ('40000000-0000-4000-8000-000000000002'::uuid,
+      '10000000-0000-4000-8000-000000000002'::uuid,
+      '30000000-0000-4000-8000-000000000002'::uuid,
+      'created', 'session.beta.algebra')
+  )
+  and synthetic_display_name is null
+  and created_at = '2000-01-01T00:00:00.000000Z'::timestamptz
+  and epoch = 1 and revision = 1
+  and device_session_id is null and device_public_key is null
+  and last_accepted_proof_counter = 0
+  and maintenance_accepted_at = '{}'::timestamptz[]
+  and capability_digest is null and capability_issued_at is null
+  and capability_expires_at is null
+  and reconnect_digest is null and reconnect_expires_at is null
+  and join_request_id is null and join_operation_digest is null
+  and join_admission_mode is null and join_material_digest is null
+  and rotation_request_id is null and rotation_operation_digest is null
+  and previous_reconnect_digest is null,
+  false
+)) from desmoslock_v2.student_sessions;`;
+
+// These stores are observed only. They are never part of the seven-table export.
+const EMPTY_STUDENT_RUNTIME_STORES_QUERY = `select
+  not exists(select 1 from desmoslock_v2.student_join_materials)
+  and not exists(select 1 from desmoslock_v2.student_device_bindings)
+  and not exists(select 1 from desmoslock_v2.student_bootstrap_challenges)
+  and not exists(select 1 from desmoslock_v2.student_bootstrap_limits);`;
 
 export async function operatorWorker(
   configuration,
@@ -1005,6 +1047,16 @@ export async function operatorWorker(
       (await query(sourceEnv, PRISTINE_TEST_METADATA_QUERY)) === "t",
       "PRISTINE_SOURCE_TEST_METADATA_REQUIRED",
     );
+    requireFixture(
+      (await query(sourceEnv, PRISTINE_STUDENT_METADATA_QUERY)) === "t",
+      "PRISTINE_SOURCE_STUDENT_METADATA_REQUIRED",
+    );
+    for (const environment of [sourceEnv, targetEnv]) {
+      requireFixture(
+        (await query(environment, EMPTY_STUDENT_RUNTIME_STORES_QUERY)) === "t",
+        "EMPTY_STUDENT_RUNTIME_STORES_REQUIRED",
+      );
+    }
     stage = "TARGET_ATTESTATION";
     requireFixture(
       (await query(
@@ -1048,7 +1100,11 @@ export async function operatorWorker(
     );
     const before = await target.observeDatabase("local-restore");
     requireFixture(
-      before.applicationState === "empty",
+      before.applicationState === "empty" &&
+        (await query(
+          targetEnv,
+          "select not exists(select 1 from desmoslock_v2.student_sessions);",
+        )) === "t",
       "UNSEEDED_TARGET_REQUIRED",
     );
     stage = "EXPORT";
@@ -1098,6 +1154,15 @@ export async function operatorWorker(
           "select bool_and(created_at::text = '1999-12-31 16:00:00-08') from desmoslock_v2.tests;",
         )) === "t",
       "RESTORED_TEST_METADATA_REQUIRED",
+    );
+    requireFixture(
+      (await query(targetEnv, PRISTINE_STUDENT_METADATA_QUERY)) === "t" &&
+        (await query(
+          targetEnv,
+          "select bool_and(created_at::text = '1999-12-31 16:00:00-08') from desmoslock_v2.student_sessions;",
+        )) === "t" &&
+        (await query(targetEnv, EMPTY_STUDENT_RUNTIME_STORES_QUERY)) === "t",
+      "RESTORED_STUDENT_METADATA_REQUIRED",
     );
     stage = "SECOND_RESTORE";
     let refused = false;
@@ -1176,6 +1241,12 @@ select not exists(select 1 from desmoslock_v2.local_restore_target_attestation);
       )) === "t",
       "POST_RETIREMENT_BASELINE_REQUIRED",
     );
+    requireFixture(
+      (await query(targetEnv, PRISTINE_TEST_METADATA_QUERY)) === "t" &&
+        (await query(targetEnv, PRISTINE_STUDENT_METADATA_QUERY)) === "t" &&
+        (await query(targetEnv, EMPTY_STUDENT_RUNTIME_STORES_QUERY)) === "t",
+      "POST_RETIREMENT_METADATA_REQUIRED",
+    );
     return {
       status: "restored",
       artifactSha256: exported.artifactSha256,
@@ -1187,6 +1258,8 @@ select not exists(select 1 from desmoslock_v2.local_restore_target_attestation);
       distinctClusters: true,
       distinctSessionTimezones: true,
       testMetadataPreserved: true,
+      studentMetadataPreserved: true,
+      studentRuntimeStoresEmpty: true,
       secondRestoreRefused: true,
       restoreMarkerRetired: true,
     };

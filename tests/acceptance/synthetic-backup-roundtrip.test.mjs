@@ -8,7 +8,7 @@ import {
 } from "./synthetic-backup-runtime.mjs";
 
 test(
-  "real synthetic export preserves Test metadata across distinct session timezones before the complete staff Auth suite",
+  "real synthetic export preserves Test and StudentSession metadata with empty runtime stores across distinct session timezones before the complete staff Auth suite",
   { timeout: 1_800_000 },
   async (context) => {
     const repositoryRoot = path.resolve(
@@ -32,6 +32,8 @@ test(
     }
     assert.equal(receipt.distinctSessionTimezones, true);
     assert.equal(receipt.testMetadataPreserved, true);
+    assert.equal(receipt.studentMetadataPreserved, true);
+    assert.equal(receipt.studentRuntimeStoresEmpty, true);
     // Hashes and static boolean results only; never print database/CLI responses.
     context.diagnostic(JSON.stringify(receipt));
   },

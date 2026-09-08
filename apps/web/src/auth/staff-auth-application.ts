@@ -38,6 +38,12 @@ import {
   type TestWorkspacePort,
 } from "../test-workspace/test-workspace-controller.js";
 import { bindTestWorkspaceView } from "../test-workspace/test-workspace-view.js";
+import {
+  createStudentSessionController,
+  type StudentSessionController,
+} from "../student-sessions/student-session-controller.js";
+import type { StudentSessionPort } from "../student-sessions/student-session-port.js";
+import { bindStudentSessionView } from "../student-sessions/student-session-view.js";
 
 const sensitiveCallbackKeys = new Set([
   "access_token",
@@ -128,6 +134,10 @@ export interface StaffAuthApplicationFactories {
     root: HTMLElement,
     controller: TestWorkspaceController,
   ) => () => void;
+  readonly bindStudentSessionView: (
+    root: HTMLElement,
+    controller: StudentSessionController,
+  ) => () => void;
   readonly createStaffServices: (
     configuration: PublicWebConfiguration,
     operationIds: StaffAuthOperationIdSource,
@@ -135,6 +145,7 @@ export interface StaffAuthApplicationFactories {
     readonly adapter: StaffAuthApplicationAdapter;
     readonly schoolSettingsPort: SchoolSettingsPort;
     readonly testWorkspacePort: TestWorkspacePort;
+    readonly studentSessionPort: StudentSessionPort;
   };
   readonly observeHealth: (
     configuration: PublicWebConfiguration,
@@ -290,9 +301,12 @@ interface StaffAuthApplicationGeneration {
   readonly initialization: Promise<unknown>;
   readonly settingsController: SchoolSettingsController;
   readonly testController: TestWorkspaceController;
+  readonly studentController: StudentSessionController;
   unsubscribeProduct: (() => void) | null;
+  unsubscribeTests: (() => void) | null;
   disposeSettingsView: (() => void) | null;
   disposeTestView: (() => void) | null;
+  disposeStudentView: (() => void) | null;
   testRoot: HTMLElement | null;
   settingsRoot: HTMLElement | null;
   initialTestReadStarted: boolean;
@@ -301,6 +315,10 @@ interface StaffAuthApplicationGeneration {
   disposed: boolean;
   membershipRefresh: Promise<StaffProductRefreshResult> | null;
   visibleRefresh: Promise<void> | null;
+  visibleRefreshQueued: boolean;
+  visibleRefreshScheduled: boolean;
+  studentTargetKey: string | null;
+  visibleStudentTargetKey: string | null;
 }
 
 function startScrubbedStaffAuthApplication(
@@ -348,18 +366,25 @@ function startScrubbedStaffAuthApplication(
     readonly callbackLost: boolean;
     readonly pendingCallback: PrivateStaffAuthPendingCallback | null;
   }): StaffAuthApplicationGeneration {
-    const { adapter, schoolSettingsPort, testWorkspacePort } =
+    const {
+      adapter,
+      schoolSettingsPort,
+      testWorkspacePort,
+      studentSessionPort,
+    } =
       runtimeConfiguration === null
         ? {
             adapter: createUnavailableAdapter(),
             schoolSettingsPort: createUnavailableSchoolSettingsPort(),
             testWorkspacePort: createUnavailableTestWorkspacePort(),
+            studentSessionPort: createUnavailableStudentSessionPort(),
           }
         : factories.createStaffServices(runtimeConfiguration, operationIds);
     let clearProduct = () =>
       clearProtectedSchoolDataRoot(elements.protectedSchoolDataRoot);
     let constructedSettings: SchoolSettingsController | null = null;
     let constructedTests: TestWorkspaceController | null = null;
+    let constructedStudents: StudentSessionController | null = null;
     try {
       const flows = createStaffRecoveryFlowStore({
         clock,
@@ -409,14 +434,32 @@ function startScrubbedStaffAuthApplication(
         creationRequestIds: operationIds,
       });
       constructedTests = testController;
+      const studentController = createStudentSessionController({
+        port: studentSessionPort,
+        getAccess: () => controller.getProductAccess(),
+        refreshAccess: () => refreshGenerationMembership(generation),
+        requestSelectedTestRefresh(target) {
+          const snapshot = testController.getSnapshot();
+          const selected = "data" in snapshot ? snapshot.data.selected : null;
+          if (
+            selected?.id === target.testId &&
+            selected.schoolId === target.schoolId
+          )
+            scheduleVisibleRefresh(generation, true);
+        },
+      });
+      constructedStudents = studentController;
       const generation: StaffAuthApplicationGeneration = {
         adapter,
         controller,
         settingsController,
         testController,
+        studentController,
         unsubscribeProduct: null,
+        unsubscribeTests: null,
         disposeSettingsView: null,
         disposeTestView: null,
+        disposeStudentView: null,
         testRoot: null,
         settingsRoot: null,
         initialTestReadStarted: false,
@@ -426,6 +469,10 @@ function startScrubbedStaffAuthApplication(
         disposed: false,
         membershipRefresh: null,
         visibleRefresh: null,
+        visibleRefreshQueued: false,
+        visibleRefreshScheduled: false,
+        studentTargetKey: null,
+        visibleStudentTargetKey: null,
         initialization: options.bootstrap
           ? controller.dispatch({ type: "bootstrap" })
           : Promise.resolve(controller.getSnapshot()),
@@ -438,6 +485,9 @@ function startScrubbedStaffAuthApplication(
         testController.setAccess(
           access.kind === "paused" ? access : { kind: "unavailable" },
         );
+        studentController.setAccess(
+          access.kind === "paused" ? access : { kind: "unavailable" },
+        );
         if (access.kind !== "paused") generation.initialTestReadStarted = false;
         detachProductViews(generation);
         clearProtectedSchoolDataRoot(elements.protectedSchoolDataRoot);
@@ -445,10 +495,19 @@ function startScrubbedStaffAuthApplication(
       generation.unsubscribeProduct = controller.subscribe(() =>
         synchronizeProduct(generation),
       );
+      generation.unsubscribeTests = testController.subscribe(() =>
+        synchronizeStudentTarget(generation),
+      );
       settingsController.setAccess(controller.getProductAccess());
       testController.setAccess(controller.getProductAccess());
+      studentController.setAccess(controller.getProductAccess());
       return generation;
     } catch (error) {
+      try {
+        constructedStudents?.dispose();
+      } catch {
+        // Continue through every sibling and the provider.
+      }
       try {
         constructedTests?.dispose();
       } catch {
@@ -484,10 +543,17 @@ function startScrubbedStaffAuthApplication(
   ): void {
     const disposeSettings = generation.disposeSettingsView;
     const disposeTests = generation.disposeTestView;
+    const disposeStudents = generation.disposeStudentView;
     generation.disposeSettingsView = null;
     generation.disposeTestView = null;
+    generation.disposeStudentView = null;
     generation.settingsRoot = null;
     generation.testRoot = null;
+    try {
+      disposeStudents?.();
+    } catch {
+      // A failed child view cannot preserve its siblings.
+    }
     try {
       disposeTests?.();
     } catch {
@@ -538,6 +604,56 @@ function startScrubbedStaffAuthApplication(
     });
   }
 
+  function synchronizeStudentTarget(
+    generation: StaffAuthApplicationGeneration,
+  ): void {
+    if (!generationIsCurrent(generation)) return;
+    const snapshot = generation.testController.getSnapshot();
+    const selected = "data" in snapshot ? snapshot.data.selected : null;
+    generation.studentController.setTarget(
+      selected === null
+        ? null
+        : {
+            test: selected,
+            parentBusy: snapshot.kind !== "ready",
+          },
+    );
+    if (selected === null) {
+      generation.studentTargetKey = null;
+      return;
+    }
+    // Selection/lifecycle changes need one fresh child read; label/revision-only
+    // publications preserve its controls. The existing visible cycle owns I/O.
+    if (snapshot.kind !== "ready") return;
+    const key = `${selected.schoolId}/${selected.id}/${selected.lifecycle}`;
+    const changed = key !== generation.studentTargetKey;
+    generation.studentTargetKey = key;
+    if (changed && selected.lifecycle === "open")
+      scheduleVisibleRefresh(generation, false);
+  }
+
+  function scheduleVisibleRefresh(
+    generation: StaffAuthApplicationGeneration,
+    afterCurrent: boolean,
+  ): void {
+    if (!generationIsCurrent(generation)) return;
+    if (generation.visibleRefresh !== null) {
+      if (
+        afterCurrent ||
+        (generation.visibleStudentTargetKey !== null &&
+          generation.visibleStudentTargetKey !== generation.studentTargetKey)
+      )
+        generation.visibleRefreshQueued = true;
+      return;
+    }
+    if (generation.visibleRefreshScheduled) return;
+    generation.visibleRefreshScheduled = true;
+    queueMicrotask(() => {
+      generation.visibleRefreshScheduled = false;
+      if (generationIsCurrent(generation)) void refreshVisibleData(generation);
+    });
+  }
+
   function synchronizeProduct(
     generation: StaffAuthApplicationGeneration,
   ): void {
@@ -545,6 +661,8 @@ function startScrubbedStaffAuthApplication(
     const access = generation.controller.getProductAccess();
     generation.settingsController.setAccess(access);
     generation.testController.setAccess(access);
+    generation.studentController.setAccess(access);
+    synchronizeStudentTarget(generation);
     if (generation.disposeView !== null) scheduleEntryFocus(generation);
     if (access.kind !== "ready") {
       detachProductViews(generation);
@@ -559,12 +677,18 @@ function startScrubbedStaffAuthApplication(
         testRoot.dataset.testWorkspaceRoot = "";
         const settingsRoot = root.ownerDocument.createElement("section");
         settingsRoot.dataset.schoolSettingsRoot = "";
-        root.replaceChildren(testRoot, settingsRoot);
+        const studentRoot = root.ownerDocument.createElement("section");
+        studentRoot.dataset.studentSessionRoot = "";
+        root.replaceChildren(testRoot, studentRoot, settingsRoot);
         generation.testRoot = testRoot;
         generation.settingsRoot = settingsRoot;
         generation.disposeTestView = factories.bindTestWorkspaceView(
           testRoot,
           generation.testController,
+        );
+        generation.disposeStudentView = factories.bindStudentSessionView(
+          studentRoot,
+          generation.studentController,
         );
         generation.disposeSettingsView = factories.bindSchoolSettingsView(
           settingsRoot,
@@ -589,6 +713,7 @@ function startScrubbedStaffAuthApplication(
     } catch {
       generation.settingsController.setAccess({ kind: "unavailable" });
       generation.testController.setAccess({ kind: "unavailable" });
+      generation.studentController.setAccess({ kind: "unavailable" });
       detachProductViews(generation);
       clearProtectedSchoolDataRoot(elements.protectedSchoolDataRoot);
     }
@@ -600,11 +725,23 @@ function startScrubbedStaffAuthApplication(
     if (generation === null || generation.disposed) return;
     generation.disposed = true;
     const unsubscribeProduct = generation.unsubscribeProduct;
+    const unsubscribeTests = generation.unsubscribeTests;
     generation.unsubscribeProduct = null;
+    generation.unsubscribeTests = null;
+    try {
+      unsubscribeTests?.();
+    } catch {
+      // Continue through all authority retirement.
+    }
     try {
       unsubscribeProduct?.();
     } catch {
       // Continue through product and provider disposal.
+    }
+    try {
+      generation.studentController.dispose();
+    } catch {
+      // Continue through every sibling and provider.
     }
     try {
       generation.testController.dispose();
@@ -743,16 +880,29 @@ function startScrubbedStaffAuthApplication(
         )
           return;
         await generation.testController.refreshFromStaff(result);
+        if (!generationIsCurrent(generation)) return;
+        synchronizeStudentTarget(generation);
+        // A selection before this point is covered by this cycle; a later
+        // selection needs one follow-up after the captured roster read settles.
+        generation.visibleStudentTargetKey = generation.studentTargetKey;
+        await generation.studentController.refreshFromStaff(result);
       })
       .catch(() => {
         if (generationIsCurrent(generation)) {
           generation.testController.setAccess({ kind: "unavailable" });
+          generation.studentController.setAccess({ kind: "unavailable" });
         }
       });
     generation.visibleRefresh = refresh;
     void refresh.then(() => {
-      if (generation.visibleRefresh === refresh)
+      if (generation.visibleRefresh === refresh) {
         generation.visibleRefresh = null;
+        generation.visibleStudentTargetKey = null;
+        if (generation.visibleRefreshQueued) {
+          generation.visibleRefreshQueued = false;
+          scheduleVisibleRefresh(generation, false);
+        }
+      }
     });
     return refresh;
   }
@@ -1047,6 +1197,7 @@ export function createProductionStaffAuthApplicationFactories(dependencies: {
     bindView: bindStaffAuthView,
     bindSchoolSettingsView,
     bindTestWorkspaceView,
+    bindStudentSessionView,
     createStaffServices(configuration, operationIds) {
       const port = createProductionSupabaseStaffAuthPort(
         configuration,
@@ -1074,6 +1225,15 @@ export function createProductionStaffAuthApplicationFactories(dependencies: {
           updateTestTitle: port.updateTestTitle,
           openTest: port.openTest,
           endTest: port.endTest,
+        },
+        studentSessionPort: {
+          captureStudentSessionAuthority: port.captureStudentSessionAuthority,
+          releaseStudentSessionAuthority: port.releaseStudentSessionAuthority,
+          readStudentTarget: port.readStudentTarget,
+          readStudentSessions: port.readStudentSessions,
+          issueTestJoinCode: port.issueTestJoinCode,
+          removeStudentSession: port.removeStudentSession,
+          prepareStudentReadmission: port.prepareStudentReadmission,
         },
       };
     },
@@ -1114,6 +1274,19 @@ function createUnavailableTestWorkspacePort(): TestWorkspacePort {
     updateTestTitle: unavailable,
     openTest: unavailable,
     endTest: unavailable,
+  };
+}
+
+function createUnavailableStudentSessionPort(): StudentSessionPort {
+  const unavailable = async () => null;
+  return {
+    captureStudentSessionAuthority: async () => ({ status: "unavailable" }),
+    releaseStudentSessionAuthority() {},
+    readStudentTarget: unavailable,
+    readStudentSessions: unavailable,
+    issueTestJoinCode: unavailable,
+    removeStudentSession: unavailable,
+    prepareStudentReadmission: unavailable,
   };
 }
 

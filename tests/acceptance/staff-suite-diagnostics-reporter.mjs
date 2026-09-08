@@ -9,6 +9,8 @@ const FILE_STAGES = new Map([
   ["tests/acceptance/staff-auth-stack.test.mjs", "stack"],
   ["tests/acceptance/revoke-membership-lock.test.mjs", "locks"],
   ["tests/acceptance/staff-auth-composed.test.mjs", "composed"],
+  ["tests/acceptance/student-session-interop.test.mjs", "composed"],
+  ["tests/acceptance/student-session-locks.test.mjs", "composed"],
 ]);
 const SCRIPT_STAGES = new Map([
   ["> desmoslock@2.0.0 test:db\n> supabase test db", "db"],
@@ -21,7 +23,7 @@ const SCRIPT_STAGES = new Map([
     "locks",
   ],
   [
-    "> desmoslock@2.0.0 test:edge\n> deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts",
+    "> desmoslock@2.0.0 test:edge\n> deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts supabase/functions/student-session-challenge/index.ts supabase/functions/student-session-join/index.ts supabase/functions/student-session-read/index.ts supabase/functions/student-session-reconnect/index.ts supabase/functions/student-session-forfeit/index.ts",
     "edge",
   ],
   [

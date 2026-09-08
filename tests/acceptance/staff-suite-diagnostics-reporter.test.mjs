@@ -14,6 +14,10 @@ const prefix = "[desmoslock-staff-suite:v1] ";
 const stackFile = "tests/acceptance/staff-auth-stack.test.mjs";
 const locksFile = "tests/acceptance/revoke-membership-lock.test.mjs";
 const composedFile = "tests/acceptance/staff-auth-composed.test.mjs";
+const studentInteropFile = "tests/acceptance/student-session-interop.test.mjs";
+const studentLocksFile = "tests/acceptance/student-session-locks.test.mjs";
+const edgeCommand =
+  "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts supabase/functions/student-session-challenge/index.ts supabase/functions/student-session-join/index.ts supabase/functions/student-session-read/index.ts supabase/functions/student-session-reconnect/index.ts supabase/functions/student-session-forfeit/index.ts";
 const reporterPath = fileURLToPath(
   new URL("./staff-suite-diagnostics-reporter.mjs", import.meta.url),
 );
@@ -222,16 +226,65 @@ test("decoder retains the latest 32 records and counts only validated bounded fr
   assert.ok(Object.values(result.eventCounters).every(Number.isSafeInteger));
 });
 
+test("Student file locations retain the closed composed projection and reject lookalike or noncanonical frames", async () => {
+  for (const file of [studentInteropFile, studentLocksFile]) {
+    const output = await rendered([
+      {
+        type: "test:fail",
+        data: {
+          file: path.resolve(file),
+          line: 7,
+          name: sentinel,
+          details: { error: new Error(sentinel) },
+        },
+      },
+      { type: "test:stdout", data: { file, line: 7, message: sentinel } },
+      { type: "test:stderr", data: { file, line: 7, message: sentinel } },
+    ]);
+    assert.equal(output, frame(file, 7, "failed"));
+    assert.deepEqual(parseStaffSuiteDiagnostics(output), {
+      stage: "composed",
+      records: [{ file, line: 7, outcome: "failed" }],
+      eventCounters: { passed: 0, failed: 1, omitted: 0 },
+    });
+    for (const invalidFile of [
+      path.basename(file),
+      `${file}.other`,
+      `outside/${file}`,
+      file.replace("student-session-", "student_session_"),
+    ]) {
+      assert.equal(
+        await rendered([
+          { type: "test:fail", data: { file: invalidFile, line: 7 } },
+        ]),
+        "",
+      );
+      assert.deepEqual(
+        parseStaffSuiteDiagnostics(frame(invalidFile, 7, "failed")),
+        empty,
+      );
+    }
+    for (const payload of [
+      JSON.stringify({ file, line: 7, outcome: "failed", error: sentinel }),
+      `{"file":"${file}","line":7,"outcome":"${sentinel}","outcome":"failed"}`,
+      JSON.stringify({ file, line: 7, outcome: "failed" }).replaceAll(
+        "/",
+        "\\/",
+      ),
+    ])
+      assert.deepEqual(
+        parseStaffSuiteDiagnostics(`${prefix}${payload}\n`),
+        empty,
+      );
+  }
+});
+
 test("stage fallback accepts only the six exact current npm banner and command pairs", () => {
   const stages = [
     ["test:db", "supabase test db", "db"],
     ["test:staff-auth:stack", `node --test ${stackFile}`, "stack"],
     ["test:staff-auth:locks", `node --test ${locksFile}`, "locks"],
-    [
-      "test:edge",
-      "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts",
-      "edge",
-    ],
+    ["test:edge", edgeCommand, "edge"],
     ["test:unit", "npm run build:packages && vitest run", "unit"],
     ["test:staff-auth:composed", `node --test ${composedFile}`, "composed"],
   ];
@@ -262,6 +315,34 @@ test("stage fallback accepts only the six exact current npm banner and command p
     ).stage,
     "edge",
   );
+});
+
+test("Edge fallback matches the Student package command and requires all five ordered Student entrypoints", async () => {
+  const packageJson = JSON.parse(
+    await fs.readFile(new URL("../../package.json", import.meta.url), "utf8"),
+  );
+  assert.equal(packageJson.scripts["test:edge"], edgeCommand);
+  const banner = (command) => `> desmoslock@2.0.0 test:edge\n> ${command}\n`;
+  assert.deepEqual(parseStaffSuiteDiagnostics(banner(edgeCommand)), {
+    ...empty,
+    stage: "edge",
+  });
+  const entrypoints = ["challenge", "join", "read", "reconnect", "forfeit"].map(
+    (operation) => `supabase/functions/student-session-${operation}/index.ts`,
+  );
+  for (const command of [
+    edgeCommand.slice(0, edgeCommand.indexOf(` ${entrypoints[0]}`)),
+    ...entrypoints.map((entrypoint) =>
+      edgeCommand.replace(` ${entrypoint}`, ""),
+    ),
+    edgeCommand.replace(
+      `${entrypoints[3]} ${entrypoints[4]}`,
+      `${entrypoints[4]} ${entrypoints[3]}`,
+    ),
+    edgeCommand.replace("student-session-join", "student-session-join-other"),
+    `${edgeCommand} ${sentinel}`,
+  ])
+    assert.deepEqual(parseStaffSuiteDiagnostics(banner(command)), empty);
 });
 
 test("NODE_OPTIONS preserves owned bytes and rejects competing reporters, unsafe syntax and unknown options", () => {
@@ -363,6 +444,7 @@ async function fixture(run) {
       npm_config_cache: path.join(directory, "npm-cache"),
       npm_config_userconfig: userConfig,
       npm_config_globalconfig: globalConfig,
+      npm_config_offline: "true",
       npm_config_update_notifier: "false",
       npm_config_audit: "false",
       npm_config_fund: "false",
@@ -414,6 +496,32 @@ test("actual Node 24 custom reporter suppresses synthetic names, stdout, stderr 
     );
   });
 });
+
+for (const file of [studentInteropFile, studentLocksFile]) {
+  test(`actual Node reporter keeps ${path.basename(file)} in the closed composed projection`, async () => {
+    await fixture(async ({ directory, environment }) => {
+      await fs.writeFile(
+        path.join(directory, file),
+        `import test from 'node:test';\ntest('${sentinel}-pass', () => { console.log('${sentinel}-stdout'); console.error('${sentinel}-stderr'); });\ntest('${sentinel}-failure', () => { throw new Error('${sentinel}-error'); });\n`,
+      );
+      const result = child(process.execPath, ["--test", file], {
+        cwd: directory,
+        env: environment,
+      });
+      assert.equal(result.status, 1);
+      assert.equal(result.stderr, "");
+      assert.equal(result.stdout, frame(file, 2) + frame(file, 3, "failed"));
+      assert.deepEqual(parseStaffSuiteDiagnostics(result.stdout), {
+        stage: "composed",
+        records: [
+          { file, line: 2, outcome: "passed" },
+          { file, line: 3, outcome: "failed" },
+        ],
+        eventCounters: { passed: 1, failed: 1, omitted: 0 },
+      });
+    });
+  });
+}
 
 test("actual npm run inherits the single reporter through the synthetic staff-stage chain", async () => {
   await fixture(async ({ directory, environment, npmCli }) => {

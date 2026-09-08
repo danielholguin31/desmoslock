@@ -1,4 +1,4 @@
-import { updateDesktopBackendStatus } from "./backend-status.js";
+import { bindStudentSessionView } from "./student-session-view.js";
 import type { TrustedDesktopBridge } from "./trusted-bridge.js";
 
 declare global {
@@ -6,13 +6,10 @@ declare global {
     readonly desmoslockDesktop?: TrustedDesktopBridge;
   }
 }
-const status = document.querySelector<HTMLElement>("[data-v2-status]");
+const root = document.querySelector<HTMLElement>("[data-student-session-root]");
 const bridge = window.desmoslockDesktop;
 
-if (status !== null) {
-  if (bridge === undefined) {
-    status.textContent = "Secure assessment controls unavailable";
-  } else {
-    void updateDesktopBackendStatus(status, globalThis.fetch.bind(globalThis));
-  }
+if (root !== null) {
+  const dispose = bindStudentSessionView(root, bridge);
+  window.addEventListener("pagehide", dispose, { once: true });
 }

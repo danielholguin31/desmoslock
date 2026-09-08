@@ -21,6 +21,10 @@ import {
 
 import type { PublicWebConfiguration } from "../public-config.js";
 import {
+  createStudentSessionPort,
+  type StudentSessionPort,
+} from "../student-sessions/student-session-port.js";
+import {
   createStaffAuthSessionStorage,
   type StaffAuthSessionSnapshot,
   type StaffAuthSessionStorage,
@@ -629,7 +633,7 @@ export interface SupabaseStaffAuthPortDependencies {
 
 export function createSupabaseStaffAuthPort(
   dependencies: SupabaseStaffAuthPortDependencies,
-): SupabaseStaffAuthPort {
+): SupabaseStaffAuthPort & StudentSessionPort {
   let disposed = false;
   let recoveryAuthority: {
     readonly accessToken: string;
@@ -648,6 +652,7 @@ export function createSupabaseStaffAuthPort(
     | "staff_management"
     | "school_settings"
     | "test_workspace"
+    | "student_session_management"
     | "auth_read"
     | "mfa";
   type BoundAuthorityPurpose = Exclude<AuthorityPurpose, "password">;
@@ -847,6 +852,38 @@ export function createSupabaseStaffAuthPort(
     );
     return result?.status === 200 &&
       (await currentBoundAuthority(handle, "test_workspace")) === authority
+      ? result.body
+      : null;
+  }
+
+  async function studentSessionRpc(
+    handle: string,
+    name:
+      | "current_school_test"
+      | "current_test_student_sessions"
+      | "issue_test_join_code"
+      | "remove_student_session"
+      | "prepare_student_readmission",
+    args: Readonly<{ workspace_id: string; test_id: string }>,
+  ): Promise<unknown> {
+    const purpose = "student_session_management";
+    const authority = await currentBoundAuthority(handle, purpose);
+    if (
+      authority === null ||
+      disposed ||
+      capturedAuthority(handle, purpose) !== authority
+    )
+      return null;
+    const result = await directAuthorityRequest(
+      authority.accessToken,
+      `/rest/v1/rpc/${name}`,
+      "POST",
+      args,
+    );
+    return result?.status === 200 &&
+      (await currentBoundAuthority(handle, purpose)) === authority &&
+      !disposed &&
+      capturedAuthority(handle, purpose) === authority
       ? result.body
       : null;
   }
@@ -1112,6 +1149,15 @@ export function createSupabaseStaffAuthPort(
     expectedProviderSessionId: string,
     purpose: AuthorityPurpose,
   ) {
+    if (purpose === "student_session_management") {
+      const result = await captureBoundAuthority(purpose, [
+        expectedAccountId,
+        expectedProviderSessionId,
+      ]);
+      return result.status === "ready"
+        ? { authorityHandle: result.authorityHandle, status: "ready" }
+        : { status: "unavailable" };
+    }
     const generation = authorityGeneration;
     try {
       if (
@@ -1165,6 +1211,31 @@ export function createSupabaseStaffAuthPort(
   }
 
   return {
+    ...createStudentSessionPort({
+      captureAuthority: (accountId, providerSessionId) =>
+        captureAccountAuthority(
+          accountId,
+          providerSessionId,
+          "student_session_management",
+        ),
+      releaseAuthority(handle) {
+        if (
+          capturedAuthorities.get(handle)?.purpose ===
+          "student_session_management"
+        )
+          releaseCapturedAuthority(handle);
+      },
+      currentSchoolTest: (handle, args) =>
+        studentSessionRpc(handle, "current_school_test", args),
+      currentTestStudentSessions: (handle, args) =>
+        studentSessionRpc(handle, "current_test_student_sessions", args),
+      issueTestJoinCode: (handle, args) =>
+        studentSessionRpc(handle, "issue_test_join_code", args),
+      removeStudentSession: (handle, args) =>
+        studentSessionRpc(handle, "remove_student_session", args),
+      prepareStudentReadmission: (handle, args) =>
+        studentSessionRpc(handle, "prepare_student_readmission", args),
+    }),
     dispose() {
       if (disposed) return;
       disposed = true;
@@ -2168,7 +2239,7 @@ export function createProductionSupabaseStaffAuthPort(
     "origin" | "publishableKey" | "url"
   >,
   fetchImplementation: RecoveryFetch = globalThis.fetch,
-): SupabaseStaffAuthPort {
+): SupabaseStaffAuthPort & StudentSessionPort {
   const sessionStorage = createStaffAuthSessionStorage(configuration.url);
   const client = createClient(configuration.url, configuration.publishableKey, {
     auth: {

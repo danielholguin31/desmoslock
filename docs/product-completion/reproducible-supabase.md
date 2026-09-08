@@ -3,10 +3,12 @@
 ## Scope and safety boundary
 
 This is the generation-4 internal-release backend for local development and
-approved synthetic staging. Its ten versioned migrations include the staff
+approved synthetic staging. Its eleven versioned migrations include the staff
 authentication lifecycle, Membership administration, School display-name settings,
-and the draft/open/ended Test workspace.
-Student Session capabilities and calculator isolation remain later work.
+the draft/open/ended Test workspace, and the accountless
+[StudentSession admission source contract](student-session-admission.md).
+The current StudentSession candidate has no new real provider or SQL receipt. Native
+assessment protection and protected calculator eligibility remain separate gates.
 
 Generation 4 preserves the synthetic fixture across these follow-on migrations.
 Repository implementation and migration
@@ -57,6 +59,7 @@ health function, and operator modules in this repository are the authority.
 - `supabase/migrations/20260907000400_membership_administration.sql`
 - `supabase/migrations/20260908000100_school_display_name.sql`
 - `supabase/migrations/20260908000200_test_workspace.sql`
+- `supabase/migrations/20260908000300_student_session_admission.sql`
 - `supabase/seed.sql`
 - `supabase/config.toml`
 - `supabase/functions/deno.json`
@@ -65,6 +68,13 @@ health function, and operator modules in this repository are the authority.
 - `supabase/functions/account-recovery/index.ts`
 - `supabase/functions/health/index.ts`
 - `supabase/functions/staff-invitations/index.ts`
+- `supabase/functions/_shared/student-session-proof.ts`
+- `supabase/functions/_shared/student-session-service.ts`
+- `supabase/functions/student-session-challenge/index.ts`
+- `supabase/functions/student-session-join/index.ts`
+- `supabase/functions/student-session-read/index.ts`
+- `supabase/functions/student-session-reconnect/index.ts`
+- `supabase/functions/student-session-forfeit/index.ts`
 - `scripts/synthetic-backup/operator.mjs`
 - `scripts/synthetic-backup/publication-worker.mjs`
 - `scripts/synthetic-backup/postgres-adapter.mjs`
@@ -72,8 +82,8 @@ health function, and operator modules in this repository are the authority.
 The fixture contract is generation `4`, version `internal-baseline-v2`, with
 SHA-256
 `f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201`.
-The exact discovered migration file set has normalized SHA-256
-`5cf17174bf44e491a6bd78fe540326d8bdee169518d75c8082e5bd9b833f3f62`.
+The selected eleven-file candidate has normalized SHA-256
+`aa32ed754c87e7987199dbd6c5f685ae65236ba3f94921157fc6cb07ce67b308`.
 The published generation-3 migration retains its contemporaneous digest
 `06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49`;
 the original generation-4 migration likewise retains
@@ -98,11 +108,16 @@ The School display-name migration retains its nine-file digest
 `9264f3b4933e4f1bb207d5a1a130ab0b3edafea787ac37fb25268b09afba2538`
 and raw SHA-256
 `96febd78bbec6859771cb26ae095458553e19ddd75dbc438e99b54ee86549e18`.
-Only the Test workspace migration records the current aggregate. Its raw SHA-256 is
+The Test workspace migration retains its ten-file digest
+`5cf17174bf44e491a6bd78fe540326d8bdee169518d75c8082e5bd9b833f3f62`
+and raw SHA-256
 `233123dd9038740ef724432715cc17e32a5adc2be68160466fa11f5b2dfb865c`.
+Only the StudentSession migration records the current aggregate. Its verified
+raw SHA-256 is
+`448d7697885eae07f04cc3b89531b7b3711e71fa67d56d80ac891df63458fb06`.
 The repository contract pins each attested migration's raw SHA-256 and literal
-independently, then zeroes only those eight delimited self-references when deriving
-the ten-file aggregate. The follow-on migration updates the existing singleton
+independently, then zeroes only those nine delimited self-references when deriving
+the eleven-file aggregate. The follow-on migration updates the existing singleton
 attestation without changing schema generation `4` or the seven-table fixture;
 the upgrade path does not depend on rewriting or replaying historical migrations.
 The seed takes a transaction advisory lock, refuses altered or partial targets,
@@ -119,6 +134,27 @@ The backup adapter independently validates the exact eleven-column current Test
 COPY layout and every pristine metadata value, as it does the six-column School
 layout. Export uses a process-local UTC setting; the real roundtrip tests
 distinct source/target session timezones without changing global settings.
+
+The StudentSession archive has exactly 25 columns: the original
+`id, workspace_id, test_id, state, seed_key`, followed in order by
+`synthetic_display_name, created_at, epoch, revision, device_session_id,
+device_public_key, last_accepted_proof_counter, maintenance_accepted_at,
+capability_digest, capability_issued_at, capability_expires_at, reconnect_digest,
+reconnect_expires_at, join_request_id, join_operation_digest, join_admission_mode,
+join_material_digest, rotation_request_id, rotation_operation_digest,
+previous_reconnect_digest`. The two fixed identities, `created` states and seed
+keys remain unchanged. Their creation time is
+`2000-01-01T00:00:00.000000Z`, epoch/revision are one, proof counter is zero,
+and maintenance allowance is an empty timestamp array. Every other added field
+is null. Exact order, arity, nullability and each pristine value are required
+before the unchanged fixture framing/digest can be accepted; runtime admission
+state cannot enter an archive.
+
+The four Student runtime stores are `student_join_materials`,
+`student_device_bindings`, `student_bootstrap_challenges`, and
+`student_bootstrap_limits`. All must be empty in a pristine export source and an
+empty or restored target. They are observed and rejected when nonempty, never
+exported. Even a lazily created bootstrap-limit row is runtime state.
 
 ## Local bootstrap and verification
 
@@ -194,8 +230,9 @@ trailing-dot forms), local staging hosts, and non-TLS staging origins before
 bundling. The publishable key is intentionally browser-public; no database URL,
 service-role key, secret key, or operator credential is a public build input.
 The desktop renderer never receives the web origin or publishable key and
-observes health directly; no backend IPC channel or new privileged bridge
-authority is added.
+observes health directly. The separate StudentSession bridge exposes only named
+admission/recovery actions and sanitized views; it gives the renderer no device
+credential, signing, arbitrary URL or storage authority.
 
 Example local build:
 
@@ -344,23 +381,27 @@ unknown fields, hash mismatches, links, oversized files, unexpected archive
 entries or rows, a changed migration set, a target that fails the exact
 database/system-identifier/server-side-local-marker attestation, source/target
 system-identifier collisions, and targets whose seven managed tables or any of
-the five runtime-only staff lifecycle tables are nonempty. Those runtime-only
-tables are `application_session_revocation_cutoffs`,
+the nine runtime-only staff and Student tables are nonempty. The five staff tables
+are `application_session_revocation_cutoffs`,
 `application_session_revocations`, `staff_audit_events`, `staff_invitations`,
-and `staff_password_recovery_operations`. The archive allowlist is exactly the
+and `staff_password_recovery_operations`. They remain excluded, together with all four
+Student runtime stores named above. The archive allowlist is exactly the
 seven synthetic tables, including `foundation_seed`; Auth, invitation,
-application revocation, password-recovery, and audit data are never added. The
+application revocation, password-recovery, audit, join-material, device-binding,
+bootstrap-challenge and bootstrap-limit data are never added. The
 PostgreSQL adapter rejects every archive-rendered statement except an exact
 allowlist of harmless dump scaffolding and the seven validated `COPY` blocks.
 The generation-4 profile and Membership layouts accept PostgreSQL null markers
 only in their exact nullable positions. Seeded profiles must be unbound, and
 seeded Memberships must be active at revision one with every acceptance and
-revocation field null.
+revocation field null. StudentSession `COPY` requires the exact 25-column layout
+and all pristine values above.
 It rebuilds a private dependency-ordered `COPY` plan from those validated rows;
 raw `pg_restore` SQL is never executed. The adapter then rechecks the cluster
 system identifier, exact database name, server-side local marker, normalized
-migration-set digest attestation, exact migration versions, and seven-table
-emptiness and applies the plan in one serializable transaction. It verifies the
+migration-set digest attestation, exact migration versions, and emptiness of the
+seven managed and nine runtime-only tables, and applies the plan in one
+serializable transaction. It verifies the
 fixture and foundation marker before commit. Immediately before restore, the
 operator re-hashes the held archive bytes. After commit, it directly re-observes
 the target through PostgreSQL and emits a scoped local synthetic-fixture receipt
@@ -406,8 +447,14 @@ The nine-migration School settings extension passed its actual roundtrip, full
 restored-target staff suite and 599 fresh SQL assertions on
 [source `6939c59`](https://github.com/danielholguin31/desmoslock/actions/runs/34194857958),
 then merged as [`d8fadca`](https://github.com/danielholguin31/desmoslock/commit/d8fadcafe8aa5fbc7ef6ca6717d61899677b49fc).
-The current ten-migration Test extension remains runtime-pending; those earlier
-runs do not attest its new schema, archive metadata or journeys. See
+The ten-migration Test extension was runtime-pending at the inherited checkpoint;
+that historical status is not evidence for the current eleven-migration
+StudentSession candidate. The current candidate requires its own exact-commit
+roundtrip and complete staff suite, including StudentSession acceptance, without
+reset/reseed. Source, restored-target and post-marker-retirement checks now
+require exact Student metadata and empty runtime stores, with static receipt
+flags `studentMetadataPreserved` and `studentRuntimeStoresEmpty`. Neither flag
+has been established by a new real runtime run at this source-only checkpoint. See
 [source, operation and evidence boundaries](synthetic-restore-acceptance.md)
 for the exact receipts, TLS prerequisites and cleanup contract.
 

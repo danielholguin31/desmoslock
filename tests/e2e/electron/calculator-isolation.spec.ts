@@ -12,6 +12,7 @@ import {
   type ElectronApplication,
   type Page,
 } from "@playwright/test";
+import { build } from "esbuild";
 
 import { createElectronLaunchProfile } from "../../../scripts/electron-launch-profile.mjs";
 import {
@@ -169,7 +170,8 @@ async function typeCalculatorExpression(
   await clickCalculatorControl(application, "[data-expression-form] button");
 }
 
-test.describe.serial("isolated calculator surface", () => {
+test.describe
+  .serial("synthetic fixture exercising the production calculator surface", () => {
   let application: ElectronApplication;
   let shell: Page;
   let sinkOrigin: string;
@@ -232,12 +234,29 @@ test.describe.serial("isolated calculator surface", () => {
           fs.rm(acquiredUserDataDirectory, { force: true, recursive: true }),
         );
 
+        const fixturePath = path.join(
+          acquiredUserDataDirectory,
+          "calculator-isolation.mjs",
+        );
+        await build({
+          bundle: true,
+          entryPoints: [
+            path.resolve("tests/e2e/electron/fixtures/calculator-isolation.ts"),
+          ],
+          external: ["electron"],
+          format: "esm",
+          outfile: fixturePath,
+          platform: "node",
+          target: "node24",
+        });
+
         const launchProfile = createElectronLaunchProfile();
         const acquiredApplication = await electron.launch({
           args: [
             ...launchProfile.args,
             `--user-data-dir=${acquiredUserDataDirectory}`,
-            path.resolve("apps/desktop"),
+            fixturePath,
+            path.resolve("apps/desktop/dist"),
           ],
           env: launchProfile.env,
           ...(launchProfile.chromiumSandbox === undefined
@@ -312,7 +331,17 @@ test.describe.serial("isolated calculator surface", () => {
         ).desmoslockDesktop;
         return bridge === undefined ? [] : Object.keys(bridge).sort();
       }),
-    ).resolves.toEqual(["requestAssessmentLock", "version"]);
+    ).resolves.toEqual([
+      "beginTargetedReadmission",
+      "forfeitStudentSession",
+      "joinTest",
+      "onStudentSessionViewChanged",
+      "readStudentSessionView",
+      "refreshStudentSession",
+      "requestAssessmentLock",
+      "retryStudentSession",
+      "version",
+    ]);
 
     const isolation = await application.evaluate(
       async ({ app, webContents }, url) => {
@@ -523,12 +552,8 @@ test.describe.serial("isolated calculator surface", () => {
     expect(sinkRequests).toBe(0);
     expect(tcpSinkConnections).toBe(0);
     expect(udpSinkRequests).toBe(0);
-    await expect(shell.locator("[data-v2-status]")).toHaveText(
-      "Synthetic backend ready",
-    );
-    await expect(shell.locator("[data-v2-status]")).toHaveAttribute(
-      "data-backend-status",
-      "ready",
+    await expect(shell.locator("[data-isolation-fixture]")).toHaveText(
+      "Synthetic calculator isolation fixture",
     );
 
     await typeCalculatorExpression(application, "(2,3)");
@@ -541,7 +566,7 @@ test.describe.serial("isolated calculator surface", () => {
     ).resolves.toBe(true);
   });
 
-  test("accepts only the trusted shell's fixed assessment-lock request", async () => {
+  test("does not let the synthetic fixture claim native protection through the legacy bridge", async () => {
     await expect(
       shell.evaluate(() =>
         (
@@ -552,7 +577,7 @@ test.describe.serial("isolated calculator surface", () => {
           }
         ).desmoslockDesktop?.requestAssessmentLock(),
       ),
-    ).resolves.toEqual({ ok: true });
+    ).resolves.toEqual({ ok: false, reason: "native-protection-unavailable" });
   });
 
   test("destroys the owned calculator contents when its BrowserWindow closes", async () => {

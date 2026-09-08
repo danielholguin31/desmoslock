@@ -1,5 +1,6 @@
 @import "./auth/staff-auth.css";
 @import "./test-workspace/test-workspace.css";
+@import "./student-sessions/student-session.css";
 @import "./school-settings/school-settings.css";
 
 :root {

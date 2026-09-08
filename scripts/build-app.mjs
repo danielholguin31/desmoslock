@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
+import { buildDesktopDurableRecord } from "./build-desktop-durable-record.mjs";
 
 import {
   parsePublicBackendConfiguration,
@@ -181,6 +182,7 @@ async function runCommandLine() {
   await fs.mkdir(outputRoot, { recursive: true });
 
   if (appName === "desktop") {
+    await buildDesktopDurableRecord();
     await build({
       bundle: true,
       define: browserDefine,
@@ -270,6 +272,13 @@ async function runCommandLine() {
     await fs.copyFile(
       path.join(sourceRoot, "test-workspace", "test-workspace.css"),
       path.join(outputRoot, "test-workspace", "test-workspace.css"),
+    );
+    await fs.mkdir(path.join(outputRoot, "student-sessions"), {
+      recursive: true,
+    });
+    await fs.copyFile(
+      path.join(sourceRoot, "student-sessions", "student-session.css"),
+      path.join(outputRoot, "student-sessions", "student-session.css"),
     );
   }
 }

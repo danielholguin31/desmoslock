@@ -4,6 +4,13 @@ select pg_advisory_xact_lock(hashtextextended('desmoslock-v2/internal-baseline-v
 
 do $$
 begin
+  if exists (select 1 from desmoslock_v2.student_join_materials)
+    or exists (select 1 from desmoslock_v2.student_device_bindings)
+    or exists (select 1 from desmoslock_v2.student_bootstrap_challenges)
+    or exists (select 1 from desmoslock_v2.student_bootstrap_limits) then
+    raise exception using errcode = '55000',
+      message = 'refusing to seed StudentSession runtime authority';
+  end if;
   if exists (select 1 from desmoslock_v2.workspaces)
     or exists (select 1 from desmoslock_v2.foundation_seed)
     or exists (select 1 from desmoslock_v2.profiles)
@@ -173,7 +180,27 @@ insert into desmoslock_v2.student_sessions (
   workspace_id,
   test_id,
   state,
-  seed_key
+  seed_key,
+  synthetic_display_name,
+  created_at,
+  epoch,
+  revision,
+  device_session_id,
+  device_public_key,
+  last_accepted_proof_counter,
+  maintenance_accepted_at,
+  capability_digest,
+  capability_issued_at,
+  capability_expires_at,
+  reconnect_digest,
+  reconnect_expires_at,
+  join_request_id,
+  join_operation_digest,
+  join_admission_mode,
+  join_material_digest,
+  rotation_request_id,
+  rotation_operation_digest,
+  previous_reconnect_digest
 )
 values
   (
@@ -181,14 +208,54 @@ values
     '10000000-0000-4000-8000-000000000001',
     '30000000-0000-4000-8000-000000000001',
     'created',
-    'session.alpha.algebra'
+    'session.alpha.algebra',
+    null,
+    '2000-01-01T00:00:00.000000Z',
+    1,
+    1,
+    null,
+    null,
+    0,
+    '{}'::timestamptz[],
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
   ),
   (
     '40000000-0000-4000-8000-000000000002',
     '10000000-0000-4000-8000-000000000002',
     '30000000-0000-4000-8000-000000000002',
     'created',
-    'session.beta.algebra'
+    'session.beta.algebra',
+    null,
+    '2000-01-01T00:00:00.000000Z',
+    1,
+    1,
+    null,
+    null,
+    0,
+    '{}'::timestamptz[],
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
   )
 on conflict do nothing;
 

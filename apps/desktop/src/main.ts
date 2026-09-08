@@ -8,6 +8,7 @@ import {
   ipcMain,
   protocol,
   session,
+  safeStorage,
   type WebContents,
 } from "electron";
 
@@ -17,23 +18,33 @@ import {
 } from "@desmoslock/contracts";
 
 import { publicDesktopBackendConfiguration } from "./backend-status.js";
-import type { CalculatorSurface } from "./main/calculator-surface.js";
 import { calculatorScheme } from "./main/calculator-assets.js";
-import { createElectronCalculatorSurface } from "./main/electron-calculator-surface.js";
 import { createTrustedShellWebPreferences } from "./main/hardened-web-preferences.js";
 import {
   assertPackagedLaunchPolicy,
   inspectPackagedLaunchPolicyBoundary,
 } from "./main/packaged-launch-policy.js";
-import { createPrivilegedRequestRouter } from "./main/privileged-request-router.js";
 import {
   denyByDefaultCapabilityPolicy,
   installSessionDenialPolicy,
   installWebContentsEscapeDenial,
 } from "./main/session-denial-policy.js";
 import { createStaticProtocolHandler } from "./main/static-protocol.js";
-import { createTrustedRequestHandler } from "./main/trusted-request-handler.js";
-import { trustedAssessmentLockChannel } from "./trusted-bridge.js";
+import {
+  trustedAssessmentLockChannel,
+  studentSessionChannels,
+} from "./trusted-bridge.js";
+import {
+  createStudentSessionCoordinator,
+  type StudentSessionCoordinator,
+} from "./main/student-session-coordinator.js";
+import { createStudentSessionCrypto } from "./main/student-session-crypto.js";
+import { createStudentSessionTransport } from "./main/student-session-transport.js";
+import {
+  createStudentSessionStore,
+  openNativeStudentRecordStore,
+} from "./main/student-session-store.js";
+import { createStudentSessionIpc } from "./main/student-session-ipc.js";
 
 export const desktopBuild: RepositoryBuildIdentity = {
   sourceCommit: "development",
@@ -66,8 +77,13 @@ try {
   process.exit(78);
 }
 
+// Supplement the native fixed-inode lock; a second UI never interprets arguments.
+if (!app.requestSingleInstanceLock()) {
+  app.exit(0);
+  process.exit(0);
+}
+
 const shellScheme = "desmoslock-app";
-const shellBarHeight = 140;
 const connectionAllowlistOverride =
   "OverrideConnectionAllowlistOriginTrial" as const;
 const publicBackendConfiguration = parsePublicBackendConfiguration(
@@ -127,45 +143,73 @@ protocol.registerSchemesAsPrivileged(
 );
 
 let mainWindow: BrowserWindow | null = null;
-let calculatorSurface: CalculatorSurface | null = null;
 let shellProtocolRegistered = false;
 let shellSessionPolicyInstalled = false;
-let nextAssessmentGeneration = 1;
-const assessmentStates = new Map<
-  number,
-  {
-    readonly generation: string;
-    lockIntentAccepted: boolean;
-    readonly testLifecycle: "open";
-  }
->();
+let nextShellGeneration = 1;
+let studentCoordinator: StudentSessionCoordinator | null = null;
+let studentIpc: ReturnType<typeof createStudentSessionIpc> | null = null;
+let maintenanceTimer: ReturnType<typeof setInterval> | null = null;
+let quitting = false;
 
-const privilegedRouter = createPrivilegedRequestRouter({
-  engageLock: async (webContentsId) => {
-    // This is intentionally an intent receipt only. Native lock and recovery
-    // authority belong to issue #35.
-    const state = assessmentStates.get(webContentsId);
-    if (state === undefined) {
-      throw new Error("Assessment state is unavailable");
-    }
-    state.lockIntentAccepted = true;
-  },
-  readState: (webContentsId) => {
-    const state = assessmentStates.get(webContentsId);
-    return state === undefined
-      ? undefined
-      : {
-          generation: state.generation,
-          lockState: state.lockIntentAccepted ? "locked" : "unlocked",
-          testLifecycle: state.testLifecycle,
-        };
-  },
+// The old intent receipt never constitutes assessment protection.
+ipcMain.handle(trustedAssessmentLockChannel, () => ({
+  ok: false,
+  reason: "native-protection-unavailable",
+}));
+for (const channel of [
+  studentSessionChannels.read,
+  studentSessionChannels.join,
+  studentSessionChannels.recover,
+  studentSessionChannels.retry,
+  studentSessionChannels.refresh,
+  studentSessionChannels.forfeit,
+]) {
+  ipcMain.handle(
+    channel,
+    (event, ...args: readonly unknown[]) =>
+      studentIpc?.request(channel, event, ...args) ?? null,
+  );
+}
+app.on("second-instance", () => {
+  if (mainWindow === null || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
 });
 
-ipcMain.handle(
-  trustedAssessmentLockChannel,
-  createTrustedRequestHandler(privilegedRouter),
-);
+async function initializeStudentSession(): Promise<void> {
+  if (publicBackendConfiguration === null || studentCoordinator !== null)
+    return;
+  const crypto = createStudentSessionCrypto(publicBackendConfiguration);
+  const ownedDirectory = path.join(app.getPath("userData"), "student-session");
+  const store = createStudentSessionStore({
+    apiOrigin: publicBackendConfiguration.url,
+    openNativeStore: () => openNativeStudentRecordStore(ownedDirectory),
+    codec: {
+      isEncryptionAvailable: () => safeStorage.isEncryptionAvailable(),
+      encryptString: (value) => safeStorage.encryptString(value),
+      decryptString: (value) => safeStorage.decryptString(value),
+    },
+    validateDevice: crypto.validateDevice,
+    validateCandidates: crypto.validateCandidates,
+  });
+  studentCoordinator = createStudentSessionCoordinator({
+    apiOrigin: publicBackendConfiguration.url,
+    store,
+    crypto,
+    transport: createStudentSessionTransport(publicBackendConfiguration),
+  });
+  studentIpc = createStudentSessionIpc(studentCoordinator);
+  await studentCoordinator.initialize();
+  maintenanceTimer = setInterval(() => {
+    if (
+      mainWindow !== null &&
+      !mainWindow.isDestroyed() &&
+      mainWindow.isVisible()
+    )
+      void studentCoordinator?.refresh();
+  }, 15_000);
+}
 
 async function ensureShellProtocol(outputDirectory: string): Promise<void> {
   if (!shellSessionPolicyInstalled) {
@@ -208,18 +252,16 @@ async function ensureShellProtocol(outputDirectory: string): Promise<void> {
 
 function registerTrustedShell(
   webContents: WebContents,
-  assessmentGeneration: string,
+  generation: string,
 ): void {
-  const revoke = (): void =>
-    privilegedRouter.revokeTrustedCaller(webContents.id);
-
+  const revoke = (): void => studentIpc?.revoke(webContents.id);
   webContents.on("did-start-navigation", (event) => {
     if (event.isMainFrame) revoke();
   });
   webContents.on("did-navigate", (_event, url) => {
     if (url !== trustedShellUrl || webContents.mainFrame.isDestroyed()) return;
-    privilegedRouter.registerTrustedCaller({
-      generation: assessmentGeneration,
+    studentIpc?.register({
+      generation,
       mainFrameProcessId: webContents.mainFrame.processId,
       mainFrameRoutingId: webContents.mainFrame.routingId,
       trustedUrl: trustedShellUrl,
@@ -231,109 +273,55 @@ function registerTrustedShell(
   webContents.on("destroyed", revoke);
 }
 
-function calculatorBounds(window: BrowserWindow) {
-  const size = window.getContentSize();
-  const width = size[0] ?? 0;
-  const height = size[1] ?? 0;
-  return {
-    height: Math.max(0, height - shellBarHeight),
-    width,
-    x: 0,
-    y: shellBarHeight,
-  };
-}
-
 async function createWindow(): Promise<BrowserWindow> {
   const outputDirectory = path.dirname(fileURLToPath(import.meta.url));
   await ensureShellProtocol(outputDirectory);
-  let ownedCalculatorSurface: CalculatorSurface | null = null;
-
   const window = new BrowserWindow({
     backgroundColor: "#e8edf5",
     height: 720,
     minHeight: 560,
     minWidth: 860,
     show: false,
+    width: 1080,
     webPreferences: createTrustedShellWebPreferences(
       path.join(outputDirectory, "preload.cjs"),
     ),
-    width: 1080,
   });
   installWebContentsEscapeDenial(
     window.webContents,
     `${shellScheme}:`,
     denyByDefaultCapabilityPolicy,
   );
-  const trustedWebContentsId = window.webContents.id;
-  const assessmentState = {
-    generation: `internal-assessment-${nextAssessmentGeneration}`,
-    lockIntentAccepted: false,
-    testLifecycle: "open" as const,
-  };
-  nextAssessmentGeneration += 1;
-  assessmentStates.set(trustedWebContentsId, assessmentState);
-  registerTrustedShell(window.webContents, assessmentState.generation);
+  const generation = `internal-shell-${nextShellGeneration++}`;
+  const contents = window.webContents;
+  registerTrustedShell(contents, generation);
+  const unsubscribe = studentCoordinator?.subscribe((view) => {
+    if (
+      !window.isDestroyed() &&
+      !contents.isDestroyed() &&
+      studentIpc?.mayPublish(contents.id, generation) &&
+      !contents.mainFrame.isDestroyed() &&
+      contents.mainFrame.url === trustedShellUrl
+    )
+      contents.send(studentSessionChannels.changed, view);
+  });
   window.once("closed", () => {
-    const surface = ownedCalculatorSurface;
-    ownedCalculatorSurface = null;
-    if (calculatorSurface === surface) calculatorSurface = null;
-    if (surface !== null) void surface.close().catch(() => app.exit(1));
-    assessmentStates.delete(trustedWebContentsId);
-    privilegedRouter.revokeTrustedCaller(trustedWebContentsId);
+    unsubscribe?.();
+    studentIpc?.revoke(contents.id);
     if (mainWindow === window) mainWindow = null;
   });
-  window.on("resize", () =>
-    ownedCalculatorSurface?.setBounds(calculatorBounds(window)),
-  );
-
   try {
     await window.loadURL(trustedShellUrl);
-    ownedCalculatorSurface = await createElectronCalculatorSurface({
-      bounds: calculatorBounds(window),
-      onCleanupFailure: () => app.exit(1),
-      outputDirectory,
-      parent: window,
-    });
-    if (window.isDestroyed()) {
-      throw new Error("Desktop window closed during calculator startup");
-    }
-    calculatorSurface = ownedCalculatorSurface;
+    if (window.isDestroyed()) throw new Error("Desktop closed during startup");
+    // Admission is separate from native protection. Until a real protection
+    // adapter passes its gates, no calculator WebContentsView is attached.
     mainWindow = window;
     window.show();
     return window;
   } catch (error) {
-    assessmentStates.delete(trustedWebContentsId);
-    privilegedRouter.revokeTrustedCaller(trustedWebContentsId);
-    const cleanupFailures: unknown[] = [];
-    if (ownedCalculatorSurface !== null) {
-      const surface = ownedCalculatorSurface;
-      ownedCalculatorSurface = null;
-      if (calculatorSurface === surface) calculatorSurface = null;
-      try {
-        await surface.close();
-      } catch (cleanupError) {
-        cleanupFailures.push(
-          ...(cleanupError instanceof AggregateError
-            ? cleanupError.errors
-            : [cleanupError]),
-        );
-      }
-    }
-    if (mainWindow === window) mainWindow = null;
-    if (!window.isDestroyed()) {
-      try {
-        window.destroy();
-      } catch (cleanupError) {
-        cleanupFailures.push(cleanupError);
-      }
-    }
-    if (cleanupFailures.length > 0) {
-      throw new AggregateError(
-        [error, ...cleanupFailures],
-        "Desktop window startup and cleanup both failed",
-        { cause: error },
-      );
-    }
+    unsubscribe?.();
+    studentIpc?.revoke(contents.id);
+    if (!window.isDestroyed()) window.destroy();
     throw error;
   }
 }
@@ -341,6 +329,7 @@ async function createWindow(): Promise<BrowserWindow> {
 void app
   .whenReady()
   .then(async () => {
+    await initializeStudentSession();
     await createWindow();
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) {
@@ -354,4 +343,17 @@ void app
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
+});
+
+app.on("before-quit", (event) => {
+  if (quitting || studentCoordinator === null) return;
+  event.preventDefault();
+  quitting = true;
+  if (maintenanceTimer !== null) clearInterval(maintenanceTimer);
+  // If drain fails, the native descriptor stays owned until app.exit releases
+  // it through process termination. No explicit close is forced on timeout.
+  void studentCoordinator.dispose().then(
+    () => app.exit(0),
+    () => app.exit(1),
+  );
 });

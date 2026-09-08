@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
 import dgram from "node:dgram";
 import fs from "node:fs/promises";
+import { createReadStream } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { packager } from "@electron/packager";
 import { _electron as electron } from "@playwright/test";
+import { build } from "esbuild";
+import { statFile } from "@electron/asar";
 
 import {
   hardenPackagedElectron,
@@ -74,10 +78,167 @@ const expectedDistributionFiles = [
   "calculator/styles.css",
   "index.html",
   "main.js",
+  ...(process.platform === "darwin" ? ["native/durable-record.node"] : []),
   "preload.cjs",
   "renderer.js",
   "styles.css",
 ];
+const studentBridgeKeys = [
+  "beginTargetedReadmission",
+  "forfeitStudentSession",
+  "joinTest",
+  "onStudentSessionViewChanged",
+  "readStudentSessionView",
+  "refreshStudentSession",
+  "requestAssessmentLock",
+  "retryStudentSession",
+  "version",
+];
+
+async function selectExistingElectronArchive(electronVersion) {
+  assert.equal(
+    electronVersion,
+    "43.4.1",
+    "Packaging requires the reviewed Electron version",
+  );
+  assert.ok(
+    ["darwin", "linux", "win32"].includes(process.platform),
+    "Packaging platform is unsupported",
+  );
+  assert.ok(
+    ["arm64", "x64"].includes(process.arch),
+    "Packaging architecture is unsupported",
+  );
+  const filename = `electron-v${electronVersion}-${process.platform}-${process.arch}.zip`;
+  const checksums = JSON.parse(
+    await fs.readFile(
+      path.join(repositoryRoot, "node_modules/electron/checksums.json"),
+      "utf8",
+    ),
+  );
+  const expectedHash = checksums[filename];
+  assert.match(
+    expectedHash ?? "",
+    /^[0-9a-f]{64}$/,
+    "The installed Electron package must pin the exact archive checksum",
+  );
+  let directory = process.env.DESMOSLOCK_ELECTRON_ZIP_DIR;
+  if (directory === undefined) {
+    // Address one existing official cache entry, matching @electron/get's
+    // Cache.getCacheDirectory and env-paths('electron', { suffix: '' }).
+    // npm ci already populates this entry in CI; this verifier never downloads.
+    const defaultCacheRoot =
+      process.platform === "darwin"
+        ? path.join(os.homedir(), "Library/Caches/electron")
+        : process.platform === "win32"
+          ? path.join(
+              process.env.LOCALAPPDATA ||
+                path.join(os.homedir(), "AppData/Local"),
+              "electron/Cache",
+            )
+          : path.join(
+              process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"),
+              "electron",
+            );
+    const cacheRoot = process.env.electron_config_cache ?? defaultCacheRoot;
+    assert.equal(
+      path.isAbsolute(cacheRoot),
+      true,
+      "The selected Electron cache root must be absolute",
+    );
+    const releaseDirectory = `https://github.com/electron/electron/releases/download/v${electronVersion}`;
+    directory = path.join(
+      cacheRoot,
+      createHash("sha256").update(releaseDirectory).digest("hex"),
+    );
+  }
+  assert.equal(
+    path.isAbsolute(directory),
+    true,
+    "The selected Electron ZIP directory must be absolute",
+  );
+  const archivePath = path.join(directory, filename);
+  let status;
+  try {
+    status = await fs.lstat(archivePath);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    throw new Error(
+      `Required existing ${filename} is unavailable. Select its verified directory with DESMOSLOCK_ELECTRON_ZIP_DIR or retain npm ci's official Electron cache; this verifier will not download or search for it.`,
+      { cause: error },
+    );
+  }
+  assert.equal(
+    status.isFile() && !status.isSymbolicLink(),
+    true,
+    "The selected Electron ZIP must be a regular archive file",
+  );
+  const hasher = createHash("sha256");
+  let bytes = 0;
+  for await (const chunk of createReadStream(archivePath)) {
+    hasher.update(chunk);
+    bytes += chunk.length;
+  }
+  const sha256 = hasher.digest("hex");
+  assert.equal(
+    bytes,
+    status.size,
+    "The selected Electron archive changed while being verified",
+  );
+  assert.equal(
+    sha256,
+    expectedHash,
+    "The existing Electron archive does not match the installed package's checksum",
+  );
+  if (process.platform === "darwin" && process.arch === "arm64") {
+    assert.equal(
+      sha256,
+      "fe3cac8cbfd9ba1739fac6c69166cf30848741f93cbe251d800ae6ef7cebb64b",
+    );
+    assert.equal(bytes, 122_238_952);
+  }
+  return { directory: await fs.realpath(directory), filename, sha256, bytes };
+}
+
+async function inspectNativeRecordArtifact(filename) {
+  const status = await fs.lstat(filename);
+  assert.equal(
+    status.isSymbolicLink(),
+    false,
+    "Native artifact must be an owned regular file",
+  );
+  assert.equal(status.isFile(), true);
+  const bytes = await fs.readFile(filename);
+  assert.ok(
+    bytes.length >= 32,
+    "Native artifact must contain a Mach-O64 header",
+  );
+  assert.equal(
+    bytes.readUInt32LE(0),
+    0xfeedfacf,
+    "Native artifact must be little-endian Mach-O64",
+  );
+  assert.ok(
+    ["arm64", "x64"].includes(process.arch),
+    "Native artifact architecture is unsupported",
+  );
+  assert.equal(
+    bytes.readUInt32LE(4),
+    process.arch === "arm64" ? 0x0100000c : 0x01000007,
+    "Native artifact CPU must match the selected runtime",
+  );
+  assert.equal(
+    bytes.readUInt32LE(12),
+    8,
+    "Native storage must be a Mach-O bundle",
+  );
+  return {
+    path: "dist/native/durable-record.node",
+    architecture: process.arch,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    bytes: bytes.length,
+  };
+}
 
 async function run(command, arguments_, options = {}) {
   await new Promise((resolve, reject) => {
@@ -350,32 +511,182 @@ async function launchInternalProductionBuild(userDataDirectory) {
           : { chromiumSandbox: launchProfile.chromiumSandbox }),
       }),
     ready: async (application) => {
-      await application.firstWindow();
+      const shell = await application.firstWindow();
+      await shell.waitForFunction(() => {
+        const phase =
+          globalThis.document.querySelector(".student-session")?.dataset.phase;
+        return phase !== undefined && phase !== "loading";
+      });
+    },
+  });
+}
+
+async function launchSyntheticCalculatorBuild(userDataDirectory, fixturePath) {
+  const launchProfile = createElectronLaunchProfile();
+  return acquireReadyElectronApplication({
+    launch: () =>
+      electron.launch({
+        args: [
+          ...launchProfile.args,
+          `--user-data-dir=${userDataDirectory}`,
+          fixturePath,
+          distributionRoot,
+        ],
+        env: launchProfile.env,
+        ...(launchProfile.chromiumSandbox === undefined
+          ? {}
+          : { chromiumSandbox: launchProfile.chromiumSandbox }),
+      }),
+    ready: async (application) => {
+      const shell = await application.firstWindow();
+      await shell.locator("[data-isolation-fixture]").waitFor();
       await waitForCalculator(application);
     },
   });
 }
 
-async function inspectRuntime(application) {
+async function inspectProductionShell(application, expectedPhase) {
   const shell = await application.firstWindow();
   await shell.waitForFunction(
-    () =>
-      globalThis.document.querySelector("[data-v2-status]")?.dataset
-        .backendStatus === "ready",
+    (phase) =>
+      globalThis.document.querySelector(".student-session")?.dataset.phase ===
+      phase,
+    expectedPhase,
   );
   const shellBoundary = await shell.evaluate(async () => {
     const bridge = globalThis.desmoslockDesktop;
-    const status = globalThis.document.querySelector("[data-v2-status]");
     return {
-      backendStatus: status?.dataset.backendStatus,
       bridgeKeys: bridge === undefined ? [] : Object.keys(bridge).sort(),
       bridgeVersion: bridge?.version,
       lockRequestResult: await bridge?.requestAssessmentLock(),
+      studentView: await bridge?.readStudentSessionView(),
       manualLockControls:
         globalThis.document.querySelectorAll("[data-lock-intent]").length,
-      status: status?.textContent,
+      protection: globalThis.document.querySelector(
+        ".student-session__protection h3",
+      )?.textContent,
+      phase:
+        globalThis.document.querySelector(".student-session")?.dataset.phase,
     };
   });
+  assert.deepEqual(shellBoundary.bridgeKeys, studentBridgeKeys);
+  assert.equal(shellBoundary.bridgeVersion, "2.0.0");
+  assert.deepEqual(shellBoundary.lockRequestResult, {
+    ok: false,
+    reason: "native-protection-unavailable",
+  });
+  assert.equal(shellBoundary.manualLockControls, 0);
+  assert.equal(shellBoundary.protection, "Assessment protection unavailable");
+  assert.equal(shellBoundary.phase, expectedPhase);
+  assert.deepEqual(Object.keys(shellBoundary.studentView).sort(), [
+    "calculatorEligible",
+    "pendingOperation",
+    "phase",
+    "protection",
+    "revision",
+    "session",
+  ]);
+  assert.equal(shellBoundary.studentView.phase, expectedPhase);
+  assert.equal(shellBoundary.studentView.protection, "unavailable");
+  assert.equal(shellBoundary.studentView.calculatorEligible, false);
+  assert.equal(shellBoundary.studentView.session, null);
+  assert.equal(shellBoundary.studentView.pendingOperation, null);
+  assert.ok(Number.isSafeInteger(shellBoundary.studentView.revision));
+  const boundary = await application.evaluate(
+    ({ BrowserWindow, webContents }, url) => ({
+      calculators: webContents
+        .getAllWebContents()
+        .filter((contents) => contents.getURL() === url).length,
+      windows: BrowserWindow.getAllWindows().map((window) => ({
+        attachedViews: window.contentView.children.length,
+      })),
+      electronVersion: process.versions.electron,
+      architecture: process.arch,
+      platform: process.platform,
+    }),
+    calculatorUrl,
+  );
+  assert.deepEqual(boundary, {
+    calculators: 0,
+    windows: [{ attachedViews: 0 }],
+    electronVersion: "43.4.1",
+    architecture: process.arch,
+    platform: process.platform,
+  });
+  for (const [width, height] of [
+    [860, 560],
+    [1080, 720],
+  ]) {
+    const contentBounds = await application.evaluate(
+      ({ BrowserWindow }, size) => {
+        const window = BrowserWindow.getAllWindows()[0];
+        window.setSize(size.width, size.height);
+        return window.getContentBounds();
+      },
+      { width, height },
+    );
+    await shell.waitForFunction(
+      (bounds) =>
+        globalThis.innerWidth === bounds.width &&
+        globalThis.innerHeight === bounds.height,
+      contentBounds,
+    );
+    await shell.locator(".student-session").waitFor();
+    const layout = await shell.evaluate(() => {
+      const panel = globalThis.document.querySelector(".student-session");
+      const bounds = panel.getBoundingClientRect();
+      return {
+        left: bounds.left,
+        right: bounds.right,
+        width: bounds.width,
+        viewportWidth: globalThis.innerWidth,
+        overflow:
+          globalThis.document.documentElement.scrollWidth >
+          globalThis.innerWidth,
+      };
+    });
+    assert.ok(
+      layout.left >= 0 &&
+        layout.right <= layout.viewportWidth &&
+        layout.width >= 500,
+    );
+    assert.equal(layout.overflow, false);
+    if (expectedPhase === "entry" || expectedPhase === "recovery_required") {
+      const input = shell.locator("#student-session-code");
+      await input.scrollIntoViewIfNeeded();
+      assert.equal(await input.isVisible(), true);
+      const usable = await input.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        return (
+          globalThis.document.elementFromPoint(
+            box.x + box.width / 2,
+            box.y + box.height / 2,
+          ) === element
+        );
+      });
+      assert.equal(
+        usable,
+        true,
+        "The detached calculator must not occlude join or recovery",
+      );
+    }
+  }
+  if (expectedPhase === "unavailable") {
+    await shell.locator('[data-action="open-recovery"]').click();
+    assert.equal(
+      await shell.locator("#student-session-code").isVisible(),
+      true,
+    );
+    assert.equal(
+      await shell.locator('label[for="student-session-code"]').textContent(),
+      "Private re-admission code",
+    );
+    await shell.locator('[data-action="cancel-recovery"]').click();
+  }
+  return { shellBoundary, boundary };
+}
+
+async function inspectCalculatorRuntime(application) {
   const runtime = await application.evaluate(
     async ({ app, webContents }, url) => {
       const calculator = webContents
@@ -390,6 +701,9 @@ async function inspectRuntime(application) {
           process.env.ELECTRON_DISABLE_SANDBOX === "1",
         contextIsolation: preferences.contextIsolation,
         devTools: preferences.devTools ?? false,
+        electronVersion: process.versions.electron,
+        architecture: process.arch,
+        platform: process.platform,
         enabledFeatures: app.commandLine
           .getSwitchValue("enable-features")
           .split(","),
@@ -408,7 +722,7 @@ async function inspectRuntime(application) {
     },
     calculatorUrl,
   );
-  return { runtime, shellBoundary };
+  return runtime;
 }
 
 async function runInternalShellDenialProbe(application) {
@@ -679,7 +993,27 @@ let backendFixture = null;
 let networkSinks = null;
 
 await runWithIndependentCleanup(async () => {
+  const electronManifest = JSON.parse(
+    await fs.readFile(
+      path.join(repositoryRoot, "node_modules/electron/package.json"),
+      "utf8",
+    ),
+  );
+  const electronArchive = await selectExistingElectronArchive(
+    electronManifest.version,
+  );
   backendFixture = await createBackendHealthFixture();
+  const emptyBuildConfig = path.join(temporaryRoot, "empty-build-global-npmrc");
+  await fs.writeFile(emptyBuildConfig, "", { mode: 0o600 });
+  const nativeBuildEnvironment = Object.fromEntries(
+    [
+      "DESMOSLOCK_NATIVE_CLANG",
+      "DESMOSLOCK_NATIVE_SDK",
+      "DESMOSLOCK_NATIVE_NODE_HEADERS",
+    ]
+      .filter((key) => process.env[key] !== undefined)
+      .map((key) => [key, process.env[key]]),
+  );
   await run(
     process.execPath,
     [
@@ -689,7 +1023,21 @@ await runWithIndependentCleanup(async () => {
     ],
     {
       env: {
-        ...process.env,
+        PATH: process.env.PATH ?? "",
+        LANG: "C",
+        LC_ALL: "C",
+        TMPDIR: process.env.TMPDIR ?? temporaryRoot,
+        TMP: process.env.TMPDIR ?? temporaryRoot,
+        TEMP: process.env.TMPDIR ?? temporaryRoot,
+        NODE_DISABLE_COMPILE_CACHE: "1",
+        COREPACK_ENABLE_NETWORK: "0",
+        npm_config_cache:
+          process.env.npm_config_cache ?? path.join(temporaryRoot, "npm-cache"),
+        npm_config_userconfig: "/dev/null",
+        npm_config_globalconfig: emptyBuildConfig,
+        npm_config_offline: "true",
+        npm_config_update_notifier: "false",
+        ...nativeBuildEnvironment,
         DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT: "local",
         DESMOSLOCK_PUBLIC_BACKEND_URL: backendFixture.origin,
       },
@@ -703,10 +1051,18 @@ await runWithIndependentCleanup(async () => {
   const productionRuntimeText = (
     await Promise.all(
       expectedDistributionFiles.map((relativePath) =>
-        fs.readFile(path.join(distributionRoot, relativePath), "utf8"),
+        relativePath === "native/durable-record.node"
+          ? ""
+          : fs.readFile(path.join(distributionRoot, relativePath), "utf8"),
       ),
     )
   ).join("\n");
+  const nativeArtifact =
+    process.platform === "darwin"
+      ? await inspectNativeRecordArtifact(
+          path.join(distributionRoot, "native/durable-record.node"),
+        )
+      : null;
   for (const prohibited of [
     /authorized local fixture/i,
     /controlled calculator/i,
@@ -731,7 +1087,7 @@ await runWithIndependentCleanup(async () => {
   );
   assert.doesNotMatch(
     shellDocument,
-    /data-lock-intent|<button\b/i,
+    /data-lock-intent|test-lock-intent|Send lock intent/i,
     "Production shell must not expose a manual lock-intent control",
   );
 
@@ -756,21 +1112,20 @@ await runWithIndependentCleanup(async () => {
     )}\n`,
   );
 
-  const electronManifest = JSON.parse(
-    await fs.readFile(
-      path.join(repositoryRoot, "node_modules", "electron", "package.json"),
-      "utf8",
-    ),
-  );
   const packageDirectories = await packager({
     arch: process.arch,
-    asar: true,
+    asar:
+      process.platform === "darwin"
+        ? { unpack: "dist/native/durable-record.node" }
+        : true,
     dir: stagingRoot,
     electronVersion: electronManifest.version,
+    electronZipDir: electronArchive.directory,
     executableName: packagedExecutableName,
     name: "DesmosLock Internal",
     osxSign: false,
     out: path.join(temporaryRoot, "package"),
+    tmpdir: path.join(temporaryRoot, "packager-tmp"),
     overwrite: true,
     platform: process.platform,
     prune: false,
@@ -778,6 +1133,39 @@ await runWithIndependentCleanup(async () => {
   });
   assert.equal(packageDirectories.length, 1);
   const packagedArtifact = await packagedExecutable(packageDirectories[0]);
+  const resourcesDirectory =
+    process.platform === "darwin"
+      ? path.join(packagedArtifact.appBundle, "Contents/Resources")
+      : path.join(packageDirectories[0], "resources");
+  if (nativeArtifact !== null) {
+    assert.equal(
+      statFile(
+        path.join(resourcesDirectory, "app.asar"),
+        "dist/native/durable-record.node",
+      ).unpacked,
+      true,
+    );
+    assert.deepEqual(
+      await listFiles(path.join(resourcesDirectory, "app.asar.unpacked")),
+      ["dist/native/durable-record.node"],
+    );
+    assert.deepEqual(
+      await inspectNativeRecordArtifact(
+        path.join(
+          resourcesDirectory,
+          "app.asar.unpacked/dist/native/durable-record.node",
+        ),
+      ),
+      nativeArtifact,
+    );
+  } else {
+    assert.throws(() =>
+      statFile(
+        path.join(resourcesDirectory, "app.asar"),
+        "dist/native/durable-record.node",
+      ),
+    );
+  }
   const executablePath = packagedArtifact.executable;
   if (process.platform === "darwin") {
     assert.equal(
@@ -798,44 +1186,93 @@ await runWithIndependentCleanup(async () => {
     RunAsNode: "DISABLE",
   });
 
-  const userDataDirectory = path.join(temporaryRoot, "internal-user-data");
-
+  // This actual-main gate uses the production OS-encryption adapter. Authoring
+  // or running the synthetic fixture does not satisfy that separate gate.
+  const userDataDirectory = path.join(temporaryRoot, "actual-main-user-data");
   application = await launchInternalProductionBuild(userDataDirectory);
-  const firstLaunch = await inspectRuntime(application);
-  assert.deepEqual(firstLaunch.shellBoundary, {
-    backendStatus: "ready",
-    bridgeKeys: ["requestAssessmentLock", "version"],
-    bridgeVersion: "2.0.0",
-    lockRequestResult: { ok: true },
-    manualLockControls: 0,
-    status: "Synthetic backend ready",
+  const productionShell = await inspectProductionShell(
+    application,
+    process.platform === "darwin" ? "entry" : "unavailable",
+  );
+  assert.deepEqual(await runInternalShellDenialProbe(application), {
+    download: { count: 1, deniedByProductionPolicy: true },
+    permission: "denied",
   });
-  assert.deepEqual(firstLaunch.runtime, {
+  await closeElectronApplicationCooperatively(application);
+  application = null;
+  let productionRecovery = null;
+  if (process.platform === "darwin") {
+    const corruptRecord = path.join(
+      userDataDirectory,
+      "student-session/student-session.record",
+    );
+    await fs.writeFile(
+      corruptRecord,
+      Buffer.from("synthetic-unreadable-admission-record", "utf8"),
+      { mode: 0o600, flag: "wx" },
+    );
+    application = await launchInternalProductionBuild(userDataDirectory);
+    productionRecovery = await inspectProductionShell(
+      application,
+      "recovery_required",
+    );
+    assert.equal(
+      (await fs.readFile(corruptRecord)).toString("utf8"),
+      "synthetic-unreadable-admission-record",
+    );
+    await closeElectronApplicationCooperatively(application);
+    application = null;
+  }
+
+  const fixturePath = path.join(temporaryRoot, "calculator-isolation.mjs");
+  await build({
+    bundle: true,
+    entryPoints: [
+      path.join(
+        repositoryRoot,
+        "tests/e2e/electron/fixtures/calculator-isolation.ts",
+      ),
+    ],
+    external: ["electron"],
+    format: "esm",
+    outfile: fixturePath,
+    platform: "node",
+    target: "node24",
+  });
+  const calculatorUserDataDirectory = path.join(
+    temporaryRoot,
+    "synthetic-calculator-user-data",
+  );
+  application = await launchSyntheticCalculatorBuild(
+    calculatorUserDataDirectory,
+    fixturePath,
+  );
+  const calculatorRuntime = await inspectCalculatorRuntime(application);
+  assert.deepEqual(calculatorRuntime, {
     chromiumSandboxDisabledByLaunch: process.platform === "linux",
     contextIsolation: true,
     devTools: false,
-    enabledFeatures: firstLaunch.runtime.enabledFeatures,
+    electronVersion: "43.4.1",
+    architecture: process.arch,
+    platform: process.platform,
+    enabledFeatures: calculatorRuntime.enabledFeatures,
     isPackaged: false,
     isPersistent: false,
     nodeIntegration: false,
     preload: undefined,
     registeredPreloads: 0,
-    remoteProxy: firstLaunch.runtime.remoteProxy,
+    remoteProxy: calculatorRuntime.remoteProxy,
     rendererSandboxPreference: true,
     storagePath: null,
     webviewTag: false,
   });
   assert.ok(
-    firstLaunch.runtime.enabledFeatures.includes(
+    calculatorRuntime.enabledFeatures.includes(
       "OverrideConnectionAllowlistOriginTrial",
     ),
-    "Internal production build did not enable the Connection-Allowlist override",
+    "Synthetic calculator fixture did not enable the production Connection-Allowlist prerequisite",
   );
-  assert.match(firstLaunch.runtime.remoteProxy, /PROXY 127\.0\.0\.1:9/);
-  assert.deepEqual(await runInternalShellDenialProbe(application), {
-    download: { count: 1, deniedByProductionPolicy: true },
-    permission: "denied",
-  });
+  assert.match(calculatorRuntime.remoteProxy, /PROXY 127\.0\.0\.1:9/);
 
   networkSinks = await createHostileNetworkSinks();
   const hostile = await runInternalHostileProbe(application, networkSinks);
@@ -864,7 +1301,10 @@ await runWithIndependentCleanup(async () => {
   await closeElectronApplicationCooperatively(application);
   application = null;
 
-  application = await launchInternalProductionBuild(userDataDirectory);
+  application = await launchSyntheticCalculatorBuild(
+    calculatorUserDataDirectory,
+    fixturePath,
+  );
   assert.deepEqual(await readCalculatorState(application), {
     databases: [],
     expressions: ["y=x"],
@@ -916,8 +1356,11 @@ await runWithIndependentCleanup(async () => {
 
   process.stdout.write(
     process.platform === "linux"
-      ? "Internal production-build renderer policy and process-supervision checks passed under the non-release Linux compatibility profile; Chromium's OS sandbox was disabled. Issue #34 remains incomplete pending Desmos rights/exact assets and exact packaged physical UI acceptance.\n"
-      : "Internal production-build renderer policy and exact packaged launch policy passed without a sandbox-disabling launch control. Issue #34 remains incomplete pending Desmos rights/exact assets and exact signed/notarized packaged physical UI acceptance.\n",
+      ? "Actual production shell keeps the calculator detached; synthetic calculator isolation and process-supervision checks passed under the non-release Linux compatibility profile with Chromium's OS sandbox disabled. OS encryption, physical protection and packaged UI acceptance remain unproven.\n"
+      : "Actual production join/recovery shell keeps the calculator detached; separately synthetic calculator isolation and exact packaged launch policy checks passed without a sandbox-disabling launch control. OS encryption enrollment/continuity, physical protection and signed/notarized packaged UI acceptance remain unproven.\n",
+  );
+  process.stdout.write(
+    `${JSON.stringify({ nativeArtifact, electronArchive: { filename: electronArchive.filename, sha256: electronArchive.sha256, bytes: electronArchive.bytes }, actualMain: { entry: productionShell.shellBoundary.phase, recovery: productionRecovery?.shellBoundary.phase ?? null, calculatorEligible: false }, calculatorEvidence: "synthetic-isolation-fixture-only" })}\n`,
   );
 }, [
   async () => {

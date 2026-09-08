@@ -5,7 +5,10 @@ baseline. The corrected eight-migration baseline passed the real TLS/export/
 restore checks and full staff suite on both source `5b5722b` and merged main
 `73d8b8a`; exact run links and the sanitized receipt are recorded below.
 The nine-migration School extension also passed on source `6939c59`, merged as
-`d8fadca`; the current ten-migration Test extension requires a new runtime run.
+`d8fadca`. The ten-migration Test extension was runtime-pending at the inherited
+checkpoint. The current eleven-migration StudentSession candidate requires its
+own exact-commit runtime run; this source-only update supplies no new test or
+runtime result.
 The existing hosted staging project and legacy deployment restrictions remain
 separate from this disposable CI lane.
 
@@ -20,9 +23,16 @@ add a workflow, dependency, provider setting or product migration.
 The harness creates a full target stack without seed and a distinct source
 PostgreSQL/GoTrue project with the pristine seed. Source inputs are explicit:
 the versioned configuration, current operator migration list, seed and recovery
-template. Only the copied project ID and five ports differ. At integration the
-source is the eight-migration Membership baseline, whose migration-set SHA256 is
+template. Only the copied project ID and five ports differ. At the original
+integration checkpoint the source was the eight-migration Membership baseline,
+whose migration-set SHA256 was
 `7c3e7403b61d5c66123b15d2fe4de28ee2259d71a304ce8695d16630f5353a56`.
+The imported `CURRENT_MIGRATION_FILES` now propagates all eleven migrations.
+The selected current aggregate is
+`aa32ed754c87e7987199dbd6c5f685ae65236ba3f94921157fc6cb07ce67b308`;
+the [versioned input contract](reproducible-supabase.md#versioned-inputs)
+retains all historical pins and the nine delimited self-reference normalization.
+Schema generation `4`, fixture digest and seven-table archive remain unchanged.
 
 The existing operator and default bounded adapter run on host Node/Python.
 Three temporary executable wrappers invoke actual PostgreSQL clients from one
@@ -61,15 +71,33 @@ marker, requires the marker table to be empty and independently rechecks the
 live fixture counts/digest and migration attestation. Audit protection is never
 disabled and audit rows are never deleted.
 
+The StudentSession extension independently checks both fixed fixture identities
+and all 20 added pristine fields in the source, restored target and after marker
+retirement. The current Student `COPY` has exactly 25 columns; creation time is
+`2000-01-01T00:00:00.000000Z`, epoch/revision are one, proof counter is zero,
+allowance is an empty timestamp array, and every added name/device/credential/
+receipt field is null. Source and target use distinct session timezones; explicit
+UTC export and the restored local timestamp are both required. The target must
+have no StudentSession rows before restore. All four runtime stores
+(`student_join_materials`, `student_device_bindings`,
+`student_bootstrap_challenges`, `student_bootstrap_limits`) must be empty in
+source and target, after restore, and after marker retirement. These tables
+never enter the archive. New static receipt fields
+`studentMetadataPreserved: true` and `studentRuntimeStoresEmpty: true` are
+required by both the controller and roundtrip assertion; missing or non-Boolean
+evidence fails before the staff suite.
+
 A valid-CA TLS query brackets the negative CA probe. That probe accepts only
 native psql exit 2, empty stdout, and the exact expected root-file rejection for
 `127.0.0.1:55322` and `/dev/null`. Its combined output is limited to 8 KiB and
 classified only in memory. Docker/connection errors, unknown diagnostics,
 unexpected success, timeout, cancellation and overflow fail the gate.
 
-After restore, the unchanged complete `test:staff-auth` suite runs without reset
-or reseed. This retains SQL/RLS, stack/public-health, authorization-lock, Edge,
-unit, real-provider and Membership browser checks on the restored fixture.
+After restore, the complete `test:staff-auth` suite runs without reset or reseed.
+The StudentSession acceptance groups must extend that same chain, preserving
+SQL/RLS, stack/public-health, authorization-lock, Edge, unit, real-provider and
+Membership/School/Test browser checks on the restored fixture. A separately
+reset Student stack cannot satisfy this gate.
 Successful receipts contain only hashes and static booleans. Raw database,
 provider, CLI and TLS diagnostics are withheld; synthetic credentials and
 callback material are not written to files or artifacts by this harness.
@@ -102,7 +130,7 @@ a credential-shaped literal containing only synthetic test values. The
 integrated helper test now builds that same URL from a credential-free endpoint
 and separately assigned synthetic username/password. Parser inputs and all
 rejection assertions remain unchanged; scanner rules were not weakened. The
-current `synthetic-backup-runtime.test.mjs` SHA256 is
+`synthetic-backup-runtime.test.mjs` SHA256 at that historical checkpoint was
 `0b07cd695de978c7eb307a902021feb9365a448e5f3537fc7bc82896625a91ed`.
 At that checkpoint, the other executable imports and all CI hooks retained
 their reviewed hashes.
@@ -254,10 +282,15 @@ remain withheld. The selected repair updated the current SQL attestation pins
 and enforced the exact six-column pristine School archive; earlier candidate
 checkpoints remain historical.
 
-The current Test extension needs new exact-commit ten-migration evidence,
-including its strict eleven-column Test archive and timezone roundtrip. None
-of these local/source CI gates proves hosted staging migration/export, delivered
-hosted email or packaged desktop staging acceptance.
+At the inherited Test checkpoint, new exact-commit ten-migration evidence was
+still required for its strict eleven-column Test archive and timezone roundtrip.
+That statement and every receipt above describe their recorded source versions.
+The current eleven-migration StudentSession candidate adds the exact 25-column
+Student archive and four empty runtime-store checks. Its real roundtrip and
+complete restored-target staff/Student suite remain unverified at this
+source-only checkpoint. No historical receipt acquires the new Boolean fields
+retroactively. None of these local/source CI gates proves hosted staging
+migration/export, delivered hosted email or packaged desktop staging acceptance.
 
 Primary implementation references: [pinned CLI image list](https://raw.githubusercontent.com/supabase/cli/v2.115.0/apps/cli-go/pkg/config/templates/Dockerfile),
 [exact PostgreSQL image build](https://raw.githubusercontent.com/supabase/postgres/17.6.1.159/Dockerfile-17),

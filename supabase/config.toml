@@ -66,3 +66,18 @@ verify_jwt = true
 
 [analytics]
 enabled = false
+
+[functions.student-session-challenge]
+verify_jwt = false
+
+[functions.student-session-join]
+verify_jwt = false
+
+[functions.student-session-read]
+verify_jwt = false
+
+[functions.student-session-reconnect]
+verify_jwt = false
+
+[functions.student-session-forfeit]
+verify_jwt = false
