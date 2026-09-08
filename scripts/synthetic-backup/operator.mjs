@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const CURRENT_MIGRATION_SET_SHA256 =
-  "8d5fd99304ce8bbf9524dfb788080f890ab84565c096a8e6d4faf437a9b734dc";
+  "e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a";
 export const CURRENT_MIGRATION_FILES = Object.freeze([
   "20260824000100_v2_foundation.sql",
   "20260828000100_internal_release_backend.sql",
@@ -14,6 +14,7 @@ export const CURRENT_MIGRATION_FILES = Object.freeze([
   "20260903000200_staff_auth_generation_4.sql",
   "20260907000100_staff_auth_callback_completion.sql",
   "20260907000200_runtime_owner_bootstrap.sql",
+  "20260907000300_membership_revocation_authority.sql",
 ]);
 export const CURRENT_MIGRATION_VERSIONS = Object.freeze(
   CURRENT_MIGRATION_FILES.map((fileName) => fileName.slice(0, 14)),

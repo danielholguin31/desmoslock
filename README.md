@@ -90,8 +90,9 @@ npm run db:stop
 
 CI owns startup and unconditional shutdown for that lane. The command verifies
 database schema/RPC lifecycle contracts, local Auth/PostgREST/health prerequisites,
-Edge handler behavior, unit tests, then real-provider invitation, recovery and
-revocation journeys. The final composed suite requires a freshly reset stack;
+observed two-connection authorization races, Edge handler behavior, unit tests,
+then real-provider invitation, PKCE recovery and revocation journeys. The final
+composed suite requires a freshly reset stack;
 its append-only audit fixtures remain until the disposable stack is stopped or
 reset. CLI startup output is sanitized so generated local keys are not printed.
 This source candidate has not executed those database/provider journeys locally.

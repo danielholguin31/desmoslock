@@ -1,17 +1,20 @@
 import { spawnSync } from "node:child_process";
 import { createHmac, randomBytes } from "node:crypto";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
 import { createClient } from "@supabase/supabase-js";
 
+import { prepareStaffRecoveryCallback } from "../../apps/web/src/auth/staff-auth-callback.ts";
 import { createBackendProbe } from "../../supabase/functions/health/index.ts";
 
 export const API_ORIGIN = "http://127.0.0.1:54321";
 // Match the checked-in inert SiteURL so real GoTrue accepts the callback
 // without adding redirect permissions. This origin is never fetched.
 export const WEB_ORIGIN = "https://desmoslock.invalid";
+const MAILPIT_ORIGIN = "http://127.0.0.1:54324";
 const project = "desmoslock-v2";
 const root = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -106,7 +109,8 @@ export function openDisposableStack() {
     endpoint === "unix:///var/run/docker.sock",
     "Acceptance requires the default local Unix Docker runtime",
   );
-  for (const component of ["auth", "db"]) {
+  // CLI 2.115.0 retains the legacy inbucket container name for Mailpit.
+  for (const component of ["auth", "db", "inbucket"]) {
     const metadata = command("docker", [
       "--context",
       "default",
@@ -130,12 +134,19 @@ export function openDisposableStack() {
         ),
         "Acceptance requires pinned GoTrue v2.195.0",
       );
-    else
+    else if (component === "db")
       check(
         /^(?:public\.ecr\.aws\/supabase\/|ghcr\.io\/supabase\/|supabase\/)postgres:17\./u.test(
           metadata[2],
         ),
         "Acceptance requires disposable Supabase PostgreSQL 17",
+      );
+    else
+      check(
+        /^(?:public\.ecr\.aws\/supabase\/|ghcr\.io\/supabase\/|axllent\/)mailpit:v1\.30\.2(?:@sha256:[0-9a-f]{64})?$/u.test(
+          metadata[2],
+        ),
+        "Acceptance requires the pinned disposable Mailpit v1.30.2 sink",
       );
   }
   const status = json(
@@ -201,13 +212,14 @@ export async function loopbackFetch(input, init = {}) {
   return response;
 }
 
-export function client(key, fetcher = loopbackFetch) {
+export function client(key, fetcher = loopbackFetch, flowType = "implicit") {
   return createClient(API_ORIGIN, key, {
     auth: {
       autoRefreshToken: false,
       detectSessionInUrl: false,
       persistSession: false,
       debug: false,
+      flowType,
     },
     global: { fetch: fetcher },
   });
@@ -407,26 +419,225 @@ export async function stepUp(supabase) {
   );
 }
 
-// Admin-generated recovery followed through the real GET verification route.
-// This produces provider-owned recovery AMR. It is not emailed-PKCE evidence.
-export async function recoverySession(admin, recipient, supabase) {
-  const generated = await auth(() =>
-    admin.auth.admin.generateLink({ type: "recovery", email: recipient }),
+// Mailpit is the CLI's disposable SMTP sink, with no relay configured. These
+// numeric loopback URLs constrain this harness; they do not attest Docker's
+// listener bindings. No mail is released, downloaded to a file, or logged.
+async function mailpitJson(endpoint) {
+  check(
+    endpoint.origin === MAILPIT_ORIGIN &&
+      !endpoint.username &&
+      !endpoint.password &&
+      !endpoint.hash,
+    "Mail capture refuses any noncanonical sink origin",
   );
-  let action;
+  let response;
   try {
-    action = new URL(generated.properties?.action_link);
+    response = await fetch(endpoint, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(10_000),
+    });
   } catch {
-    throw new Error("Invalid provider recovery action; details redacted");
+    throw new Error("Disposable mail capture unavailable; details redacted");
+  }
+  if (response.status !== 200 || response.body === null) {
+    await response.body?.cancel();
+    throw new Error("Disposable mail capture did not succeed");
+  }
+  // The fetch signal's ten-second deadline also covers reads. Bound bytes before
+  // decoding/parsing so even an unexpected response cannot collect a large mail.
+  const reader = response.body.getReader();
+  const chunks = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      check(
+        bytes <= 262_144,
+        "Disposable mail response exceeds its byte limit",
+      );
+      chunks.push(value);
+    }
+    return json(Buffer.concat(chunks, bytes).toString("utf8"));
+  } catch {
+    await reader.cancel().catch(() => {});
+    throw new Error(
+      "Invalid or incomplete disposable mail response; details redacted",
+    );
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function exactRecipient(message, recipient) {
+  return (
+    Array.isArray(message?.To) &&
+    message.To.length === 1 &&
+    message.To[0]?.Address === recipient &&
+    (message.Cc?.length ?? 0) === 0 &&
+    (message.Bcc?.length ?? 0) === 0
+  );
+}
+
+async function mailedRecoveryCallback(recipient, supabase, redirectTo) {
+  check(
+    /^composed-teacher-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}@example\.invalid$/u.test(
+      recipient,
+    ),
+    "Recovery capture requires the run-owned synthetic recipient",
+  );
+  const search = new URL("/api/v1/search", MAILPIT_ORIGIN);
+  search.searchParams.set("query", `to:${recipient}`);
+  search.searchParams.set("start", "0");
+  search.searchParams.set("limit", "2");
+  const initial = await mailpitJson(search);
+  check(
+    initial.messages_count === 0 &&
+      Array.isArray(initial.messages) &&
+      initial.messages.length === 0,
+    "Recovery capture requires an unused synthetic recipient mailbox",
+  );
+  // The PKCE-configured SDK generates S256 and holds its verifier in memory.
+  // The provider creates the flow and sends the untouched pkce_ credential.
+  await auth(() =>
+    supabase.auth.resetPasswordForEmail(recipient, { redirectTo }),
+  );
+  const deadline = Date.now() + 15_000;
+  let summary;
+  while (Date.now() < deadline) {
+    const result = await mailpitJson(search);
+    check(
+      Array.isArray(result.messages) &&
+        Number.isInteger(result.messages_count) &&
+        result.messages_count >= 0 &&
+        result.messages_count <= 1 &&
+        result.messages.length === result.messages_count,
+      "Recovery capture returned an ambiguous mailbox result",
+    );
+    if (result.messages_count === 1) {
+      summary = result.messages[0];
+      break;
+    }
+    await delay(200);
   }
   check(
-    action.origin === API_ORIGIN &&
-      action.pathname === "/auth/v1/verify" &&
-      action.searchParams.get("type") === "recovery" &&
-      !action.username &&
-      !action.password &&
-      !action.hash,
-    "Recovery action is outside the pinned provider verification route",
+    exactRecipient(summary, recipient) &&
+      typeof summary.ID === "string" &&
+      /^[A-Za-z0-9_-]{1,80}$/u.test(summary.ID),
+    "Recovery mail was not captured for the exact synthetic recipient",
+  );
+  const message = await mailpitJson(
+    new URL(`/api/v1/message/${summary.ID}`, MAILPIT_ORIGIN),
+  );
+  check(
+    message.ID === summary.ID &&
+      exactRecipient(message, recipient) &&
+      typeof message.HTML === "string" &&
+      message.HTML.length < 100_000,
+    "Recovery mail detail did not match its synthetic recipient",
+  );
+  const links = [
+    ...message.HTML.matchAll(
+      /<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')[^>]*>/giu,
+    ),
+  ];
+  check(links.length === 1, "Recovery mail omitted its unique provider action");
+  // recovery-v1.html intentionally mails an inert frontend callback. Decode
+  // HTML escaping only and never fetch that callback or alter its credential.
+  const callbackText = (links[0][1] ?? links[0][2]).replaceAll("&amp;", "&");
+  let callback;
+  try {
+    callback = new URL(callbackText);
+  } catch {
+    throw new Error("Invalid mailed recovery callback; details redacted");
+  }
+  const fragment = new URLSearchParams(callback.hash.slice(1));
+  const tokenHash = fragment.get("token_hash");
+  check(
+    /^pkce_[0-9a-f]{56}$/u.test(tokenHash ?? "") &&
+      callbackText === `${redirectTo}#token_hash=${tokenHash}&type=recovery` &&
+      callback.href === callbackText &&
+      callback.origin === WEB_ORIGIN &&
+      !callback.username &&
+      !callback.password,
+    "Mailed recovery callback differs from the exact inert application route",
+  );
+  return callbackText;
+}
+
+// Genuine local SMTP PKCE recovery. External email delivery and browser callback
+// handling remain separate evidence; the provider owns all flow/session state.
+export async function recoverySession(recipient, supabase) {
+  // Same route shape as the application. These run-owned callback identifiers
+  // are independent of the SDK's secret PKCE verifier, which stays in memory.
+  const flow = randomBytes(16).toString("base64url");
+  const state = randomBytes(32).toString("base64url");
+  const redirectTo = `${WEB_ORIGIN}/?auth=recovery&flow=${flow}&state=${state}`;
+  const mailedCallback = await mailedRecoveryCallback(
+    recipient,
+    supabase,
+    redirectTo,
+  );
+  let action;
+  let installed;
+  let scrubs = 0;
+  const callbackOptions = {
+    backendOrigin: API_ORIGIN,
+    route: { origin: WEB_ORIGIN, pathname: "/" },
+    history: {
+      replaceState(data, unused, url) {
+        check(
+          data === null && unused === "" && url === "/",
+          "Recovery callback did not scrub its sensitive route",
+        );
+        scrubs += 1;
+      },
+    },
+    navigate(url) {
+      let parsed;
+      try {
+        parsed = new URL(url);
+      } catch {
+        throw new Error("Invalid provider navigation; details redacted");
+      }
+      check(
+        action === undefined &&
+          url.startsWith(`${API_ORIGIN}/auth/v1/verify?`) &&
+          parsed.href === url &&
+          parsed.origin === API_ORIGIN &&
+          parsed.pathname === "/auth/v1/verify" &&
+          !parsed.username &&
+          !parsed.password &&
+          !parsed.hash,
+        "Recovery navigation is outside the canonical loopback provider route",
+      );
+      action = parsed;
+    },
+    async exchange(input) {
+      check(
+        installed === undefined &&
+          input.flowId === flow &&
+          input.state === state,
+        "Recovery code callback did not preserve the requested flow and state",
+      );
+      installed = await auth(() =>
+        supabase.auth.exchangeCodeForSession(input.authorizationCode),
+      );
+    },
+  };
+  const prepared = prepareStaffRecoveryCallback(
+    mailedCallback,
+    callbackOptions,
+  );
+  check(
+    prepared.status === "confirmation_required" && action === undefined,
+    "Mailed recovery callback did not require explicit confirmation",
+  );
+  const confirmed = await prepared.confirm();
+  check(
+    confirmed.status === "redirecting" && action !== undefined,
+    "Recovery confirmation did not prepare provider verification",
   );
   let response;
   try {
@@ -438,35 +649,27 @@ export async function recoverySession(admin, recipient, supabase) {
     throw new Error("Recovery verification did not complete; details redacted");
   }
   check(
-    response.status >= 300 && response.status < 400,
-    "Provider recovery GET did not return a session redirect",
+    response.status === 303,
+    "Provider PKCE recovery GET did not return its code redirect",
   );
-  let redirect;
-  try {
-    redirect = new URL(response.headers.get("location"));
-  } catch {
-    throw new Error("Malformed recovery redirect; details redacted");
-  }
+  const redirect = response.headers.get("location");
   await response.body?.cancel();
-  // Inspect only; never follow the redirect or persist its fragment.
-  const fragment = new URLSearchParams(redirect.hash.slice(1));
+  // Inspect only; never follow the inert SiteURL or persist the callback/code.
+  const completed = prepareStaffRecoveryCallback(redirect, callbackOptions);
   check(
-    fragment.get("type") === "recovery" &&
-      fragment.has("access_token") &&
-      fragment.has("refresh_token"),
-    "Provider recovery GET omitted its session",
+    completed.status === "exchange_required" && installed === undefined,
+    "Provider PKCE code callback was not accepted by the application parser",
   );
-  const installed = await auth(() =>
-    supabase.auth.setSession({
-      access_token: fragment.get("access_token"),
-      refresh_token: fragment.get("refresh_token"),
-    }),
+  const exchanged = await completed.exchange();
+  check(
+    exchanged.status === "accepted" && installed !== undefined && scrubs === 2,
+    "Application recovery callback did not exchange its real provider code",
   );
   check(
     sessionClaims(installed.session).amr?.some(
       (claim) => claim.method === "recovery",
     ) === true,
-    "Actual provider session lacks recovery AMR",
+    "Actual provider PKCE session lacks recovery AMR",
   );
   return installed.session;
 }

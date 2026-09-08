@@ -111,7 +111,7 @@ Deno.test(
                 fixture_valid: true,
                 fixture_version: "internal-baseline-v2",
                 migration_set_sha256:
-                  "8d5fd99304ce8bbf9524dfb788080f890ab84565c096a8e6d4faf437a9b734dc",
+                  "e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a",
                 schema_generation: 4,
               },
             ]),
@@ -181,7 +181,7 @@ Deno.test(
                     fixture_valid: true,
                     fixture_version: "internal-baseline-v2",
                     migration_set_sha256:
-                      "8d5fd99304ce8bbf9524dfb788080f890ab84565c096a8e6d4faf437a9b734dc",
+                      "e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a",
                     schema_generation: 4,
                   },
                 ]),
@@ -346,7 +346,7 @@ Deno.test(
                   fixture_valid: true,
                   fixture_version: "internal-baseline-v2",
                   migration_set_sha256:
-                    "8d5fd99304ce8bbf9524dfb788080f890ab84565c096a8e6d4faf437a9b734dc",
+                    "e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a",
                   schema_generation: 4,
                 },
               ]),
@@ -387,7 +387,7 @@ Deno.test(
                 fixture_valid: true,
                 fixture_version: "internal-baseline-v2",
                 migration_set_sha256:
-                  "8d5fd99304ce8bbf9524dfb788080f890ab84565c096a8e6d4faf437a9b734dc",
+                  "e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a",
                 schema_generation: 4,
               },
             ]),

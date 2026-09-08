@@ -26,8 +26,9 @@ import {
   stepUp,
 } from "./staff-auth-loopback.mjs";
 
-// Source-handler integration with real GoTrue/PostgREST. Only the mail transport
-// is in memory; this does not attest deployed Edge, email delivery, or browser UI.
+// Source-handler integration with real GoTrue/PostgREST. Invitation mail uses an
+// in-memory transport; PKCE recovery mail reaches the disposable local SMTP sink.
+// This does not attest deployed Edge, external email delivery, or browser UI.
 test(
   "real provider composes invitation, recovery, and revocation",
   { timeout: 180_000 },
@@ -300,25 +301,53 @@ commit;`);
     );
 
     await t.test(
-      "real recovery AMR stays denied; a lost password response is reconciled by fresh sign-in",
+      "real PKCE recovery AMR stays denied; a lost password response is reconciled by fresh sign-in",
       async () => {
         let dropped = false;
-        const recovery = client(publishableKey, async (input, init) => {
-          const response = await loopbackFetch(input, init);
-          if (
-            !dropped &&
-            new URL(input instanceof Request ? input.url : input).pathname ===
-              "/auth/v1/user" &&
-            init?.method === "PUT" &&
-            response.ok
-          ) {
-            dropped = true;
-            await response.body?.cancel();
-            throw new Error("Synthetic lost password-update response");
-          }
-          return response;
-        });
-        await recoverySession(admin, teacherEmail, recovery);
+        let sentS256Recovery = false;
+        const recovery = client(
+          publishableKey,
+          async (input, init) => {
+            if (
+              new URL(input instanceof Request ? input.url : input).pathname ===
+              "/auth/v1/recover"
+            ) {
+              let body;
+              try {
+                body = JSON.parse(init?.body);
+              } catch {
+                throw new Error("Malformed recovery request; details redacted");
+              }
+              check(
+                init?.method === "POST" &&
+                  body.email === teacherEmail &&
+                  body.code_challenge_method === "s256" &&
+                  /^[A-Za-z0-9_-]{43}$/u.test(body.code_challenge ?? ""),
+                "Real recovery request did not use the expected S256 challenge",
+              );
+              sentS256Recovery = true;
+            }
+            const response = await loopbackFetch(input, init);
+            if (
+              !dropped &&
+              new URL(input instanceof Request ? input.url : input).pathname ===
+                "/auth/v1/user" &&
+              init?.method === "PUT" &&
+              response.ok
+            ) {
+              dropped = true;
+              await response.body?.cancel();
+              throw new Error("Synthetic lost password-update response");
+            }
+            return response;
+          },
+          "pkce",
+        );
+        await recoverySession(teacherEmail, recovery);
+        check(
+          sentS256Recovery,
+          "Recovery did not exercise the real S256 request",
+        );
         code(await rpc(recovery, "current_staff_context"), "forbidden");
         const started = await rpc(recovery, "begin_staff_password_recovery", {
           requested_operation_id: randomUUID(),

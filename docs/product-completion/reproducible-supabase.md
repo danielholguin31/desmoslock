@@ -42,6 +42,7 @@ health function, and operator modules in this repository are the authority.
 - `supabase/migrations/20260903000200_staff_auth_generation_4.sql`
 - `supabase/migrations/20260907000100_staff_auth_callback_completion.sql`
 - `supabase/migrations/20260907000200_runtime_owner_bootstrap.sql`
+- `supabase/migrations/20260907000300_membership_revocation_authority.sql`
 - `supabase/seed.sql`
 - `supabase/config.toml`
 - `supabase/functions/deno.json`
@@ -58,7 +59,7 @@ The fixture contract is generation `4`, version `internal-baseline-v2`, with
 SHA-256
 `f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201`.
 The exact discovered migration file set has normalized SHA-256
-`8d5fd99304ce8bbf9524dfb788080f890ab84565c096a8e6d4faf437a9b734dc`.
+`e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a`.
 The published generation-3 migration retains its contemporaneous digest
 `06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49`;
 the original generation-4 migration likewise retains
@@ -67,12 +68,16 @@ The callback-completion migration retains its five-file digest
 `1b499b73aca1ff812cbc244f9eb9908e8dad839ecc6befbcb1a496865a2d5f52`
 and raw SHA-256
 `79ab31e822b4f04f4148c50bb98446210a37d975a646119b42d78fe1349a8862`.
-Only the runtime-Owner-bootstrap migration records the current aggregate. Its
-raw SHA-256 is
+The runtime-Owner-bootstrap migration retains its six-file digest
+`8d5fd99304ce8bbf9524dfb788080f890ab84565c096a8e6d4faf437a9b734dc`
+and raw SHA-256
 `43527d889ae0823057bba8ab7b4ed97eb9603220658c59c56cfda70889af75c9`.
+Only the Membership-revocation-authority migration records the current aggregate.
+Its raw SHA-256 is
+`9c59c0192b4f960f925db8c64be1c7b2aa6843591d6214a98b29c2bac5a326ad`.
 The repository contract pins each attested migration's raw SHA-256 and literal
-independently, then zeroes only those four delimited self-references when deriving
-the six-file aggregate. The follow-on migration updates the existing singleton
+independently, then zeroes only those five delimited self-references when deriving
+the seven-file aggregate. The follow-on migration updates the existing singleton
 attestation without changing schema generation `4` or the seven-table fixture;
 the upgrade path does not depend on rewriting or replaying historical migrations.
 The seed takes a transaction advisory lock, refuses altered or partial targets,
@@ -94,6 +99,13 @@ npm run db:reset
 npm run test:db
 npm run db:stop
 ```
+
+The full staff-auth CI lane enables the pinned CLI's disposable Mailpit service
+for actual PKCE recovery mail capture. The harness uses the numeric loopback
+Mailpit API and only its run-owned recipient, retaining message bodies, PKCE
+verifiers and provider credentials in memory. This is a local test mail sink,
+not hosted SMTP or external delivery evidence. A loopback client URL does not
+by itself prove that Docker publishes the service only on a loopback interface.
 
 The Edge and client suites do not require the live stack:
 

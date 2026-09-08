@@ -125,9 +125,11 @@ export function verifyCiContract(repositoryRoot) {
   );
   if (
     rootPackage.scripts?.["test:staff-auth"] !==
-      "npm run test:db && npm run test:staff-auth:stack && npm run test:edge && npm run test:unit && npm run test:staff-auth:composed" ||
+      "npm run test:db && npm run test:staff-auth:stack && npm run test:staff-auth:locks && npm run test:edge && npm run test:unit && npm run test:staff-auth:composed" ||
     rootPackage.scripts?.["test:staff-auth:composed"] !==
       "node --test tests/acceptance/staff-auth-composed.test.mjs" ||
+    rootPackage.scripts?.["test:staff-auth:locks"] !==
+      "node --test tests/acceptance/revoke-membership-lock.test.mjs" ||
     rootPackage.scripts?.["db:start:full"] !==
       "node scripts/run-local-supabase.mjs start-full" ||
     rootPackage.scripts?.["test:staff-auth:stack"] !==
@@ -140,6 +142,7 @@ export function verifyCiContract(repositoryRoot) {
     );
   }
   readText(repositoryRoot, "tests/acceptance/staff-auth-stack.test.mjs");
+  readText(repositoryRoot, "tests/acceptance/revoke-membership-lock.test.mjs");
   readText(repositoryRoot, "tests/acceptance/staff-auth-composed.test.mjs");
   readText(repositoryRoot, "tests/acceptance/staff-auth-loopback.mjs");
   readText(repositoryRoot, "scripts/run-local-supabase.mjs");

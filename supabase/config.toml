@@ -24,7 +24,7 @@ enabled = false
 port = 54323
 
 [local_smtp]
-enabled = false
+enabled = true
 port = 54324
 
 [storage]

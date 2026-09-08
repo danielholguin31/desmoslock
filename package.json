@@ -27,7 +27,7 @@
     "test:clean-build": "node --test tests/acceptance/clean-build.test.mjs",
     "test:unit": "npm run build:packages && vitest run",
     "test:repository": "npm run test:clean-build && node --test tests/repository-contract.test.mjs tests/acceptance/required-check-probe.test.mjs tests/acceptance/unsupported-surfaces.test.mjs tests/acceptance/license-policy.test.mjs tests/acceptance/legacy-packaging.test.mjs tests/acceptance/synthetic-backup.test.mjs tests/acceptance/postgres-backup-adapter.test.mjs tests/acceptance/local-supabase-output.test.mjs",
-    "test:staff-auth": "npm run test:db && npm run test:staff-auth:stack && npm run test:edge && npm run test:unit && npm run test:staff-auth:composed",
+    "test:staff-auth": "npm run test:db && npm run test:staff-auth:stack && npm run test:staff-auth:locks && npm run test:edge && npm run test:unit && npm run test:staff-auth:composed",
     "test:staff-auth:stack": "node --test tests/acceptance/staff-auth-stack.test.mjs",
     "test:evidence": "npm run build:packages && node scripts/run-release-evidence.mjs",
     "db:start": "node scripts/run-local-supabase.mjs start-minimal",
@@ -51,7 +51,8 @@
     "verify:packages": "node scripts/verify-packages.mjs",
     "verify:repository": "node scripts/verify-repository-contract.mjs",
     "verify:required-check-probe": "node scripts/verify-required-check-probe.mjs",
-    "test:staff-auth:composed": "node --test tests/acceptance/staff-auth-composed.test.mjs"
+    "test:staff-auth:composed": "node --test tests/acceptance/staff-auth-composed.test.mjs",
+    "test:staff-auth:locks": "node --test tests/acceptance/revoke-membership-lock.test.mjs"
   },
   "devDependencies": {
     "@electron/fuses": "^2.1.3",

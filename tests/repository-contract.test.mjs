@@ -399,11 +399,13 @@ test("v2 data plane is migration-owned and clean-start only", () => {
     "supabase/migrations/20260903000200_staff_auth_generation_4.sql",
     "supabase/migrations/20260907000100_staff_auth_callback_completion.sql",
     "supabase/migrations/20260907000200_runtime_owner_bootstrap.sql",
+    "supabase/migrations/20260907000300_membership_revocation_authority.sql",
     "supabase/seed.sql",
     "supabase/tests/database/internal_release_backend.test.sql",
     "supabase/tests/database/staff_auth_generation_4.test.sql",
     "supabase/tests/database/staff_auth_callback_completion.test.sql",
     "supabase/tests/database/runtime_owner_bootstrap.test.sql",
+    "supabase/tests/database/membership_revocation_authority.test.sql",
     "supabase/tests/database/staff_auth_lifecycle.test.sql",
     "supabase/tests/database/v2_foundation.test.sql",
   ]) {
@@ -584,9 +586,15 @@ test("generation-4 attests the exact normalized migration history", () => {
         "79ab31e822b4f04f4148c50bb98446210a37d975a646119b42d78fe1349a8862",
     },
     "20260907000200_runtime_owner_bootstrap.sql": {
-      migrationSetSha256: expectedMigrationSetSha256,
+      migrationSetSha256:
+        "8d5fd99304ce8bbf9524dfb788080f890ab84565c096a8e6d4faf437a9b734dc",
       rawSha256:
         "43527d889ae0823057bba8ab7b4ed97eb9603220658c59c56cfda70889af75c9",
+    },
+    "20260907000300_membership_revocation_authority.sql": {
+      migrationSetSha256: expectedMigrationSetSha256,
+      rawSha256:
+        "9c59c0192b4f960f925db8c64be1c7b2aa6843591d6214a98b29c2bac5a326ad",
     },
   });
   assert.doesNotThrow(() => assertMigrationSetAttestation(migrations));
@@ -610,6 +618,7 @@ test("generation-4 attests the exact normalized migration history", () => {
     "20260828000100_internal_release_backend.sql",
     "20260903000200_staff_auth_generation_4.sql",
     "20260907000100_staff_auth_callback_completion.sql",
+    "20260907000200_runtime_owner_bootstrap.sql",
   ]) {
     assert.throws(
       () =>
@@ -646,7 +655,7 @@ test("generation-4 attests the exact normalized migration history", () => {
       assertMigrationSetAttestation(
         migrations.map(([fileName, source]) => [
           fileName,
-          fileName === "20260907000200_runtime_owner_bootstrap.sql"
+          fileName === "20260907000300_membership_revocation_authority.sql"
             ? source.replace(expectedMigrationSetSha256, "0".repeat(64))
             : source,
         ]),
@@ -692,6 +701,19 @@ test("staff Auth schema and composed journeys have a required disposable CI lane
     "node --test tests/acceptance/staff-auth-composed.test.mjs",
   );
   assert.equal(
+    rootPackage.scripts?.["test:staff-auth:locks"],
+    "node --test tests/acceptance/revoke-membership-lock.test.mjs",
+  );
+  assert.equal(
+    fs.existsSync(
+      path.join(
+        repositoryRoot,
+        "tests/acceptance/revoke-membership-lock.test.mjs",
+      ),
+    ),
+    true,
+  );
+  assert.equal(
     rootPackage.scripts?.["db:start:full"],
     "node scripts/run-local-supabase.mjs start-full",
   );
@@ -702,7 +724,7 @@ test("staff Auth schema and composed journeys have a required disposable CI lane
 
   assert.equal(
     rootPackage.scripts?.["test:staff-auth"],
-    "npm run test:db && npm run test:staff-auth:stack && npm run test:edge && npm run test:unit && npm run test:staff-auth:composed",
+    "npm run test:db && npm run test:staff-auth:stack && npm run test:staff-auth:locks && npm run test:edge && npm run test:unit && npm run test:staff-auth:composed",
   );
   assert.equal(
     rootPackage.scripts?.["test:edge"],
