@@ -23,6 +23,7 @@ const expectedOutputs = [
   "apps/desktop/dist/renderer.js",
   "apps/desktop/dist/styles.css",
   "apps/web/dist/auth/staff-auth.css",
+  "apps/web/dist/school-settings/school-settings.css",
   "apps/web/dist/main.js",
   "packages/contracts/dist/index.js",
   "packages/domain/dist/index.js",

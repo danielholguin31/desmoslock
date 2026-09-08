@@ -1,0 +1,78 @@
+{
+  "date": "2026-09-08",
+  "base": "a2143701541303293ca2c93ffcdf0e035218305f",
+  "head": "f66fcba0eef58738947aaf5c6c0561db6770f66e",
+  "run_id": "school-display-name-f66fcba-v1",
+  "source_files_sha256": {
+    "apps/web/package.json": "f389e1451e20700a089cf89f4d140101afbd33419f59134eb9cdf6bb93618d56",
+    "apps/web/src/auth/index.ts": "a276fd7413b43d1e38db08630a2f30c1d292dc762b7254fc5b3d00ee5cdcedc9",
+    "apps/web/src/auth/staff-auth-application.ts": "bb0c50afe937aaa9b3f2c517b48190130a02c09a18d4c88e98f716c26cd7280b",
+    "apps/web/src/auth/staff-auth-callback.ts": "8d08652e58d1bcc2dc06c6c2bc6fe4de24f4ac6f5092871628ea3aa8ce173623",
+    "apps/web/src/auth/staff-auth-controller.ts": "79a5f5e5690af3f6d0938e63d4ef2ed3748eee382a3f39e9b30eb828baa6648f",
+    "apps/web/src/auth/staff-auth-view.ts": "abec10831dd737318d72bee43f4270dda2d0d545370d99949ec74d2a3e56c822",
+    "apps/web/src/auth/staff-auth.css": "cada4ca8d718c0afe802fa01c9ee984aad4150b843b69a157b03d7aa54d92b84",
+    "apps/web/src/auth/staff-product-access.ts": "d407d50d525a50256806914af7f163007695f5884e01b5fb3a7afa855fb16a74",
+    "apps/web/src/auth/staff-recovery-flow-store.ts": "102add1a4ecfe20851d9e0190d7c08ee9ab9a0a00ffa6660fc2df2f9810118f3",
+    "apps/web/src/auth/supabase-staff-auth-adapter.ts": "f2190056de00f831073941ada8e4c86399dedea1c27c09b40e7c3b7d52affd31",
+    "apps/web/src/auth/supabase-staff-auth-port.ts": "442f46583c2ce08b1c4527281c1f9bce8cb5eb2e21c23ebec13b9c458b0b4788",
+    "apps/web/src/backend-status.ts": "88ecdd5afd3bdea0d81dda1d36f4462b7a47b55f759fb4b0a4d903b7abc97aec",
+    "apps/web/src/index.html": "e388f22f4632d490317a8022d36c6e64ee22f4b8efbe17364213855d6b0da36d",
+    "apps/web/src/main.ts": "f44dc6abaf74d6ac79d79a0a5f343062982d54d87aabecda4e1fb51b196e8e65",
+    "apps/web/src/public-config.ts": "4bb95d8f57fa8fdcdcf1ef0d7cb14ae9e7bd1bb68b95b02eed4967520b3ee8b0",
+    "apps/web/src/school-settings/school-settings-controller.ts": "c5c57ae300d0d1f7cda1d32cf37e2450b9585706810b2772b594608a062a15cb",
+    "apps/web/src/school-settings/school-settings-view.ts": "671fb0818996f3c8f7134aef6bc50b119ae5779576b29025c3e776e59b4105d1",
+    "apps/web/src/school-settings/school-settings.css": "59a685ee14e1f4a6b35b3a929bef345f24ff65361d39b79a27adffba4ca6d2ba",
+    "apps/web/src/styles.css": "12069927652bf63589de05733ac199ed9935351b169bbdd23692df3ba03cb395",
+    "apps/web/tsconfig.json": "96c84921725cbf098da90748f3805869d72773a2cf83367759c7eb84e99cf615",
+    "package-lock.json": "0a9eedd02e52e924330977926fd4a074f86c0c6438d64ee624a737ae30979446",
+    "package.json": "19e6c4855e06ce743b3fb4f151606ec1154188560e955bfbba5023c65488290c",
+    "packages/contracts/src/backend-observation.ts": "34f9358dc0d7eaa4ac75fbf5ff61d9e9f8c1c7ef83c93fa0a2f16b26110b2a26",
+    "packages/contracts/src/exact-record.ts": "0d36ea8490282b02f5e769aa9290ee2c9212b396a7badf705aad6876c81fd21c",
+    "packages/contracts/src/gatekeeper-acceptance.ts": "c95497cabe8f457f880e21d1169e4573057cbb3152ec4ad712825dd77dd2872a",
+    "packages/contracts/src/index.ts": "47b3e2bbead6bc6157d4e5b2996fa2de5d25d019fc38e46fa87fc9d4172210cf",
+    "packages/contracts/src/release-provenance.ts": "eb8615096acaf8485a31518e1794f633a0e1b5947972971d49305c55faa702cb",
+    "packages/contracts/src/school-settings.ts": "20993b91077688fed16102f80f12c60205fbd9c4ef9c96511948a8b79bfa42b0",
+    "packages/contracts/src/staff-auth.ts": "38803312c553448154f9182eef8f743f5645bcf9625e7a5d7763601e07319121",
+    "packages/domain/src/index.ts": "4be779d1b4e0c391927bfe41094cb5e2ae02772f96bf88f2b2628bd23aa483d5",
+    "packages/domain/src/staff-auth.ts": "e438faca896b5b1805fc4f989e54fc88aa7d8dced8b04a1bab7ebf837f26a581",
+    "packages/domain/src/student-session.ts": "f3a9fcd40ebce001515795665d899e59dcd020c9ec22ac4c4c5890ef07630144",
+    "scripts/build-app.mjs": "8741f58290f31b00ba6cd2ef2105ff177e4ddf46f5094722d2c6de768891da3e",
+    "tsconfig.base.json": "e4278c06020a4d26797318ef45126018eaa2a08e41b75d1d28c9e15179417b38"
+  },
+  "compiled_workspace_files_sha256": {
+    "packages/contracts/dist/backend-observation.js": "721baf3165ed89b4912619864134c89fe4f58214c820ac36962cd5fa23449280",
+    "packages/contracts/dist/exact-record.js": "64dad19afa361f3ad1f2af757105f5470e58eafaee67066ea9620d545b8be5b6",
+    "packages/contracts/dist/gatekeeper-acceptance.js": "03cb5a734fe1cee0e219175e33f71706b7f04954ab6fbcbd20c85638009e8e61",
+    "packages/contracts/dist/index.js": "cef1f5402a1c9eb38370427d232b52c658370ce2a0b37bcbf9c4f9312bf1eb57",
+    "packages/contracts/dist/release-provenance.js": "1e2e9f4e005b34efbf3d1410e9446bc164f2885c158c00e213ee977bbd6b0f61",
+    "packages/contracts/dist/school-settings.js": "0f5a1d3ee5e7df79ea00525950cafcdbdefefbfa9611fb7d8527c22c95547015",
+    "packages/contracts/dist/staff-auth.js": "ad8d478ee5e1e8aa845616f9776c6ce05b3f4a065fd4ad2dde4dd57fc52cc6f4",
+    "packages/domain/dist/index.js": "a33af0415d5b83a743e61b1e1566dfd48da2e9e87abf5fe595ba789cd0339071",
+    "packages/domain/dist/staff-auth.js": "008baf0db384fad7ee037305e469e09c11ed7a3bc1febf8bfbf2efae40f86d52",
+    "packages/domain/dist/student-session.js": "54a69b71d1b5874c8ffc91ccec3dc341c38aef3de3b833a076cbf9f7530e2982"
+  },
+  "web_build": "passed using exact Node24.20.0/npm11.12.1 and explicit repository synthetic local origins43173/43174 and synthetic publishable value; no providers or services contacted",
+  "build_configuration": {
+    "environment": "local",
+    "url": "http://127.0.0.1:43174",
+    "origin": "http://127.0.0.1:43173",
+    "publishableKey": "sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc"
+  },
+  "build_output_sha256": {
+    "apps/web/dist/auth/staff-auth.css": "cada4ca8d718c0afe802fa01c9ee984aad4150b843b69a157b03d7aa54d92b84",
+    "apps/web/dist/index.html": "e388f22f4632d490317a8022d36c6e64ee22f4b8efbe17364213855d6b0da36d",
+    "apps/web/dist/main.js": "6cbaa629b6a398360b7a118a3f5de7309bb5744266da717c3ac5ae141d10fe00",
+    "apps/web/dist/main.js.map": "b30dca09ce1b68c2a90141035395019aecfcce2e9b0647d3a4fb0f534fbdebad",
+    "apps/web/dist/school-settings/school-settings.css": "59a685ee14e1f4a6b35b3a929bef345f24ff65361d39b79a27adffba4ca6d2ba",
+    "apps/web/dist/styles.css": "12069927652bf63589de05733ac199ed9935351b169bbdd23692df3ba03cb395"
+  },
+  "css_asset_verification": {
+    "root_stylesheet_imports": [
+      "./auth/staff-auth.css",
+      "./school-settings/school-settings.css"
+    ],
+    "both_dist_files_equal_source": true,
+    "actual_browser_load": "pending root manifest gate and Banksy QA"
+  },
+  "scope": "Frozen production-entrypoint application, contracts/domain inputs and local compiled modules for synthetic browser QA. The nine-migration actual-provider/SQL/observed-lock/live-backend browser/restored-target suite remains pending exact-commit CI. No web build or source mutation may run during QA."
+}

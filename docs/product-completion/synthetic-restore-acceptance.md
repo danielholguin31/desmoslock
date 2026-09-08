@@ -1,9 +1,10 @@
 # Disposable synthetic restore acceptance
 
 This source tranche adds a required real backup/restore gate for the internal
-baseline. CI has completed the real TLS/export/restore checks, then stopped in
-the staff suite because the fixture retained its temporary restore marker.
-The marker-retirement correction and full runtime acceptance remain pending.
+baseline. The corrected eight-migration baseline passed the real TLS/export/
+restore checks and full staff suite on both source `5b5722b` and merged main
+`73d8b8a`; exact run links and the sanitized receipt are recorded below.
+The current nine-migration School settings extension requires a new runtime run.
 The existing hosted staging project and legacy deployment restrictions remain
 separate from this disposable CI lane.
 
@@ -43,8 +44,9 @@ The exact pinned PostgreSQL image uses Alpine/Nix and does not guarantee a host
 Node loader, Python or discoverable OpenSSL CLI. Keeping Node/Python on the host
 resolves the former mismatch. An absent in-image OpenSSL executable fails the
 TLS-generation stage; there is no installation, extra image, host private-key
-generation or TLS downgrade fallback. The source DB/Auth-only topology also
-requires real CI confirmation.
+generation or TLS downgrade fallback. The source DB/Auth-only topology was
+confirmed by the successful baseline CI runs below; future image or topology
+changes still require real execution.
 
 ## Acceptance observations
 
@@ -193,12 +195,56 @@ The corrected runtime SHA256 is
 `c570c53fab0c3ff84e6ae1cf0f4ac4748e4a592665bd81312b081f1eec044e35`.
 All 118 existing focused operator/adapter/helper cases, scoped ESLint, Prettier,
 Secretlint and whitespace checks passed. Those local checks do not execute the
-new retirement SQL; this correction still requires CI execution.
+new retirement SQL; at that checkpoint this correction still required CI execution.
 
-Actual disposable runtime acceptance remains pending until the required CI job
-passes at the corrected source. A passing local roundtrip will not prove hosted
-staging migration/export, delivered hosted email or packaged desktop staging
-acceptance.
+Actual disposable runtime acceptance was pending at this second-run checkpoint.
+The completed run below supersedes that status while preserving these historical
+observations.
+
+## Corrected source and merged-main acceptance
+
+[Source verification run 34189874469](https://github.com/danielholguin31/desmoslock/actions/runs/34189874469)
+and [source security run 34189874479](https://github.com/danielholguin31/desmoslock/actions/runs/34189874479)
+passed at exact commit `5b5722b20a87961663f6680efe34a0497e739ea1`.
+[PR 56](https://github.com/danielholguin31/desmoslock/pull/56) merged as
+`73d8b8ade195db445bbd5e0d5877b00ede9a2683`, with the identical tree
+`eb6eea68514ed08c2b53f91349ee48c24c1ec0d8`.
+[Merged-main verification 34190379428](https://github.com/danielholguin31/desmoslock/actions/runs/34190379428)
+and [merged-main security 34190379415](https://github.com/danielholguin31/desmoslock/actions/runs/34190379415)
+also passed, including the complete restored-target suite. All twelve jobs
+passed on both source and main.
+
+The source run emitted this bounded nonsecret receipt:
+
+```json
+{
+  "status": "restored",
+  "artifactSha256": "91216153b214209a0f81af206118d7f2cbf13cf4d9f5e7ae49b2c90d9c1b09dd",
+  "manifestSha256": "1acc86336a8b0c860f134e4cfb25ca9e4250c0ca3c9039473a354dab8e21638b",
+  "migrationSetSha256": "7c3e7403b61d5c66123b15d2fe4de28ee2259d71a304ce8695d16630f5353a56",
+  "fixtureDigest": "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
+  "tlsVerified": true,
+  "invalidCaRejected": true,
+  "distinctClusters": true,
+  "secondRestoreRefused": true,
+  "restoreMarkerRetired": true,
+  "staffAuthSuiteOnRestoredTarget": true
+}
+```
+
+The complete unchanged staff suite passed on the restored target without reset
+or reseed. Nested output is deliberately withheld, so no unobserved restored
+subtest counts are claimed. The separate fresh database job reported 509 tests
+across eight files. Cleanup completed without a failure suffix.
+
+These receipts attest the eight-migration Membership baseline. The School
+settings branch retains that runtime harness and adds a ninth migration whose
+current aggregate is
+`9264f3b4933e4f1bb207d5a1a130ab0b3edafea787ac37fb25268b09afba2538`.
+Its SQL, competing writes, School browser journeys and restored-target acceptance
+remain pending exact-commit CI. Neither baseline CI nor the School local source
+checks prove hosted staging migration/export, delivered hosted email or packaged
+desktop staging acceptance.
 
 Primary implementation references: [pinned CLI image list](https://raw.githubusercontent.com/supabase/cli/v2.115.0/apps/cli-go/pkg/config/templates/Dockerfile),
 [exact PostgreSQL image build](https://raw.githubusercontent.com/supabase/postgres/17.6.1.159/Dockerfile-17),

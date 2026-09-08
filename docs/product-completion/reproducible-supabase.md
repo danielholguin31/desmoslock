@@ -385,9 +385,14 @@ It exports the pristine fixture from one fresh cluster through the real
 `verify-full` staging-profile adapter, restores a separate empty migrated
 cluster, refuses a second restore, and runs the unchanged complete staff-auth
 suite without reseeding. This lane requires a fresh disposable CI runner and
-must not target an existing local or hosted database. Actual execution is
-pending; see [source, operation and evidence boundaries](synthetic-restore-acceptance.md)
-for the exact imported candidate, TLS prerequisites and cleanup contract.
+must not target an existing local or hosted database. The eight-migration
+baseline passed actual restore and the full restored-target staff suite on
+[source `5b5722b`](https://github.com/danielholguin31/desmoslock/actions/runs/34189874469)
+and [merged main `73d8b8a`](https://github.com/danielholguin31/desmoslock/actions/runs/34190379428).
+The current nine-migration School settings extension remains runtime-pending;
+those earlier runs do not attest its new schema or journeys. See
+[source, operation and evidence boundaries](synthetic-restore-acceptance.md)
+for the exact receipts, TLS prerequisites and cleanup contract.
 
 ## Remote staging acceptance gate
 

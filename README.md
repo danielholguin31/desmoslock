@@ -91,17 +91,22 @@ npm run db:stop
 CI now runs that complete lane inside the disposable
 [`test:backup:roundtrip` harness](docs/product-completion/synthetic-restore-acceptance.md),
 which first exports and restores the pristine fixture across distinct fresh
-clusters, then runs the staff-auth suite without reseeding. Real restore
-execution remains pending. CI owns startup and unconditional shutdown. The command verifies
+clusters, then runs the staff-auth suite without reseeding. The eight-migration
+baseline passed this real roundtrip on both
+[source `5b5722b`](https://github.com/danielholguin31/desmoslock/actions/runs/34189874469)
+and [merged main `73d8b8a`](https://github.com/danielholguin31/desmoslock/actions/runs/34190379428).
+The nine-migration School settings extension still requires its own exact-commit
+runtime run. CI owns startup and unconditional shutdown. The command verifies
 database schema/RPC lifecycle contracts, local Auth/PostgREST/health prerequisites,
 observed two-connection authorization races, Edge handler behavior, unit tests,
 then real-provider invitation, PKCE recovery and revocation journeys. The final
 composed suite requires a freshly reset stack;
 its append-only audit fixtures remain until the disposable stack is stopped or
 reset. CLI startup output is sanitized so generated local keys are not printed.
-This source candidate has not executed those database/provider journeys locally.
-Delivered email, actual browser journeys and hosted configuration remain separate
-acceptance gates. See
+The School settings candidate has not executed those database/provider journeys
+locally. The merged baseline includes an actual-entrypoint browser against the
+disposable backend; School rename browser/runtime coverage remains pending.
+Hosted email and configuration remain separate acceptance gates. See
 [`auth-integration-evidence.md`](docs/product-completion/auth-integration-evidence.md)
 for the selected contract, evidence limits and in-place rollout prerequisite.
 
