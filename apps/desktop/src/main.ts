@@ -5,8 +5,11 @@ import { fileURLToPath } from "node:url";
 import {
   app,
   BrowserWindow,
+  globalShortcut,
   ipcMain,
+  powerMonitor,
   protocol,
+  screen,
   session,
   safeStorage,
   type WebContents,
@@ -19,6 +22,10 @@ import {
 
 import { publicDesktopBackendConfiguration } from "./backend-status.js";
 import { calculatorScheme } from "./main/calculator-assets.js";
+import { createAssessmentProtectionCoordinator } from "./main/assessment-protection-coordinator.js";
+import { prepareElectronCalculatorSurface } from "./main/electron-calculator-surface.js";
+import { createElectronProtectionWindow } from "./main/electron-protection-window.js";
+import { createNativeProtectionAdapter } from "./main/native-protection-adapter.js";
 import { createTrustedShellWebPreferences } from "./main/hardened-web-preferences.js";
 import {
   assertPackagedLaunchPolicy,
@@ -147,9 +154,43 @@ let shellProtocolRegistered = false;
 let shellSessionPolicyInstalled = false;
 let nextShellGeneration = 1;
 let studentCoordinator: StudentSessionCoordinator | null = null;
+let protectionCoordinator: ReturnType<
+  typeof createAssessmentProtectionCoordinator
+> | null = null;
 let studentIpc: ReturnType<typeof createStudentSessionIpc> | null = null;
 let maintenanceTimer: ReturnType<typeof setInterval> | null = null;
 let quitting = false;
+let startupQuitRequested = false;
+const shellGenerations = new WeakMap<BrowserWindow, string>();
+const emergencyAccelerator = "Control+Alt+Shift+E";
+let shortcutOwned = false;
+
+function isTrustedWindow(window: BrowserWindow): boolean {
+  if (window !== mainWindow || window.isDestroyed()) return false;
+  const contents = window.webContents;
+  const generation = shellGenerations.get(window);
+  return (
+    generation !== undefined &&
+    !contents.isDestroyed() &&
+    !contents.mainFrame.isDestroyed() &&
+    contents.mainFrame.url === trustedShellUrl &&
+    studentIpc?.mayPublish(contents.id, generation) === true &&
+    shellProtocolRegistered &&
+    shellSessionPolicyInstalled
+  );
+}
+
+const protectionWindow = createElectronProtectionWindow({
+  getWindow: () => mainWindow,
+  isTrusted: isTrustedWindow,
+  onInvalidated: () => protectionCoordinator?.requestLocalEnd("window_lost"),
+});
+
+function closeActiveWindowGate(): void {
+  const phase = protectionCoordinator?.readView().protection.phase;
+  if (phase === "preflight" || phase === "engaging" || phase === "locked")
+    protectionCoordinator?.requestLocalEnd("window_lost");
+}
 
 // The old intent receipt never constitutes assessment protection.
 ipcMain.handle(trustedAssessmentLockChannel, () => ({
@@ -163,6 +204,10 @@ for (const channel of [
   studentSessionChannels.retry,
   studentSessionChannels.refresh,
   studentSessionChannels.forfeit,
+  studentSessionChannels.start,
+  studentSessionChannels.emergencyReview,
+  studentSessionChannels.emergencyCancel,
+  studentSessionChannels.emergencyConfirm,
 ]) {
   ipcMain.handle(
     channel,
@@ -172,6 +217,16 @@ for (const channel of [
 }
 app.on("second-instance", () => {
   if (mainWindow === null || mainWindow.isDestroyed()) return;
+  if (protectionCoordinator?.hasRetainedAttempt()) {
+    // Recovery presentation belongs to the owner that can confirm calculator
+    // teardown. A second launch cannot bypass an uncertain close by showing it.
+    if (mainWindow.isMinimized() || !mainWindow.isVisible())
+      protectionCoordinator.requestLocalEnd("window_lost");
+    else mainWindow.focus();
+    return;
+  }
+  if (mainWindow.isMinimized() || !mainWindow.isVisible())
+    closeActiveWindowGate();
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
@@ -199,15 +254,63 @@ async function initializeStudentSession(): Promise<void> {
     crypto,
     transport: createStudentSessionTransport(publicBackendConfiguration),
   });
-  studentIpc = createStudentSessionIpc(studentCoordinator);
   await studentCoordinator.initialize();
+  if (startupQuitRequested) return;
+  protectionCoordinator = createAssessmentProtectionCoordinator({
+    student: studentCoordinator,
+    native: createNativeProtectionAdapter(),
+    window: protectionWindow,
+    prepareCalculator: async () => {
+      const parent = mainWindow;
+      if (
+        parent === null ||
+        !isTrustedWindow(parent) ||
+        !protectionWindow.isReady()
+      )
+        throw new Error("Trusted calculator window unavailable");
+      return prepareElectronCalculatorSurface({
+        parent,
+        bounds: protectionWindow.calculatorBounds(),
+        outputDirectory: path.dirname(fileURLToPath(import.meta.url)),
+        onCleanupFailure: () =>
+          protectionCoordinator?.requestLocalEnd("window_lost"),
+      });
+    },
+    shortcuts: {
+      register(listener) {
+        if (shortcutOwned || globalShortcut.isRegistered(emergencyAccelerator))
+          return false;
+        shortcutOwned = globalShortcut.register(emergencyAccelerator, listener);
+        // Return the ownership acknowledgment; the coordinator independently
+        // checks current registration and still cleans up an acknowledged one.
+        return shortcutOwned;
+      },
+      isRegistered: () =>
+        shortcutOwned && globalShortcut.isRegistered(emergencyAccelerator),
+      unregister() {
+        if (!shortcutOwned) return;
+        globalShortcut.unregister(emergencyAccelerator);
+        if (globalShortcut.isRegistered(emergencyAccelerator))
+          throw new Error("Owned emergency shortcut restoration unconfirmed");
+        shortcutOwned = false;
+      },
+    },
+  });
+  studentIpc = createStudentSessionIpc(protectionCoordinator, () =>
+    protectionCoordinator?.requestLocalEnd("renderer_lost"),
+  );
   maintenanceTimer = setInterval(() => {
     if (
-      mainWindow !== null &&
-      !mainWindow.isDestroyed() &&
-      mainWindow.isVisible()
+      protectionCoordinator?.hasRetainedAttempt() ||
+      (mainWindow !== null &&
+        !mainWindow.isDestroyed() &&
+        mainWindow.isVisible())
     )
-      void studentCoordinator?.refresh();
+      void protectionCoordinator
+        ?.refresh()
+        .catch(() =>
+          protectionCoordinator?.requestLocalEnd("backend_unavailable"),
+        );
   }, 15_000);
 }
 
@@ -293,9 +396,11 @@ async function createWindow(): Promise<BrowserWindow> {
     denyByDefaultCapabilityPolicy,
   );
   const generation = `internal-shell-${nextShellGeneration++}`;
+  shellGenerations.set(window, generation);
   const contents = window.webContents;
   registerTrustedShell(contents, generation);
-  const unsubscribe = studentCoordinator?.subscribe((view) => {
+  const disposeZoomControls = protectionWindow.installZoomControls(window);
+  const unsubscribe = protectionCoordinator?.subscribe((view) => {
     if (
       !window.isDestroyed() &&
       !contents.isDestroyed() &&
@@ -305,21 +410,31 @@ async function createWindow(): Promise<BrowserWindow> {
     )
       contents.send(studentSessionChannels.changed, view);
   });
+  window.on("close", (event) => {
+    if (!protectionCoordinator?.hasRetainedAttempt()) return;
+    event.preventDefault();
+    protectionCoordinator.requestLocalEnd("window_lost");
+  });
+  window.on("minimize", closeActiveWindowGate);
+  window.on("hide", closeActiveWindowGate);
+  window.on("leave-full-screen", closeActiveWindowGate);
   window.once("closed", () => {
     unsubscribe?.();
+    disposeZoomControls();
     studentIpc?.revoke(contents.id);
     if (mainWindow === window) mainWindow = null;
   });
   try {
     await window.loadURL(trustedShellUrl);
     if (window.isDestroyed()) throw new Error("Desktop closed during startup");
-    // Admission is separate from native protection. Until a real protection
-    // adapter passes its gates, no calculator WebContentsView is attached.
+    // Loading the trusted shell never attaches calculator content. Only the
+    // explicit Start pipeline can attach after all private gates settle.
     mainWindow = window;
     window.show();
     return window;
   } catch (error) {
     unsubscribe?.();
+    disposeZoomControls();
     studentIpc?.revoke(contents.id);
     if (!window.isDestroyed()) window.destroy();
     throw error;
@@ -330,10 +445,26 @@ void app
   .whenReady()
   .then(async () => {
     await initializeStudentSession();
+    if (startupQuitRequested) return;
     await createWindow();
+    powerMonitor.on("suspend", () =>
+      protectionCoordinator?.requestLocalEnd("suspend"),
+    );
+    powerMonitor.on("resume", () =>
+      protectionCoordinator?.requestLocalEnd("suspend"),
+    );
+    const displayChanged = (): void =>
+      protectionCoordinator?.requestLocalEnd("display_changed");
+    screen.on("display-added", displayChanged);
+    screen.on("display-removed", displayChanged);
+    screen.on("display-metrics-changed", displayChanged);
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) {
-        void createWindow().catch(() => app.exit(1));
+        void createWindow().catch(() => {
+          if (protectionCoordinator?.hasRetainedAttempt())
+            protectionCoordinator.requestLocalEnd("window_lost");
+          else app.exit(1);
+        });
       }
     });
   })
@@ -346,14 +477,28 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", (event) => {
-  if (quitting || studentCoordinator === null) return;
+  if (studentCoordinator === null) return;
   event.preventDefault();
+  if (quitting) return;
   quitting = true;
-  if (maintenanceTimer !== null) clearInterval(maintenanceTimer);
-  // If drain fails, the native descriptor stays owned until app.exit releases
-  // it through process termination. No explicit close is forced on timeout.
-  void studentCoordinator.dispose().then(
-    () => app.exit(0),
-    () => app.exit(1),
+  if (protectionCoordinator === null) startupQuitRequested = true;
+  // Retained native ownership cannot be bypassed by a second quit request.
+  // The composed owner drains Student only after its own cleanup completes.
+  const shutdown =
+    protectionCoordinator === null
+      ? studentCoordinator
+          .dispose()
+          .then((complete) => (complete ? "complete" : "retained"))
+      : protectionCoordinator.shutdown();
+  void shutdown.then(
+    (outcome) => {
+      if (outcome === "complete") {
+        if (maintenanceTimer !== null) clearInterval(maintenanceTimer);
+        app.exit(0);
+      } else quitting = false;
+    },
+    () => {
+      quitting = false;
+    },
   );
 });

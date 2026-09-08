@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { StudentSessionViewState } from "@desmoslock/contracts";
 
+import type { DesktopStudentView } from "../src/assessment-protection-view-state.js";
+
 import { bindStudentSessionView } from "../src/student-session-view.js";
 
 class Element {
@@ -153,8 +155,8 @@ function state(
   phase: StudentSessionViewState["phase"] = "entry",
   revision = 1,
   overrides: Partial<StudentSessionViewState> = {},
-): StudentSessionViewState {
-  return {
+): DesktopStudentView {
+  const admission: StudentSessionViewState = {
     revision,
     phase,
     session:
@@ -170,6 +172,31 @@ function state(
     pendingOperation: null,
     ...overrides,
   };
+  const category = { status: "pending", code: "none" } as const;
+  return {
+    revision: admission.revision,
+    admission: {
+      phase: admission.phase,
+      session: admission.session,
+      pendingOperation: admission.pendingOperation,
+    },
+    protection: {
+      phase: "idle",
+      categories: {
+        aac: category,
+        shortcuts: category,
+        applications: category,
+        persistence: category,
+        windowNetwork: category,
+      },
+      calculatorVisible: false,
+      failure: null,
+      nativeEndObserved: false,
+      cleanup: "not_requested",
+      evidence: "none",
+      emergencyReview: false,
+    },
+  };
 }
 
 function deferred<T>() {
@@ -180,6 +207,39 @@ function deferred<T>() {
     reject = rejectValue;
   });
   return { promise, resolve, reject };
+}
+
+function nativeState(
+  phase: DesktopStudentView["protection"]["phase"],
+  revision = 1,
+  overrides: Partial<DesktopStudentView["protection"]> = {},
+): DesktopStudentView {
+  const base = state("active", revision);
+  const confirmed = { status: "confirmed", code: "none" } as const;
+  return {
+    ...base,
+    protection: {
+      ...base.protection,
+      phase,
+      ...(phase === "locked"
+        ? {
+            calculatorVisible: true,
+            categories: {
+              aac: confirmed,
+              shortcuts: confirmed,
+              applications: confirmed,
+              persistence: confirmed,
+              windowNetwork: confirmed,
+            },
+          }
+        : {}),
+      ...(phase === "ended"
+        ? ({ nativeEndObserved: true, cleanup: "complete" } as const)
+        : {}),
+      ...(phase === "failed" ? ({ cleanup: "complete" } as const) : {}),
+      ...overrides,
+    },
+  };
 }
 
 async function settle() {
@@ -198,35 +258,55 @@ function visible(element: Element): boolean {
 }
 
 function setup(
-  initial: StudentSessionViewState | null = state(),
+  initial: DesktopStudentView | null = state(),
   firstRead = Promise.resolve(initial),
 ) {
   const document = new DocumentFixture();
   const root = new Element(document, "main");
   document.body.append(root);
   let snapshot = initial;
-  let listener: ((value: StudentSessionViewState) => void) | undefined;
+  let listener: ((value: DesktopStudentView) => void) | undefined;
   const unsubscribe = vi.fn();
   const bridge = {
     readStudentSessionView: vi.fn(() => firstRead),
     joinTest: vi.fn<
-      (request: { code: string }) => Promise<StudentSessionViewState | null>
+      (request: { code: string }) => Promise<DesktopStudentView | null>
     >(async () => snapshot),
     beginTargetedReadmission: vi.fn<
       (request: {
         code: string;
         snapshotRevision: number;
-      }) => Promise<StudentSessionViewState | null>
+      }) => Promise<DesktopStudentView | null>
     >(async () => snapshot),
     retryStudentSession: vi.fn(async () => snapshot),
     refreshStudentSession: vi.fn(async () => snapshot),
     forfeitStudentSession: vi.fn<
       (request: {
         snapshotRevision: number;
-      }) => Promise<StudentSessionViewState | null>
+      }) => Promise<DesktopStudentView | null>
+    >(async () => snapshot),
+    startAssessment: vi.fn<
+      (request: {
+        snapshotRevision: number;
+      }) => Promise<DesktopStudentView | null>
+    >(async () => snapshot),
+    reviewEmergencyEnd: vi.fn<
+      (request: {
+        snapshotRevision: number;
+      }) => Promise<DesktopStudentView | null>
+    >(async () => snapshot),
+    cancelEmergencyEnd: vi.fn<
+      (request: {
+        snapshotRevision: number;
+      }) => Promise<DesktopStudentView | null>
+    >(async () => snapshot),
+    confirmEmergencyEnd: vi.fn<
+      (request: {
+        snapshotRevision: number;
+      }) => Promise<DesktopStudentView | null>
     >(async () => snapshot),
     onStudentSessionViewChanged: vi.fn(
-      (next: (value: StudentSessionViewState) => void) => {
+      (next: (value: DesktopStudentView) => void) => {
         listener = next;
         return unsubscribe;
       },
@@ -264,7 +344,7 @@ function setup(
     form,
     heading,
     text,
-    publish(next: StudentSessionViewState) {
+    publish(next: DesktopStudentView) {
       snapshot = next;
       listener?.(next);
     },
@@ -311,7 +391,7 @@ describe("Student desktop session view", () => {
       expect(view.input().getAttribute("aria-invalid")).toBe("true");
     }
     expect(view.bridge.joinTest).not.toHaveBeenCalled();
-    const pending = deferred<StudentSessionViewState | null>();
+    const pending = deferred<DesktopStudentView | null>();
     view.bridge.joinTest.mockReturnValueOnce(pending.promise);
     view.input().value = "123456789ABC";
     view.input().fire("input");
@@ -333,7 +413,7 @@ describe("Student desktop session view", () => {
   });
 
   it("keeps a newer subscription projection when the initial read arrives late", async () => {
-    const initialRead = deferred<StudentSessionViewState | null>();
+    const initialRead = deferred<DesktopStudentView | null>();
     const view = setup(state(), initialRead.promise);
     view.publish(state("active", 5));
     initialRead.resolve(state("entry", 1));
@@ -346,7 +426,7 @@ describe("Student desktop session view", () => {
   it.each(["null", "rejection"])(
     "ignores a late initial %s after a trusted subscription",
     async (outcome) => {
-      const initialRead = deferred<StudentSessionViewState | null>();
+      const initialRead = deferred<DesktopStudentView | null>();
       const view = setup(state(), initialRead.promise);
       view.publish(state("active", 5));
       if (outcome === "null") initialRead.resolve(null);
@@ -400,7 +480,7 @@ describe("Student desktop session view", () => {
   it("does not let an older mutation result overwrite a newer unconfirmed projection", async () => {
     const view = setup();
     await settle();
-    const pending = deferred<StudentSessionViewState | null>();
+    const pending = deferred<DesktopStudentView | null>();
     view.bridge.joinTest.mockReturnValueOnce(pending.promise);
     view.input().value = "123456789ABC";
     view.form().fire("submit");
@@ -435,10 +515,10 @@ describe("Student desktop session view", () => {
   });
 
   it("an equal-revision old read cannot mask a later null mutation result", async () => {
-    const initialRead = deferred<StudentSessionViewState | null>();
+    const initialRead = deferred<DesktopStudentView | null>();
     const view = setup(state(), initialRead.promise);
     view.publish(state("entry", 1));
-    const mutation = deferred<StudentSessionViewState | null>();
+    const mutation = deferred<DesktopStudentView | null>();
     view.bridge.joinTest.mockReturnValueOnce(mutation.promise);
     view.input().value = "123456789ABC";
     view.form().fire("submit");
@@ -469,7 +549,7 @@ describe("Student desktop session view", () => {
     expect(view.document.activeElement).toBe(submit);
     expect(view.bridge.beginTargetedReadmission).not.toHaveBeenCalled();
     view.form().fire("submit");
-    const pending = deferred<StudentSessionViewState | null>();
+    const pending = deferred<DesktopStudentView | null>();
     view.bridge.beginTargetedReadmission.mockReturnValueOnce(pending.promise);
     const confirmOld = savedListener(view.action("confirm-review"));
     view.action("confirm-review").fire("click");
@@ -552,7 +632,7 @@ describe("Student desktop session view", () => {
     view.action("cancel-review").fire("click");
     expect(view.document.activeElement).toBe(view.action("review-forfeit"));
     view.action("review-forfeit").fire("click");
-    const pending = deferred<StudentSessionViewState | null>();
+    const pending = deferred<DesktopStudentView | null>();
     view.bridge.forfeitStudentSession.mockReturnValueOnce(pending.promise);
     view.action("confirm-review").fire("click");
     expect(view.bridge.forfeitStudentSession).toHaveBeenCalledExactlyOnceWith({
@@ -575,7 +655,9 @@ describe("Student desktop session view", () => {
     view.action("confirm-review").fire("click");
     expect(view.bridge.forfeitStudentSession).not.toHaveBeenCalled();
     expect(view.action("confirm-review").disabled).toBe(true);
-    view.publish(state("unavailable", 7, { session: state("active").session }));
+    view.publish(
+      state("unavailable", 7, { session: state("active").admission.session }),
+    );
     expect(view.text()).not.toContain("Student A7");
     expect(visible(view.action("confirm-review"))).toBe(false);
   });
@@ -584,7 +666,7 @@ describe("Student desktop session view", () => {
     const view = setup(
       state("unconfirmed", 6, {
         pendingOperation: "forfeit",
-        session: state("active").session,
+        session: state("active").admission.session,
       }),
     );
     await settle();
@@ -626,7 +708,7 @@ describe("Student desktop session view", () => {
     view.publish(
       state("active", 5, {
         session: {
-          ...state("active").session!,
+          ...state("active").admission.session!,
           syntheticDisplayName: "Student B9",
         },
       }),
@@ -636,7 +718,7 @@ describe("Student desktop session view", () => {
     view.publish(
       state("active", 6, {
         session: {
-          ...state("active").session!,
+          ...state("active").admission.session!,
           syntheticDisplayName: '<img src=x onerror="fail()">',
         },
       }),
@@ -645,7 +727,7 @@ describe("Student desktop session view", () => {
     view.publish({
       ...state("active", 7),
       calculatorEligible: true,
-    } as unknown as StudentSessionViewState);
+    } as unknown as DesktopStudentView);
     expect(view.heading()).toBe("Session unavailable");
     expect(visible(view.action("review-forfeit"))).toBe(false);
     expect(
@@ -660,7 +742,7 @@ describe("Student desktop session view", () => {
     await settle();
     const sibling = new Element(view.document, "button");
     view.document.body.append(sibling);
-    const pending = deferred<StudentSessionViewState | null>();
+    const pending = deferred<DesktopStudentView | null>();
     view.bridge.refreshStudentSession.mockReturnValueOnce(pending.promise);
     view.action("refresh").fire("click");
     sibling.focus();
@@ -679,7 +761,7 @@ describe("Student desktop session view", () => {
     input.value = "123456789ABC";
     view.form().fire("submit");
     const oldConfirm = savedListener(view.action("confirm-review"));
-    const pending = deferred<StudentSessionViewState | null>();
+    const pending = deferred<DesktopStudentView | null>();
     view.bridge.beginTargetedReadmission.mockReturnValueOnce(pending.promise);
     view.action("confirm-review").fire("click");
     const controls = nodes(view.root);
@@ -750,5 +832,555 @@ describe("Student desktop session view", () => {
     expect(view.bridge.beginTargetedReadmission).not.toHaveBeenCalled();
     expect(view.root.children).toHaveLength(0);
     expect(() => view.dispose()).not.toThrow();
+  });
+});
+
+describe("Student desktop protection presentation", () => {
+  it("adds no renderer timer or polling authority to passive protection publication", async () => {
+    const interval = vi.spyOn(globalThis, "setInterval");
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    try {
+      const view = setup(nativeState("idle", 1));
+      await settle();
+      view.publish(nativeState("preflight", 2));
+      view.publish(nativeState("engaging", 3));
+      view.publish(nativeState("locked", 4));
+      view.dispose();
+      expect(interval).not.toHaveBeenCalled();
+      expect(timeout).not.toHaveBeenCalled();
+      expect(view.bridge.refreshStudentSession).not.toHaveBeenCalled();
+      expect(view.bridge.startAssessment).not.toHaveBeenCalled();
+    } finally {
+      interval.mockRestore();
+      timeout.mockRestore();
+    }
+  });
+
+  it("keeps an unconfigured bridge honest and settles null refresh without inventing controls", async () => {
+    const view = setup(null);
+    await settle();
+    expect(view.heading()).toBe("Session unavailable");
+    expect(
+      view.find((node) => node.id === "protection-status").textContent,
+    ).toBe("Protection status unconfirmed");
+    expect(view.root.attributes["data-admission-phase"]).toBe("unavailable");
+    expect(view.root.attributes["data-protection-phase"]).toBe("unconfirmed");
+    expect(visible(view.action("start-assessment"))).toBe(false);
+    expect(visible(view.action("review-emergency"))).toBe(false);
+    view.action("refresh").fire("click");
+    await settle();
+    expect(view.action("refresh").disabled).toBe(false);
+    expect(view.text()).not.toContain("Assessment protected");
+  });
+
+  it.each([
+    ["idle", {}, true],
+    ["ended", {}, true],
+    ["failed", {}, true],
+    ["failed", { cleanup: "unconfirmed" }, false],
+    ["recovery_required", { cleanup: "complete" }, false],
+    ["preflight", {}, false],
+    ["engaging", {}, false],
+    ["locked", {}, false],
+    ["ending", {}, false],
+    ["idle", { evidence: "full" }, false],
+    ["idle", { evidence: "unconfirmed" }, false],
+    ["idle", { emergencyReview: true }, false],
+  ] as const)(
+    "sends Start only for legal %s/%j presentation",
+    async (phase, overrides, eligible) => {
+      const view = setup(nativeState(phase, 31, overrides));
+      await settle();
+      expect(view.bridge.startAssessment).not.toHaveBeenCalled();
+      expect(
+        !view.action("start-assessment").disabled &&
+          visible(view.action("start-assessment")),
+      ).toBe(eligible);
+      view.action("start-assessment").fire("click");
+      expect(view.bridge.startAssessment).toHaveBeenCalledTimes(
+        eligible ? 1 : 0,
+      );
+      if (eligible)
+        expect(view.bridge.startAssessment).toHaveBeenCalledWith({
+          snapshotRevision: 31,
+        });
+    },
+  );
+
+  it("allows a fresh explicit check after failed categories but never from an admission review or pending reconnect", async () => {
+    const failed = nativeState("failed", 8, {
+      categories: {
+        ...state().protection.categories,
+        aac: { status: "unavailable", code: "native_unavailable" },
+      },
+    });
+    const view = setup(failed);
+    await settle();
+    expect(view.action("start-assessment").disabled).toBe(false);
+    expect(view.text()).toContain("Protection unavailable");
+    expect(view.text()).not.toContain("end was observed");
+    view.action("review-forfeit").fire("click");
+    view.action("start-assessment").fire("click");
+    expect(view.bridge.startAssessment).not.toHaveBeenCalled();
+    view.action("cancel-review").fire("click");
+    view.publish({
+      ...failed,
+      revision: 9,
+      admission: { ...failed.admission, pendingOperation: "reconnect" },
+    });
+    view.action("start-assessment").fire("click");
+    expect(view.bridge.startAssessment).not.toHaveBeenCalled();
+    view.publish(state("entry", 10));
+    view.action("start-assessment").fire("click");
+    expect(view.bridge.startAssessment).not.toHaveBeenCalled();
+  });
+
+  it("keeps Emergency independent of a held Start and requires main confirmation for protected layout", async () => {
+    const view = setup(nativeState("idle", 4));
+    await settle();
+    const starting = deferred<DesktopStudentView | null>();
+    view.bridge.startAssessment.mockReturnValueOnce(starting.promise);
+    view.action("start-assessment").fire("click");
+    view.action("start-assessment").fire("click");
+    expect(view.bridge.startAssessment).toHaveBeenCalledTimes(1);
+    expect(visible(view.action("review-emergency"))).toBe(true);
+    view.publish(nativeState("engaging", 5));
+    expect(view.root.attributes["data-calculator-space-reserved"]).toBe(
+      "false",
+    );
+    const review = nativeState("engaging", 6, { emergencyReview: true });
+    view.bridge.reviewEmergencyEnd.mockResolvedValueOnce(review);
+    view.action("review-emergency").focus();
+    view.action("review-emergency").fire("click");
+    await settle();
+    expect(view.bridge.reviewEmergencyEnd).toHaveBeenCalledWith({
+      snapshotRevision: 5,
+    });
+    expect(view.document.activeElement?.id).toBe(
+      "assessment-emergency-heading",
+    );
+    expect(view.bridge.confirmEmergencyEnd).not.toHaveBeenCalled();
+    view.bridge.cancelEmergencyEnd.mockResolvedValueOnce(
+      nativeState("engaging", 7),
+    );
+    view.action("cancel-emergency").fire("click");
+    await settle();
+    expect(view.bridge.cancelEmergencyEnd).toHaveBeenCalledWith({
+      snapshotRevision: 6,
+    });
+    expect(view.bridge.confirmEmergencyEnd).not.toHaveBeenCalled();
+    view.publish(nativeState("locked", 8));
+    starting.resolve(nativeState("idle", 4));
+    await settle();
+    expect(view.root.attributes["data-protection-phase"]).toBe("locked");
+    expect(view.root.attributes["data-calculator-space-reserved"]).toBe("true");
+    expect(view.text()).toContain("Assessment protected");
+    expect(
+      visible(view.find((node) => node.className === "student-session")),
+    ).toBe(false);
+    expect(
+      nodes(view.root).some((node) =>
+        ["webview", "iframe", "canvas"].includes(node.tagName),
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    "aac",
+    "shortcuts",
+    "applications",
+    "persistence",
+    "windowNetwork",
+  ] as const)(
+    "never presents locked when %s is unconfirmed in a malformed IPC projection",
+    async (category) => {
+      const view = setup(nativeState("engaging", 5));
+      await settle();
+      const locked = nativeState("locked", 6);
+      view.publish({
+        ...locked,
+        protection: {
+          ...locked.protection,
+          categories: {
+            ...locked.protection.categories,
+            [category]: { status: "pending", code: "none" },
+          },
+        },
+      });
+      expect(view.root.attributes["data-protection-phase"]).toBe("unconfirmed");
+      expect(view.root.attributes["data-calculator-space-reserved"]).toBe(
+        "false",
+      );
+      expect(view.text()).not.toContain("Assessment protected");
+      expect(visible(view.action("review-emergency"))).toBe(true);
+    },
+  );
+
+  it("does not read accessors or render private extras from the protection bridge", async () => {
+    const view = setup(nativeState("engaging", 5));
+    await settle();
+    const getter = vi.fn(() => "private-native-proof");
+    const malformed = nativeState("locked", 6);
+    Object.defineProperty(malformed.protection, "nativeProof", {
+      get: getter,
+      enumerable: true,
+    });
+    view.publish(malformed);
+    expect(getter).not.toHaveBeenCalled();
+    expect(view.text()).not.toContain("private-native-proof");
+    expect(view.text()).not.toContain("Assessment protected");
+  });
+
+  it("fences stale emergency confirmation and keeps cancellation inert", async () => {
+    const view = setup(nativeState("locked", 10));
+    await settle();
+    view.publish(nativeState("locked", 11, { emergencyReview: true }));
+    const oldConfirm = savedListener(view.action("confirm-emergency"));
+    expect(view.document.activeElement?.id).toBe(
+      "assessment-emergency-heading",
+    );
+    view.publish(nativeState("locked", 12, { emergencyReview: true }));
+    oldConfirm();
+    view.action("confirm-emergency").fire("click");
+    expect(view.action("confirm-emergency").disabled).toBe(true);
+    expect(view.text()).toContain("Session changed. Cancel and review again.");
+    expect(view.bridge.confirmEmergencyEnd).not.toHaveBeenCalled();
+    view.bridge.cancelEmergencyEnd.mockResolvedValueOnce(
+      nativeState("locked", 13),
+    );
+    view.action("cancel-emergency").fire("click");
+    await settle();
+    expect(view.bridge.cancelEmergencyEnd).toHaveBeenCalledWith({
+      snapshotRevision: 12,
+    });
+    expect(view.root.attributes["data-protection-phase"]).toBe("locked");
+    view.publish(nativeState("locked", 14, { emergencyReview: true }));
+    view.action("confirm-emergency").fire("click");
+    expect(view.bridge.confirmEmergencyEnd).toHaveBeenCalledWith({
+      snapshotRevision: 14,
+    });
+  });
+
+  it("keeps focused emergency controls stable during pending and passive projections", async () => {
+    const view = setup(nativeState("locked", 20));
+    await settle();
+    const button = view.action("review-emergency");
+    const reading = deferred<DesktopStudentView | null>();
+    view.bridge.reviewEmergencyEnd.mockReturnValueOnce(reading.promise);
+    button.focus();
+    const disables = button.disableTransitions;
+    button.fire("click");
+    button.fire("click");
+    view.publish(nativeState("locked", 20));
+    expect(view.document.activeElement).toBe(button);
+    expect(button.disableTransitions).toBe(disables);
+    expect(button.attributes["aria-disabled"]).toBe("true");
+    expect(view.bridge.reviewEmergencyEnd).toHaveBeenCalledTimes(1);
+    reading.resolve(nativeState("locked", 21, { emergencyReview: true }));
+    await settle();
+    const confirm = view.action("confirm-emergency");
+    const ending = deferred<DesktopStudentView | null>();
+    view.bridge.confirmEmergencyEnd.mockReturnValueOnce(ending.promise);
+    confirm.focus();
+    const confirmDisables = confirm.disableTransitions;
+    confirm.fire("click");
+    confirm.fire("click");
+    expect(view.document.activeElement).toBe(confirm);
+    expect(confirm.disableTransitions).toBe(confirmDisables);
+    expect(view.bridge.confirmEmergencyEnd).toHaveBeenCalledTimes(1);
+    expect(view.action("cancel-emergency").disabled).toBe(true);
+    ending.resolve(nativeState("ended", 22));
+    await settle();
+    expect(view.root.attributes["data-protection-phase"]).toBe("ended");
+  });
+
+  it("does not send confirmation during a pending cancellation or steal moved focus on its reply", async () => {
+    const view = setup(nativeState("locked", 4, { emergencyReview: true }));
+    await settle();
+    const cancel = view.action("cancel-emergency");
+    const pending = deferred<DesktopStudentView | null>();
+    view.bridge.cancelEmergencyEnd.mockReturnValueOnce(pending.promise);
+    cancel.focus();
+    cancel.fire("click");
+    cancel.fire("click");
+    view.action("confirm-emergency").fire("click");
+    expect(view.bridge.cancelEmergencyEnd).toHaveBeenCalledTimes(1);
+    expect(view.bridge.confirmEmergencyEnd).not.toHaveBeenCalled();
+    expect(view.document.activeElement).toBe(cancel);
+    const sibling = new Element(view.document, "button");
+    view.document.body.append(sibling);
+    sibling.focus();
+    pending.resolve(nativeState("locked", 5));
+    await settle();
+    expect(view.document.activeElement).toBe(sibling);
+    expect(view.root.attributes["data-protection-phase"]).toBe("locked");
+  });
+
+  it.each(["null", "reject"] as const)(
+    "keeps uncertain %s emergency results honest and retryable without claiming end",
+    async (mode) => {
+      const view = setup(nativeState("locked", 6, { emergencyReview: true }));
+      await settle();
+      if (mode === "null")
+        view.bridge.confirmEmergencyEnd.mockResolvedValueOnce(null);
+      else
+        view.bridge.confirmEmergencyEnd.mockRejectedValueOnce(
+          new Error("private native detail"),
+        );
+      view.action("confirm-emergency").fire("click");
+      await settle();
+      expect(view.root.attributes["data-protection-phase"]).toBe("unconfirmed");
+      expect(view.root.attributes["data-calculator-space-reserved"]).toBe(
+        "true",
+      );
+      expect(view.text()).toContain("result is unconfirmed");
+      expect(view.text()).not.toContain("private native detail");
+      expect(view.text()).not.toContain("Assessment protected");
+      expect(view.text()).not.toContain("protection ended");
+      expect(view.action("confirm-emergency").disabled).toBe(false);
+      expect(view.action("cancel-emergency").disabled).toBe(false);
+    },
+  );
+
+  it.each([
+    ["ended", "Assessment protection ended"],
+    ["recovery_required", "Recovery required"],
+  ] as const)(
+    "uses newer main %s status while emergency confirmation is still pending",
+    async (phase, label) => {
+      const view = setup(nativeState("locked", 10, { emergencyReview: true }));
+      await settle();
+      const confirmation = deferred<DesktopStudentView | null>();
+      view.bridge.confirmEmergencyEnd.mockReturnValueOnce(confirmation.promise);
+      view.action("confirm-emergency").fire("click");
+      expect(view.action("confirm-emergency").textContent).toBe("Ending…");
+      view.publish(nativeState(phase, 11));
+      const status = view.find((node) => node.id === "protection-status");
+      expect(visible(status)).toBe(true);
+      expect(status.textContent).toBe(label);
+      expect(view.root.attributes["data-protection-phase"]).toBe(phase);
+      expect(view.root.attributes["data-calculator-space-reserved"]).toBe(
+        "false",
+      );
+      expect(view.text()).not.toContain("Ending protection");
+      expect(view.heading()).toBe("Session confirmed");
+      expect(view.text()).not.toContain(
+        "This session’s admission was given up.",
+      );
+      confirmation.resolve(null);
+      await settle();
+      expect(status.textContent).toBe(label);
+      expect(view.root.attributes["data-protection-phase"]).toBe(phase);
+    },
+  );
+
+  it("lets emergency confirmation proceed while a failed session refresh is unresolved", async () => {
+    const view = setup(
+      nativeState("recovery_required", 5, {
+        failure: "persistence_unavailable",
+        cleanup: "unconfirmed",
+        evidence: "unconfirmed",
+      }),
+    );
+    await settle();
+    const refreshing = deferred<DesktopStudentView | null>();
+    view.bridge.refreshStudentSession.mockReturnValueOnce(refreshing.promise);
+    view.action("refresh").fire("click");
+    view.publish(
+      nativeState("recovery_required", 6, {
+        emergencyReview: true,
+        failure: "persistence_unavailable",
+        cleanup: "unconfirmed",
+        evidence: "unconfirmed",
+      }),
+    );
+    view.action("confirm-emergency").fire("click");
+    expect(view.bridge.confirmEmergencyEnd).toHaveBeenCalledWith({
+      snapshotRevision: 6,
+    });
+    view.publish(nativeState("ended", 7));
+    refreshing.reject(new Error("private transport error"));
+    await settle();
+    expect(view.root.attributes["data-protection-phase"]).toBe("ended");
+    expect(view.text()).not.toContain("private transport error");
+  });
+
+  it("distinguishes observed native end, pending cleanup and queued evidence from admission surrender", async () => {
+    const view = setup(nativeState("ending", 3));
+    await settle();
+    expect(view.text()).toContain(
+      "Native end and local cleanup are not yet confirmed",
+    );
+    view.publish(
+      nativeState("ending", 4, { nativeEndObserved: true, cleanup: "pending" }),
+    );
+    expect(view.text()).toContain("Waiting for confirmed local cleanup");
+    expect(view.text()).not.toContain("cleanup is complete");
+    view.publish(nativeState("ended", 5, { evidence: "queued" }));
+    expect(view.text()).toContain(
+      "Native end was observed and local cleanup is complete",
+    );
+    expect(view.text()).toContain(
+      "does not confirm the session’s admission was given up",
+    );
+    expect(view.text()).toContain("Server receipt is not confirmed");
+    expect(view.heading()).toBe("Session confirmed");
+  });
+
+  it.each(["admission_changed", "backend_unavailable"] as const)(
+    "shows only generic public access guidance for %s",
+    async (failure) => {
+      const view = setup(
+        nativeState("recovery_required", 4, {
+          failure,
+          cleanup: "unconfirmed",
+        }),
+      );
+      await settle();
+      expect(view.text()).toContain(
+        "Session access cannot currently be confirmed",
+      );
+      expect(view.text()).not.toMatch(
+        /teacher (removed|ended)|Test ended|revoked|expired/u,
+      );
+    },
+  );
+
+  it("blocks corrupt-record targeted recovery until operator recovery while preserving legal admission-only recovery", async () => {
+    const view = setup(state("recovery_required", 4));
+    await settle();
+    expect(visible(view.form())).toBe(true);
+    view.input().value = "123456789ABC";
+    view.form().fire("submit");
+    const oldConfirm = savedListener(view.action("confirm-review"));
+    const blocked = nativeState("recovery_required", 5, {
+      cleanup: "unconfirmed",
+      failure: "persistence_unavailable",
+    });
+    view.publish({
+      ...blocked,
+      admission: state("recovery_required").admission,
+    });
+    oldConfirm();
+    view.form().fire("submit");
+    view.action("open-recovery").fire("click");
+    view.action("start-assessment").fire("click");
+    expect(view.bridge.beginTargetedReadmission).not.toHaveBeenCalled();
+    expect(view.bridge.startAssessment).not.toHaveBeenCalled();
+    expect(visible(view.form())).toBe(false);
+    expect(visible(view.action("open-recovery"))).toBe(false);
+    expect(view.input().value).toBe("");
+    expect(view.text()).toContain("operator");
+    expect(view.text()).not.toContain(
+      "Ask your teacher for a private re-admission code",
+    );
+    expect(view.text()).not.toMatch(/reset|wipe/iu);
+    view.publish(state("recovery_required", 6));
+    view.input().value = "123456789ABC";
+    view.form().fire("submit");
+    view.action("confirm-review").fire("click");
+    expect(view.bridge.beginTargetedReadmission).toHaveBeenCalledWith({
+      code: "123456789ABC",
+      snapshotRevision: 6,
+    });
+  });
+
+  it("does not steal focus when an emergency reply arrives after user movement", async () => {
+    const view = setup(nativeState("engaging", 1));
+    await settle();
+    const reviewing = deferred<DesktopStudentView | null>();
+    view.bridge.reviewEmergencyEnd.mockReturnValueOnce(reviewing.promise);
+    view.action("review-emergency").focus();
+    view.action("review-emergency").fire("click");
+    const sibling = new Element(view.document, "button");
+    view.document.body.append(sibling);
+    sibling.focus();
+    reviewing.resolve(nativeState("engaging", 2, { emergencyReview: true }));
+    await settle();
+    expect(view.document.activeElement).toBe(sibling);
+  });
+
+  it("explains an unchanged unreadable-recovery Emergency reply without pretending a review opened", async () => {
+    const recovery = {
+      ...nativeState("recovery_required", 7, { cleanup: "unconfirmed" }),
+      admission: state("recovery_required").admission,
+    };
+    const view = setup(recovery);
+    await settle();
+    view.action("review-emergency").fire("click");
+    await settle();
+    expect(view.bridge.reviewEmergencyEnd).toHaveBeenCalledWith({
+      snapshotRevision: 7,
+    });
+    expect(view.text()).toContain(
+      "Emergency review is unavailable. Ask your teacher or operator for help.",
+    );
+    expect(visible(view.action("confirm-emergency"))).toBe(false);
+    expect(visible(view.action("review-emergency"))).toBe(true);
+    expect(view.action("review-emergency").disabled).toBe(false);
+    expect(visible(view.form())).toBe(false);
+    expect(view.root.attributes["data-protection-phase"]).toBe(
+      "recovery_required",
+    );
+    expect(view.bridge.confirmEmergencyEnd).not.toHaveBeenCalled();
+    expect(view.bridge.startAssessment).not.toHaveBeenCalled();
+  });
+
+  it.each(["ended", "recovery_required", "locked"] as const)(
+    "does not add unavailable-review feedback over a newer %s publication",
+    async (phase) => {
+      const recovery = {
+        ...nativeState("recovery_required", 7, { cleanup: "unconfirmed" }),
+        admission: state("recovery_required").admission,
+      };
+      const view = setup(recovery);
+      await settle();
+      const pending = deferred<DesktopStudentView | null>();
+      view.bridge.reviewEmergencyEnd.mockReturnValueOnce(pending.promise);
+      view.action("review-emergency").fire("click");
+      view.publish(
+        nativeState(phase, 8, { emergencyReview: phase === "locked" }),
+      );
+      pending.resolve(recovery);
+      await settle();
+      expect(view.root.attributes["data-protection-phase"]).toBe(phase);
+      expect(view.text()).not.toContain("Emergency review is unavailable");
+      expect(view.text()).not.toContain("The result is unconfirmed");
+      expect(visible(view.action("confirm-emergency"))).toBe(
+        phase === "locked",
+      );
+    },
+  );
+
+  it("cleans both UI surfaces and stale emergency intents even if unsubscribe fails during a pending action", async () => {
+    const view = setup(nativeState("locked", 4, { emergencyReview: true }));
+    await settle();
+    const pending = deferred<DesktopStudentView | null>();
+    view.bridge.confirmEmergencyEnd.mockReturnValueOnce(pending.promise);
+    const confirm = savedListener(view.action("confirm-emergency"));
+    view.action("confirm-emergency").fire("click");
+    const controls = nodes(view.root);
+    view.unsubscribe.mockImplementationOnce(() => {
+      throw new Error("closed IPC");
+    });
+    expect(view.dispose).toThrow("closed IPC");
+    pending.resolve(nativeState("ended", 5));
+    view.publish(nativeState("locked", 6));
+    await settle();
+    confirm();
+    expect(view.root.children).toHaveLength(0);
+    expect(view.root.attributes["data-protection-phase"]).toBeUndefined();
+    expect(view.root.attributes["data-admission-phase"]).toBeUndefined();
+    expect(
+      view.root.attributes["data-calculator-space-reserved"],
+    ).toBeUndefined();
+    expect(
+      controls.every((control) =>
+        [...control.listeners.values()].every(
+          (listeners) => listeners.size === 0,
+        ),
+      ),
+    ).toBe(true);
+    expect(view.bridge.confirmEmergencyEnd).toHaveBeenCalledTimes(1);
   });
 });

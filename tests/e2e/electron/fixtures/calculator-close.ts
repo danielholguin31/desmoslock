@@ -8,7 +8,7 @@ import {
   type Session,
 } from "electron";
 
-import { createElectronCalculatorSurface } from "../../../../apps/desktop/src/main/electron-calculator-surface.js";
+import { prepareElectronCalculatorSurface } from "../../../../apps/desktop/src/main/electron-calculator-surface.js";
 
 const calculatorUrl = "desmoslock-calculator://host/index.html";
 
@@ -55,12 +55,13 @@ protocol.registerSchemesAsPrivileged([
 async function runProbe(): Promise<void> {
   await app.whenReady();
   const parent = new BrowserWindow({ show: false });
-  const surface = await createElectronCalculatorSurface({
+  const surface = await prepareElectronCalculatorSurface({
     bounds: { height: 400, width: 600, x: 0, y: 0 },
     onCleanupFailure: () => app.exit(1),
     outputDirectory,
     parent,
   });
+  surface.attach();
   const calculator = webContents
     .getAllWebContents()
     .find((contents) => contents.getURL() === calculatorUrl);

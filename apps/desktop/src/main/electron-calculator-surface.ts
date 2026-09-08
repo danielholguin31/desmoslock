@@ -5,6 +5,7 @@ import {
   WebContentsView,
   type BrowserWindow,
   type Session,
+  type WebContents,
 } from "electron";
 
 import { createAssessmentSessionPolicy } from "./assessment-session-policy.js";
@@ -40,6 +41,7 @@ const calculatorContentSecurityPolicy = [
   "form-action 'none'",
   "frame-ancestors 'none'",
 ].join("; ");
+const destructionAcknowledgementTimeoutMs = 15_000;
 
 export interface ElectronCalculatorSurfaceOptions {
   readonly bounds: CalculatorSurfaceBounds;
@@ -122,7 +124,7 @@ function installAssessmentSessionPolicy(
   return uninstallSessionPolicy;
 }
 
-export async function createElectronCalculatorSurface(
+export async function prepareElectronCalculatorSurface(
   options: ElectronCalculatorSurfaceOptions,
 ): Promise<CalculatorSurface> {
   const partition = `desmoslock-calculator-${randomUUID()}`;
@@ -135,43 +137,104 @@ export async function createElectronCalculatorSurface(
   }
 
   let view: WebContentsView | null = null;
+  let contents: WebContents | null = null;
   let closed = false;
+  let invalidated = false;
   let attached = false;
   let initializing = true;
   let parentClosed = options.parent.isDestroyed();
   let uninstallSessionPolicy: (() => void) | null = null;
   let protocolRegistered = false;
   let closePromise: Promise<void> | null = null;
+  let destructionCompletion: Promise<readonly unknown[]> | null = null;
+  let destructionConfirmed = true;
   const pendingTeardownFailures: unknown[] = [];
+
+  const detachChildSynchronously = (ownedView: WebContentsView): void => {
+    const wasAttached = attached;
+    attached = false;
+    if (wasAttached && !options.parent.isDestroyed()) {
+      options.parent.contentView.removeChildView(ownedView);
+    }
+  };
 
   const teardownWebContentsSynchronously = (): readonly unknown[] => {
     const failures: unknown[] = [];
+    invalidated = true;
     if (view === null) return failures;
     const ownedView = view;
+    // Electron clears WebContentsView.webContents during destruction. Keep the
+    // direct emitter for acknowledgement and listener cleanup across that event.
+    const ownedContents = contents ?? ownedView.webContents;
     view = null;
-    if (attached) {
-      try {
-        if (!options.parent.isDestroyed()) {
-          options.parent.contentView.removeChildView(ownedView);
+    let completeDestruction!: (failures: readonly unknown[]) => void;
+    // A result-valued promise also covers parent loss during a held load: it
+    // cannot reject unobserved before initialization reaches closeSurface().
+    destructionCompletion = new Promise((resolve) => {
+      completeDestruction = resolve;
+    });
+    let settled = false;
+    let listening = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const finishDestruction = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      destructionConfirmed = error === undefined;
+      const acknowledgementFailures: unknown[] =
+        error === undefined ? [] : [error];
+      if (timer !== null) clearTimeout(timer);
+      if (listening) {
+        try {
+          ownedContents.removeListener("destroyed", handleDestroyed);
+        } catch (listenerError) {
+          acknowledgementFailures.push(listenerError);
         }
+      }
+      completeDestruction(acknowledgementFailures);
+    };
+    const handleDestroyed = (): void => finishDestruction();
+    const observeDestroyed = (): void => {
+      try {
+        if (ownedContents.isDestroyed()) handleDestroyed();
+      } catch (error) {
+        failures.push(error);
+      }
+    };
+    observeDestroyed();
+    if (!settled) {
+      timer = setTimeout(
+        () =>
+          finishDestruction(
+            new Error(
+              `CalculatorSurface destruction was not acknowledged within ${destructionAcknowledgementTimeoutMs}ms`,
+            ),
+          ),
+        destructionAcknowledgementTimeoutMs,
+      );
+      timer.unref?.();
+      try {
+        listening = true;
+        ownedContents.once("destroyed", handleDestroyed);
       } catch (error) {
         failures.push(error);
       }
     }
-    attached = false;
-    let webContentsDestroyed = false;
+    // Cache and subscribe before detach: native removal may re-enter close or
+    // destroy the renderer. close(false) itself only requests asynchronous end.
     try {
-      webContentsDestroyed = ownedView.webContents.isDestroyed();
+      detachChildSynchronously(ownedView);
     } catch (error) {
       failures.push(error);
     }
-    if (!webContentsDestroyed) {
+    observeDestroyed();
+    if (!destructionConfirmed) {
       try {
-        ownedView.webContents.close({ waitForBeforeUnload: false });
+        ownedContents.close({ waitForBeforeUnload: false });
       } catch (error) {
         failures.push(error);
       }
     }
+    observeDestroyed();
     return failures;
   };
 
@@ -192,15 +255,23 @@ export async function createElectronCalculatorSurface(
       } catch (error) {
         synchronousFailures.push(error);
       }
+      const destructionFailures = await (destructionCompletion ??
+        Promise.resolve([]));
 
-      const uninstallPolicy = uninstallSessionPolicy;
-      uninstallSessionPolicy = null;
-      const unregisterProtocol = protocolRegistered;
-      protocolRegistered = false;
+      // Unknown destruction never relaxes the still-live renderer's denial
+      // policy. Independent session clearing remains best-effort on failure.
+      const uninstallPolicy = destructionConfirmed
+        ? uninstallSessionPolicy
+        : null;
+      if (destructionConfirmed) uninstallSessionPolicy = null;
+      const unregisterProtocol = destructionConfirmed && protocolRegistered;
+      if (destructionConfirmed) protocolRegistered = false;
       const cleanupTasks = [
         () => options.parent.removeListener("closed", handleParentClosed),
         ...(uninstallPolicy === null ? [] : [uninstallPolicy]),
-        () => calculatorSession.webRequest.onBeforeRequest(null),
+        ...(destructionConfirmed
+          ? [() => calculatorSession.webRequest.onBeforeRequest(null)]
+          : []),
         ...(unregisterProtocol
           ? [() => calculatorSession.protocol.unhandle(calculatorScheme)]
           : []),
@@ -215,6 +286,8 @@ export async function createElectronCalculatorSurface(
       );
       const failures = [
         ...synchronousFailures,
+        ...destructionFailures,
+        ...pendingTeardownFailures.splice(0),
         ...outcomes.flatMap((outcome) =>
           outcome.status === "rejected" ? [outcome.reason] : [],
         ),
@@ -269,6 +342,8 @@ export async function createElectronCalculatorSurface(
     view = new WebContentsView({
       webPreferences: createCalculatorWebPreferences(partition),
     });
+    contents = view.webContents;
+    destructionConfirmed = false;
     const assessmentPolicy = createAssessmentSessionPolicy({
       allowedResources: calculatorResourceManifest,
       webContentsId: view.webContents.id,
@@ -285,12 +360,15 @@ export async function createElectronCalculatorSurface(
     view.webContents.setAudioMuted(true);
     view.webContents.setWebRTCIPHandlingPolicy("disable_non_proxied_udp");
     requireLiveParent();
-    options.parent.contentView.addChildView(view);
-    attached = true;
     await view.webContents.loadURL(calculatorDocumentUrl);
     requireLiveParent();
     await view.webContents.setVisualZoomLevelLimits(1, 1);
     requireLiveParent();
+    if (view.webContents.isDestroyed()) {
+      throw new Error(
+        "CalculatorSurface renderer closed during initialization",
+      );
+    }
     initializing = false;
     requireLiveParent();
   } catch (error) {
@@ -312,16 +390,65 @@ export async function createElectronCalculatorSurface(
   }
 
   const liveView = view;
-  if (liveView === null) {
+  const liveContents = contents;
+  if (liveView === null || liveContents === null) {
     throw new Error("CalculatorSurface closed before initialization completed");
   }
 
   return Object.freeze({
     partition,
-    webContentsId: liveView.webContents.id,
+    webContentsId: liveContents.id,
+    attach(): void {
+      let attachmentAttempted = false;
+      try {
+        if (
+          closed ||
+          invalidated ||
+          parentClosed ||
+          options.parent.isDestroyed() ||
+          liveContents.isDestroyed()
+        ) {
+          throw new Error("CalculatorSurface is closed or invalidated");
+        }
+        if (attached) return;
+        // Claim ownership before the native call: a throw or reentrant close
+        // must still remove a partially attached child and destroy its renderer.
+        attached = true;
+        attachmentAttempted = true;
+        options.parent.contentView.addChildView(liveView);
+        if (
+          closed ||
+          invalidated ||
+          parentClosed ||
+          options.parent.isDestroyed() ||
+          liveContents.isDestroyed()
+        ) {
+          throw new Error("CalculatorSurface invalidated during attachment");
+        }
+      } catch (error) {
+        if (attachmentAttempted && view !== null) attached = true;
+        pendingTeardownFailures.push(...teardownWebContentsSynchronously());
+        throw error;
+      }
+    },
+    detach(): void {
+      // Detachment is terminal even before first attachment. A new attempt
+      // requires a newly prepared surface; this object cannot reopen content.
+      invalidated = true;
+      if (view === null) return;
+      try {
+        detachChildSynchronously(view);
+      } catch (error) {
+        pendingTeardownFailures.push(
+          error,
+          ...teardownWebContentsSynchronously(),
+        );
+        throw error;
+      }
+    },
     close: closeSurface,
     setBounds(bounds: CalculatorSurfaceBounds) {
-      if (!closed && !liveView.webContents.isDestroyed()) {
+      if (!closed && !invalidated && !liveContents.isDestroyed()) {
         liveView.setBounds(bounds);
       }
     },

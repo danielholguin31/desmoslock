@@ -21,41 +21,84 @@ body {
   background: #e8edf5;
 }
 
-.shell-bar {
-  align-items: center;
-  background: #172033;
-  color: white;
-  display: flex;
-  min-height: 140px;
-  padding: 20px 28px;
-}
-
-.eyebrow {
-  color: #9eb1d4;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.11em;
-  margin: 0 0 4px;
-  text-transform: uppercase;
-}
-
-h1 {
-  font-size: 24px;
-  margin: 0;
-}
-
-[data-v2-status] {
-  color: #cbd6e9;
-  font-size: 13px;
-  margin: 5px 0 0;
-}
-
 [hidden] {
   display: none !important;
 }
 
 [data-student-session-root] {
-  padding: 28px;
+  --assessment-toolbar-height: 96px;
+  min-height: 100vh;
+  padding: calc(var(--assessment-toolbar-height) + 28px) 28px 28px;
+}
+
+.assessment-toolbar {
+  align-items: center;
+  background: #172033;
+  color: white;
+  display: flex;
+  gap: 12px;
+  height: var(--assessment-toolbar-height);
+  inset: 0 0 auto;
+  justify-content: space-between;
+  padding: 12px 20px;
+  position: fixed;
+  z-index: 10;
+}
+
+.assessment-toolbar__identity,
+.assessment-toolbar__review-copy {
+  min-width: 0;
+  max-height: calc(var(--assessment-toolbar-height) - 24px);
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+.assessment-toolbar h1,
+.assessment-toolbar h2 {
+  font-size: 1rem;
+  line-height: 1.3;
+  margin: 0 0 4px;
+}
+
+.assessment-toolbar p {
+  color: #cbd6e9;
+  font-size: 0.875rem;
+  line-height: 1.35;
+  margin: 0;
+}
+
+.assessment-toolbar__actions {
+  align-items: center;
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.assessment-toolbar__review {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-width: 0;
+  width: 100%;
+}
+
+.assessment-toolbar .student-session__button {
+  font-size: 0.875rem;
+  line-height: 1.2;
+  max-height: calc(var(--assessment-toolbar-height) - 24px);
+  overflow: auto;
+  padding: 10px 12px;
+}
+
+.assessment-toolbar :focus-visible {
+  outline: 3px solid #9ebffd;
+  outline-offset: 3px;
+}
+
+.assessment-toolbar [aria-disabled="true"] {
+  cursor: wait;
+  opacity: 0.6;
 }
 
 .student-session {
@@ -191,17 +234,55 @@ h1 {
   margin-bottom: 0;
 }
 
-@media (max-width: 900px), (max-height: 600px) {
-  .shell-bar {
-    min-height: 112px;
-    padding: 20px 24px;
-  }
+.student-session__categories {
+  display: grid;
+  gap: 0;
+  margin: 20px 0;
+}
 
+.student-session__category {
+  border-top: 1px solid #cad3e1;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  padding: 12px 0;
+}
+
+.student-session__category dt {
+  font-weight: 650;
+}
+
+.student-session__category dd {
+  color: #46546d;
+  margin: 0;
+}
+
+.student-session__category [data-status="failed"],
+.student-session__category [data-status="unavailable"] {
+  color: #79252d;
+}
+
+@media (max-width: 900px), (max-height: 600px) {
   [data-student-session-root] {
-    padding: 20px 24px;
+    padding: calc(var(--assessment-toolbar-height) + 20px) 24px 20px;
   }
 
   .student-session {
     padding: 24px;
+  }
+}
+
+@media (max-width: 600px) {
+  .assessment-toolbar {
+    gap: 8px;
+    padding: 12px;
+  }
+
+  .assessment-toolbar__review {
+    gap: 8px;
+  }
+
+  .student-session__category {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

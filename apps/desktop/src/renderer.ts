@@ -1,3 +1,4 @@
+import { assessmentToolbarHeight } from "./assessment-protection-view-state.js";
 import { bindStudentSessionView } from "./student-session-view.js";
 import type { TrustedDesktopBridge } from "./trusted-bridge.js";
 
@@ -10,6 +11,10 @@ const root = document.querySelector<HTMLElement>("[data-student-session-root]");
 const bridge = window.desmoslockDesktop;
 
 if (root !== null) {
+  root.style.setProperty(
+    "--assessment-toolbar-height",
+    `${assessmentToolbarHeight}px`,
+  );
   const dispose = bindStudentSessionView(root, bridge);
   window.addEventListener("pagehide", dispose, { once: true });
 }

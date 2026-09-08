@@ -67,16 +67,20 @@ mutation and reserved counter. The selected macOS store uses a separate fixed
 process-lifetime advisory-lock inode, exclusive temporary writes, exact
 `F_FULLFSYNC` file and parent-directory barriers, and atomic replacement. It
 retains possibly published bytes on uncertain durability; no failed barrier may
-authorize egress, counter rollback or silent replacement. Targeted recovery
-preserves corrupt/unsupported bytes before a new pending record. Electron's
+authorize egress, counter rollback or silent replacement. Initial unreadable or
+unsupported records retain their bytes and block targeted recovery because prior
+native ownership cannot be established. Known decoded terminal records retain
+the separate explicit targeted-recovery path. Electron's
 single-instance guard complements the native store lock.
 
 The renderer receives named admission/recovery actions and sanitized view
 snapshots, with trusted-frame/generation fencing. It receives no device key,
 credential, counter, signing, arbitrary URL or storage interface. Confirmed
-backend admission still projects `protection: "unavailable"` and
-`calculatorEligible: false`; the calculator remains detached. Unsupported
-native storage fails closed. A synthetic callback or compiled addon does not
+backend admission alone never attaches the calculator. The composed
+[native protection owner](native-assessment-protection.md) receives a separate
+trusted Start intent and requires all five categories, actual native begin,
+a later authoritative backend read and durable lock state before attachment.
+Unsupported native storage fails closed. A synthetic callback or compiled addon does not
 establish assessment protection, recovery or OS-backed encryption acceptance.
 
 ## Migration and synthetic restore

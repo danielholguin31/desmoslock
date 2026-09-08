@@ -79,12 +79,9 @@ test("production Electron shell preserves Student isolation and denies protectio
         "data-phase",
         expectedPhase,
       );
-      await expect(
-        page.getByRole("heading", {
-          exact: true,
-          name: "Assessment protection unavailable",
-        }),
-      ).toBeVisible();
+      await expect(page.locator("#protection-status")).toHaveText(
+        "Protection not started",
+      );
       const boundary = await page.evaluate(async () => {
         const bridge = (
           globalThis as typeof globalThis & {
@@ -102,6 +99,8 @@ test("production Electron shell preserves Student isolation and denies protectio
       });
       expect(boundary.bridge).toEqual([
         "beginTargetedReadmission",
+        "cancelEmergencyEnd",
+        "confirmEmergencyEnd",
         "forfeitStudentSession",
         "joinTest",
         "onStudentSessionViewChanged",
@@ -109,6 +108,8 @@ test("production Electron shell preserves Student isolation and denies protectio
         "refreshStudentSession",
         "requestAssessmentLock",
         "retryStudentSession",
+        "reviewEmergencyEnd",
+        "startAssessment",
         "version",
       ]);
       expect(boundary.version).toBe("2.0.0");
@@ -120,14 +121,57 @@ test("production Electron shell preserves Student isolation and denies protectio
       });
       expect(boundary.studentView).toEqual({
         revision: expect.any(Number),
-        phase: expectedPhase,
-        session: null,
-        protection: "unavailable",
-        calculatorEligible: false,
-        pendingOperation: null,
+        admission: {
+          phase: expectedPhase,
+          session: null,
+          pendingOperation: null,
+        },
+        protection: {
+          phase: "idle",
+          categories: {
+            aac: { status: expect.any(String), code: expect.any(String) },
+            shortcuts: { status: expect.any(String), code: expect.any(String) },
+            applications: {
+              status: expect.any(String),
+              code: expect.any(String),
+            },
+            persistence: {
+              status: expect.any(String),
+              code: expect.any(String),
+            },
+            windowNetwork: {
+              status: expect.any(String),
+              code: expect.any(String),
+            },
+          },
+          calculatorVisible: false,
+          failure: null,
+          nativeEndObserved: false,
+          cleanup: "not_requested",
+          evidence: "none",
+          emergencyReview: false,
+        },
       });
+      expect(boundary.studentView?.protection.categories.aac.status).not.toBe(
+        "confirmed",
+      );
+      for (const category of Object.values(
+        boundary.studentView?.protection.categories ?? {},
+      ))
+        expect(["pending", "confirmed", "failed", "unavailable"]).toContain(
+          category.status,
+        );
       expect(Number.isSafeInteger(boundary.studentView?.revision)).toBe(true);
       expect(boundary.studentView?.revision).toBeGreaterThanOrEqual(1);
+      await expect(
+        page.locator('[data-action="start-assessment"]'),
+      ).toBeVisible();
+      await expect(
+        page.locator('[data-action="start-assessment"]'),
+      ).toBeDisabled();
+      await expect(
+        page.locator('[data-action="review-emergency"]'),
+      ).toBeHidden();
       await expect(
         page.getByRole("button", { name: /lock intent/i }),
       ).toHaveCount(0);

@@ -1,8 +1,9 @@
+import { parseStudentJoinCode } from "@desmoslock/contracts";
+
 import {
-  parseStudentJoinCode,
-  parseStudentSessionViewState,
-  type StudentSessionViewState,
-} from "@desmoslock/contracts";
+  parseDesktopStudentView,
+  type DesktopStudentView,
+} from "./assessment-protection-view-state.js";
 
 import type { TrustedDesktopBridge } from "./trusted-bridge.js";
 
@@ -15,6 +16,10 @@ type SessionBridge = Pick<
   | "refreshStudentSession"
   | "forfeitStudentSession"
   | "onStudentSessionViewChanged"
+  | "startAssessment"
+  | "reviewEmergencyEnd"
+  | "cancelEmergencyEnd"
+  | "confirmEmergencyEnd"
 >;
 
 type Review =
@@ -29,19 +34,17 @@ type Review =
       readonly name: string;
     };
 
-type Operation = "join" | "recovery" | "retry" | "refresh" | "forfeit";
+type Operation =
+  "join" | "recovery" | "retry" | "refresh" | "forfeit" | "start";
+type EmergencyOperation = "review" | "cancel" | "confirm";
 
 function sameSnapshot(
-  left: StudentSessionViewState,
-  right: StudentSessionViewState,
+  left: DesktopStudentView,
+  right: DesktopStudentView,
 ): boolean {
   return (
-    left.phase === right.phase &&
-    left.pendingOperation === right.pendingOperation &&
-    left.session?.syntheticDisplayName ===
-      right.session?.syntheticDisplayName &&
-    left.session?.sessionRevision === right.session?.sessionRevision &&
-    left.session?.capabilityExpiresAtMs === right.session?.capabilityExpiresAtMs
+    JSON.stringify(left.admission) === JSON.stringify(right.admission) &&
+    JSON.stringify(left.protection) === JSON.stringify(right.protection)
   );
 }
 
@@ -67,6 +70,39 @@ export function bindStudentSessionView(
     element.dataset.action = key;
     return element;
   };
+
+  const toolbar = make("header", "assessment-toolbar");
+  const toolbarIdentity = make("div", "assessment-toolbar__identity");
+  const brand = make("h1", "", "DesmosLock");
+  const protectionStatus = make("p", "assessment-toolbar__status");
+  protectionStatus.id = "protection-status";
+  protectionStatus.setAttribute("role", "status");
+  protectionStatus.setAttribute("aria-live", "polite");
+  toolbarIdentity.append(brand, protectionStatus);
+  const toolbarActions = make("div", "assessment-toolbar__actions");
+  const start = button("Start assessment", "start-assessment");
+  start.className += " student-session__button--primary";
+  const emergency = button("Emergency", "review-emergency");
+  emergency.setAttribute("aria-label", "Review emergency exit");
+  toolbarActions.append(start, emergency);
+  const emergencyPanel = make("section", "assessment-toolbar__review");
+  emergencyPanel.setAttribute(
+    "aria-labelledby",
+    "assessment-emergency-heading",
+  );
+  const emergencyText = make("div", "assessment-toolbar__review-copy");
+  const emergencyHeading = make("h2", "", "End assessment?");
+  emergencyHeading.id = "assessment-emergency-heading";
+  emergencyHeading.tabIndex = -1;
+  const emergencyWarning = make("p", "", "Gives up admission.");
+  emergencyWarning.setAttribute("role", "status");
+  emergencyText.append(emergencyHeading, emergencyWarning);
+  const emergencyActions = make("div", "assessment-toolbar__actions");
+  const emergencyConfirm = button("End & leave", "confirm-emergency");
+  const emergencyCancel = button("Cancel", "cancel-emergency");
+  emergencyActions.append(emergencyConfirm, emergencyCancel);
+  emergencyPanel.append(emergencyText, emergencyActions);
+  toolbar.append(toolbarIdentity, toolbarActions, emergencyPanel);
 
   const panel = make("section", "student-session");
   panel.setAttribute("aria-labelledby", "student-session-heading");
@@ -134,14 +170,38 @@ export function bindStudentSessionView(
   const openRecovery = button("Use private re-admission code", "open-recovery");
   const cancelRecovery = button("Cancel recovery", "cancel-recovery");
   actions.append(retry, refresh, leave, openRecovery, cancelRecovery);
-  const protection = make("aside", "student-session__protection");
+  const protection = make("section", "student-session__protection");
+  protection.setAttribute("aria-labelledby", "assessment-protection-heading");
+  const protectionHeading = make("h3", "", "Assessment protection unavailable");
+  protectionHeading.id = "assessment-protection-heading";
+  const protectionSummary = make("p");
+  const protectionFailure = make("p", "student-session__feedback");
+  const evidence = make("p", "student-session__help");
+  const categoryList = make("dl", "student-session__categories");
+  type Category = keyof DesktopStudentView["protection"]["categories"];
+  const categoryLabels: Record<Category, string> = {
+    aac: "Native assessment protection",
+    shortcuts: "Emergency shortcut",
+    applications: "Permitted applications",
+    persistence: "Local session records",
+    windowNetwork: "Assessment window and network",
+  };
+  const categories = new Map<Category, HTMLElement>();
+  for (const category of Object.keys(categoryLabels) as Category[]) {
+    const row = make("div", "student-session__category");
+    row.dataset.protectionCategory = category;
+    const label = make("dt", "", categoryLabels[category]);
+    const detail = make("dd");
+    categories.set(category, detail);
+    row.append(label, detail);
+    categoryList.append(row);
+  }
   protection.append(
-    make("h3", "", "Assessment protection unavailable"),
-    make(
-      "p",
-      "",
-      "The calculator remains unavailable. Follow your teacher’s instructions.",
-    ),
+    protectionHeading,
+    protectionSummary,
+    protectionFailure,
+    categoryList,
+    evidence,
   );
   panel.append(
     heading,
@@ -153,10 +213,10 @@ export function bindStudentSessionView(
     actions,
     protection,
   );
-  root.append(panel);
+  root.append(toolbar, panel);
 
   let disposed = false;
-  let current: StudentSessionViewState | null = null;
+  let current: DesktopStudentView | null = null;
   let unavailable = bridge === undefined;
   let loading = bridge !== undefined;
   let publication = 0;
@@ -164,6 +224,10 @@ export function bindStudentSessionView(
   let review: Review | null = null;
   let recoveryOpened = false;
   let message = "";
+  let emergencyMessage = "";
+  let protectionUnconfirmed = false;
+  let emergencyReviewRevision: number | null = null;
+  const emergencyPending = new Set<EmergencyOperation>();
   const bindings = new Map<
     HTMLElement,
     { type: string; listener: (event: Event) => void }
@@ -185,14 +249,15 @@ export function bindStudentSessionView(
     codeError.hidden = true;
     codeInput.removeAttribute("aria-invalid");
   };
-  const live = (snapshot: StudentSessionViewState) =>
+  const live = (snapshot: DesktopStudentView) =>
     !disposed &&
     !unavailable &&
     pending === null &&
+    !retainedProtection(snapshot) &&
     current?.revision === snapshot.revision;
 
-  function accept(value: StudentSessionViewState | null): boolean {
-    const next = parseStudentSessionViewState(value);
+  function accept(value: DesktopStudentView | null): boolean {
+    const next = parseDesktopStudentView(value);
     if (disposed || next === null) return false;
     if (current !== null && next.revision < current.revision) return true;
     if (
@@ -201,21 +266,35 @@ export function bindStudentSessionView(
       !sameSnapshot(current, next)
     )
       return false;
+    const openedEmergency =
+      next.protection.emergencyReview && !current?.protection.emergencyReview;
+    if (!next.protection.emergencyReview) emergencyReviewRevision = null;
+    else if (openedEmergency) emergencyReviewRevision = next.revision;
     if (
-      current?.phase !== next.phase ||
-      current?.session?.syntheticDisplayName !==
-        next.session?.syntheticDisplayName
+      current?.admission.phase !== next.admission.phase ||
+      current?.admission.session?.syntheticDisplayName !==
+        next.admission.session?.syntheticDisplayName
     ) {
       clearCode();
       review = null;
       recoveryOpened = false;
       message = "";
     }
-    if (current === null || next.revision > current.revision) publication += 1;
+    if (retainedProtection(next) || next.protection.emergencyReview) {
+      review = null;
+      recoveryOpened = false;
+      clearCode();
+    }
+    if (current === null || next.revision > current.revision) {
+      publication += 1;
+      protectionUnconfirmed = false;
+    }
     current = next;
     unavailable = false;
     loading = false;
     render();
+    if (openedEmergency && !emergencyPending.has("review"))
+      emergencyHeading.focus({ preventScroll: true });
     return true;
   }
 
@@ -231,7 +310,7 @@ export function bindStudentSessionView(
 
   async function request(
     operation: Operation | null,
-    invoke: () => Promise<StudentSessionViewState | null>,
+    invoke: () => Promise<DesktopStudentView | null>,
   ) {
     if (disposed || (operation !== null && pending !== null)) return;
     const startedAt = publication;
@@ -255,12 +334,307 @@ export function bindStudentSessionView(
     }
   }
 
+  function retainedProtection(snapshot: DesktopStudentView): boolean {
+    const state = snapshot.protection;
+    return (
+      state.phase === "preflight" ||
+      state.phase === "engaging" ||
+      state.phase === "locked" ||
+      state.phase === "ending" ||
+      state.phase === "recovery_required" ||
+      (state.phase === "failed" && state.cleanup !== "complete")
+    );
+  }
+
+  function canStart(snapshot: DesktopStudentView): boolean {
+    const state = snapshot.protection;
+    const eligiblePhase =
+      state.phase === "idle" ||
+      (state.phase === "ended" &&
+        state.nativeEndObserved &&
+        state.cleanup === "complete") ||
+      (state.phase === "failed" && state.cleanup === "complete");
+    return (
+      live(snapshot) &&
+      review === null &&
+      !loading &&
+      !protectionUnconfirmed &&
+      eligiblePhase &&
+      snapshot.admission.phase === "active" &&
+      snapshot.admission.pendingOperation === null &&
+      !state.emergencyReview &&
+      emergencyPending.size === 0 &&
+      state.evidence !== "full" &&
+      state.evidence !== "unconfirmed"
+    );
+  }
+
+  async function requestEmergency(
+    operation: EmergencyOperation,
+    invoke: () => Promise<DesktopStudentView | null>,
+  ) {
+    if (disposed || emergencyPending.has(operation)) return;
+    const origin = document.activeElement;
+    const startedAt = publication;
+    emergencyPending.add(operation);
+    emergencyMessage = "";
+    render();
+    try {
+      const value = await invoke();
+      if (disposed) return;
+      const superseded = publication !== startedAt;
+      const accepted = accept(value);
+      if (!accepted && publication === startedAt) {
+        emergencyMessage =
+          "The result is unconfirmed. Try the emergency action again.";
+        if (operation === "confirm") protectionUnconfirmed = true;
+      } else if (
+        operation === "review" &&
+        accepted &&
+        !superseded &&
+        value?.revision === current?.revision &&
+        !current?.protection.emergencyReview
+      ) {
+        emergencyMessage =
+          "Emergency review is unavailable. Ask your teacher or operator for help.";
+      } else if (document.activeElement === origin) {
+        if (operation === "review" && current?.protection.emergencyReview)
+          emergencyHeading.focus({ preventScroll: true });
+        else if (
+          operation === "cancel" &&
+          !current?.protection.emergencyReview &&
+          !emergency.hidden &&
+          !emergency.disabled
+        )
+          emergency.focus({ preventScroll: true });
+      }
+    } catch {
+      if (!disposed && publication === startedAt) {
+        emergencyMessage =
+          "The result is unconfirmed. Try the emergency action again.";
+        if (operation === "confirm") protectionUnconfirmed = true;
+      }
+    } finally {
+      emergencyPending.delete(operation);
+      if (!disposed) render();
+    }
+  }
+
+  function renderProtection() {
+    // Reserving the last visible calculator space is layout only. On an IPC
+    // failure the label becomes unconfirmed; the renderer cannot detach or
+    // certify a native surface. Main owns the actual child and native gate.
+    const value = current;
+    const state = value?.protection;
+    const known = value !== null && !unavailable && !protectionUnconfirmed;
+    const reserved = state?.calculatorVisible === true;
+    panel.hidden = reserved;
+    root.setAttribute("data-calculator-space-reserved", String(reserved));
+    root.setAttribute(
+      "data-protection-phase",
+      known ? state!.phase : "unconfirmed",
+    );
+    const status = !known
+      ? "Protection status unconfirmed"
+      : {
+          idle: "Protection not started",
+          preflight: "Checking protection",
+          engaging: "Starting protection",
+          locked: "Assessment protected",
+          ending: "Ending protection",
+          ended: "Assessment protection ended",
+          failed: "Protection unavailable",
+          recovery_required: "Recovery required",
+        }[state!.phase];
+    protectionStatus.textContent = status;
+    protectionStatus.setAttribute("title", status);
+    const reviewing = state?.emergencyReview === true;
+    toolbarIdentity.hidden = reviewing;
+    toolbarActions.hidden = reviewing;
+    emergencyPanel.hidden = !reviewing;
+    const eligiblePhase =
+      state?.phase === "idle" ||
+      state?.phase === "ended" ||
+      state?.phase === "failed";
+    start.hidden = !known || !eligiblePhase || pending === "start";
+    start.disabled = value === null || bridge === undefined || !canStart(value);
+    const emergencyAvailable =
+      value !== null && (retainedProtection(value) || pending === "start");
+    emergency.hidden = !emergencyAvailable;
+    emergency.disabled = bridge === undefined;
+    emergency.setAttribute(
+      "aria-disabled",
+      String(emergencyPending.has("review")),
+    );
+    emergencyConfirm.disabled =
+      bridge === undefined ||
+      !reviewing ||
+      emergencyPending.has("cancel") ||
+      emergencyReviewRevision !== value?.revision;
+    emergencyConfirm.setAttribute(
+      "aria-disabled",
+      String(emergencyPending.has("confirm")),
+    );
+    emergencyCancel.disabled =
+      bridge === undefined || emergencyPending.has("confirm");
+    emergencyCancel.setAttribute(
+      "aria-disabled",
+      String(emergencyPending.has("cancel")),
+    );
+    emergencyConfirm.textContent = emergencyPending.has("confirm")
+      ? "Ending…"
+      : "End & leave";
+    emergencyWarning.textContent =
+      emergencyMessage ||
+      (emergencyReviewRevision !== value?.revision
+        ? "Session changed. Cancel and review again."
+        : "Gives up admission.");
+    protectionHeading.textContent = !known
+      ? "Protection status unconfirmed"
+      : {
+          idle: "Assessment protection unavailable",
+          preflight: "Checking assessment protection",
+          engaging: "Waiting for native confirmation",
+          locked: "Assessment protected",
+          ending: "Assessment protection is ending",
+          ended: "Assessment protection ended",
+          failed: "Protection unavailable",
+          recovery_required: "Assessment recovery required",
+        }[state!.phase];
+    protectionSummary.textContent = !known
+      ? "The calculator remains unavailable. Protection could not be checked. Follow your teacher’s instructions."
+      : state!.phase === "recovery_required"
+        ? state!.nativeEndObserved
+          ? "Native end was observed, but local cleanup is not confirmed. Keep this app open and ask your teacher or operator for help."
+          : "The previous assessment’s end could not be confirmed. Keep this app open and ask your teacher or operator for help. A new assessment cannot start here."
+        : state!.phase === "ended"
+          ? "Native end was observed and local cleanup is complete. This does not confirm the session’s admission was given up."
+          : state!.phase === "ending"
+            ? state!.nativeEndObserved
+              ? "Native end was observed. Waiting for confirmed local cleanup."
+              : "Ending has been requested. Native end and local cleanup are not yet confirmed."
+            : state!.phase === "failed" && state!.cleanup === "complete"
+              ? "The attempt did not establish confirmed protection. Local cleanup is complete. A new Start checks protection again."
+              : state!.phase === "preflight" || state!.phase === "engaging"
+                ? "The calculator remains unavailable until native confirmation and all five checks are confirmed."
+                : "The calculator remains unavailable. Join a Test, then choose Start assessment to check protection.";
+    type Code =
+      DesktopStudentView["protection"]["categories"][Category]["code"];
+    const categoryCopy: Record<Code, string> = {
+      none: "Not checked",
+      awaiting_native_begin: "Waiting for native confirmation",
+      native_unavailable:
+        "Native support is unavailable; this app’s authorization to begin protection is not confirmed",
+      native_inactive: "Native protection is not currently confirmed",
+      emergency_shortcut_unavailable: "The emergency shortcut is unavailable",
+      prohibited_application:
+        "A prohibited application prevents assessment protection",
+      application_observation_unavailable:
+        "Permitted applications could not be checked",
+      durability_unavailable: "Local session records could not be confirmed",
+      evidence_capacity: "Local evidence capacity is reached",
+      window_unavailable: "The assessment window is unavailable",
+      network_policy_unavailable:
+        "The assessment network boundary is unavailable",
+      backend_unavailable: "Session access cannot currently be confirmed",
+    };
+    for (const [category, detail] of categories) {
+      const observation = known ? state!.categories[category] : null;
+      detail.textContent =
+        observation === null
+          ? "Unconfirmed"
+          : observation.status === "confirmed"
+            ? "Confirmed"
+            : observation.code === "none"
+              ? "Pending"
+              : categoryCopy[observation.code];
+      detail.dataset.status = observation?.status ?? "unavailable";
+    }
+    const cause = known ? state!.failure : null;
+    protectionFailure.hidden = cause === null && emergencyMessage === "";
+    protectionFailure.textContent =
+      emergencyMessage ||
+      (cause === "backend_unavailable" || cause === "admission_changed"
+        ? "Session access cannot currently be confirmed. Follow your teacher’s instructions."
+        : cause === "persistence_unavailable"
+          ? "Local session records could not be confirmed. Emergency exit remains available while recovery is needed."
+          : cause === null
+            ? ""
+            : "Assessment protection could not be maintained. Follow the recovery guidance above.");
+    evidence.hidden = !known || state!.evidence === "none";
+    evidence.textContent =
+      !known || state!.evidence === "none"
+        ? ""
+        : {
+            queued:
+              "Session evidence is saved locally and queued. Server receipt is not confirmed.",
+            full: "Local evidence capacity is reached. Another assessment cannot start.",
+            unconfirmed:
+              "Local evidence could not be confirmed. Another assessment cannot start.",
+          }[state!.evidence];
+
+    bind(start, "click", () => {
+      if (value === null || bridge === undefined || !canStart(value)) return;
+      void request("start", () =>
+        bridge.startAssessment({ snapshotRevision: value.revision }),
+      );
+    });
+    bind(emergency, "click", () => {
+      if (
+        value === null ||
+        bridge === undefined ||
+        current?.revision !== value.revision ||
+        !emergencyAvailable ||
+        reviewing ||
+        emergencyPending.has("review")
+      )
+        return;
+      void requestEmergency("review", () =>
+        bridge.reviewEmergencyEnd({ snapshotRevision: value.revision }),
+      );
+    });
+    const capturedReviewRevision = emergencyReviewRevision;
+    bind(emergencyConfirm, "click", () => {
+      if (
+        value === null ||
+        bridge === undefined ||
+        !reviewing ||
+        current?.revision !== value.revision ||
+        capturedReviewRevision !== value.revision ||
+        emergencyReviewRevision !== capturedReviewRevision ||
+        emergencyPending.has("confirm") ||
+        emergencyPending.has("cancel")
+      )
+        return;
+      void requestEmergency("confirm", () =>
+        bridge.confirmEmergencyEnd({
+          snapshotRevision: capturedReviewRevision,
+        }),
+      );
+    });
+    bind(emergencyCancel, "click", () => {
+      if (
+        value === null ||
+        bridge === undefined ||
+        !reviewing ||
+        current?.revision !== value.revision ||
+        emergencyPending.has("cancel") ||
+        emergencyPending.has("confirm")
+      )
+        return;
+      void requestEmergency("cancel", () =>
+        bridge.cancelEmergencyEnd({ snapshotRevision: value.revision }),
+      );
+    });
+  }
+
   function render() {
     if (disposed) return;
     const snapshot = unavailable ? null : current;
-    const phase = snapshot?.phase ?? "unavailable";
+    const phase = snapshot?.admission.phase ?? "unavailable";
     const renderedPublication = publication;
     const busy = pending !== null || loading || phase === "joining";
+    const admissionBlocked = current !== null && retainedProtection(current);
     const canOpenRecovery =
       snapshot !== null && (phase === "unavailable" || phase === "forfeited");
     const recovery =
@@ -268,12 +642,13 @@ export function bindStudentSessionView(
     const entry = phase === "entry";
     const reviewing = review !== null && snapshot !== null;
     panel.dataset.phase = loading ? "loading" : phase;
+    root.setAttribute("data-admission-phase", loading ? "loading" : phase);
     heading.textContent = loading
       ? "Loading session…"
       : {
           entry: "Join a Test",
           joining:
-            snapshot?.pendingOperation === "join"
+            snapshot?.admission.pendingOperation === "join"
               ? "Joining…"
               : "Restoring your saved attempt…",
           active: "Session confirmed",
@@ -288,54 +663,58 @@ export function bindStudentSessionView(
           entry: "Ask your teacher for the Test join code.",
           joining:
             "Wait while your saved attempt is checked. Your session is not yet confirmed.",
-          active:
-            "Your session admission is confirmed. Assessment protection is still unavailable.",
+          active: "Your session admission is confirmed.",
           unconfirmed:
-            snapshot?.pendingOperation === "forfeit"
+            snapshot?.admission.pendingOperation === "forfeit"
               ? "Leaving has not been confirmed. Retry the saved attempt to check its result."
-              : snapshot?.pendingOperation == null
+              : snapshot?.admission.pendingOperation == null
                 ? "Your session is not currently confirmed. Refresh to check again or ask your teacher for help."
                 : "Your session is not currently confirmed. Retry the saved attempt without starting a new session.",
           unavailable:
             "Your session cannot currently be confirmed. Refresh to check again or ask your teacher for help.",
-          recovery_required:
-            "Ask your teacher for a private re-admission code to restore an existing session.",
+          recovery_required: admissionBlocked
+            ? "Local protection recovery is required before session recovery. Ask your teacher or operator for help."
+            : "Ask your teacher for a private re-admission code to restore an existing session.",
           forfeited:
             "This session’s admission was given up. Ask your teacher if you need to return.",
         }[phase];
     identity.hidden = phase !== "active";
     identity.textContent =
-      phase === "active" ? (snapshot?.session?.syntheticDisplayName ?? "") : "";
+      phase === "active"
+        ? (snapshot?.admission.session?.syntheticDisplayName ?? "")
+        : "";
     const pendingCopy: Record<Operation, string> = {
       join: "Submitting your join attempt…",
       recovery: "Restoring your session…",
       retry: "Checking your saved attempt…",
       refresh: "Checking your session…",
       forfeit: "Leaving has not yet been confirmed…",
+      start: "Checking assessment protection…",
     };
     feedback.textContent = pending === null ? message : pendingCopy[pending];
     feedback.hidden = feedback.textContent === "";
-    codeForm.hidden = (!entry && !recovery) || reviewing;
+    codeForm.hidden = (!entry && !recovery) || reviewing || admissionBlocked;
     codeLabel.textContent = recovery
       ? "Private re-admission code"
       : "Test join code";
     submit.textContent = recovery ? "Review recovery" : "Join Test";
     codeInput.readOnly = busy;
-    submit.disabled = busy || snapshot === null;
+    submit.disabled = busy || snapshot === null || admissionBlocked;
     reviewPanel.hidden = !reviewing;
     retry.hidden =
       reviewing ||
       phase !== "unconfirmed" ||
-      snapshot?.pendingOperation == null;
+      snapshot?.admission.pendingOperation == null;
     refresh.hidden = reviewing || loading || entry || phase === "joining";
     leave.hidden = reviewing || phase !== "active";
-    openRecovery.hidden = reviewing || !canOpenRecovery || recoveryOpened;
+    openRecovery.hidden =
+      reviewing || !canOpenRecovery || recoveryOpened || admissionBlocked;
     cancelRecovery.hidden = reviewing || !canOpenRecovery || !recoveryOpened;
-    retry.disabled = busy || bridge === undefined;
+    retry.disabled = busy || bridge === undefined || admissionBlocked;
     refresh.disabled = busy || bridge === undefined;
-    leave.disabled = busy;
-    openRecovery.disabled = busy;
-    cancelRecovery.disabled = busy;
+    leave.disabled = busy || admissionBlocked;
+    openRecovery.disabled = busy || admissionBlocked;
+    cancelRecovery.disabled = busy || admissionBlocked;
     confirm.disabled =
       busy || !reviewing || review?.revision !== snapshot?.revision;
     cancel.disabled = busy;
@@ -392,14 +771,14 @@ export function bindStudentSessionView(
         snapshot === null ||
         !live(snapshot) ||
         phase !== "active" ||
-        snapshot.session === null ||
+        snapshot.admission.session === null ||
         review !== null
       )
         return;
       review = {
         kind: "forfeit",
         revision: snapshot.revision,
-        name: snapshot.session.syntheticDisplayName,
+        name: snapshot.admission.session.syntheticDisplayName,
       };
       render();
       reviewHeading.focus({ preventScroll: true });
@@ -453,7 +832,7 @@ export function bindStudentSessionView(
         snapshot === null ||
         !live(snapshot) ||
         phase !== "unconfirmed" ||
-        snapshot.pendingOperation === null ||
+        snapshot.admission.pendingOperation === null ||
         review !== null ||
         bridge === undefined
       )
@@ -498,6 +877,7 @@ export function bindStudentSessionView(
       render();
       openRecovery.focus({ preventScroll: true });
     });
+    renderProtection();
   }
 
   bind(codeInput, "input", () => {
@@ -531,6 +911,12 @@ export function bindStudentSessionView(
       review = null;
       identity.textContent = "";
       panel.remove();
+      toolbar.remove();
+      emergencyPending.clear();
+      emergencyReviewRevision = null;
+      root.removeAttribute("data-admission-phase");
+      root.removeAttribute("data-protection-phase");
+      root.removeAttribute("data-calculator-space-reserved");
     }
   };
 }

@@ -333,6 +333,8 @@ test.describe
       }),
     ).resolves.toEqual([
       "beginTargetedReadmission",
+      "cancelEmergencyEnd",
+      "confirmEmergencyEnd",
       "forfeitStudentSession",
       "joinTest",
       "onStudentSessionViewChanged",
@@ -340,6 +342,8 @@ test.describe
       "refreshStudentSession",
       "requestAssessmentLock",
       "retryStudentSession",
+      "reviewEmergencyEnd",
+      "startAssessment",
       "version",
     ]);
 
