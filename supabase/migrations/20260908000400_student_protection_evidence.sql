@@ -115,7 +115,7 @@ begin
     or identity->>'sourceRepository' is distinct from 'danielholguin31/desmoslock' then return null; end if;
   foreach key in array array['sourceCommit','sourceTree','packageLockSha256','buildId'] loop
     if jsonb_typeof(identity->key) is distinct from 'string'
-      or (identity->>key) !~ case when key in ('sourceCommit','sourceTree') then '^[0-9a-f]{40}$' else '^[0-9a-f]{64}$' end
+      or (identity->>key) !~ (case when key in ('sourceCommit','sourceTree') then '^[0-9a-f]{40}$' else '^[0-9a-f]{64}$' end)
       or (identity->>key) ~ '^0+$' then return null; end if;
   end loop;
   return jsonb_build_array('build',1,'danielholguin31/desmoslock',identity->>'sourceCommit',identity->>'sourceTree',identity->>'packageLockSha256',identity->>'buildId');
@@ -691,7 +691,7 @@ grant execute on function desmoslock_v2.current_student_protection_events(uuid,u
 -- desmoslock-migration-set-sha256:begin
 create or replace function desmoslock_v2.expected_migration_set_sha256()
 returns text language sql immutable set search_path = '' as $$
-  select 'b6357a2882075f41e309ce14c8c6c2313a0336c6f5cdaa0f910906d6e4df5ca2'::text;
+  select 'a1c671760f91c131241216daae7df908a42f4b26a867efdc8676169d9b2df778'::text;
 $$;
 -- desmoslock-migration-set-sha256:end
 revoke all on function desmoslock_v2.expected_migration_set_sha256() from public, anon, authenticated, service_role;

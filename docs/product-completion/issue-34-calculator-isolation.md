@@ -48,9 +48,15 @@ The deterministic synthetic sequence is: retain initial `y=x`; add `y=x^2` at
 100%; zoom once to 125%; add `y=sin(x)`, `y=cos(x)`, `y=3`, `x=-3`, `(2,3)`;
 remove only `y=x^2` and compare every surviving geometry; submit unsupported
 `y=2x+1` and require the error with unchanged plots/zoom; run the existing hostile
-containment probe; then add `(4,-2)` and require its visible point while all prior
-plots survive. Bridge, URL, window and zero HTTP/TCP/UDP sink checks remain
-independent requirements. The pure controls and fixture source do not themselves
+containment probe with all six remaining forms and 125% zoom verified first.
+The probe attempts a foreign main-frame navigation. Production restores its own
+calculator document after that load fails; the document's temporary graph state
+starts again at `y=x` and 100% zoom. The fixture requires the actual failed foreign
+main-frame load, subsequent owned document navigation and completed load, and a
+fresh document time origin. It rejects unexplained state loss or wrong restored
+geometry. It then adds `(4,-2)` through native input and requires its visible
+point at the 100% position/color, with the restored baseline unchanged. Bridge,
+URL, window and zero HTTP/TCP/UDP sink checks remain independent requirements. The pure controls and fixture source do not themselves
 claim an executed Electron or packaged graphing pass.
 
 Both the trusted shell's default Electron session and the calculator's ephemeral

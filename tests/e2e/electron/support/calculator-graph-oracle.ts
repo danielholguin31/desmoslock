@@ -11,6 +11,7 @@ export type GraphPlot =
       readonly painted: boolean;
     };
 export interface GraphSnapshot {
+  readonly document: { readonly url: string; readonly timeOrigin: number };
   readonly expressions: readonly string[];
   readonly plots: readonly GraphPlot[];
   readonly zoom: string;
@@ -158,6 +159,71 @@ export function assertGraphGeometry(
       }
     }
   });
+}
+
+export type GraphRecoveryEvent =
+  | {
+      readonly kind: "failed-load";
+      readonly url: string;
+      readonly isMainFrame: boolean;
+      readonly errorCode: number;
+    }
+  | { readonly kind: "navigated" | "finished-load"; readonly url: string };
+export interface GraphRecoveryEvidence {
+  readonly calculatorUrl: string;
+  readonly attemptedUrl: string;
+  readonly beforePlots: readonly ExpectedPlot[];
+  readonly initialPlots: readonly ExpectedPlot[];
+  readonly events: readonly GraphRecoveryEvent[];
+}
+
+// A reset is valid only across an observed failed foreign main-frame navigation
+// and a completed replacement document. Missing forms in the same document, or
+// a reset inferred solely from the graph's contents, must still fail.
+export function assertGraphRestoredAfterNavigation(
+  before: GraphSnapshot,
+  after: GraphSnapshot,
+  evidence: GraphRecoveryEvidence,
+): void {
+  assertGraphGeometry(before, evidence.beforePlots);
+  assert.equal(before.zoom, "125%", "pre-attack zoom");
+  assert.equal(before.document.url, evidence.calculatorUrl);
+  assert.equal(after.document.url, evidence.calculatorUrl);
+  assert.notEqual(evidence.attemptedUrl, evidence.calculatorUrl);
+  assert(
+    Number.isFinite(before.document.timeOrigin) &&
+      before.document.timeOrigin > 0 &&
+      Number.isFinite(after.document.timeOrigin) &&
+      after.document.timeOrigin > before.document.timeOrigin,
+    "no fresh calculator document",
+  );
+  const failed = evidence.events.findIndex(
+    (event) =>
+      event.kind === "failed-load" &&
+      event.isMainFrame &&
+      event.url === evidence.attemptedUrl &&
+      Number.isInteger(event.errorCode) &&
+      event.errorCode < 0,
+  );
+  assert(failed >= 0, "missing failed foreign main-frame navigation");
+  const navigated = evidence.events.findIndex(
+    (event, index) =>
+      index > failed &&
+      event.kind === "navigated" &&
+      event.url === evidence.calculatorUrl,
+  );
+  assert(navigated > failed, "missing owned document restoration");
+  assert(
+    evidence.events.some(
+      (event, index) =>
+        index > navigated &&
+        event.kind === "finished-load" &&
+        event.url === evidence.calculatorUrl,
+    ),
+    "restored document did not finish loading",
+  );
+  assertGraphGeometry(after, evidence.initialPlots);
+  assert.equal(after.zoom, "100%", "restored initial zoom");
 }
 
 export function plotGeometry(snapshot: GraphSnapshot): readonly unknown[] {

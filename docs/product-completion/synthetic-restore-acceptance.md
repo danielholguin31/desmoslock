@@ -30,7 +30,7 @@ whose migration-set SHA256 was
 `7c3e7403b61d5c66123b15d2fe4de28ee2259d71a304ce8695d16630f5353a56`.
 The imported `CURRENT_MIGRATION_FILES` now propagates all twelve migrations.
 The selected current aggregate is
-`b6357a2882075f41e309ce14c8c6c2313a0336c6f5cdaa0f910906d6e4df5ca2`;
+`a1c671760f91c131241216daae7df908a42f4b26a867efdc8676169d9b2df778`;
 the [versioned input contract](reproducible-supabase.md#versioned-inputs)
 retains all historical pins and the ten delimited self-reference normalization.
 The eleventh migration preserves its historical aggregate
@@ -38,7 +38,7 @@ The eleventh migration preserves its historical aggregate
 and raw SHA-256
 `448d7697885eae07f04cc3b89531b7b3711e71fa67d56d80ac891df63458fb06`.
 Migration 12's raw SHA-256 is
-`caf89e51eee3aac9332a27146b86038d466740da49a1ba327a9534bbd51b81b4`.
+`5caa57745a0fec6ab4291e9a254b6d1e77090d6298b57f6f8d739bd71c5fdc07`.
 Schema generation `4`, fixture digest and seven-table archive remain unchanged.
 
 The existing operator and default bounded adapter run on host Node/Python.

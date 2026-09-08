@@ -88,7 +88,7 @@ The fixture contract is generation `4`, version `internal-baseline-v2`, with
 SHA-256
 `f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201`.
 The selected twelve-file candidate has normalized SHA-256
-`b6357a2882075f41e309ce14c8c6c2313a0336c6f5cdaa0f910906d6e4df5ca2`.
+`a1c671760f91c131241216daae7df908a42f4b26a867efdc8676169d9b2df778`.
 The published generation-3 migration retains its contemporaneous digest
 `06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49`;
 the original generation-4 migration likewise retains
@@ -123,7 +123,7 @@ and raw SHA-256
 `448d7697885eae07f04cc3b89531b7b3711e71fa67d56d80ac891df63458fb06`.
 Only the native-protection evidence migration records the current aggregate.
 Its raw SHA-256 is
-`caf89e51eee3aac9332a27146b86038d466740da49a1ba327a9534bbd51b81b4`.
+`5caa57745a0fec6ab4291e9a254b6d1e77090d6298b57f6f8d739bd71c5fdc07`.
 The repository contract pins each attested migration's raw SHA-256 and literal
 independently, then zeroes only those ten delimited self-references when deriving
 the twelve-file aggregate. The follow-on migration updates the existing singleton

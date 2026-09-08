@@ -28,6 +28,7 @@ import {
 import { runHostileCalculatorProbe } from "./support/hostile-calculator-probe.mjs";
 import {
   assertGraphGeometry,
+  assertGraphRestoredAfterNavigation,
   assertPlotPaint,
   assertZoomGeometryChanged,
   graphScreenPoint,
@@ -35,6 +36,7 @@ import {
   type ExpectedPlot,
   type GraphPoint,
   type GraphSnapshot,
+  type GraphRecoveryEvent,
 } from "./support/calculator-graph-oracle.js";
 
 const calculatorUrl = "desmoslock-calculator://host/index.html";
@@ -214,6 +216,7 @@ async function readGraph(
       if (matrix === null) throw new Error("Graph transform is missing");
       const box = graph.viewBox.baseVal;
       return {
+        document: { url: location.href, timeOrigin: performance.timeOrigin },
         expressions: Array.from(
           document.querySelectorAll<HTMLElement>("[data-expression]"),
           (element) => element.dataset.expression ?? "",
@@ -722,7 +725,8 @@ test.describe
   test("blocks hostile desktop, network, popup, navigation, download, and permission attempts", async () => {
     const beforeAttack = await readGraph(application);
     assertGraphGeometry(beforeAttack, [diagonal, ...otherProfileForms125]);
-    await application.evaluate(({ webContents }, url) => {
+    expect(beforeAttack.zoom).toBe("125%");
+    const calculatorId = await application.evaluate(({ webContents }, url) => {
       const calculator = webContents
         .getAllWebContents()
         .find((contents) => contents.getURL() === url);
@@ -730,6 +734,46 @@ test.describe
       const tracked = calculator as typeof calculator & {
         blockedDownloadEvents?: number;
         productionDownloadDenialObserved?: boolean;
+        graphRecoveryEvents?: GraphRecoveryEvent[];
+        stopGraphRecoveryObservation?: () => void;
+      };
+      tracked.graphRecoveryEvents = [];
+      const failed = (
+        _event: Electron.Event,
+        errorCode: number,
+        _description: string,
+        failedUrl: string,
+        isMainFrame: boolean,
+      ): void => {
+        tracked.graphRecoveryEvents?.push({
+          kind: "failed-load",
+          url: failedUrl,
+          isMainFrame,
+          errorCode,
+        });
+      };
+      const navigated = (
+        _event: Electron.Event,
+        committedUrl: string,
+      ): void => {
+        tracked.graphRecoveryEvents?.push({
+          kind: "navigated",
+          url: committedUrl,
+        });
+      };
+      const finished = (): void => {
+        tracked.graphRecoveryEvents?.push({
+          kind: "finished-load",
+          url: calculator.getURL(),
+        });
+      };
+      calculator.on("did-fail-load", failed);
+      calculator.on("did-navigate", navigated);
+      calculator.on("did-finish-load", finished);
+      tracked.stopGraphRecoveryObservation = () => {
+        calculator.removeListener("did-fail-load", failed);
+        calculator.removeListener("did-navigate", navigated);
+        calculator.removeListener("did-finish-load", finished);
       };
       tracked.blockedDownloadEvents = 0;
       tracked.productionDownloadDenialObserved = false;
@@ -744,103 +788,158 @@ test.describe
           }
         },
       );
+      return calculator.id;
     }, calculatorUrl);
 
-    const hostile = await callCalculator(
-      application,
-      runHostileCalculatorProbe,
-      {
-        httpOrigin: sinkOrigin,
-        tcpPort: tcpSinkPort,
-        udpPort: udpSinkPort,
-      },
-    );
+    try {
+      const hostile = await callCalculator(
+        application,
+        runHostileCalculatorProbe,
+        {
+          httpOrigin: sinkOrigin,
+          tcpPort: tcpSinkPort,
+          udpPort: udpSinkPort,
+        },
+      );
 
-    expect(hostile).toMatchObject({
-      bridge: "undefined",
-      externalProtocol: "denied",
-      fetch: "blocked",
-      nodeProcess: "undefined",
-      nodeRequire: "undefined",
-      permission: "denied",
-      popup: "blocked",
-      rtcPeerConnection: "NotAllowedError",
-      webTransport: "rejected",
-    });
+      expect(hostile).toMatchObject({
+        bridge: "undefined",
+        externalProtocol: "denied",
+        fetch: "blocked",
+        nodeProcess: "undefined",
+        nodeRequire: "undefined",
+        permission: "denied",
+        popup: "blocked",
+        rtcPeerConnection: "NotAllowedError",
+        webTransport: "rejected",
+      });
 
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    const afterAttack = await application.evaluate(
-      ({ BrowserWindow, webContents }, url) => {
-        const calculator = webContents
-          .getAllWebContents()
-          .find((contents) => contents.getURL() === url);
-        if (calculator === undefined) {
-          throw new Error(
-            `Calculator is missing; active URLs: ${webContents
-              .getAllWebContents()
-              .map((contents) => contents.getURL())
-              .join(", ")}`,
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const afterAttack = await application.evaluate(
+        ({ BrowserWindow, webContents }, url) => {
+          const calculator = webContents
+            .getAllWebContents()
+            .find((contents) => contents.getURL() === url);
+          if (calculator === undefined) {
+            throw new Error(
+              `Calculator is missing; active URLs: ${webContents
+                .getAllWebContents()
+                .map((contents) => contents.getURL())
+                .join(", ")}`,
+            );
+          }
+          return {
+            blockedDownloadEvents:
+              (
+                calculator as typeof calculator & {
+                  blockedDownloadEvents?: number;
+                }
+              ).blockedDownloadEvents ?? 0,
+            productionDownloadDenialObserved:
+              (
+                calculator as typeof calculator & {
+                  productionDownloadDenialObserved?: boolean;
+                }
+              ).productionDownloadDenialObserved ?? false,
+            calculatorUrl: calculator.getURL(),
+            windowCount: BrowserWindow.getAllWindows().length,
+          };
+        },
+        calculatorUrl,
+      );
+
+      expect(afterAttack).toEqual({
+        blockedDownloadEvents: 1,
+        calculatorUrl,
+        productionDownloadDenialObserved: true,
+        windowCount: 1,
+      });
+      expect(sinkRequests).toBe(0);
+      expect(tcpSinkConnections).toBe(0);
+      expect(udpSinkRequests).toBe(0);
+      await expect(shell.locator("[data-isolation-fixture]")).toHaveText(
+        "Synthetic calculator isolation fixture",
+      );
+
+      const readRecoveryEvents = (): Promise<GraphRecoveryEvent[]> =>
+        application.evaluate(({ webContents }, id) => {
+          const calculator = webContents.fromId(id);
+          if (calculator === undefined)
+            throw new Error("Original calculator is missing");
+          return (
+            (
+              calculator as typeof calculator & {
+                graphRecoveryEvents?: GraphRecoveryEvent[];
+              }
+            ).graphRecoveryEvents ?? []
           );
-        }
-        return {
-          blockedDownloadEvents:
-            (
-              calculator as typeof calculator & {
-                blockedDownloadEvents?: number;
-              }
-            ).blockedDownloadEvents ?? 0,
-          productionDownloadDenialObserved:
-            (
-              calculator as typeof calculator & {
-                productionDownloadDenialObserved?: boolean;
-              }
-            ).productionDownloadDenialObserved ?? false,
-          calculatorUrl: calculator.getURL(),
-          windowCount: BrowserWindow.getAllWindows().length,
+        }, calculatorId);
+      // Wait for the actual production recovery; never reload or re-seed the graph.
+      await expect
+        .poll(async () => {
+          const events = await readRecoveryEvents();
+          return events.some(
+            (event) =>
+              event.kind === "finished-load" && event.url === calculatorUrl,
+          );
+        })
+        .toBe(true);
+      const afterProbe = await readGraph(application);
+      const recovery = {
+        calculatorUrl,
+        attemptedUrl: `${sinkOrigin}/navigation`,
+        events: await readRecoveryEvents(),
+        beforePlots: [diagonal, ...otherProfileForms125],
+        initialPlots: [diagonal],
+      };
+      await test.info().attach("hostile-navigation-recovery", {
+        body: JSON.stringify({ beforeAttack, afterProbe, recovery }),
+        contentType: "application/json",
+      });
+      assertGraphRestoredAfterNavigation(beforeAttack, afterProbe, recovery);
+      await typeCalculatorExpression(application, "(4,-2)");
+      await expect
+        .poll(async () => (await readGraph(application)).expressions.at(-1))
+        .toBe("(4,-2)");
+      const afterGraph = await readGraph(application);
+      assertGraphGeometry(afterGraph, [
+        diagonal,
+        { expression: "(4,-2)", kind: "point", points: [[504, 302]] },
+      ]);
+      expect(plotGeometry(afterGraph).slice(0, -1)).toEqual(
+        plotGeometry(afterProbe),
+      );
+      expect(afterGraph.zoom).toBe("100%");
+      expect(afterGraph.document).toEqual(afterProbe.document);
+      await assertCapturedPlot(
+        application,
+        afterGraph,
+        [[504, 302]],
+        [209, 73, 91],
+        "supported-point-after-hostile-probe",
+      );
+      expect(sinkRequests).toBe(0);
+      expect(tcpSinkConnections).toBe(0);
+      expect(udpSinkRequests).toBe(0);
+    } finally {
+      const events = await application.evaluate(({ webContents }, id) => {
+        const calculator = webContents.fromId(id);
+        if (calculator === undefined) return [];
+        const tracked = calculator as typeof calculator & {
+          stopGraphRecoveryObservation?: () => void;
+          graphRecoveryEvents?: GraphRecoveryEvent[];
         };
-      },
-      calculatorUrl,
-    );
-
-    expect(afterAttack).toEqual({
-      blockedDownloadEvents: 1,
-      calculatorUrl,
-      productionDownloadDenialObserved: true,
-      windowCount: 1,
-    });
-    expect(sinkRequests).toBe(0);
-    expect(tcpSinkConnections).toBe(0);
-    expect(udpSinkRequests).toBe(0);
-    await expect(shell.locator("[data-isolation-fixture]")).toHaveText(
-      "Synthetic calculator isolation fixture",
-    );
-
-    const afterProbe = await readGraph(application);
-    assertGraphGeometry(afterProbe, [diagonal, ...otherProfileForms125]);
-    expect(plotGeometry(afterProbe)).toEqual(plotGeometry(beforeAttack));
-    await typeCalculatorExpression(application, "(4,-2)");
-    await expect
-      .poll(async () => (await readGraph(application)).expressions.at(-1))
-      .toBe("(4,-2)");
-    const afterGraph = await readGraph(application);
-    assertGraphGeometry(afterGraph, [
-      diagonal,
-      ...otherProfileForms125,
-      { expression: "(4,-2)", kind: "point", points: [[540, 320]] },
-    ]);
-    expect(plotGeometry(afterGraph).slice(0, -1)).toEqual(
-      plotGeometry(beforeAttack),
-    );
-    await assertCapturedPlot(
-      application,
-      afterGraph,
-      [[540, 320]],
-      [42, 157, 103],
-      "supported-point-after-hostile-probe",
-    );
-    expect(sinkRequests).toBe(0);
-    expect(tcpSinkConnections).toBe(0);
-    expect(udpSinkRequests).toBe(0);
+        tracked.stopGraphRecoveryObservation?.();
+        const observed = tracked.graphRecoveryEvents ?? [];
+        delete tracked.stopGraphRecoveryObservation;
+        delete tracked.graphRecoveryEvents;
+        return observed;
+      }, calculatorId);
+      await test.info().attach("hostile-navigation-events", {
+        body: JSON.stringify(events),
+        contentType: "application/json",
+      });
+    }
   });
 
   test("does not let the synthetic fixture claim native protection through the legacy bridge", async () => {

@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const CURRENT_MIGRATION_SET_SHA256 =
-  "b6357a2882075f41e309ce14c8c6c2313a0336c6f5cdaa0f910906d6e4df5ca2";
+  "a1c671760f91c131241216daae7df908a42f4b26a867efdc8676169d9b2df778";
 export const CURRENT_MIGRATION_FILES = Object.freeze([
   "20260824000100_v2_foundation.sql",
   "20260828000100_internal_release_backend.sql",

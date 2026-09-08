@@ -93,9 +93,9 @@ Its raw SHA-256 remains
 `448d7697885eae07f04cc3b89531b7b3711e71fa67d56d80ac891df63458fb06`.
 The current twelfth migration is
 `supabase/migrations/20260908000400_student_protection_evidence.sql`, with raw
-SHA-256 `caf89e51eee3aac9332a27146b86038d466740da49a1ba327a9534bbd51b81b4`
+SHA-256 `5caa57745a0fec6ab4291e9a254b6d1e77090d6298b57f6f8d739bd71c5fdc07`
 and current normalized aggregate
-`b6357a2882075f41e309ce14c8c6c2313a0336c6f5cdaa0f910906d6e4df5ca2`.
+`a1c671760f91c131241216daae7df908a42f4b26a867efdc8676169d9b2df778`.
 All eleven predecessors retain their bytes and historical pins; schema generation
 `4`, fixture digest and seven-table archive are unchanged. See the
 [exact inventory and normalization](reproducible-supabase.md#versioned-inputs).
