@@ -15,8 +15,7 @@ published, or presented as current product behavior.
 - Repository: `danielholguin31/desmoslock`
 - Integration branch: `main`
 - Product source: `apps/`, `packages/`, `supabase/config.toml`,
-  `supabase/functions/deno.json`, `supabase/functions/health/`,
-  `supabase/migrations/`, `supabase/seed.sql`, and
+  `supabase/functions/`, `supabase/migrations/`, `supabase/seed.sql`, and
   `supabase/tests/database/`
 - Operations source: `scripts/synthetic-backup/` for the synthetic-only backup
   and local-restore boundary
@@ -46,7 +45,7 @@ the available controls; they are not represented as server-side protection.
 
 ## Develop and verify v2
 
-Use Node.js 24 or newer and npm 11.12.1 from the repository root.
+Use exactly Node.js 24.20.0 and npm 11.12.1 from the repository root.
 
 ```bash
 npm ci
@@ -56,15 +55,22 @@ npm run typecheck
 npm test
 DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=local \
 DESMOSLOCK_PUBLIC_BACKEND_URL=http://127.0.0.1:54321 \
+DESMOSLOCK_PUBLIC_WEB_ORIGIN=http://localhost:43174 \
+DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc \
   npm run build
 ```
 
-Both public backend values are mandatory. An absent or partial configuration
-fails before bundling; there is no implicit loopback or staging default.
+All four public web values are mandatory. An absent or partial configuration
+fails before bundling; there is no implicit loopback, staging target, or
+publishable key. The synthetic key above is test-only and is never a hosted
+credential.
 
 The disposable v2 database starts from `supabase/migrations/` and
 `supabase/seed.sql`. It does not import legacy users or product rows. The
-generation-3 seed creates only the fixed two-School synthetic internal baseline.
+generation-4 seed creates only the fixed two-School synthetic internal
+baseline. Its six profiles remain unbound to Auth identities, and its six
+Memberships remain active, revision-one fixtures with no acceptance or
+revocation state.
 
 ```bash
 npm run db:start
@@ -72,6 +78,28 @@ npm run db:reset
 npm run test:db
 npm run db:stop
 ```
+
+For the disposable staff-auth schema and local-prerequisite verification lane:
+
+```bash
+npm run db:start:full
+npm run db:reset
+npm run test:staff-auth
+npm run db:stop
+```
+
+CI owns startup and unconditional shutdown for that lane. The command verifies
+database schema/RPC lifecycle contracts, local Auth/PostgREST/health prerequisites,
+observed two-connection authorization races, Edge handler behavior, unit tests,
+then real-provider invitation, PKCE recovery and revocation journeys. The final
+composed suite requires a freshly reset stack;
+its append-only audit fixtures remain until the disposable stack is stopped or
+reset. CLI startup output is sanitized so generated local keys are not printed.
+This source candidate has not executed those database/provider journeys locally.
+Delivered email, actual browser journeys and hosted configuration remain separate
+acceptance gates. See
+[`auth-integration-evidence.md`](docs/product-completion/auth-integration-evidence.md)
+for the selected contract, evidence limits and in-place rollout prerequisite.
 
 See
 [`docs/product-completion/reproducible-supabase.md`](docs/product-completion/reproducible-supabase.md)

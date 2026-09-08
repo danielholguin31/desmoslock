@@ -22,6 +22,7 @@ const expectedOutputs = [
   "apps/desktop/dist/preload.cjs",
   "apps/desktop/dist/renderer.js",
   "apps/desktop/dist/styles.css",
+  "apps/web/dist/auth/staff-auth.css",
   "apps/web/dist/main.js",
   "packages/contracts/dist/index.js",
   "packages/domain/dist/index.js",
@@ -63,6 +64,9 @@ test("the documented aggregate app build succeeds without generated workspace ar
     env: {
       DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT: "local",
       DESMOSLOCK_PUBLIC_BACKEND_URL: "http://127.0.0.1:54321",
+      DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY:
+        "sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc",
+      DESMOSLOCK_PUBLIC_WEB_ORIGIN: "http://127.0.0.1:43173",
       LANG: "C",
       LC_ALL: "C",
       PATH: process.env.PATH ?? "",

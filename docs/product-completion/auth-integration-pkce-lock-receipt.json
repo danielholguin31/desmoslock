@@ -1,0 +1,64 @@
+{
+  "date": "2026-09-07",
+  "status": "repair_source_frozen_awaiting_root_gate_and_exact_commit_ci",
+  "base_commit": "2a0d6cfee334df5cbe62d9f5fe53fe9efbed19f1",
+  "previous_ci_run": "https://github.com/danielholguin31/desmoslock/actions/runs/34176046359",
+  "supersedes": {
+    "receipts": [
+      "docs/product-completion/auth-integration-final-receipt.json",
+      "docs/product-completion/auth-integration-ci-repair-receipt.json"
+    ],
+    "scope": "The corresponding hashes and status claims for affected paths below are superseded. Earlier receipts remain historical snapshots, not current-tree attestations."
+  },
+  "files_sha256": {
+    "README.md": "e8045232dedea2f7b6f66c70e358a307807510f4a00cb02de506cc1f3abc4893",
+    "docs/product-completion/auth-integration-ci-evidence.md": "c19ef7a4049c9a96a059e5c636bee7b9dcfeb2362bb92c449c31a7d65f7fd109",
+    "docs/product-completion/auth-integration-evidence.md": "d78e11ca110317d553d865f8c4b0574a21895c0477d968597496f2af2481ef38",
+    "docs/product-completion/reproducible-supabase.md": "93c0e7806dd38de11e9dc5a444d5a37d86263cf1ce3a8dfbe932fcd74e897f10",
+    "package.json": "618e58c46f3f4dfaa33d760213abe0442f8092c9494e10634722597fd30dab12",
+    "scripts/repository-contract/ci-contract.mjs": "365dd0e5e7a73e3664d1549833594f6c5897a9c92476a4af1d4b66b2e94de67d",
+    "scripts/repository-contract/supabase-contract.mjs": "9f832dff399fe3e33a68e633cd1e872e130fd02175dbf897f23338e817c87254",
+    "scripts/synthetic-backup/operator.mjs": "618cf6d231904c6669a07a30446446ee9d0edfd38bd5ee9c1f0ec6342dc10315",
+    "supabase/config.toml": "a9946f0f50e998da2da2b04bc7c1f9a62390cee91ec23f8b0440a2a99b965750",
+    "supabase/functions/health/index.test.ts": "8031de853f880894db5bd8e7b7a1394efd532e9897174520baa93fe2bb87f61f",
+    "supabase/functions/health/index.ts": "ab3c74957e0d9050a75b8634390a42c036de37c35b1523bc71d44b8fd2c8a835",
+    "supabase/migrations/20260907000300_membership_revocation_authority.sql": "9c59c0192b4f960f925db8c64be1c7b2aa6843591d6214a98b29c2bac5a326ad",
+    "supabase/tests/database/internal_release_backend.test.sql": "1924867efa9ab4cb6f68e65119e8f83908cda25fd26aaa53317181a7cb16632f",
+    "supabase/tests/database/membership_revocation_authority.test.sql": "c046220e86ca09eadee7391a91d84f71abbc65d57602e484c4956f1467e4a914",
+    "tests/acceptance/revoke-membership-lock-db.mjs": "6302943ebe16ef850d19a7caa97d9231080294768a58f8b360a4a39eb13a5429",
+    "tests/acceptance/revoke-membership-lock.test.mjs": "6d0dd25dcdefc095ab62170a21ef544d95335e216b3a42716e71b1ab6c035b54",
+    "tests/acceptance/staff-auth-composed.test.mjs": "edb030912f4cea2ac52f8b5f250b9485cefb56fc837e39844eaea4baf4d9610b",
+    "tests/acceptance/staff-auth-loopback.mjs": "4cca0d4f38d7bd1a411091522a18c7eb276261b835e4e36d978ea95b44bfc90f",
+    "tests/acceptance/synthetic-backup.test.mjs": "2fd6ebcf17c3caf02767107376d23a2cedd1257e88f41ad4d8f3027788509bde",
+    "tests/repository-contract.test.mjs": "e630b229541c2282ff0e1b4042c5cd52e63af1a25d6431beb284f8b444718348"
+  },
+  "tracked_diff_sha256": "29aada6b218ad066dd0b7280c1ecd3b843ec049eb40f556fd23858137351bb4d",
+  "current_migration_set_sha256": "e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a",
+  "historical_six_migrations_unchanged": true,
+  "web_qa": {
+    "manifest": "docs/product-completion/auth-integration-web-sha256.json",
+    "sha256": "b590428c4c4535174d5257d28ad413ed615b4d845fd4da0a0e36876bcada1221",
+    "unchanged_inputs": 28,
+    "changed_input": "package.json",
+    "exception": "Only test:staff-auth and test:staff-auth:locks scripts changed since the prior reviewed commit; dependency, build and production runtime fields are identical. All other 28 manifest paths match. Prior synthetic browser QA remains applicable; no new UI claim or repeat UI run."
+  },
+  "decisions": [
+    "Preserve the published six migrations and add a seventh forward-only post-lock Owner/AAL2 reauthorization for revoke_membership.",
+    "Exercise genuine PKCE recovery through actual disposable Mailpit delivery, the production callback parser and same-client SDK memory verifier; preserve the exact provider recovery-AMR guard.",
+    "Generic verified OTP remains ordinary email identity subject to Membership, tenancy, MFA and revocation checks; application cutoff/cleanup claims apply to its supported RPC flow.",
+    "Enable only the existing pinned CLI local mail sink; no hosted SMTP or external relay. Numeric loopback harness URLs do not attest Docker listener bindings."
+  ],
+  "checks": {
+    "repository_verifier": "passed after final helper/config freeze",
+    "focused_ci_contract": "1 passed",
+    "focused_migration_contracts": "4 passed",
+    "synthetic_backup_and_postgres_adapter": "107 passed",
+    "health": "13 cached-only tests passed",
+    "scoped_source_checks": "Node 24.20.0 syntax/import, ESLint, Prettier, pure callback shape and whitespace checks passed",
+    "independent_review": "Atlas seventh migration, deterministic tests, two-connection harness, final PKCE/Mailpit callback/helper/config and manifest source reviews clear; root final hash gate pending",
+    "previous_actual_ci": "On exact 2a0d6cf: database 389 assertions across six files passed; three stack prerequisites and two of three real-provider groups passed. Recovery group failed on implicit-link recovery-AMR assumption. All eight non-Auth verification jobs and Security required passed.",
+    "new_sql_and_lock_runtime": "not executed locally; actual two-connection regression and seventh migration require next exact-commit CI",
+    "new_pkce_mailpit_journey": "not executed locally; real SMTP/GoTrue PKCE and subsequent password-loss/cleanup journey require next exact-commit CI"
+  },
+  "authority": "Reviewed source/PR CI continuation only; no main merge, hosted changes, credentials, installations or local container startup."
+}

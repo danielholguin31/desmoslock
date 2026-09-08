@@ -20,6 +20,8 @@ run. Vercel skips legacy builds, and a direct legacy build command fails.
 
 ## Local verification
 
+Use exactly Node.js 24.20.0 and npm 11.12.1 from the repository root.
+
 ```bash
 npm ci
 npm run format:check
@@ -35,6 +37,8 @@ npm run test:workflows
 npm run verify:locks
 DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=local \
 DESMOSLOCK_PUBLIC_BACKEND_URL=http://127.0.0.1:54321 \
+DESMOSLOCK_PUBLIC_WEB_ORIGIN=http://localhost:43174 \
+DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc \
   npm run build
 npm run sbom
 npm run verify:licenses
@@ -42,8 +46,10 @@ npm run verify:packages
 npm run verify:repository
 ```
 
-The two public backend build values are mandatory. Missing or partial values
-fail before bundling; the build never invents a loopback or staging target.
+The four public web build values are mandatory. Missing or partial values fail
+before bundling; the build never invents a loopback target, browser origin,
+staging target, or publishable key. The synthetic publishable key above is
+test-only, and desktop builds never receive either web-only value.
 
 With Docker available, reset and test the clean local data plane:
 

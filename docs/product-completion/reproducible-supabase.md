@@ -2,19 +2,31 @@
 
 ## Scope and safety boundary
 
-This is the generation-3 internal-release backend for local development and a
-future synthetic staging project. It is deliberately smaller than the future
-identity, role-policy, Student Session capability, and calculator-isolation
-work in issues 31–34.
+This is the generation-4 internal-release backend for local development and a
+future synthetic staging project. It adds the reviewed staff authentication
+lifecycle foundation from issue 31 while remaining deliberately smaller than
+the future role-policy, Student Session capability, and calculator-isolation
+work in issues 32–34.
+
+Generation 4 includes the callback-completion follow-on migration while
+preserving the synthetic fixture. Repository implementation and migration
+attestations alone do not establish operational staff-auth readiness. Delivered
+invitations, completed callbacks, and cross-browser session revocation require
+separate runtime evidence; health and the local schema verification lane do not
+claim those journeys.
 
 The baseline contains exactly the generation-2 foundation marker, two fictional
 Schools, six fictional staff profiles and memberships, two Tests, and two
-Student Sessions. It contains no Auth users, email addresses, passwords,
-invitations, join codes, billing data, real School data, or real student data.
-The database tables remain default-deny; an authenticated caller can use only
-the no-argument
-`desmoslock_v2.current_school_summary()` read model. The service role alone can
-execute `desmoslock_v2.internal_baseline_status()` for the public health
+Student Sessions. The canonical fixture contains no Auth users, email addresses,
+passwords, invitations, application-session revocations, audit events, join
+codes, billing data, real School data, or real student data. Its seeded profiles
+are explicitly unbound and its seeded Memberships are active at revision one
+with no acceptance or revocation fields set.
+The database tables remain default-deny. Authenticated callers can execute the
+no-argument `desmoslock_v2.current_school_summary()` read model and the reviewed
+staff lifecycle RPCs, which enforce caller identity, session generation,
+membership state, and role at their function boundaries. The service role alone
+can execute `desmoslock_v2.internal_baseline_status()` for the public health
 function. It has no direct table privilege on the foundation, fixture, or
 attestation tables.
 
@@ -26,45 +38,101 @@ health function, and operator modules in this repository are the authority.
 
 - `supabase/migrations/20260824000100_v2_foundation.sql`
 - `supabase/migrations/20260828000100_internal_release_backend.sql`
+- `supabase/migrations/20260903000100_staff_auth_lifecycle.sql`
+- `supabase/migrations/20260903000200_staff_auth_generation_4.sql`
+- `supabase/migrations/20260907000100_staff_auth_callback_completion.sql`
+- `supabase/migrations/20260907000200_runtime_owner_bootstrap.sql`
+- `supabase/migrations/20260907000300_membership_revocation_authority.sql`
 - `supabase/seed.sql`
 - `supabase/config.toml`
+- `supabase/functions/deno.json`
+- `supabase/functions/_shared/http.ts`
+- `supabase/functions/_shared/supabase-http.ts`
+- `supabase/functions/account-recovery/index.ts`
 - `supabase/functions/health/index.ts`
+- `supabase/functions/staff-invitations/index.ts`
 - `scripts/synthetic-backup/operator.mjs`
 - `scripts/synthetic-backup/publication-worker.mjs`
 - `scripts/synthetic-backup/postgres-adapter.mjs`
 
-The fixture contract is generation `3`, version `internal-baseline-v1`, with
+The fixture contract is generation `4`, version `internal-baseline-v2`, with
 SHA-256
-`7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca`.
+`f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201`.
 The exact discovered migration file set has normalized SHA-256
+`e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a`.
+The published generation-3 migration retains its contemporaneous digest
 `06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49`;
-the generation-3 migration records that same digest in its singleton database
-attestation. The only normalization is the migration's one delimited copy of
-that digest, which makes the self-attestation reproducible without excluding
-any other migration byte.
+the original generation-4 migration likewise retains
+`ce79427901195258897e0b75c80acfb7b50699eb223af5289cf5d5d59958f2b7`.
+The callback-completion migration retains its five-file digest
+`1b499b73aca1ff812cbc244f9eb9908e8dad839ecc6befbcb1a496865a2d5f52`
+and raw SHA-256
+`79ab31e822b4f04f4148c50bb98446210a37d975a646119b42d78fe1349a8862`.
+The runtime-Owner-bootstrap migration retains its six-file digest
+`8d5fd99304ce8bbf9524dfb788080f890ab84565c096a8e6d4faf437a9b734dc`
+and raw SHA-256
+`43527d889ae0823057bba8ab7b4ed97eb9603220658c59c56cfda70889af75c9`.
+Only the Membership-revocation-authority migration records the current aggregate.
+Its raw SHA-256 is
+`9c59c0192b4f960f925db8c64be1c7b2aa6843591d6214a98b29c2bac5a326ad`.
+The repository contract pins each attested migration's raw SHA-256 and literal
+independently, then zeroes only those five delimited self-references when deriving
+the seven-file aggregate. The follow-on migration updates the existing singleton
+attestation without changing schema generation `4` or the seven-table fixture;
+the upgrade path does not depend on rewriting or replaying historical migrations.
 The seed takes a transaction advisory lock, refuses altered or partial targets,
 and verifies this digest plus the exact generation-2 foundation marker after
-insertion. A replay is accepted only when the existing fixture is already
-exact.
+insertion. The fixture digest length-frames every seeded identity and content
+field plus the new profile Auth binding and Membership lifecycle fields. A
+replay is accepted only when the existing fixture is already exact; runtime
+rows with null seed keys do not change health attestation.
 
 ## Local bootstrap and verification
 
-Use Node.js 24, npm 11.12.1, Docker, and the repository-pinned Supabase CLI.
+Use exactly Node.js 24.20.0, npm 11.12.1, Docker, and the repository-pinned
+Supabase CLI.
 
 ```bash
 npm ci
 npm run db:start
 npm run db:reset
 npm run test:db
+npm run db:stop
+```
+
+The full staff-auth CI lane enables the pinned CLI's disposable Mailpit service
+for actual PKCE recovery mail capture. The harness uses the numeric loopback
+Mailpit API and only its run-owned recipient, retaining message bodies, PKCE
+verifiers and provider credentials in memory. This is a local test mail sink,
+not hosted SMTP or external delivery evidence. A loopback client URL does not
+by itself prove that Docker publishes the service only on a loopback interface.
+
+The Edge and client suites do not require the live stack:
+
+```bash
 npm run test:edge
 npm run test:web
 npm run test:electron
 ```
 
-`db:start` is the database-only verification profile. Use
-`npm run db:start:full` when exercising Auth, REST, and the Edge health function.
+`db:start` is the database-only verification profile. The staff Auth schema and
+local-prerequisite lane requires the full disposable stack:
+
+```bash
+npm run db:start:full
+npm run db:reset
+npm run test:staff-auth
+npm run db:stop
+```
+
 The web and desktop tests build against a credential-free loopback health
-fixture and verify the same public contract through their rendered status.
+fixture and verify the same public contract through their rendered status. The
+dedicated staff-auth CI lane starts the full disposable stack, resets it, runs
+all pgTAP schema/RPC lifecycle contracts, performs credential-free local Auth,
+PostgREST, and health prerequisite probes, runs Edge handler and unit behavior
+suites, and always attempts stack shutdown. It does not exercise delivered
+email or a complete callback in two browser contexts, so passing the lane is
+not operational staff-auth evidence.
 The versioned Auth configuration is intentionally fail-closed for this ticket:
 it uses a non-routable placeholder origin and disables global and anonymous
 signup. It also explicitly preserves the hosted-safe Auth settings that differ
@@ -72,28 +140,37 @@ from Supabase CLI defaults: email confirmations remain required, email resend
 frequency remains one minute, email OTPs remain eight digits, and TOTP
 enrollment and verification remain enabled. These values must be explicit
 because `supabase config push` includes defaults for omitted supported fields.
-Issue 31 must replace the placeholder only as part of its separately reviewed
-identity and session design.
+Completing issue 31 on hosted staging still requires replacing the placeholder
+only through the separately reviewed identity, callback, and session rollout.
+The local generation-4 contract does not authorize that hosted change.
 
-The public build configuration has exactly two fields:
+The web build configuration has exactly four public fields:
 
 - `DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT`: `local` or `staging`
 - `DESMOSLOCK_PUBLIC_BACKEND_URL`: a numeric-loopback HTTP origin for local, or
   a root-path HTTPS DNS origin for staging
+- `DESMOSLOCK_PUBLIC_WEB_ORIGIN`: the exact browser origin allowed to run the
+  web application
+- `DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY`: the browser-safe Supabase
+  publishable key for the selected backend
 
-Both fields are mandatory. The build rejects absent or partial configuration,
+All four fields are mandatory. The build rejects absent or partial configuration,
 unknown fields, URL credentials, paths, query strings, fragments, numeric
 hosts, the entire special-use `.localhost` namespace (including subdomains and
 trailing-dot forms), local staging hosts, and non-TLS staging origins before
-bundling. No API key, database URL, service-role key, or operator credential is
-a public build input. The desktop renderer observes health directly; no
-backend IPC channel or new privileged bridge authority is added.
+bundling. The publishable key is intentionally browser-public; no database URL,
+service-role key, secret key, or operator credential is a public build input.
+The desktop renderer never receives the web origin or publishable key and
+observes health directly; no backend IPC channel or new privileged bridge
+authority is added.
 
 Example local build:
 
 ```bash
 DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=local \
 DESMOSLOCK_PUBLIC_BACKEND_URL=http://127.0.0.1:54321 \
+DESMOSLOCK_PUBLIC_WEB_ORIGIN=http://localhost:43174 \
+DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc \
 npm run build
 ```
 
@@ -102,33 +179,44 @@ Example staging build after the remote gate has been approved:
 ```bash
 DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=staging \
 DESMOSLOCK_PUBLIC_BACKEND_URL=https://PROJECT_REF.supabase.co \
+DESMOSLOCK_PUBLIC_WEB_ORIGIN=https://APP_ORIGIN.example \
+DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY=PUBLISHABLE_KEY \
 npm run build
 ```
 
-`PROJECT_REF` is a placeholder, not a repository value.
+`PROJECT_REF`, `APP_ORIGIN`, and `PUBLISHABLE_KEY` are placeholders, not
+repository values. Hosted values remain a separately approved rollout gate.
 
 ## Health contract
 
-`GET /functions/v1/health` is public and credential-free. It returns `200` only
-when Auth responds and the service-only database RPC verifies the exact
-migration generation and fixture digest. Client reads omit credentials, reject
-redirects, bypass caches, and time out after five seconds. Missing runtime
-configuration, dependency errors, invalid fixtures, and incompatible responses
-fail closed without returning internal diagnostics, project identifiers, or
-credentials. The Edge function also bounds its Auth and database dependency
-probes to five seconds and maps a timeout to the same sanitized unavailable
-response.
+`GET /functions/v1/health` is public and credential-free. Its generation-4
+ready response includes exactly the `auth`, `database`, and `rest` capabilities.
+The separate `schemaGeneration: 4`, fixture version, and fixture digest fields
+attest the schema foundation; `staff-auth` is deliberately absent from the
+operational capability list until delivery and full browser acceptance exist.
+Clients require that exact distinction and reject a response that adds the
+unproven capability. Health returns `200` only when Auth responds and the
+service-only database RPC verifies the exact migration generation and fixture
+digest. Client reads omit credentials, reject redirects, bypass caches, and
+time out after five seconds. Missing runtime configuration, dependency errors,
+invalid fixtures, and incompatible responses fail closed without returning
+internal diagnostics, project identifiers, or credentials. The Edge function
+also bounds its Auth and database dependency probes to five seconds and maps a
+timeout to the same sanitized unavailable response.
 
 The Edge runtime receives `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` from the
 Supabase platform. It must also receive
 `DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN`, independently set to the exact root
-origin of `SUPABASE_URL` in every runtime. Local development permits HTTP only
-for `127.0.0.1`, `[::1]`, `host.docker.internal`, or `kong`, and still requires
-that exact independent origin pin. Hosted use additionally requires the exact
-`https://<20-character-project-ref>.supabase.co` shape. Arbitrary HTTPS origins,
-ports in hosted origins, paths, credentials, missing pins, and mismatched pins
-fail before any request. The service-role value is never a client build input
-and is never returned by the function.
+origin of `SUPABASE_URL` in every hosted runtime. Local development permits HTTP
+only for exactly pinned `127.0.0.1`, `[::1]`, `host.docker.internal`, or `kong`
+origins. The sole absent-pin exception is the Supabase CLI's byte-exact internal
+`http://kong:8000` gateway; host-side callers continue to use
+`http://127.0.0.1:54321`. Hosted use additionally requires the exact
+`https://<20-character-project-ref>.supabase.co` shape and matching independent
+pin. Arbitrary HTTPS origins, ports in hosted origins, paths, credentials,
+missing hosted pins, mismatched pins, and local near-misses fail before any
+request. The service-role value is never a client build input and is never
+returned by the function.
 
 ## Synthetic backup and restore operator
 
@@ -222,11 +310,19 @@ Restore refuses absolute or traversing artifact paths, noncanonical manifests,
 unknown fields, hash mismatches, links, oversized files, unexpected archive
 entries or rows, a changed migration set, a target that fails the exact
 database/system-identifier/server-side-local-marker attestation, source/target
-system-identifier collisions, and targets whose seven managed tables are
-nonempty. The archive allowlist is exactly the seven synthetic tables, including
-`foundation_seed`. The
+system-identifier collisions, and targets whose seven managed tables or any of
+the five runtime-only staff lifecycle tables are nonempty. Those runtime-only
+tables are `application_session_revocation_cutoffs`,
+`application_session_revocations`, `staff_audit_events`, `staff_invitations`,
+and `staff_password_recovery_operations`. The archive allowlist is exactly the
+seven synthetic tables, including `foundation_seed`; Auth, invitation,
+application revocation, password-recovery, and audit data are never added. The
 PostgreSQL adapter rejects every archive-rendered statement except an exact
 allowlist of harmless dump scaffolding and the seven validated `COPY` blocks.
+The generation-4 profile and Membership layouts accept PostgreSQL null markers
+only in their exact nullable positions. Seeded profiles must be unbound, and
+seeded Memberships must be active at revision one with every acceptance and
+revocation field null.
 It rebuilds a private dependency-ordered `COPY` plan from those validated rows;
 raw `pg_restore` SQL is never executed. The adapter then rechecks the cluster
 system identifier, exact database name, server-side local marker, normalized
@@ -235,9 +331,9 @@ emptiness and applies the plan in one serializable transaction. It verifies the
 fixture and foundation marker before commit. Immediately before restore, the
 operator re-hashes the held archive bytes. After commit, it directly re-observes
 the target through PostgreSQL and emits a scoped local synthetic-fixture receipt
-only when the expected generation-3 seven-table fixture matches. This receipt is
+only when the expected generation-4 seven-table fixture matches. This receipt is
 not evidence of the public health or web/desktop smoke journey; that remains
-part of the remote staging human gate below.
+part of the remote staging acceptance gate below.
 
 Backup publication opens and verifies the canonical root descriptor, binds the
 new backup directory as the worker's current directory, and performs every file
@@ -262,7 +358,7 @@ path replacement cannot make it delete an unowned inode. Never restore or
 reuse a refused backup name; an operator must inspect and move the quarantine
 through a separate approved cleanup procedure.
 
-## Remote staging human gate
+## Remote staging acceptance gate
 
 The guarded Supabase CLI 2.115.0 configuration pass applied only the intended
 API schema allowlist change. Its bundled Auth diff was declined because the
@@ -281,20 +377,26 @@ The repository now pins the corresponding supported CLI fields as
 or regression of any of these fields as well as the fail-closed site URL,
 global signup, anonymous sign-in, and redirect allowlist settings.
 
-This regression-fix follow-up made no further hosted call and does not provide
-evidence for a database migration, seed, function deployment, backup, or
-restore. An authorized operator must complete or provide the missing receipts
-for the unresolved gates:
+The generation-4 integration work makes no hosted call and does not provide
+evidence for a database migration, seed, function deployment, backup, restore,
+email delivery, callback completion, or two-browser revocation journey. An
+agent carries the implementation, verification and receipt collection through
+the unresolved gates within the authorized scope. Human input is required for
+an actual authority boundary or unresolved material choice, not for checks the
+agent can perform:
 
-1. Select a newly created, empty, synthetic-only staging project and independently
-   record its project identity and PostgreSQL `system_identifier`.
+1. Verify and reuse an approved empty synthetic-only staging target when one is
+   already available. Create a new project only when the reviewed requirements
+   call for it. Independently record the target identity and PostgreSQL
+   `system_identifier`.
 2. Confirm the target is not production and contains no real School or student
    data.
 3. Link the Supabase CLI using an approved account and credential channel, then
    independently read back the linked project identity.
 4. Review the versioned `supabase/config.toml`: the API schema allowlist must
    include `desmoslock_v2`, `health` must remain public, and every explicit Auth
-   value above must remain unchanged for issue 30.
+   value above must remain unchanged until the separately approved hosted issue
+   31 callback and identity configuration replaces it.
 5. Before any future `supabase config push`, inspect the complete diff and
    obtain explicit approval for every proposed setting. That command has no
    dry-run mode. Reject a bundled diff that changes an unapproved setting.
@@ -304,13 +406,20 @@ for the unresolved gates:
 7. After explicit approval, run the corresponding non-dry-run migration and seed.
 8. Set `DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN` through the approved hosted secret
    channel to the independently recorded exact project origin. Deploy only the
-   versioned `health` function with JWT verification disabled as declared in
+   reviewed versioned functions with their exact JWT policies declared in
    `supabase/config.toml`.
-9. Observe the exact public health response from outside the project network and
-   build both clients with only the staging public origin.
-10. Export the synthetic backup, restore it into a clean local project with the
+9. Observe the exact generation-4 public health response from outside the
+   project network and build both clients with only the approved public staging
+   configuration.
+10. Complete delivered-email invitation and recovery callbacks with disposable
+    identities, then prove membership and session revocation from an already-open
+    second browser context.
+11. Export the synthetic backup, restore it into a clean local project with the
     operator above, and repeat the public health plus web/desktop smoke checks.
 
-Actual hosted bootstrap, credential provisioning, function deployment, backup,
-and restore receipts remain this human gate. They must not be represented as
-complete from local tests alone.
+Actual hosted bootstrap, credential provisioning, function deployment, email
+delivery, callback, multi-context revocation, backup, and restore receipts remain
+this acceptance gate. They must not be represented as complete from local tests
+alone. Initial Owner provisioning must follow the separate
+[runtime bootstrap contract](runtime-owner-bootstrap.md), preserving the
+immutable synthetic fixture and proving health after the operational lifecycle.

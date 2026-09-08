@@ -7,6 +7,7 @@ import test from "node:test";
 
 import {
   CURRENT_MIGRATION_SET_SHA256,
+  CURRENT_MIGRATION_VERSIONS,
   SYNTHETIC_TABLES,
 } from "../../scripts/synthetic-backup/operator.mjs";
 import {
@@ -60,33 +61,40 @@ const expectedFixture = {
     workspaces: 2,
   },
   dataClass: "synthetic-only",
-  digest: "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca",
-  version: "internal-baseline-v1",
+  digest: "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
+  version: "internal-baseline-v2",
 };
+const RUNTIME_LIFECYCLE_TABLES = Object.freeze([
+  "application_session_revocation_cutoffs",
+  "application_session_revocations",
+  "staff_audit_events",
+  "staff_invitations",
+  "staff_password_recovery_operations",
+]);
 
 function syntheticArchiveSql() {
   return Buffer.from(`
 COPY desmoslock_v2.baseline_fixture_state (id, schema_generation, fixture_version, fixture_digest) FROM stdin;
-1\t3\tinternal-baseline-v1\t7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca
+1\t4\tinternal-baseline-v2\tf1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201
 \\.
 COPY desmoslock_v2.foundation_seed (id, schema_generation, fixture_namespace) FROM stdin;
 1\t2\tdesmoslock-v2-foundation
 \\.
-COPY desmoslock_v2.memberships (workspace_id, profile_id, role, seed_key) FROM stdin;
-10000000-0000-4000-8000-000000000001\t20000000-0000-4000-8000-000000000001\towner\tmembership.alpha.owner
-10000000-0000-4000-8000-000000000001\t20000000-0000-4000-8000-000000000002\tadmin\tmembership.alpha.admin
-10000000-0000-4000-8000-000000000001\t20000000-0000-4000-8000-000000000003\tteacher\tmembership.alpha.teacher
-10000000-0000-4000-8000-000000000002\t20000000-0000-4000-8000-000000000011\towner\tmembership.beta.owner
-10000000-0000-4000-8000-000000000002\t20000000-0000-4000-8000-000000000012\tadmin\tmembership.beta.admin
-10000000-0000-4000-8000-000000000002\t20000000-0000-4000-8000-000000000013\tteacher\tmembership.beta.teacher
+COPY desmoslock_v2.memberships (workspace_id, profile_id, role, seed_key, status, role_revision, accepted_at, revoked_at, revoked_by_profile_id, revocation_reason_code, updated_at) FROM stdin;
+10000000-0000-4000-8000-000000000001\t20000000-0000-4000-8000-000000000001\towner\tmembership.alpha.owner\tactive\t1\t\\N\t\\N\t\\N\t\\N\t\\N
+10000000-0000-4000-8000-000000000001\t20000000-0000-4000-8000-000000000002\tadmin\tmembership.alpha.admin\tactive\t1\t\\N\t\\N\t\\N\t\\N\t\\N
+10000000-0000-4000-8000-000000000001\t20000000-0000-4000-8000-000000000003\tteacher\tmembership.alpha.teacher\tactive\t1\t\\N\t\\N\t\\N\t\\N\t\\N
+10000000-0000-4000-8000-000000000002\t20000000-0000-4000-8000-000000000011\towner\tmembership.beta.owner\tactive\t1\t\\N\t\\N\t\\N\t\\N\t\\N
+10000000-0000-4000-8000-000000000002\t20000000-0000-4000-8000-000000000012\tadmin\tmembership.beta.admin\tactive\t1\t\\N\t\\N\t\\N\t\\N\t\\N
+10000000-0000-4000-8000-000000000002\t20000000-0000-4000-8000-000000000013\tteacher\tmembership.beta.teacher\tactive\t1\t\\N\t\\N\t\\N\t\\N\t\\N
 \\.
-COPY desmoslock_v2.profiles (id, display_name, seed_key) FROM stdin;
-20000000-0000-4000-8000-000000000001\tSynthetic Alpha Owner\tprofile.alpha.owner
-20000000-0000-4000-8000-000000000002\tSynthetic Alpha Admin\tprofile.alpha.admin
-20000000-0000-4000-8000-000000000003\tSynthetic Alpha Teacher\tprofile.alpha.teacher
-20000000-0000-4000-8000-000000000011\tSynthetic Beta Owner\tprofile.beta.owner
-20000000-0000-4000-8000-000000000012\tSynthetic Beta Admin\tprofile.beta.admin
-20000000-0000-4000-8000-000000000013\tSynthetic Beta Teacher\tprofile.beta.teacher
+COPY desmoslock_v2.profiles (id, display_name, seed_key, auth_user_id) FROM stdin;
+20000000-0000-4000-8000-000000000001\tSynthetic Alpha Owner\tprofile.alpha.owner\t\\N
+20000000-0000-4000-8000-000000000002\tSynthetic Alpha Admin\tprofile.alpha.admin\t\\N
+20000000-0000-4000-8000-000000000003\tSynthetic Alpha Teacher\tprofile.alpha.teacher\t\\N
+20000000-0000-4000-8000-000000000011\tSynthetic Beta Owner\tprofile.beta.owner\t\\N
+20000000-0000-4000-8000-000000000012\tSynthetic Beta Admin\tprofile.beta.admin\t\\N
+20000000-0000-4000-8000-000000000013\tSynthetic Beta Teacher\tprofile.beta.teacher\t\\N
 \\.
 COPY desmoslock_v2.student_sessions (id, workspace_id, test_id, state, seed_key) FROM stdin;
 40000000-0000-4000-8000-000000000001\t10000000-0000-4000-8000-000000000001\t30000000-0000-4000-8000-000000000001\tcreated\tsession.alpha.algebra
@@ -101,6 +109,17 @@ COPY desmoslock_v2.workspaces (id, kind, slug, display_name, seed_key) FROM stdi
 10000000-0000-4000-8000-000000000002\tschool\tsynthetic-beta\tSynthetic Beta School\tschool.beta
 \\.
 `);
+}
+
+function archiveWithRowValue(sql, row, columnIndex, value) {
+  const columns = row.split("\t");
+  assert.ok(columnIndex >= 0 && columnIndex < columns.length);
+  assert.notEqual(columns[columnIndex], value);
+  columns[columnIndex] = value;
+  assert.equal(sql.includes(row), true);
+  const mutated = sql.replace(row, columns.join("\t"));
+  assert.notEqual(mutated, sql);
+  return mutated;
 }
 
 function createFakeChild(pid = 4321) {
@@ -405,14 +424,14 @@ test("Postgres adapter keeps credentials out of argv and exposes only symbolic d
               workspaces: 2,
             },
             digest:
-              "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca",
+              "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
             valid: true,
-            version: "internal-baseline-v1",
+            version: "internal-baseline-v2",
           },
-          migrationVersions: ["20260824000100", "20260828000100"],
+          migrationVersions: [...CURRENT_MIGRATION_VERSIONS],
           migrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
           localRestoreMarker: null,
-          schemaGeneration: 3,
+          schemaGeneration: 4,
           systemIdentifier: "7512345678901234567",
         }),
       );
@@ -446,7 +465,7 @@ test("Postgres adapter keeps credentials out of argv and exposes only symbolic d
     fixture: expectedFixture,
     identity: "7512345678901234567",
     migrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
-    schemaGeneration: 3,
+    schemaGeneration: 4,
   });
   assert.deepEqual(await adapter.dumpSyntheticData("staging"), archive);
   assert.deepEqual(await adapter.inspectDump(archive), {
@@ -458,12 +477,21 @@ test("Postgres adapter keeps credentials out of argv and exposes only symbolic d
     fixture: expectedFixture,
     format: "postgres-custom-data-only",
   });
+  assert.deepEqual(SYNTHETIC_TABLES, [
+    "baseline_fixture_state",
+    "foundation_seed",
+    "memberships",
+    "profiles",
+    "student_sessions",
+    "tests",
+    "workspaces",
+  ]);
   await adapter.restoreVerifiedEmptyDatabase(
     {
       databaseAlias: "local-restore",
       expectedDatabaseIdentity: "7512345678901234568",
       expectedMigrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
-      expectedSchemaGeneration: 3,
+      expectedSchemaGeneration: 4,
       sourceDatabaseIdentity: "7512345678901234567",
     },
     archive,
@@ -478,6 +506,10 @@ test("Postgres adapter keeps credentials out of argv and exposes only symbolic d
   assert.equal(calls[4].executable, "/operator-tools/psql");
   assert.equal(calls[1].arguments.includes("--data-only"), true);
   assert.equal(calls[1].arguments.includes("--serializable-deferrable"), true);
+  assert.deepEqual(
+    calls[1].arguments.filter((argument) => argument.startsWith("--table=")),
+    SYNTHETIC_TABLES.map((table) => `--table=desmoslock_v2.${table}`),
+  );
   for (const call of calls) {
     const argumentsText = JSON.stringify(call.arguments);
     assert.doesNotMatch(
@@ -506,32 +538,61 @@ test("Postgres adapter keeps credentials out of argv and exposes only symbolic d
   );
   assert.equal(calls[4].environment.PGSSLMODE, "disable");
   assert.equal(calls[4].environment.PGSSLROOTCERT, undefined);
+  const observationQuery = calls[0].arguments.at(-1);
+  const transactionInput = calls[4].input.toString("utf8");
+  for (const table of RUNTIME_LIFECYCLE_TABLES) {
+    assert.match(
+      observationQuery,
+      new RegExp(
+        `count\\(\\*\\) from desmoslock_v2\\.${table}\\)\\:\\:integer as ${table}`,
+      ),
+    );
+    assert.equal(
+      observationQuery.match(new RegExp(`counts\\.${table} = 0`, "g"))?.length,
+      2,
+    );
+    assert.match(
+      transactionInput,
+      new RegExp(`exists \\(select 1 from desmoslock_v2\\.${table}\\)`),
+    );
+    assert.equal(
+      calls[1].arguments.includes(`--table=desmoslock_v2.${table}`),
+      false,
+    );
+    assert.doesNotMatch(
+      transactionInput,
+      new RegExp(`COPY desmoslock_v2\\.${table}`, "i"),
+    );
+  }
+  assert.match(transactionInput, /begin isolation level serializable/i);
   assert.match(
-    calls[4].input.toString("utf8"),
-    /begin isolation level serializable/i,
-  );
-  assert.match(
-    calls[4].input.toString("utf8"),
+    transactionInput,
     /current_database\(\)[\s\S]*postgres[\s\S]*local-restore-marker-0000000000000000000000000001[\s\S]*copy desmoslock_v2\.foundation_seed/i,
   );
   assert.match(
-    calls[4].input.toString("utf8"),
+    transactionInput,
     new RegExp(
       `${CURRENT_MIGRATION_SET_SHA256}[\\s\\S]*copy desmoslock_v2\\.foundation_seed`,
       "i",
     ),
   );
-  assert.match(calls[4].input.toString("utf8"), /7512345678901234568/);
+  assert.equal(
+    transactionInput.includes(
+      `array[${CURRENT_MIGRATION_VERSIONS.map((version) => `'${version}'`).join(", ")}]::text[]`,
+    ),
+    true,
+  );
+  assert.match(transactionInput, /7512345678901234568/);
   assert.match(
-    calls[4].input.toString("utf8"),
+    transactionInput,
     /restore target is not empty[\s\S]*copy desmoslock_v2\.workspaces[\s\S]*restored fixture verification failed/i,
   );
   assert.match(
-    calls[4].input.toString("utf8"),
+    transactionInput,
     /restored fixture verification failed[\s\S]*restored foundation verification failed[\s\S]*commit/i,
   );
   assert.doesNotMatch(
-    calls[4].input.toString("utf8"),
+    transactionInput,
     /synthetic-(?:local|staging)-test-password/,
   );
 });
@@ -554,6 +615,33 @@ test("Postgres adapter refuses export from the local restore profile", async () 
   );
 });
 
+test("Postgres adapter refuses a generation-3 restore target before execution", async () => {
+  const localConfiguration = {
+    executablePaths: {
+      pgRestore: "/operator-tools/pg_restore",
+      psql: "/operator-tools/psql",
+    },
+    profiles: { "local-restore": configuration.profiles["local-restore"] },
+  };
+  const adapter = createPostgresBackupAdapter(localConfiguration, async () => {
+    throw new Error("the subprocess must not run");
+  });
+
+  await assert.rejects(
+    adapter.restoreVerifiedEmptyDatabase(
+      {
+        databaseAlias: "local-restore",
+        expectedDatabaseIdentity: "7512345678901234568",
+        expectedMigrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
+        expectedSchemaGeneration: 3,
+        sourceDatabaseIdentity: "7512345678901234567",
+      },
+      Buffer.from("uninspected archive"),
+    ),
+    /POSTGRES_RESTORE_TARGET_INVALID/,
+  );
+});
+
 test("Postgres observation refuses migration drift and unattested local targets", async () => {
   const basePayload = {
     applicationState: "empty",
@@ -561,8 +649,8 @@ test("Postgres observation refuses migration drift and unattested local targets"
     fixture: null,
     localRestoreMarker: "local-restore-marker-0000000000000000000000000001",
     migrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
-    migrationVersions: ["20260824000100", "20260828000100"],
-    schemaGeneration: 3,
+    migrationVersions: [...CURRENT_MIGRATION_VERSIONS],
+    schemaGeneration: 4,
     systemIdentifier: "7512345678901234568",
   };
   const localConfiguration = {
@@ -575,6 +663,11 @@ test("Postgres observation refuses migration drift and unattested local targets"
 
   for (const mutation of [
     { migrationSetSha256: "0".repeat(64) },
+    { migrationVersions: CURRENT_MIGRATION_VERSIONS.slice(0, -1) },
+    {
+      migrationVersions: [...CURRENT_MIGRATION_VERSIONS, "20990101000000"],
+    },
+    { schemaGeneration: 3 },
     { localRestoreMarker: null },
     { localRestoreMarker: "wrong-local-restore-marker-000000000000000000000" },
     { databaseName: "other_database" },
@@ -598,15 +691,35 @@ test("Postgres adapter rejects hostile archive contents before any database conn
     "",
   ].join("\n");
   const baselineRow =
-    "1\t3\tinternal-baseline-v1\t7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca";
+    "1\t4\tinternal-baseline-v2\tf1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201";
+  const membershipHeader =
+    "COPY desmoslock_v2.memberships (workspace_id, profile_id, role, seed_key, status, role_revision, accepted_at, revoked_at, revoked_by_profile_id, revocation_reason_code, updated_at) FROM stdin;";
+  const membershipRow =
+    "10000000-0000-4000-8000-000000000001\t20000000-0000-4000-8000-000000000001\towner\tmembership.alpha.owner\tactive\t1\t\\N\t\\N\t\\N\t\\N\t\\N";
+  const profileHeader =
+    "COPY desmoslock_v2.profiles (id, display_name, seed_key, auth_user_id) FROM stdin;";
+  const profileRow =
+    "20000000-0000-4000-8000-000000000001\tSynthetic Alpha Owner\tprofile.alpha.owner\t\\N";
   const hostileArchives = {
     "altered foundation marker": validSql.replace(
       "desmoslock-v2-foundation",
       "altered-foundation",
     ),
     "altered pinned digest": validSql.replace(
-      "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca",
+      "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
       "0".repeat(64),
+    ),
+    "stale fixture generation": archiveWithRowValue(
+      validSql,
+      baselineRow,
+      1,
+      "3",
+    ),
+    "stale fixture version": archiveWithRowValue(
+      validSql,
+      baselineRow,
+      2,
+      "internal-baseline-v1",
     ),
     "duplicate COPY block": `${validSql}${foundationBlock}`,
     "extra fixture row": validSql.replace(
@@ -617,15 +730,146 @@ test("Postgres adapter rejects hostile archive contents before any database conn
       "COPY desmoslock_v2.workspaces",
       "COPY public.workspaces",
     ),
+    "stale membership COPY layout": validSql.replace(
+      membershipHeader,
+      "COPY desmoslock_v2.memberships (workspace_id, profile_id, role, seed_key) FROM stdin;",
+    ),
+    "extra membership COPY column": validSql.replace(
+      membershipHeader,
+      membershipHeader.replace("updated_at)", "updated_at, unexpected)"),
+    ),
+    "reordered membership COPY columns": validSql.replace(
+      membershipHeader,
+      membershipHeader.replace(
+        "status, role_revision",
+        "role_revision, status",
+      ),
+    ),
+    "stale profile COPY layout": validSql.replace(
+      profileHeader,
+      "COPY desmoslock_v2.profiles (id, display_name, seed_key) FROM stdin;",
+    ),
+    "extra profile COPY column": validSql.replace(
+      profileHeader,
+      profileHeader.replace("auth_user_id)", "auth_user_id, unexpected)"),
+    ),
+    "reordered profile COPY columns": validSql.replace(
+      profileHeader,
+      profileHeader.replace("display_name, seed_key", "seed_key, display_name"),
+    ),
+    "bound seeded profile": archiveWithRowValue(
+      validSql,
+      profileRow,
+      3,
+      "a1000000-0000-4000-8000-000000000001",
+    ),
+    "literal NULL profile binding": archiveWithRowValue(
+      validSql,
+      profileRow,
+      3,
+      "NULL",
+    ),
+    "empty profile binding": archiveWithRowValue(validSql, profileRow, 3, ""),
+    "null marker in required profile field": archiveWithRowValue(
+      validSql,
+      profileRow,
+      1,
+      "\\N",
+    ),
+    "null marker in seeded profile key": archiveWithRowValue(
+      validSql,
+      profileRow,
+      2,
+      "\\N",
+    ),
+    "inactive seeded membership": archiveWithRowValue(
+      validSql,
+      membershipRow,
+      4,
+      "revoked",
+    ),
+    "advanced seeded membership revision": archiveWithRowValue(
+      validSql,
+      membershipRow,
+      5,
+      "2",
+    ),
+    "accepted seeded membership": archiveWithRowValue(
+      validSql,
+      membershipRow,
+      6,
+      "2026-09-03 12:00:00+00",
+    ),
+    "revoked seeded membership": archiveWithRowValue(
+      validSql,
+      membershipRow,
+      7,
+      "2026-09-03 12:00:00+00",
+    ),
+    "seeded membership with revoker": archiveWithRowValue(
+      validSql,
+      membershipRow,
+      8,
+      "20000000-0000-4000-8000-000000000001",
+    ),
+    "seeded membership with revocation reason": archiveWithRowValue(
+      validSql,
+      membershipRow,
+      9,
+      "owner_action",
+    ),
+    "updated seeded membership": archiveWithRowValue(
+      validSql,
+      membershipRow,
+      10,
+      "2026-09-03 12:00:00+00",
+    ),
+    "literal NULL membership lifecycle value": archiveWithRowValue(
+      validSql,
+      membershipRow,
+      6,
+      "NULL",
+    ),
+    "empty membership lifecycle value": archiveWithRowValue(
+      validSql,
+      membershipRow,
+      6,
+      "",
+    ),
+    "null marker in required membership state": archiveWithRowValue(
+      validSql,
+      membershipRow,
+      4,
+      "\\N",
+    ),
+    "null marker in membership revision": archiveWithRowValue(
+      validSql,
+      membershipRow,
+      5,
+      "\\N",
+    ),
+    "null marker in seeded membership key": archiveWithRowValue(
+      validSql,
+      membershipRow,
+      3,
+      "\\N",
+    ),
     "missing foundation marker": validSql.replace(foundationBlock, ""),
     "transaction escape": `COMMIT;\n${validSql}`,
     "privileged DDL": `${validSql}\nCREATE TABLE public.escape (id integer);\n`,
     "procedural SQL": `${validSql}\nDO $$ begin null; end $$;\n`,
     "psql connection switch": `\\connect postgres\n${validSql}`,
     "unexpected session command": `SET ROLE postgres;\n${validSql}`,
+    ...Object.fromEntries(
+      RUNTIME_LIFECYCLE_TABLES.map((table) => [
+        `${table} COPY block`,
+        `${validSql}COPY desmoslock_v2.${table} (id) FROM stdin;\nruntime-row\n\\.\n`,
+      ]),
+    ),
   };
 
   for (const [label, archiveSql] of Object.entries(hostileArchives)) {
+    assert.notEqual(archiveSql, validSql, label);
     await context.test(label, async () => {
       const calls = [];
       const adapter = createPostgresBackupAdapter(
@@ -651,6 +895,35 @@ test("Postgres adapter rejects hostile archive contents before any database conn
         /POSTGRES_ARCHIVE_CONTENT_INVALID/,
       );
       assert.equal(calls.length, 2);
+    });
+  }
+});
+
+test("Postgres adapter rejects every lifecycle table in the archive inventory", async (context) => {
+  for (const lifecycleTable of RUNTIME_LIFECYCLE_TABLES) {
+    await context.test(lifecycleTable, async () => {
+      const adapter = createPostgresBackupAdapter(
+        configuration,
+        async (request) => {
+          if (request.arguments.includes("--list")) {
+            return Buffer.from(
+              [
+                ...SYNTHETIC_TABLES.map(
+                  (table, index) =>
+                    `${index + 1}; 0 ${index + 100} TABLE DATA desmoslock_v2 ${table} postgres`,
+                ),
+                `8; 0 108 TABLE DATA desmoslock_v2 ${lifecycleTable} postgres`,
+              ].join("\n"),
+            );
+          }
+          return syntheticArchiveSql();
+        },
+      );
+
+      await assert.rejects(
+        adapter.inspectDump(Buffer.from(`inventory-${lifecycleTable}`)),
+        /POSTGRES_ARCHIVE_CONTENT_INVALID/,
+      );
     });
   }
 });

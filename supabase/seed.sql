@@ -1,6 +1,6 @@
 begin;
 
-select pg_advisory_xact_lock(hashtextextended('desmoslock-v2/internal-baseline-v1', 0));
+select pg_advisory_xact_lock(hashtextextended('desmoslock-v2/internal-baseline-v2', 0));
 
 do $$
 begin
@@ -19,7 +19,7 @@ begin
     ) then
       raise exception using
         errcode = '55000',
-        message = 'refusing to seed a nonempty or altered generation-3 target';
+        message = 'refusing to seed a nonempty or altered generation-4 target';
     end if;
   end if;
 end
@@ -182,9 +182,9 @@ insert into desmoslock_v2.baseline_fixture_state (
 )
 values (
   1,
-  3,
-  'internal-baseline-v1',
-  '7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca'
+  4,
+  'internal-baseline-v2',
+  'f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201'
 )
 on conflict do nothing;
 
@@ -197,7 +197,7 @@ begin
   ) then
     raise exception using
       errcode = '55000',
-      message = 'generation-3 synthetic fixture verification failed';
+      message = 'generation-4 synthetic fixture verification failed';
   end if;
 end
 $$;

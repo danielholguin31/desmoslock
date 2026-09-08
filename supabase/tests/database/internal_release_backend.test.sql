@@ -3,7 +3,7 @@ begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path = extensions, public, pg_catalog;
 
-select plan(47);
+select plan(50);
 
 select has_table('desmoslock_v2', 'internal_release_attestation', 'migration attestation exists');
 select has_table('desmoslock_v2', 'local_restore_target_attestation', 'local restore attestation exists');
@@ -26,7 +26,7 @@ select ok(
         'student_sessions', 'baseline_fixture_state'
       )
   ),
-  'every generation-3 fixture table enables RLS'
+  'every generation-4 fixture table enables RLS'
 );
 select is(
   (
@@ -42,14 +42,14 @@ select is(
       )
   ),
   0::bigint,
-  'generation-3 tables have no direct allow policy'
+  'generation-4 tables have no direct allow policy'
 );
 select results_eq(
   $$
     select id, schema_generation, migration_set_sha256
     from desmoslock_v2.internal_release_attestation
   $$,
-  $$values (1::smallint, 3, '06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49')$$,
+  $$values (1::smallint, 4, 'e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a')$$,
   'the database records the exact versioned migration attestation'
 );
 select is_empty(
@@ -141,7 +141,7 @@ select results_eq(
     select schema_generation, fixture_version, fixture_digest, migration_set_sha256, fixture_valid
     from desmoslock_v2.internal_baseline_status()
   $$,
-  $$values (3, 'internal-baseline-v1', '7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca', '06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49', true)$$,
+  $$values (4, 'internal-baseline-v2', 'f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201', 'e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a', true)$$,
   'service baseline status verifies the pinned fixture digest'
 );
 
@@ -172,7 +172,7 @@ savepoint missing_foundation;
 delete from desmoslock_v2.foundation_seed;
 select results_eq(
   $$select fixture_digest, fixture_valid from desmoslock_v2.internal_baseline_status()$$,
-  $$values ('7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca', false)$$,
+  $$values ('f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201', false)$$,
   'service baseline status fails closed when the foundation marker is absent'
 );
 rollback to savepoint missing_foundation;
@@ -267,8 +267,86 @@ select ok(
   'the caller-scoped summary has no School-id overload'
 );
 
+-- Public School summaries require a verified provider identity, a live session,
+-- and its explicit profile binding. A profile UUID in JWT metadata is not Auth.
+-- Isolate these seeded authorization mutations so baseline checks below still
+-- inspect the exact unbound generation-4 fixture after rollback.
+savepoint caller_auth_fixtures;
+create function pg_temp.set_backend_auth_claims(user_id uuid, session_id uuid)
+returns void
+language plpgsql
+as $$
+begin
+  perform set_config('request.jwt.claim.sub', '', true);
+  perform set_config('request.jwt.claims', jsonb_build_object(
+    'sub', user_id::text,
+    'session_id', session_id::text,
+    'role', 'authenticated',
+    'aal', 'aal1',
+    'exp', floor(extract(epoch from clock_timestamp() + interval '1 hour'))::bigint
+  )::text, true);
+end;
+$$;
+
+select pg_temp.set_backend_auth_claims(
+  '20000000-0000-4000-8000-000000000001',
+  'c2800000-0000-4000-8000-000000000001'
+);
 set local role authenticated;
-set local "request.jwt.claim.sub" = '20000000-0000-4000-8000-000000000001';
+select is(
+  (select code from desmoslock_v2.current_staff_context()),
+  'unauthenticated',
+  'a seeded profile UUID alone cannot substitute for a verified Auth identity'
+);
+reset role;
+
+insert into auth.users (
+  instance_id, id, aud, role, email, encrypted_password,
+  email_confirmed_at, raw_app_meta_data, raw_user_meta_data, created_at, updated_at
+)
+select
+  '00000000-0000-0000-0000-000000000000'::uuid,
+  fixture.user_id, 'authenticated', 'authenticated', fixture.email, '',
+  clock_timestamp(), '{"provider":"email","providers":["email"]}'::jsonb,
+  '{}'::jsonb, clock_timestamp(), clock_timestamp()
+from (values
+  ('a2800000-0000-4000-8000-000000000001'::uuid, 'backend-alpha-owner@staff.invalid'),
+  ('a2800000-0000-4000-8000-000000000012'::uuid, 'backend-beta-admin@staff.invalid'),
+  ('a2800000-0000-4000-8000-000000000099'::uuid, 'backend-unbound@staff.invalid')
+) as fixture(user_id, email);
+insert into auth.sessions (id, user_id, created_at, updated_at, aal, not_after)
+select fixture.session_id, fixture.user_id, clock_timestamp(), clock_timestamp(),
+  'aal1', clock_timestamp() + interval '1 hour'
+from (values
+  ('c2800000-0000-4000-8000-000000000001'::uuid, 'a2800000-0000-4000-8000-000000000001'::uuid),
+  ('c2800000-0000-4000-8000-000000000012'::uuid, 'a2800000-0000-4000-8000-000000000012'::uuid),
+  ('c2800000-0000-4000-8000-000000000099'::uuid, 'a2800000-0000-4000-8000-000000000099'::uuid)
+) as fixture(session_id, user_id);
+update desmoslock_v2.profiles
+set auth_user_id = fixture.user_id
+from (values
+  ('20000000-0000-4000-8000-000000000001'::uuid, 'a2800000-0000-4000-8000-000000000001'::uuid),
+  ('20000000-0000-4000-8000-000000000012'::uuid, 'a2800000-0000-4000-8000-000000000012'::uuid)
+) as fixture(profile_id, user_id)
+where profiles.id = fixture.profile_id;
+
+select pg_temp.set_backend_auth_claims(
+  'a2800000-0000-4000-8000-000000000001',
+  'c2800000-0000-4000-8000-000000000098'
+);
+set local role authenticated;
+select is(
+  (select code from desmoslock_v2.current_staff_context()),
+  'session_expired',
+  'a confirmed bound Owner without the claimed live session has no School authority'
+);
+reset role;
+
+select pg_temp.set_backend_auth_claims(
+  'a2800000-0000-4000-8000-000000000001',
+  'c2800000-0000-4000-8000-000000000001'
+);
+set local role authenticated;
 select results_eq(
   $$
     select school_id::text, school_slug, school_name, membership_role, test_count, student_session_count
@@ -277,7 +355,12 @@ select results_eq(
   $$values ('10000000-0000-4000-8000-000000000001', 'synthetic-alpha', 'Synthetic Alpha School', 'owner', 1::bigint, 1::bigint)$$,
   'Alpha Owner observes only Alpha through the public read model'
 );
-set local "request.jwt.claim.sub" = '20000000-0000-4000-8000-000000000012';
+reset role;
+select pg_temp.set_backend_auth_claims(
+  'a2800000-0000-4000-8000-000000000012',
+  'c2800000-0000-4000-8000-000000000012'
+);
+set local role authenticated;
 select results_eq(
   $$
     select school_id::text, school_slug, school_name, membership_role, test_count, student_session_count
@@ -286,12 +369,24 @@ select results_eq(
   $$values ('10000000-0000-4000-8000-000000000002', 'synthetic-beta', 'Synthetic Beta School', 'admin', 1::bigint, 1::bigint)$$,
   'Beta Admin observes only Beta through the public read model'
 );
-set local "request.jwt.claim.sub" = '20000000-0000-4000-8000-000000000099';
+reset role;
+select pg_temp.set_backend_auth_claims(
+  'a2800000-0000-4000-8000-000000000099',
+  'c2800000-0000-4000-8000-000000000099'
+);
+set local role authenticated;
+select is(
+  (select code from desmoslock_v2.current_staff_context()),
+  'membership_inactive',
+  'a verified live Auth identity without a bound staff profile has no School authority'
+);
 select is_empty(
   $$select * from desmoslock_v2.current_school_summary()$$,
-  'an unknown authenticated identity observes no School'
+  'an authenticated identity without a staff profile observes no School'
 );
-set local "request.jwt.claim.role" = 'service_role';
+select set_config('request.jwt.claims', (
+  current_setting('request.jwt.claims')::jsonb || jsonb_build_object('role', 'service_role')
+)::text, true);
 select throws_ok(
   $$select * from desmoslock_v2.internal_baseline_status()$$,
   '42501',
@@ -305,6 +400,7 @@ select throws_ok(
   'authenticated cannot read fixture tables directly'
 );
 reset role;
+rollback to savepoint caller_auth_fixtures;
 
 grant select on table
   desmoslock_v2.workspaces,
@@ -386,7 +482,7 @@ select throws_ok(
   $$,
   '23514',
   null,
-  'generation 3 rejects unsupported role breadth'
+  'generation 4 rejects unsupported role breadth'
 );
 select throws_ok(
   $$
@@ -403,9 +499,9 @@ select throws_ok(
       id, schema_generation, fixture_version, fixture_digest
     ) values (
       2,
-      3,
-      'internal-baseline-v1',
-      '7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca'
+      4,
+      'internal-baseline-v2',
+      'f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201'
     )
   $$,
   '23514',
@@ -414,7 +510,7 @@ select throws_ok(
 );
 select results_eq(
   $$select fixture_digest, fixture_valid from desmoslock_v2.internal_baseline_status()$$,
-  $$values ('7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca', true)$$,
+  $$values ('f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201', true)$$,
   'rejected mutations leave the pinned fixture digest valid'
 );
 

@@ -24,7 +24,7 @@ enabled = false
 port = 54323
 
 [local_smtp]
-enabled = false
+enabled = true
 port = 54324
 
 [storage]
@@ -42,6 +42,10 @@ enable_confirmations = true
 max_frequency = "1m"
 otp_length = 8
 
+[auth.email.template.recovery]
+subject = "Reset your DesmosLock password"
+content_path = "./supabase/templates/recovery-v1.html"
+
 [auth.mfa.totp]
 enroll_enabled = true
 verify_enabled = true
@@ -51,8 +55,14 @@ enabled = true
 policy = "per_worker"
 deno_version = 2
 
+[functions.account-recovery]
+verify_jwt = false
+
 [functions.health]
 verify_jwt = false
+
+[functions.staff-invitations]
+verify_jwt = true
 
 [analytics]
 enabled = false

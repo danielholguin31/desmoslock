@@ -10,7 +10,22 @@ import {
   assertLegacyReleaseTombstone,
   expectedLegacyReleaseTombstone,
 } from "../scripts/release-tombstone-contract.mjs";
-import { assertSupabaseAuthConfiguration } from "../scripts/repository-contract/supabase-contract.mjs";
+import {
+  assertPublicWebCiWorkflow,
+  assertStaffAuthCiWorkflow,
+} from "../scripts/repository-contract/ci-contract.mjs";
+import {
+  assertMigrationSetAttestation,
+  assertSupabaseAuthConfiguration,
+  expectedMigrationAttestations,
+  expectedMigrationFiles,
+  expectedMigrationSetSha256,
+} from "../scripts/repository-contract/supabase-contract.mjs";
+import {
+  assertToolchainManifestContract,
+  assertWorkflowToolchain,
+  expectedToolchain,
+} from "../scripts/repository-contract/toolchain-contract.mjs";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -63,7 +78,10 @@ test("v2 uses one typed npm workspace beside legacy v1", () => {
     rootPackage.version,
     /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/,
   );
-  assert.match(rootPackage.packageManager, /^npm@\d+\.\d+\.\d+/);
+  assert.equal(
+    rootPackage.packageManager,
+    `npm@${expectedToolchain.npm}+${expectedToolchain.npmIntegrity}`,
+  );
   assert.equal(lockfile.packages[""].version, rootPackage.version);
   for (const dependencySection of [
     "dependencies",
@@ -169,13 +187,226 @@ test("v2 uses one typed npm workspace beside legacy v1", () => {
   }
 });
 
+test("repository pins the exact Node.js, npm, type, and web client toolchain", () => {
+  const workspacePackages = Object.fromEntries(
+    [
+      "apps/desktop",
+      "apps/web",
+      "packages/contracts",
+      "packages/domain",
+      "packages/test-support",
+    ].map((workspace) => [workspace, readJson(`${workspace}/package.json`)]),
+  );
+  const manifestContract = {
+    lockfile: readJson("package-lock.json"),
+    nodeVersion: readText(".node-version"),
+    rootPackage: readJson("package.json"),
+    workspacePackages,
+  };
+
+  assert.doesNotThrow(() => assertToolchainManifestContract(manifestContract));
+  assert.throws(
+    () =>
+      assertToolchainManifestContract({
+        ...manifestContract,
+        rootPackage: {
+          ...manifestContract.rootPackage,
+          engines: { node: ">=24" },
+        },
+      }),
+    /engine must pin 24\.20\.0/u,
+  );
+  assert.throws(
+    () =>
+      assertToolchainManifestContract({
+        ...manifestContract,
+        rootPackage: {
+          ...manifestContract.rootPackage,
+          packageManager: `npm@${expectedToolchain.npm}`,
+        },
+      }),
+    /verified Corepack integrity/u,
+  );
+  assert.throws(
+    () =>
+      assertToolchainManifestContract({
+        ...manifestContract,
+        rootPackage: {
+          ...manifestContract.rootPackage,
+          packageManager: `npm@${expectedToolchain.npm}+sha512.${"0".repeat(128)}`,
+        },
+      }),
+    /verified Corepack integrity/u,
+  );
+  assert.throws(
+    () =>
+      assertToolchainManifestContract({
+        ...manifestContract,
+        workspacePackages: {
+          ...workspacePackages,
+          "apps/web": {
+            ...workspacePackages["apps/web"],
+            dependencies: {
+              ...workspacePackages["apps/web"].dependencies,
+              "@supabase/supabase-js": "^2.115.0",
+            },
+          },
+        },
+      }),
+    /Only apps\/web may depend directly/u,
+  );
+
+  for (const [workflowPath, expectedJobCount] of [
+    [".github/workflows/ci.yml", 9],
+    [".github/workflows/security.yml", 1],
+  ]) {
+    const workflow = readText(workflowPath);
+    assert.doesNotThrow(() =>
+      assertWorkflowToolchain(workflow, workflowPath, expectedJobCount),
+    );
+    assert.throws(
+      () =>
+        assertWorkflowToolchain(
+          workflow.replace("node-version: 24.20.0", "node-version: 24"),
+          workflowPath,
+          expectedJobCount,
+        ),
+      /exact Node\.js\/npm setup/u,
+    );
+    assert.throws(
+      () =>
+        assertWorkflowToolchain(
+          workflow.replace(
+            'test "$(npm --version)" = "11.12.1"',
+            'test "$(npm --version)" = "11"',
+          ),
+          workflowPath,
+          expectedJobCount,
+        ),
+      /exact Node\.js\/npm setup/u,
+    );
+    assert.throws(
+      () =>
+        assertWorkflowToolchain(
+          [
+            workflow,
+            "  added-node-job:",
+            "    runs-on: ubuntu-latest",
+            "    steps:",
+            "      - run: npm --version",
+          ].join("\n"),
+          workflowPath,
+          expectedJobCount,
+        ),
+      /Node\.js\/npm job/u,
+    );
+    assert.throws(
+      () =>
+        assertWorkflowToolchain(
+          workflow.replace(
+            "      - uses: actions/setup-node@",
+            "      - run: npm --version\n      - uses: actions/setup-node@",
+          ),
+          workflowPath,
+          expectedJobCount,
+        ),
+      /before Node\.js\/npm use/u,
+    );
+    for (const jobKey of [
+      "  'added-node-job':",
+      "  added-node-job: # hidden from a partial parser",
+    ]) {
+      assert.throws(
+        () =>
+          assertWorkflowToolchain(
+            [
+              workflow,
+              jobKey,
+              "    runs-on: ubuntu-latest",
+              "    steps:",
+              "      - run: npm --version",
+            ].join("\n"),
+            workflowPath,
+            expectedJobCount,
+          ),
+        /canonical unquoted form/u,
+      );
+    }
+  }
+});
+
+test("operator docs enumerate the exact toolchain and all public web build inputs", () => {
+  const documents = [
+    {
+      exactToolchain:
+        "Use exactly Node.js 24.20.0 and npm 11.12.1 from the repository root.",
+      text: readText("README.md"),
+    },
+    {
+      exactToolchain:
+        "Use exactly Node.js 24.20.0, npm 11.12.1, Docker, and the repository-pinned\nSupabase CLI.",
+      text: readText("docs/product-completion/reproducible-supabase.md"),
+    },
+    {
+      exactToolchain:
+        "Use exactly Node.js 24.20.0 and npm 11.12.1 from the repository root.",
+      text: readText("docs/product-completion/v2-foundation.md"),
+    },
+  ];
+  for (const document of documents) {
+    assert.equal(document.text.includes(document.exactToolchain), true);
+    assert.doesNotMatch(
+      document.text,
+      /Node(?:\.js)? 24(?:\.20\.0)?\s+(?:or newer|and newer|or later|\+)/iu,
+    );
+    for (const field of [
+      "DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT",
+      "DESMOSLOCK_PUBLIC_BACKEND_URL",
+      "DESMOSLOCK_PUBLIC_WEB_ORIGIN",
+      "DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
+    ]) {
+      assert.equal(
+        document.text.includes(field),
+        true,
+        `${field} is undocumented`,
+      );
+    }
+    assert.doesNotMatch(
+      document.text,
+      /exactly two fields|two public backend/u,
+    );
+  }
+  assert.match(
+    documents[1].text,
+    /publishable key is intentionally browser-public/u,
+  );
+  assert.match(documents[1].text, /no database URL,[\s\S]*service-role key/u);
+  assert.match(documents[1].text, /desktop renderer never receives/u);
+
+  const rootPackage = readJson("package.json");
+  assert.equal(
+    rootPackage.scripts?.["test:web"],
+    "npm run build:packages && DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=local DESMOSLOCK_PUBLIC_BACKEND_URL=http://127.0.0.1:43174 DESMOSLOCK_PUBLIC_WEB_ORIGIN=http://127.0.0.1:43173 DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc npm run build --workspace @desmoslock/web && vitest run apps/web && npm run test:web:e2e",
+  );
+});
+
 test("v2 data plane is migration-owned and clean-start only", () => {
   for (const relativePath of [
     "supabase/config.toml",
     "supabase/migrations/20260824000100_v2_foundation.sql",
     "supabase/migrations/20260828000100_internal_release_backend.sql",
+    "supabase/migrations/20260903000100_staff_auth_lifecycle.sql",
+    "supabase/migrations/20260903000200_staff_auth_generation_4.sql",
+    "supabase/migrations/20260907000100_staff_auth_callback_completion.sql",
+    "supabase/migrations/20260907000200_runtime_owner_bootstrap.sql",
+    "supabase/migrations/20260907000300_membership_revocation_authority.sql",
     "supabase/seed.sql",
     "supabase/tests/database/internal_release_backend.test.sql",
+    "supabase/tests/database/staff_auth_generation_4.test.sql",
+    "supabase/tests/database/staff_auth_callback_completion.test.sql",
+    "supabase/tests/database/runtime_owner_bootstrap.test.sql",
+    "supabase/tests/database/membership_revocation_authority.test.sql",
+    "supabase/tests/database/staff_auth_lifecycle.test.sql",
     "supabase/tests/database/v2_foundation.test.sql",
   ]) {
     assert.equal(
@@ -223,7 +454,7 @@ test("v2 data plane is migration-owned and clean-start only", () => {
   }
 });
 
-test("generation-3 Supabase configuration is versioned and fails closed", () => {
+test("generation-4 Supabase configuration is versioned and fails closed", () => {
   const configuration = readText("supabase/config.toml");
   const runbook = readText("docs/product-completion/reproducible-supabase.md");
   const authStart = configuration.indexOf("[auth]\n");
@@ -320,13 +551,262 @@ test("generation-3 Supabase configuration is versioned and fails closed", () => 
     assert.equal(
       [
         ...workflow.matchAll(
-          /^\s+- run: npm run build\n\s+env:\n\s+DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT: local\n\s+DESMOSLOCK_PUBLIC_BACKEND_URL: http:\/\/127\.0\.0\.1:54321$/gmu,
+          /^\s+- run: npm run build\n\s+env:\n\s+DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT: local\n\s+DESMOSLOCK_PUBLIC_BACKEND_URL: http:\/\/127\.0\.0\.1:54321\n\s+DESMOSLOCK_PUBLIC_WEB_ORIGIN: http:\/\/localhost:43174\n\s+DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY: sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc$/gmu,
         ),
       ].length,
       expectedBuilds,
       `${workflowPath} configures every app build explicitly`,
     );
   }
+});
+
+test("generation-4 attests the exact normalized migration history", () => {
+  const migrations = expectedMigrationFiles.map((fileName) => [
+    fileName,
+    readText(`supabase/migrations/${fileName}`),
+  ]);
+
+  assert.deepEqual(expectedMigrationAttestations, {
+    "20260828000100_internal_release_backend.sql": {
+      migrationSetSha256:
+        "06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49",
+      rawSha256:
+        "1a60d2fb308a8e2cfad102f9c218c319bacd95c33a40801d5b0b731119434f2f",
+    },
+    "20260903000200_staff_auth_generation_4.sql": {
+      migrationSetSha256:
+        "ce79427901195258897e0b75c80acfb7b50699eb223af5289cf5d5d59958f2b7",
+      rawSha256:
+        "4e7321c8d9d6d3e4c27e07ab38d75252a8922868842c40c0723c349c251cac44",
+    },
+    "20260907000100_staff_auth_callback_completion.sql": {
+      migrationSetSha256:
+        "1b499b73aca1ff812cbc244f9eb9908e8dad839ecc6befbcb1a496865a2d5f52",
+      rawSha256:
+        "79ab31e822b4f04f4148c50bb98446210a37d975a646119b42d78fe1349a8862",
+    },
+    "20260907000200_runtime_owner_bootstrap.sql": {
+      migrationSetSha256:
+        "8d5fd99304ce8bbf9524dfb788080f890ab84565c096a8e6d4faf437a9b734dc",
+      rawSha256:
+        "43527d889ae0823057bba8ab7b4ed97eb9603220658c59c56cfda70889af75c9",
+    },
+    "20260907000300_membership_revocation_authority.sql": {
+      migrationSetSha256: expectedMigrationSetSha256,
+      rawSha256:
+        "9c59c0192b4f960f925db8c64be1c7b2aa6843591d6214a98b29c2bac5a326ad",
+    },
+  });
+  assert.doesNotThrow(() => assertMigrationSetAttestation(migrations));
+  assert.throws(
+    () => assertMigrationSetAttestation(migrations.slice(0, -1)),
+    /migration files/u,
+  );
+  assert.throws(
+    () =>
+      assertMigrationSetAttestation(
+        migrations.map(([fileName, source]) => [
+          fileName,
+          fileName === "20260903000100_staff_auth_lifecycle.sql"
+            ? `${source}\n-- drift\n`
+            : source,
+        ]),
+      ),
+    /normalized migration-set digest changed/u,
+  );
+  for (const historicalFile of [
+    "20260828000100_internal_release_backend.sql",
+    "20260903000200_staff_auth_generation_4.sql",
+    "20260907000100_staff_auth_callback_completion.sql",
+    "20260907000200_runtime_owner_bootstrap.sql",
+  ]) {
+    assert.throws(
+      () =>
+        assertMigrationSetAttestation(
+          migrations.map(([fileName, source]) => [
+            fileName,
+            fileName === historicalFile
+              ? source.replace(
+                  expectedMigrationAttestations[fileName].migrationSetSha256,
+                  expectedMigrationSetSha256,
+                )
+              : source,
+          ]),
+        ),
+      /does not preserve its historical migration-set attestation/u,
+      historicalFile,
+    );
+  }
+  for (const attestedFile of Object.keys(expectedMigrationAttestations)) {
+    assert.throws(
+      () =>
+        assertMigrationSetAttestation(
+          migrations.map(([fileName, source]) => [
+            fileName,
+            fileName === attestedFile ? `${source}\n-- drift\n` : source,
+          ]),
+        ),
+      /raw migration SHA-256 changed/u,
+      attestedFile,
+    );
+  }
+  assert.throws(
+    () =>
+      assertMigrationSetAttestation(
+        migrations.map(([fileName, source]) => [
+          fileName,
+          fileName === "20260907000300_membership_revocation_authority.sql"
+            ? source.replace(expectedMigrationSetSha256, "0".repeat(64))
+            : source,
+        ]),
+      ),
+    /does not attest the current migration set/u,
+  );
+});
+
+test("the runbook names every runtime-only staff lifecycle backup guard", () => {
+  const runbook = readText("docs/product-completion/reproducible-supabase.md");
+  const runtimeLifecycleTables = [
+    "application_session_revocation_cutoffs",
+    "application_session_revocations",
+    "staff_audit_events",
+    "staff_invitations",
+    "staff_password_recovery_operations",
+  ];
+
+  assert.match(runbook, /five runtime-only staff lifecycle tables/u);
+  assert.doesNotMatch(runbook, /three staff lifecycle tables/u);
+  for (const table of runtimeLifecycleTables) {
+    assert.equal(
+      runbook.includes(`\`${table}\``),
+      true,
+      `${table} must remain explicit in the operator runbook`,
+    );
+  }
+});
+
+test("staff Auth schema and composed journeys have a required disposable CI lane", () => {
+  const rootPackage = readJson("package.json");
+  const workflow = readText(".github/workflows/ci.yml");
+
+  assert.equal(
+    fs.existsSync(
+      path.join(repositoryRoot, "tests/acceptance/staff-auth-stack.test.mjs"),
+    ),
+    true,
+  );
+
+  assert.equal(
+    rootPackage.scripts?.["test:staff-auth:composed"],
+    "node --test tests/acceptance/staff-auth-composed.test.mjs",
+  );
+  assert.equal(
+    rootPackage.scripts?.["test:staff-auth:locks"],
+    "node --test tests/acceptance/revoke-membership-lock.test.mjs",
+  );
+  assert.equal(
+    fs.existsSync(
+      path.join(
+        repositoryRoot,
+        "tests/acceptance/revoke-membership-lock.test.mjs",
+      ),
+    ),
+    true,
+  );
+  assert.equal(
+    rootPackage.scripts?.["db:start:full"],
+    "node scripts/run-local-supabase.mjs start-full",
+  );
+  assert.equal(
+    fs.existsSync(path.join(repositoryRoot, "scripts/run-local-supabase.mjs")),
+    true,
+  );
+
+  assert.equal(
+    rootPackage.scripts?.["test:staff-auth"],
+    "npm run test:db && npm run test:staff-auth:stack && npm run test:staff-auth:locks && npm run test:edge && npm run test:unit && npm run test:staff-auth:composed",
+  );
+  assert.equal(
+    rootPackage.scripts?.["test:edge"],
+    "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts",
+    "the Edge suite must lint all sources and explicitly typecheck every deployed entrypoint",
+  );
+  assert.equal(
+    rootPackage.scripts?.["test:staff-auth:stack"],
+    "node --test tests/acceptance/staff-auth-stack.test.mjs",
+  );
+  assert.doesNotThrow(() => assertStaffAuthCiWorkflow(workflow));
+  assert.throws(
+    () =>
+      assertStaffAuthCiWorkflow(
+        workflow.replace(
+          "name: Staff Auth schema and composed local journeys",
+          "name: Disposable staff Auth lifecycle",
+        ),
+      ),
+    /schema and composed local journey verification/u,
+  );
+
+  const lifecycleSteps = [
+    "      - run: npm run db:start:full",
+    "      - run: npm run db:reset",
+    "      - run: npm run test:staff-auth",
+    "      - if: always()",
+    "        run: npm run db:stop",
+    "",
+  ].join("\n");
+  const relocatedLifecycleSteps = workflow
+    .replace(lifecycleSteps, "")
+    .replace("  web:\n", `  web:\n${lifecycleSteps}`);
+  assert.notEqual(relocatedLifecycleSteps, workflow);
+  assert.throws(
+    () => assertStaffAuthCiWorkflow(relocatedLifecycleSteps),
+    /full disposable local stack/u,
+  );
+
+  const relocatedAggregateNeed = workflow
+    .replace("      - staff-auth-lifecycle\n", "")
+    .replace("  web:\n", "  web:\n    needs:\n      - staff-auth-lifecycle\n");
+  assert.notEqual(relocatedAggregateNeed, workflow);
+  assert.throws(
+    () => assertStaffAuthCiWorkflow(relocatedAggregateNeed),
+    /does not depend on staff-auth-lifecycle/u,
+  );
+});
+
+test("CI supplies synthetic web configuration without desktop-job leakage", () => {
+  const ciWorkflow = readText(".github/workflows/ci.yml");
+  const securityWorkflow = readText(".github/workflows/security.yml");
+
+  assert.doesNotThrow(() =>
+    assertPublicWebCiWorkflow(ciWorkflow, securityWorkflow),
+  );
+  assert.throws(
+    () =>
+      assertPublicWebCiWorkflow(
+        ciWorkflow.replace(
+          "sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc",
+          "sb_publishable_invalid",
+        ),
+        securityWorkflow,
+      ),
+    /exact synthetic public web origin and publishable key/u,
+  );
+  assert.throws(
+    () =>
+      assertPublicWebCiWorkflow(
+        ciWorkflow.replace(
+          "      - run: xvfb-run -a npm run test:electron",
+          [
+            "      - run: xvfb-run -a npm run test:electron",
+            "        env:",
+            "          DESMOSLOCK_PUBLIC_WEB_ORIGIN: http://localhost:43174",
+          ].join("\n"),
+        ),
+        securityWorkflow,
+      ),
+    /Desktop-specific CI/u,
+  );
 });
 
 test("synthetic operator reports scoped completion rather than external verification", () => {
@@ -397,6 +877,7 @@ test("legacy v1 and test-only support cannot enter a v2 release path", () => {
 test("Electron CI acceptance includes internal isolation and external package policy verification", () => {
   const rootPackage = readJson("package.json");
   const ciWorkflow = readText(".github/workflows/ci.yml");
+  const productionVerifier = readText("scripts/verify-production-desktop.mjs");
 
   assert.equal(
     rootPackage.scripts?.["test:electron:production"],
@@ -407,6 +888,16 @@ test("Electron CI acceptance includes internal isolation and external package po
     /(?:^|&& )npm run test:electron:production$/,
   );
   assert.match(ciWorkflow, /xvfb-run -a npm run test:electron/);
+  assert.match(
+    productionVerifier,
+    /capabilities: \["auth", "database", "rest"\],[\s\S]*fixtureDigest:\s*"f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",[\s\S]*fixtureVersion: "internal-baseline-v2",[\s\S]*schemaGeneration: 4,/u,
+    "the packaged desktop probe must serve the exact generation-4 health fixture",
+  );
+  assert.doesNotMatch(
+    productionVerifier,
+    /internal-baseline-v1|7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca|schemaGeneration: 3/u,
+    "the packaged desktop probe must not silently fall back to generation 3",
+  );
 });
 
 test("the production desktop command cannot bypass observed application retirement", () => {
@@ -677,8 +1168,7 @@ test("source-reconciliation ledger exactly covers both evidence inputs", () => {
       "apps",
       "packages",
       "supabase/config.toml",
-      "supabase/functions/deno.json",
-      "supabase/functions/health",
+      "supabase/functions",
       "supabase/migrations",
       "supabase/seed.sql",
       "supabase/tests/database",
@@ -691,6 +1181,22 @@ test("source-reconciliation ledger exactly covers both evidence inputs", () => {
     ),
     false,
   );
+  for (const edgeSource of [
+    "supabase/functions/_shared/http.ts",
+    "supabase/functions/_shared/supabase-http.ts",
+    "supabase/functions/account-recovery/index.ts",
+    "supabase/functions/health/index.ts",
+    "supabase/functions/staff-invitations/index.ts",
+  ]) {
+    assert.equal(
+      ledger.canonicalSource.canonicalPaths.product.some(
+        (sourceRoot) =>
+          edgeSource === sourceRoot || edgeSource.startsWith(`${sourceRoot}/`),
+      ),
+      true,
+      `${edgeSource} must remain inside the canonical product source`,
+    );
+  }
   assert.deepEqual(ledger.canonicalSource.integrationBaseline, {
     commit: baseline,
     tree: baselineTree,

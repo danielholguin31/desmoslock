@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "description": "DesmosLock v2 workspace; legacy v1 remains evidence-only during the expand phase.",
-  "packageManager": "npm@11.12.1",
+  "packageManager": "npm@11.12.1+sha512.cdca14b85d647b3192028d02aadbe82d75f79a446aceea9874be98e6d768f20ebd3555770a48d0e9906106007877bbc690f715e9372f2e2dc644a3c3157fb14c",
   "engines": {
-    "node": ">=24"
+    "node": "24.20.0"
   },
   "workspaces": [
     "apps/*",
@@ -26,16 +26,18 @@
     "test": "npm run test:repository && npm run test:unit && npm run test:evidence",
     "test:clean-build": "node --test tests/acceptance/clean-build.test.mjs",
     "test:unit": "npm run build:packages && vitest run",
-    "test:repository": "npm run test:clean-build && node --test tests/repository-contract.test.mjs tests/acceptance/required-check-probe.test.mjs tests/acceptance/unsupported-surfaces.test.mjs tests/acceptance/license-policy.test.mjs tests/acceptance/legacy-packaging.test.mjs tests/acceptance/synthetic-backup.test.mjs tests/acceptance/postgres-backup-adapter.test.mjs",
+    "test:repository": "npm run test:clean-build && node --test tests/repository-contract.test.mjs tests/acceptance/required-check-probe.test.mjs tests/acceptance/unsupported-surfaces.test.mjs tests/acceptance/license-policy.test.mjs tests/acceptance/legacy-packaging.test.mjs tests/acceptance/synthetic-backup.test.mjs tests/acceptance/postgres-backup-adapter.test.mjs tests/acceptance/local-supabase-output.test.mjs",
+    "test:staff-auth": "npm run test:db && npm run test:staff-auth:stack && npm run test:staff-auth:locks && npm run test:edge && npm run test:unit && npm run test:staff-auth:composed",
+    "test:staff-auth:stack": "node --test tests/acceptance/staff-auth-stack.test.mjs",
     "test:evidence": "npm run build:packages && node scripts/run-release-evidence.mjs",
-    "db:start": "supabase start --exclude gotrue,realtime,storage-api,imgproxy,kong,mailpit,postgrest,postgres-meta,studio,edge-runtime,logflare,vector,supavisor",
-    "db:start:full": "supabase start",
-    "db:reset": "supabase db reset && node scripts/wait-for-postgres.mjs",
-    "db:reset:empty": "supabase db reset --no-seed && node scripts/wait-for-postgres.mjs",
-    "db:stop": "supabase stop",
+    "db:start": "node scripts/run-local-supabase.mjs start-minimal",
+    "db:start:full": "node scripts/run-local-supabase.mjs start-full",
+    "db:reset": "node scripts/run-local-supabase.mjs reset && node scripts/wait-for-postgres.mjs",
+    "db:reset:empty": "node scripts/run-local-supabase.mjs reset-empty && node scripts/wait-for-postgres.mjs",
+    "db:stop": "node scripts/run-local-supabase.mjs stop",
     "test:db": "supabase test db",
-    "test:edge": "deno test supabase/functions && deno check supabase/functions/health/index.ts",
-    "test:web": "npm run build:packages && DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=local DESMOSLOCK_PUBLIC_BACKEND_URL=http://127.0.0.1:43174 npm run build --workspace @desmoslock/web && vitest run apps/web && npm run test:web:e2e",
+    "test:edge": "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts",
+    "test:web": "npm run build:packages && DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=local DESMOSLOCK_PUBLIC_BACKEND_URL=http://127.0.0.1:43174 DESMOSLOCK_PUBLIC_WEB_ORIGIN=http://127.0.0.1:43173 DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc npm run build --workspace @desmoslock/web && vitest run apps/web && npm run test:web:e2e",
     "test:web:e2e": "playwright test --config playwright.web.config.ts",
     "test:electron": "npm run build:packages && DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT=local DESMOSLOCK_PUBLIC_BACKEND_URL=http://127.0.0.1:43175 npm run build --workspace @desmoslock/desktop && npm run test:runtime --workspace @desmoslock/desktop && vitest run apps/desktop && npm run test:electron:integration && npm run test:electron:production",
     "test:electron:integration": "playwright test --config playwright.electron.config.ts",
@@ -48,7 +50,9 @@
     "verify:locks": "node scripts/verify-locks.mjs",
     "verify:packages": "node scripts/verify-packages.mjs",
     "verify:repository": "node scripts/verify-repository-contract.mjs",
-    "verify:required-check-probe": "node scripts/verify-required-check-probe.mjs"
+    "verify:required-check-probe": "node scripts/verify-required-check-probe.mjs",
+    "test:staff-auth:composed": "node --test tests/acceptance/staff-auth-composed.test.mjs",
+    "test:staff-auth:locks": "node --test tests/acceptance/revoke-membership-lock.test.mjs"
   },
   "devDependencies": {
     "@electron/fuses": "^2.1.3",
@@ -56,7 +60,7 @@
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.62.1",
     "@secretlint/secretlint-rule-preset-recommend": "^13.0.4",
-    "@types/node": "^26.2.0",
+    "@types/node": "24.13.3",
     "actionlint": "^2.0.6",
     "deno": "^2.9.5",
     "esbuild": "^0.28.2",

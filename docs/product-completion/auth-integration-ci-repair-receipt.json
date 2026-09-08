@@ -1,0 +1,63 @@
+{
+  "date": "2026-09-07",
+  "status": "repair_source_frozen_awaiting_root_gate_and_exact_commit_ci",
+  "base_commit": "5e6ab4d9b15aa5af5ceac93c7f05b2ed542de8c0",
+  "initial_ci_run": "https://github.com/danielholguin31/desmoslock/actions/runs/34174574311",
+  "supersedes": {
+    "receipt": "docs/product-completion/auth-integration-final-receipt.json",
+    "scope": "Affected paths below supersede the corresponding hashes in the pre-CI receipt; that 54-file receipt is historical and is not a current-tree attestation.",
+    "affected_pre_ci_paths": [
+      "docs/product-completion/reproducible-supabase.md",
+      "scripts/repository-contract/supabase-contract.mjs",
+      "scripts/synthetic-backup/operator.mjs",
+      "supabase/functions/health/index.test.ts",
+      "supabase/functions/health/index.ts",
+      "supabase/tests/database/staff_auth_lifecycle.test.sql",
+      "tests/acceptance/staff-auth-composed.test.mjs",
+      "tests/acceptance/staff-auth-loopback.mjs",
+      "tests/acceptance/synthetic-backup.test.mjs",
+      "tests/e2e/web/foundation.spec.ts",
+      "tests/repository-contract.test.mjs"
+    ]
+  },
+  "tracked_diff_sha256": "e8676d0c55375d95617b643f517ed39978e72113dedd4006fe6825f4171ef40d",
+  "files_sha256": {
+    "docs/product-completion/auth-integration-ci-evidence.md": "d816731d8fe5812919b2be66ac1333824c0123a88c913d84813ad83f3c478848",
+    "docs/product-completion/reproducible-supabase.md": "fb2bfc57e2cc2a476e5a5a7f3ddbcbb787133fb6ef961dcdd39ab6b3ebe6cf41",
+    "docs/product-completion/runtime-owner-bootstrap.md": "a2a3e3a4b6c3abea706105b581ceb706f290ee5b1ae7b2d24653df9c15bf9650",
+    "scripts/repository-contract/supabase-contract.mjs": "3ce4126ba5c0903424e4870a55309588304cc16c38927866107a745a1c3e874c",
+    "scripts/synthetic-backup/operator.mjs": "6169400e1ec4c8048b7e790cb6a8cb0c7779aae3b25749ed971e78ce2ea9930d",
+    "supabase/functions/health/index.test.ts": "1f9f0795a14fe7277d7ceebfb215592952b44b32fab27ff97cfcafdd4072b768",
+    "supabase/functions/health/index.ts": "15e37e58d6aa05636f42bfaf21720bf0a208d81687e16d8d0407f9640a4b66bf",
+    "supabase/migrations/20260907000200_runtime_owner_bootstrap.sql": "43527d889ae0823057bba8ab7b4ed97eb9603220658c59c56cfda70889af75c9",
+    "supabase/tests/database/internal_release_backend.test.sql": "116952982410b5e577fa7033f4af8afa693e7bd6be259477eb58515cacb3e16a",
+    "supabase/tests/database/runtime_owner_bootstrap.test.sql": "69e5a29b6ae313369ae7e14be88ee327ca634bbbe7f2ec58c395225c7c7a2ab4",
+    "supabase/tests/database/staff_auth_generation_4.test.sql": "d0b5b981abcaf9a2913042bde4aef309089ad6ce0f74f896fc8afb6f42e1c257",
+    "supabase/tests/database/staff_auth_lifecycle.test.sql": "a32d69a4d6e89cd864c2a002ac75091172c7d6c7a88a2fdab1a8e1ff48b7d48c",
+    "tests/acceptance/staff-auth-composed.test.mjs": "b97c21cfc07dcd4d4df6c7995def946045e9d7ec3904b2423d8aed93e36fd991",
+    "tests/acceptance/staff-auth-loopback.mjs": "ab5dc17de127b8b2ad9882a82c7f57100f6c34d1218e7bc38d2abb77ad81485b",
+    "tests/acceptance/synthetic-backup.test.mjs": "53347c573659f60a1dfa1ffa8c3925b12deaef77627c37dff3075068c1f21891",
+    "tests/e2e/web/foundation.spec.ts": "e7fa5b5b48fdbf953b555d721e549d14c5bff349aa5e879daebad0aee05c82a1",
+    "tests/repository-contract.test.mjs": "8d9005bfa1bbc87eed801955ccc7a8180fb484b0ff6cacf0dadc7bf566b7686c"
+  },
+  "current_migration_set_sha256": "8d5fd99304ce8bbf9524dfb788080f890ab84565c096a8e6d4faf437a9b734dc",
+  "historical_five_migrations_unchanged": true,
+  "web_qa": {
+    "manifest": "docs/product-completion/auth-integration-web-sha256.json",
+    "sha256": "b590428c4c4535174d5257d28ad413ed615b4d845fd4da0a0e36876bcada1221",
+    "all_29_production_inputs_unchanged": true,
+    "prior_evidence": "Banksy eight scenarios plus baseline at two widths; repository six browser tests rerun after test-only repair"
+  },
+  "checks": {
+    "repository_verifier": "passed",
+    "focused_migration_contracts": "4 passed",
+    "synthetic_backup_and_postgres_adapter": "106 passed",
+    "health": "13 cached-only tests passed",
+    "repository_browser": "6 passed after both old failures reproduced",
+    "scoped_source_checks": "syntax/import, relevant test TypeScript, lint, formatting and whitespace passed",
+    "independent_review": "Atlas SQL/runtime/docs and separate migration manifest review clear",
+    "sql_runtime": "repair not executed locally; initial CI callback-completion 36 assertions passed, full SQL suite failed as documented",
+    "real_provider_journeys": "not reached in initial CI; next exact-commit CI remains required"
+  },
+  "authority": "Review branch source/CI fixes only; no main merge, hosted changes, credentials, installations or local container startup."
+}

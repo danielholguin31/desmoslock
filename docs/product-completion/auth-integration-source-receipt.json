@@ -1,0 +1,30 @@
+{
+  "date": "2026-09-07",
+  "source": "/Users/nicky/workspace/projects/desmoslock-ticket-31-callback-safety",
+  "source_head": "544fc0250617d2482173c55ddc44c52d3f240693",
+  "integration_base": "544fc0250617d2482173c55ddc44c52d3f240693",
+  "tracked_patch_sha256": "31fda262616946544726dcde1adae7f20940c440e71600b2bc8fb3046aaff33f",
+  "files_sha256": {
+    "apps/web/src/auth/staff-auth-application.ts": "5fe43043d4c826fb09a865b6fccab3870db2d8fb686a14547138a84b590c77d2",
+    "apps/web/src/auth/staff-auth-callback.ts": "bffd182c03f2281b4c1bc05f6fbb004c584a3b1b0a7bab1464a0c53b2d7e88d2",
+    "apps/web/src/auth/staff-auth-controller.ts": "be8b76300078597ca5a0546290836edf045470727c7a0ae3de6301ede8394394",
+    "apps/web/src/auth/staff-auth-view.ts": "3d456b2da715909d282496fbd34863d8562d035ea9f286092fbaccf9dacfac4d",
+    "apps/web/src/auth/staff-recovery-flow-store.ts": "102add1a4ecfe20851d9e0190d7c08ee9ab9a0a00ffa6660fc2df2f9810118f3",
+    "apps/web/src/auth/supabase-staff-auth-adapter.ts": "3cb4d9e2b3b20421766f867537245646b34b379d8333d3561b161627616c9317",
+    "apps/web/src/auth/supabase-staff-auth-port.ts": "a7a30ef8e22bdc6252d70b505a59aefcdbf35205a01a676f9e047ce69416e521",
+    "apps/web/src/index.html": "e388f22f4632d490317a8022d36c6e64ee22f4b8efbe17364213855d6b0da36d",
+    "apps/web/src/main.ts": "8d110fde8f94a02620849e3924aabd8be4edef0045f3f42b01878698746de4aa",
+    "apps/web/tests/foundation.test.ts": "06eeaf1e419481d8c1547b5ee7dda2dcafa9e9b34c825ff0bddb9f45f56e81b1",
+    "apps/web/tests/staff-auth-application.test.ts": "d9a27c2eabfb560647683db0627a9d728d31d93163091a6e8038a6e2fe037aed",
+    "apps/web/tests/staff-auth-callback.test.ts": "b2bfd17994fd466552ef4825890316aedda5c85b26ffdcac441052c5f0082350",
+    "apps/web/tests/staff-auth-controller.test.ts": "95cbefc99c536cf3e8d4802a8152040c6ac4dfb22e90031dfad1a719c5ca333b",
+    "apps/web/tests/staff-auth-view.test.ts": "9c3cd298d020502fbb9866dcc4d463345764adce45e87d881a9bea2ab5f67cd3",
+    "apps/web/tests/staff-recovery-flow-store.test.ts": "54f3189744bdcfac269ae41aa13447cbba9195499879633361de8925a47226e7",
+    "apps/web/tests/supabase-staff-auth-adapter.test.ts": "e84ad38887dc6443d5c6462fc025ea53eaf5d8e3450eb6c9319620fabaa6b516",
+    "apps/web/tests/supabase-staff-auth-port.test.ts": "57bd29aafe13c9be316ef3743e930faeaf5bc2d6106b374256f11c2653def503",
+    "tests/e2e/web/foundation.spec.ts": "ef43c9576dfeb59da75a71fcb6ac1f0d59ade0adf56e85ec18b2fa05a3c730ad",
+    "docs/product-completion/email-callback-safety-evidence.md": "98f3f49625cc40836efbca79ffaf67abece6ab7ddc6cdc3ac750107673646714"
+  },
+  "source_unchanged": true,
+  "guard": "OpenClaw change guard not applicable to workspace project root; workspace AGENTS governs. Sole integration writer coordinated with parent; no integration cwd processes found."
+}

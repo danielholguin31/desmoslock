@@ -18,7 +18,38 @@ import {
 } from "../../scripts/synthetic-backup/operator.mjs";
 
 const FIXTURE_DIGEST =
-  "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca";
+  "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201";
+const MIGRATION_ATTESTATIONS = Object.freeze({
+  "20260828000100_internal_release_backend.sql": Object.freeze({
+    migrationSetSha256:
+      "06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49",
+    rawSha256:
+      "1a60d2fb308a8e2cfad102f9c218c319bacd95c33a40801d5b0b731119434f2f",
+  }),
+  "20260903000200_staff_auth_generation_4.sql": Object.freeze({
+    migrationSetSha256:
+      "ce79427901195258897e0b75c80acfb7b50699eb223af5289cf5d5d59958f2b7",
+    rawSha256:
+      "4e7321c8d9d6d3e4c27e07ab38d75252a8922868842c40c0723c349c251cac44",
+  }),
+  "20260907000100_staff_auth_callback_completion.sql": Object.freeze({
+    migrationSetSha256:
+      "1b499b73aca1ff812cbc244f9eb9908e8dad839ecc6befbcb1a496865a2d5f52",
+    rawSha256:
+      "79ab31e822b4f04f4148c50bb98446210a37d975a646119b42d78fe1349a8862",
+  }),
+  "20260907000200_runtime_owner_bootstrap.sql": Object.freeze({
+    migrationSetSha256:
+      "8d5fd99304ce8bbf9524dfb788080f890ab84565c096a8e6d4faf437a9b734dc",
+    rawSha256:
+      "43527d889ae0823057bba8ab7b4ed97eb9603220658c59c56cfda70889af75c9",
+  }),
+  "20260907000300_membership_revocation_authority.sql": Object.freeze({
+    migrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
+    rawSha256:
+      "9c59c0192b4f960f925db8c64be1c7b2aa6843591d6214a98b29c2bac5a326ad",
+  }),
+});
 const execFileAsync = promisify(execFile);
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -38,11 +69,11 @@ function sourceObservation() {
       },
       dataClass: "synthetic-only",
       digest: FIXTURE_DIGEST,
-      version: "internal-baseline-v1",
+      version: "internal-baseline-v2",
     },
     identity: "staging-instance-001",
     migrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
-    schemaGeneration: 3,
+    schemaGeneration: 4,
   };
 }
 
@@ -65,7 +96,7 @@ function emptyLocalObservation() {
     fixture: null,
     identity: "local-instance-001",
     migrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
-    schemaGeneration: 3,
+    schemaGeneration: 4,
   };
 }
 
@@ -306,7 +337,7 @@ test("exports a canonical synthetic-only backup and hash receipt", async (contex
     fixture: sourceObservation().fixture,
     format: "desmoslock.synthetic-backup/v1",
     schema: {
-      generation: 3,
+      generation: 4,
       migrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
       tables: SYNTHETIC_TABLES,
     },
@@ -316,6 +347,81 @@ test("exports a canonical synthetic-only backup and hash receipt", async (contex
     },
   });
 });
+
+for (const [label, mutateManifest] of [
+  [
+    "generation-3 internal-baseline-v1",
+    (manifest) => {
+      manifest.fixture.digest =
+        "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca";
+      manifest.fixture.version = "internal-baseline-v1";
+      manifest.schema.generation = 3;
+    },
+  ],
+  [
+    "generation-4 four-migration",
+    (manifest) => {
+      manifest.schema.migrationSetSha256 =
+        "ce79427901195258897e0b75c80acfb7b50699eb223af5289cf5d5d59958f2b7";
+    },
+  ],
+  [
+    "generation-4 five-migration",
+    (manifest) => {
+      manifest.schema.migrationSetSha256 =
+        "1b499b73aca1ff812cbc244f9eb9908e8dad839ecc6befbcb1a496865a2d5f52";
+    },
+  ],
+  [
+    "generation-4 six-migration",
+    (manifest) => {
+      manifest.schema.migrationSetSha256 =
+        "8d5fd99304ce8bbf9524dfb788080f890ab84565c096a8e6d4faf437a9b734dc";
+    },
+  ],
+]) {
+  test(`refuses a stale ${label} manifest before adapter use`, async (context) => {
+    const { backupRoot, receipt } = await createBackup(context);
+    const manifestPath = path.join(receipt.backupDirectory, "manifest.json");
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    mutateManifest(manifest);
+    const staleManifestBytes = Buffer.from(
+      `${JSON.stringify(manifest)}\n`,
+      "utf8",
+    );
+    await fs.writeFile(manifestPath, staleManifestBytes);
+    const calls = [];
+
+    await assertRefusal(
+      () =>
+        restoreSyntheticBackup(
+          {
+            backupName: "staging-baseline",
+            backupRoot,
+            databaseAlias: "local-restore",
+            expectedDatabaseIdentity: "local-instance-001",
+            expectedManifestSha256: crypto
+              .createHash("sha256")
+              .update(staleManifestBytes)
+              .digest("hex"),
+          },
+          {
+            async inspectDump() {
+              calls.push("inspectDump");
+            },
+            async observeDatabase() {
+              calls.push("observeDatabase");
+            },
+            async restoreVerifiedEmptyDatabase() {
+              calls.push("restoreVerifiedEmptyDatabase");
+            },
+          },
+        ),
+      "MANIFEST_INVALID",
+    );
+    assert.deepEqual(calls, []);
+  });
+}
 
 test("restores the verified bytes only into the independently identified empty local target", async (context) => {
   const { archive, backupRoot, receipt } = await createBackup(context);
@@ -1208,6 +1314,7 @@ test("pins the operator migration digest to the exact migration file set", async
   assert.deepEqual(discoveredMigrations, CURRENT_MIGRATION_FILES);
   const inventory = [];
   const attestedMigrations = [];
+  const currentAttestedMigrations = [];
   for (const migrationName of discoveredMigrations) {
     const source = await fs.readFile(
       new URL(`../../supabase/migrations/${migrationName}`, import.meta.url),
@@ -1250,7 +1357,25 @@ test("pins the operator migration digest to the exact migration file set", async
         1,
         `${migrationName} has one delimited migration-set digest literal`,
       );
-      assert.equal(literals[0][1], CURRENT_MIGRATION_SET_SHA256);
+      const expectedAttestation = MIGRATION_ATTESTATIONS[migrationName];
+      assert.notEqual(
+        expectedAttestation,
+        undefined,
+        `${migrationName} has a pinned migration attestation`,
+      );
+      assert.equal(
+        crypto.createHash("sha256").update(source, "utf8").digest("hex"),
+        expectedAttestation.rawSha256,
+        `${migrationName} preserves its exact published bytes`,
+      );
+      assert.equal(
+        literals[0][1],
+        expectedAttestation.migrationSetSha256,
+        `${migrationName} preserves its pinned migration-set digest literal`,
+      );
+      if (literals[0][1] === CURRENT_MIGRATION_SET_SHA256) {
+        currentAttestedMigrations.push(migrationName);
+      }
       normalizedSource = `${source.slice(0, beginIndex)}${attestationBlock.replace(
         literals[0][1],
         "0".repeat(64),
@@ -1266,6 +1391,13 @@ test("pins the operator migration digest to the exact migration file set", async
   }
   assert.deepEqual(attestedMigrations, [
     "20260828000100_internal_release_backend.sql",
+    "20260903000200_staff_auth_generation_4.sql",
+    "20260907000100_staff_auth_callback_completion.sql",
+    "20260907000200_runtime_owner_bootstrap.sql",
+    "20260907000300_membership_revocation_authority.sql",
+  ]);
+  assert.deepEqual(currentAttestedMigrations, [
+    "20260907000300_membership_revocation_authority.sql",
   ]);
   assert.equal(
     crypto.createHash("sha256").update(inventory.join("\n")).digest("hex"),

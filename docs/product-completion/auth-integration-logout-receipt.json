@@ -1,0 +1,61 @@
+{
+  "date": "2026-09-07",
+  "status": "source_and_rendered_qa_frozen_awaiting_root_hash_gate_and_exact_commit_ci",
+  "base_commit": "ef19f43d8dbd0ee4be3ad3d1d8f8e415202cc9f7",
+  "previous_green_verification": "https://github.com/danielholguin31/desmoslock/actions/runs/34178522483",
+  "previous_green_security": "https://github.com/danielholguin31/desmoslock/actions/runs/34178522480",
+  "supersedes": "The affected source hashes and logout/reset behavior claims in earlier integration receipts are superseded by this repair. Earlier exact-commit CI results remain historical evidence for their recorded source snapshots.",
+  "files_sha256": {
+    "apps/web/src/auth/staff-auth-controller.ts": "b0608d93aa996774fdee070981eb67fdd4da3ea9ad87bfbf6608f780edbd1c1f",
+    "apps/web/src/auth/staff-auth-view.ts": "e72d44e7eeecf8dcb725b8d7cc78ebdd2b402240683f99fb4cada853b4b3af35",
+    "apps/web/src/auth/supabase-staff-auth-adapter.ts": "f075bd8ca9f852e990d844a40b293c8661787ad3ff7efff16b74fcef3c017199",
+    "apps/web/src/auth/supabase-staff-auth-port.ts": "75fde0c47728fd629661d0761d2943bc0694788d90ed8a63c7c81360991e2268",
+    "apps/web/tests/staff-auth-application.test.ts": "564f56f1959be692a6c68e4448669337c32051f93fb97cb03a759ac223d3c4fe",
+    "apps/web/tests/staff-auth-controller.test.ts": "93d2857c5c127bc346cb3cc8bf2727805d367dbdc6a4d05f78fe6c6d25fd1cb7",
+    "apps/web/tests/staff-auth-logout-sdk.test.ts": "8a237e954febf0f4ab3d4fb45a4db7536843d336762d29962e8cdb4da2e6c089",
+    "apps/web/tests/staff-auth-view.test.ts": "22346a0a13b541f018bab2e71bfd8d9bd6e89fd64f71ff18b91e3fc4c4409055",
+    "apps/web/tests/supabase-staff-auth-adapter.test.ts": "e1b4f94b6356b75f479fa750f7cbd22bab0d3e42c24004184ac3f0cf520d361b",
+    "apps/web/tests/supabase-staff-auth-port.test.ts": "06ab2c57b347fbb3d718bf371093630678dc40ea522a7fa35efd44b24920d05c",
+    "docs/product-completion/auth-integration-logout-evidence.md": "3c696f56682369a636cf992fda029fdb1d893f659d67c4bb0f9192436e6559b1",
+    "docs/product-completion/auth-integration-logout-web-sha256.json": "f38c4305ee93424ac0f41aa056a997119560637b986982c676ceb5f3fb22b66f"
+  },
+  "tracked_diff_sha256": "b1c1d93d375a0bd59daab76a7bd6f255e065efbec558a37eb8db17e453c18eeb",
+  "all_seven_published_migrations_unchanged": true,
+  "provider_configuration_and_dependencies_unchanged": true,
+  "web_qa": {
+    "manifest": "docs/product-completion/auth-integration-logout-web-sha256.json",
+    "sha256": "f38c4305ee93424ac0f41aa056a997119560637b986982c676ceb5f3fb22b66f",
+    "checked_production_inputs": 29,
+    "run_id": "logout-authority-ef19f43-v1-rerun1",
+    "receipt": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/qa/integration-preview/logout-candidate-runs/logout-authority-ef19f43-v1-rerun1/receipt.md",
+    "receipt_sha256": "2e1427f220555a89ab54f80f197e69c9cd4a1264a482205ea8b7f86de5ccfd47",
+    "final_check_sha256": "366d4eb8208fb2e7dbacece658e48545d5cb7a674209b7bcc1ced72780d8418b",
+    "results_sha256": {
+      "logout": "5b6df5c09c18262463d9eda04b9a7b7a4e03af2f15ffe371a85670a560ebcbd8",
+      "integration": "7a5ec61b39d66fc62bafe2d7f96157917fdafcd6225e0fe28c94777412c78e42",
+      "callback": "169d65eabf23ceb523e3743934568ad001af27294b990421adf32c762a4ce772"
+    },
+    "results": "22 logout cases, 8 integrated invitation/recovery runs, and 2 callback viewport runs passed at 1440x900 and 360x740; all 29 inputs matched; no unexpected console/page errors; all six final-lane servers exited 0; no QA port listeners",
+    "lineage": "First-run QA classifier treated two read RPCs as mutations; the classifier was corrected and all suites rerun, with the earlier results preserved. No candidate source changed during QA."
+  },
+  "checks": {
+    "web_tests": "611 passed across 11 files, including 78 port tests and 14 installed-SDK tests",
+    "installed_sdk_proof": "Synthetic actual-SDK adapter/port reproduction confirmed wrong-account global logout and replacement-session cache deletion before repair. One retained SDK control reproduces stale-getUser cache deletion; 13 production-composition cases pass with captured authority, inert reset and honest ended/unknown outcomes. No provider network requests.",
+    "web_typecheck": "passed",
+    "scoped_lint_and_format": "passed",
+    "repository_verifier": "passed",
+    "production_web_build": "passed using explicit repository synthetic local origins and synthetic publishable value before QA freeze",
+    "whitespace": "passed",
+    "independent_review": "Root and Atlas reviewed exact production source and all focused regression paths without outstanding P1/P2; separate port and SDK test reviews clear; Root inspected representative final screenshots",
+    "new_exact_commit_ci": "pending; prior ef19f43 exact CI was green including 409 SQL assertions and actual provider journeys, but does not attest this changed source"
+  },
+  "decisions": [
+    "Ordinary logout requires visible identityFacts account and one operation-local transient handle for both revocation phases; no later shared SDK logout.",
+    "Failed logout operation IDs require authoritative re-entry and cannot recapture a replacement account/session.",
+    "Back to sign in and Start again are inert application reset, with no provider logout or factor deletion.",
+    "Direct bounded account verification maps only exact 401/403 session_not_found/session_expired to signed out; malformed/network/400/429/5xx stay unavailable.",
+    "Provider logout requires a 2xx confirmation; dead-current-token errors do not prove global revocation.",
+    "SDK persistence remains provider-owned; no cache-erasure guarantee, raw storage mutation, private SDK lock, durable marker or global auth rewrite."
+  ],
+  "authority": "Reviewed source/PR CI continuation only; no main merge, hosted changes, credentials, installs or local container startup."
+}

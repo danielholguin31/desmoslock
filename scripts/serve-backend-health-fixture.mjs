@@ -10,10 +10,10 @@ if (!Number.isInteger(port) || port < 1024 || port > 65_535) {
 const healthBody = JSON.stringify({
   capabilities: ["auth", "database", "rest"],
   fixtureDigest:
-    "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca",
+    "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
   fixtureValid: true,
-  fixtureVersion: "internal-baseline-v1",
-  schemaGeneration: 3,
+  fixtureVersion: "internal-baseline-v2",
+  schemaGeneration: 4,
   service: "desmoslock-v2",
   status: "ready",
 });

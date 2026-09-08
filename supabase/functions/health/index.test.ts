@@ -22,14 +22,15 @@ Deno.test(
   async () => {
     const response = await handleRequest(
       new Request("http://localhost/health"),
-      async () => ({
-        capabilities: ["auth", "database", "rest"],
-        fixtureDigest:
-          "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca",
-        fixtureValid: true,
-        fixtureVersion: "internal-baseline-v1",
-        schemaGeneration: 3,
-      }),
+      () =>
+        Promise.resolve({
+          capabilities: ["auth", "database", "rest"],
+          fixtureDigest:
+            "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
+          fixtureValid: true,
+          fixtureVersion: "internal-baseline-v2",
+          schemaGeneration: 4,
+        }),
     );
 
     assertEquals(response.status, 200);
@@ -38,10 +39,10 @@ Deno.test(
     assertEquals(await response.json(), {
       capabilities: ["auth", "database", "rest"],
       fixtureDigest:
-        "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca",
+        "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
       fixtureValid: true,
-      fixtureVersion: "internal-baseline-v1",
-      schemaGeneration: 3,
+      fixtureVersion: "internal-baseline-v2",
+      schemaGeneration: 4,
       service: "desmoslock-v2",
       status: "ready",
     });
@@ -64,9 +65,10 @@ Deno.test(
   async () => {
     const response = await handleRequest(
       new Request("http://localhost/health"),
-      async () => {
-        throw new Error("credential-shaped diagnostic must stay private");
-      },
+      () =>
+        Promise.reject(
+          new Error("credential-shaped diagnostic must stay private"),
+        ),
     );
 
     assertEquals(response.status, 503);
@@ -91,26 +93,30 @@ Deno.test(
         SUPABASE_SERVICE_ROLE_KEY: "synthetic-test-only-key",
         SUPABASE_URL: "https://abcdefghijklmnopqrst.supabase.co",
       },
-      async (input, init) => {
+      (input, init) => {
         requests.push({ input: String(input), init });
         if (String(input).endsWith("/auth/v1/health")) {
-          return new Response(JSON.stringify({ status: "ok" }), {
-            status: 200,
-          });
+          return Promise.resolve(
+            new Response(JSON.stringify({ status: "ok" }), {
+              status: 200,
+            }),
+          );
         }
-        return new Response(
-          JSON.stringify([
-            {
-              fixture_digest:
-                "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca",
-              fixture_valid: true,
-              fixture_version: "internal-baseline-v1",
-              migration_set_sha256:
-                "06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49",
-              schema_generation: 3,
-            },
-          ]),
-          { status: 200 },
+        return Promise.resolve(
+          new Response(
+            JSON.stringify([
+              {
+                fixture_digest:
+                  "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
+                fixture_valid: true,
+                fixture_version: "internal-baseline-v2",
+                migration_set_sha256:
+                  "e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a",
+                schema_generation: 4,
+              },
+            ]),
+            { status: 200 },
+          ),
         );
       },
       () => timeoutSignal,
@@ -119,10 +125,10 @@ Deno.test(
     await assertEquals(await probe(), {
       capabilities: ["auth", "database", "rest"],
       fixtureDigest:
-        "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca",
+        "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
       fixtureValid: true,
-      fixtureVersion: "internal-baseline-v1",
-      schemaGeneration: 3,
+      fixtureVersion: "internal-baseline-v2",
+      schemaGeneration: 4,
     });
     assertEquals(requests, [
       {
@@ -164,22 +170,24 @@ Deno.test(
         SUPABASE_SERVICE_ROLE_KEY: "synthetic-test-only-key",
         SUPABASE_URL: "https://abcdefghijklmnopqrst.supabase.co",
       },
-      async (input) =>
-        String(input).endsWith("/auth/v1/health")
-          ? new Response(null, { status: 200 })
-          : new Response(
-              JSON.stringify([
-                {
-                  fixture_digest: "0".repeat(64),
-                  fixture_valid: true,
-                  fixture_version: "internal-baseline-v1",
-                  migration_set_sha256:
-                    "06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49",
-                  schema_generation: 3,
-                },
-              ]),
-              { status: 200 },
-            ),
+      (input) =>
+        Promise.resolve(
+          String(input).endsWith("/auth/v1/health")
+            ? new Response(null, { status: 200 })
+            : new Response(
+                JSON.stringify([
+                  {
+                    fixture_digest: "0".repeat(64),
+                    fixture_valid: true,
+                    fixture_version: "internal-baseline-v2",
+                    migration_set_sha256:
+                      "e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a",
+                    schema_generation: 4,
+                  },
+                ]),
+                { status: 200 },
+              ),
+        ),
       () => new AbortController().signal,
     );
 
@@ -197,22 +205,24 @@ Deno.test(
         SUPABASE_SERVICE_ROLE_KEY: "synthetic-test-only-key",
         SUPABASE_URL: "https://abcdefghijklmnopqrst.supabase.co",
       },
-      async (input) =>
-        String(input).endsWith("/auth/v1/health")
-          ? new Response(null, { status: 200 })
-          : new Response(
-              JSON.stringify([
-                {
-                  fixture_digest:
-                    "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca",
-                  fixture_valid: true,
-                  fixture_version: "internal-baseline-v1",
-                  migration_set_sha256: "0".repeat(64),
-                  schema_generation: 3,
-                },
-              ]),
-              { status: 200 },
-            ),
+      (input) =>
+        Promise.resolve(
+          String(input).endsWith("/auth/v1/health")
+            ? new Response(null, { status: 200 })
+            : new Response(
+                JSON.stringify([
+                  {
+                    fixture_digest:
+                      "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
+                    fixture_valid: true,
+                    fixture_version: "internal-baseline-v2",
+                    migration_set_sha256: "0".repeat(64),
+                    schema_generation: 4,
+                  },
+                ]),
+                { status: 200 },
+              ),
+        ),
       () => new AbortController().signal,
     );
 
@@ -266,9 +276,9 @@ Deno.test(
         SUPABASE_SERVICE_ROLE_KEY: "synthetic-test-only-key",
         SUPABASE_URL: "https://arbitrary.example",
       },
-      async () => {
+      () => {
         requests += 1;
-        return new Response(null, { status: 200 });
+        return Promise.resolve(new Response(null, { status: 200 }));
       },
       () => new AbortController().signal,
     );
@@ -293,9 +303,9 @@ Deno.test(
           SUPABASE_SERVICE_ROLE_KEY: "synthetic-test-only-key",
           SUPABASE_URL: "http://127.0.0.1:54321",
         },
-        async () => {
+        () => {
           requests += 1;
-          return new Response(null, { status: 200 });
+          return Promise.resolve(new Response(null, { status: 200 }));
         },
         () => new AbortController().signal,
       );
@@ -322,24 +332,26 @@ Deno.test(
           SUPABASE_SERVICE_ROLE_KEY: "synthetic-test-only-key",
           SUPABASE_URL: origin,
         },
-        async (input) => {
+        (input) => {
           requests += 1;
           if (String(input).endsWith("/auth/v1/health")) {
-            return new Response(null, { status: 200 });
+            return Promise.resolve(new Response(null, { status: 200 }));
           }
-          return new Response(
-            JSON.stringify([
-              {
-                fixture_digest:
-                  "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca",
-                fixture_valid: true,
-                fixture_version: "internal-baseline-v1",
-                migration_set_sha256:
-                  "06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49",
-                schema_generation: 3,
-              },
-            ]),
-            { status: 200 },
+          return Promise.resolve(
+            new Response(
+              JSON.stringify([
+                {
+                  fixture_digest:
+                    "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
+                  fixture_valid: true,
+                  fixture_version: "internal-baseline-v2",
+                  migration_set_sha256:
+                    "e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a",
+                  schema_generation: 4,
+                },
+              ]),
+              { status: 200 },
+            ),
           );
         },
         () => new AbortController().signal,
@@ -347,6 +359,79 @@ Deno.test(
 
       await probe();
       assertEquals(requests, 2);
+    }
+  },
+);
+
+Deno.test(
+  "backend probe accepts the exact unpinned Supabase CLI internal gateway",
+  async () => {
+    const requests: string[] = [];
+    const probe = createBackendProbe(
+      {
+        DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: undefined,
+        SUPABASE_SERVICE_ROLE_KEY: "synthetic-test-only-key",
+        SUPABASE_URL: "http://kong:8000",
+      },
+      (input) => {
+        requests.push(String(input));
+        if (String(input).endsWith("/auth/v1/health")) {
+          return Promise.resolve(new Response(null, { status: 200 }));
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify([
+              {
+                fixture_digest:
+                  "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201",
+                fixture_valid: true,
+                fixture_version: "internal-baseline-v2",
+                migration_set_sha256:
+                  "e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a",
+                schema_generation: 4,
+              },
+            ]),
+            { status: 200 },
+          ),
+        );
+      },
+      () => new AbortController().signal,
+    );
+
+    await probe();
+    assertEquals(requests.toSorted(), [
+      "http://kong:8000/auth/v1/health",
+      "http://kong:8000/rest/v1/rpc/internal_baseline_status",
+    ]);
+  },
+);
+
+Deno.test(
+  "backend probe rejects every near-miss unpinned local gateway",
+  async () => {
+    for (const origin of [
+      "http://127.0.0.1:54321",
+      "http://host.docker.internal:54321",
+      "http://kong:54321",
+      "http://kong.example:8000",
+      "https://kong:8000",
+    ]) {
+      let requests = 0;
+      const probe = createBackendProbe(
+        {
+          DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: undefined,
+          SUPABASE_SERVICE_ROLE_KEY: "synthetic-test-only-key",
+          SUPABASE_URL: origin,
+        },
+        () => {
+          requests += 1;
+          return Promise.resolve(new Response(null, { status: 200 }));
+        },
+        () => new AbortController().signal,
+      );
+
+      await assertRejects(() => probe());
+      assertEquals(requests, 0);
     }
   },
 );
@@ -362,9 +447,9 @@ Deno.test(
         SUPABASE_SERVICE_ROLE_KEY: "synthetic-test-only-key",
         SUPABASE_URL: "https://zyxwvutsrqponmlkjihg.supabase.co",
       },
-      async () => {
+      () => {
         requests += 1;
-        return new Response(null, { status: 200 });
+        return Promise.resolve(new Response(null, { status: 200 }));
       },
       () => new AbortController().signal,
     );

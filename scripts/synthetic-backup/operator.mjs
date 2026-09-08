@@ -6,10 +6,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const CURRENT_MIGRATION_SET_SHA256 =
-  "06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49";
+  "e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a";
 export const CURRENT_MIGRATION_FILES = Object.freeze([
   "20260824000100_v2_foundation.sql",
   "20260828000100_internal_release_backend.sql",
+  "20260903000100_staff_auth_lifecycle.sql",
+  "20260903000200_staff_auth_generation_4.sql",
+  "20260907000100_staff_auth_callback_completion.sql",
+  "20260907000200_runtime_owner_bootstrap.sql",
+  "20260907000300_membership_revocation_authority.sql",
 ]);
 export const CURRENT_MIGRATION_VERSIONS = Object.freeze(
   CURRENT_MIGRATION_FILES.map((fileName) => fileName.slice(0, 14)),
@@ -25,7 +30,7 @@ export const SYNTHETIC_TABLES = Object.freeze([
 ]);
 
 const FIXTURE_DIGEST =
-  "7c84b474e409b79fdb11e537b29a48f56382c1f88afc28b213fb5043fff7f2ca";
+  "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201";
 const FIXTURE_COUNTS = Object.freeze({
   baselineFixtureState: 1,
   foundationSeed: 1,
@@ -151,7 +156,7 @@ function fixtureMatches(fixture) {
     hasExactKeys(fixture, ["counts", "dataClass", "digest", "version"]) &&
     fixture.dataClass === "synthetic-only" &&
     fixture.digest === FIXTURE_DIGEST &&
-    fixture.version === "internal-baseline-v1" &&
+    fixture.version === "internal-baseline-v2" &&
     hasExactKeys(fixture.counts, Object.keys(FIXTURE_COUNTS)) &&
     Object.entries(FIXTURE_COUNTS).every(
       ([key, count]) => fixture.counts[key] === count,
@@ -173,7 +178,7 @@ function sourceMatches(observation, expectedIdentity) {
     observation.environment === "staging" &&
     observation.identity === expectedIdentity &&
     observation.migrationSetSha256 === CURRENT_MIGRATION_SET_SHA256 &&
-    observation.schemaGeneration === 3 &&
+    observation.schemaGeneration === 4 &&
     fixtureMatches(observation.fixture)
   );
 }
@@ -194,7 +199,7 @@ function emptyTargetMatches(observation, expectedIdentity, sourceIdentity) {
     observation.identity === expectedIdentity &&
     observation.identity !== sourceIdentity &&
     observation.migrationSetSha256 === CURRENT_MIGRATION_SET_SHA256 &&
-    observation.schemaGeneration === 3
+    observation.schemaGeneration === 4
   );
 }
 
@@ -212,7 +217,7 @@ function restoredTargetMatches(observation, expectedIdentity) {
     observation.environment === "local" &&
     observation.identity === expectedIdentity &&
     observation.migrationSetSha256 === CURRENT_MIGRATION_SET_SHA256 &&
-    observation.schemaGeneration === 3 &&
+    observation.schemaGeneration === 4 &&
     fixtureMatches(observation.fixture)
   );
 }
@@ -302,7 +307,7 @@ function buildManifest(source, archive) {
     fixture: source.fixture,
     format: "desmoslock.synthetic-backup/v1",
     schema: {
-      generation: 3,
+      generation: 4,
       migrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
       tables: SYNTHETIC_TABLES,
     },
@@ -356,7 +361,7 @@ function manifestMatches(manifest) {
       "migrationSetSha256",
       "tables",
     ]) &&
-    manifest.schema.generation === 3 &&
+    manifest.schema.generation === 4 &&
     manifest.schema.migrationSetSha256 === CURRENT_MIGRATION_SET_SHA256 &&
     Array.isArray(manifest.schema.tables) &&
     manifest.schema.tables.length === SYNTHETIC_TABLES.length &&
@@ -837,7 +842,7 @@ export async function restoreSyntheticBackup(specification, adapter) {
         databaseAlias: spec.databaseAlias,
         expectedDatabaseIdentity: spec.expectedDatabaseIdentity,
         expectedMigrationSetSha256: CURRENT_MIGRATION_SET_SHA256,
-        expectedSchemaGeneration: 3,
+        expectedSchemaGeneration: 4,
         sourceDatabaseIdentity: manifest.source.identity,
       },
       Buffer.from(archive),
