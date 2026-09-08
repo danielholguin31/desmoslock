@@ -1,9 +1,9 @@
 # Disposable synthetic restore acceptance
 
 This source tranche adds a required real backup/restore gate for the internal
-baseline. The first CI execution stopped during fixture TLS reload; successful
-runtime acceptance is pending. Source review and helper tests alone do not
-establish a successful export, restore, TLS connection or health check.
+baseline. CI has completed the real TLS/export/restore checks, then stopped in
+the staff suite because the fixture retained its temporary restore marker.
+The marker-retirement correction and full runtime acceptance remain pending.
 The existing hosted staging project and legacy deployment restrictions remain
 separate from this disposable CI lane.
 
@@ -53,7 +53,10 @@ tables, an empty migrated target, and a fresh target attestation. It runs the
 existing real export/publication/validation/restore operations, then requires
 the exact seven-table fixture counts, fixture digest and current migration
 attestation. A second restore must be refused without changing the observed
-target. Audit protection is never disabled and audit rows are never deleted.
+target. After that proof, the harness retires only its own temporary restore
+marker, requires the marker table to be empty and independently rechecks the
+live fixture counts/digest and migration attestation. Audit protection is never
+disabled and audit rows are never deleted.
 
 A valid-CA TLS query brackets the negative CA probe. That probe accepts only
 native psql exit 2, empty stdout, and the exact expected root-file rejection for
@@ -149,7 +152,48 @@ historical evidence. The corrected runtime SHA256 is
 `220401b2774066ced89a2f38c0f838975d68ffd97902a987f73fb73e798e3068`.
 All ten existing helper tests, scoped ESLint, Prettier, Secretlint and whitespace
 checks passed with the exact Node 24.20.0 toolchain. No local stack was started;
-the corrected TLS reload still requires CI execution.
+the next CI run supplied the runtime result below.
+
+## Second CI execution and restore-marker retirement
+
+[Verification run 34189140883](https://github.com/danielholguin31/desmoslock/actions/runs/34189140883)
+ran at exact source `5e4ed76e928541ddd9b78196b02727e9f4f0a5dd` and failed with
+`STAFF_SUITE_FIXTURE_COMMAND_FAILED`. Reaching that fixed stage requires the
+actual TLS reload, valid/invalid/valid CA probes, distinct cluster identities,
+default-adapter export and restore, exact fixture verification, and second
+restore refusal with unchanged target observation to have passed. The staff
+suite then returned nonzero; it did not time out or exceed its output bound.
+All other substantive verification jobs and [security run 34189140983](https://github.com/danielholguin31/desmoslock/actions/runs/34189140983)
+passed. Final cleanup passed, with no cleanup-failure suffix. The failed run
+does not establish the later staff/provider/health checks or emit a complete
+roundtrip receipt.
+
+Source inspection located a deterministic precondition conflict in the first
+staff subcommand: `supabase/tests/database/internal_release_backend.test.sql`
+requires the local restore marker table to be empty by default. The harness had
+intentionally populated that table for restore and retained the row. Native
+test diagnostics were not exposed, so the precise failing pgTAP output is not
+claimed as observed evidence.
+
+The scoped correction retires the harness's temporary restore authorization
+after the successful second-refusal/no-change proof. Its deletion requires id
+1, the exact in-memory marker, current database `postgres`, the verified target
+cluster identity and a fresh `pg_control_system()` match. A transactional guard
+requires exactly one removed row and an empty marker table. A separate real SQL
+query then checks the target identity, empty marker table, exact baseline
+digest/version/counts and current migration attestation. Fixed
+`MARKER_RETIREMENT` and `POST_RETIREMENT_VERIFICATION` stages fail before staff
+checks on any uncertainty; success adds only `restoreMarkerRetired: true`.
+
+The seven restored tables, release attestation, audit rows, production adapter
+and shared SQL tests remain unchanged. The adapter still refuses observation
+through a local restore profile after its marker is absent. The harness retains
+one unchanged `npm run test:staff-auth` invocation, with no reset or reseed.
+The corrected runtime SHA256 is
+`c570c53fab0c3ff84e6ae1cf0f4ac4748e4a592665bd81312b081f1eec044e35`.
+All 118 existing focused operator/adapter/helper cases, scoped ESLint, Prettier,
+Secretlint and whitespace checks passed. Those local checks do not execute the
+new retirement SQL; this correction still requires CI execution.
 
 Actual disposable runtime acceptance remains pending until the required CI job
 passes at the corrected source. A passing local roundtrip will not prove hosted

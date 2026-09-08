@@ -632,6 +632,8 @@ export async function runBackupRoundtrip(repositoryRoot, testSignal) {
         "RESTORE",
         "RESTORE_VERIFICATION",
         "SECOND_RESTORE",
+        "MARKER_RETIREMENT",
+        "POST_RETIREMENT_VERIFICATION",
       ];
       requireFixture(stages.includes(receipt.stage), "WORKER_FAILURE_INVALID");
       throw new FixtureFailure(receipt.stage);
@@ -640,6 +642,7 @@ export async function runBackupRoundtrip(repositoryRoot, testSignal) {
       receipt.status === "restored" &&
         receipt.tlsVerified === true &&
         receipt.secondRestoreRefused === true &&
+        receipt.restoreMarkerRetired === true &&
         /^[a-f0-9]{64}$/u.test(receipt.artifactSha256 ?? "") &&
         /^[a-f0-9]{64}$/u.test(receipt.manifestSha256 ?? ""),
       "ROUNDTRIP_RECEIPT_INVALID",
@@ -998,6 +1001,69 @@ export async function operatorWorker(
         isDeepStrictEqual(after, await target.observeDatabase("local-restore")),
       "SECOND_RESTORE_MUST_NOT_MUTATE",
     );
+    // End only this fixture's temporary restore authorization before running
+    // ordinary staff checks, which retain their empty-by-default marker test.
+    // All interpolated identities have already passed exact hex/digit guards.
+    stage = "MARKER_RETIREMENT";
+    requireFixture(
+      (await query(
+        targetEnv,
+        `do $fixture$
+declare retired integer;
+begin
+  delete from desmoslock_v2.local_restore_target_attestation
+  where id = 1
+    and marker = '${configuration.marker}'
+    and database_name = current_database()
+    and database_name = 'postgres'
+    and system_identifier = '${targetId}'
+    and system_identifier = (
+      select system_identifier::text from pg_control_system()
+    );
+  get diagnostics retired = row_count;
+  if retired <> 1 or exists (
+    select 1 from desmoslock_v2.local_restore_target_attestation
+  ) then
+    raise exception 'fixture marker retirement refused';
+  end if;
+end;
+$fixture$;
+select not exists(select 1 from desmoslock_v2.local_restore_target_attestation);`,
+      )) === "t",
+      "OWNED_MARKER_RETIREMENT_REQUIRED",
+    );
+    stage = "POST_RETIREMENT_VERIFICATION";
+    requireFixture(
+      (await query(
+        targetEnv,
+        `select
+  current_database() = 'postgres'
+  and (select system_identifier::text from pg_control_system()) = '${targetId}'
+  and not exists(select 1 from desmoslock_v2.local_restore_target_attestation)
+  and coalesce((
+    select count(*) = 1 and bool_and(
+      fixture_valid and schema_generation = 4
+      and fixture_version = 'internal-baseline-v2'
+      and fixture_digest = 'f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201'
+      and migration_set_sha256 = '${CURRENT_MIGRATION_SET_SHA256}'
+    ) from desmoslock_v2.internal_baseline_status()
+  ), false)
+  and (select count(*) from desmoslock_v2.baseline_fixture_state) = 1
+  and (select count(*) from desmoslock_v2.foundation_seed) = 1
+  and (select count(*) from desmoslock_v2.memberships) = 6
+  and (select count(*) from desmoslock_v2.profiles) = 6
+  and (select count(*) from desmoslock_v2.student_sessions) = 2
+  and (select count(*) from desmoslock_v2.tests) = 2
+  and (select count(*) from desmoslock_v2.workspaces) = 2
+  and coalesce((
+    select count(*) = 1 and bool_and(
+      id = 1 and schema_generation = 4
+      and migration_set_sha256 = '${CURRENT_MIGRATION_SET_SHA256}'
+    ) from desmoslock_v2.internal_release_attestation
+  ), false);`,
+      )) === "t",
+      "POST_RETIREMENT_BASELINE_REQUIRED",
+    );
     return {
       status: "restored",
       artifactSha256: exported.artifactSha256,
@@ -1008,6 +1074,7 @@ export async function operatorWorker(
       invalidCaRejected: true,
       distinctClusters: true,
       secondRestoreRefused: true,
+      restoreMarkerRetired: true,
     };
   } catch {
     return { status: "failed", stage };
