@@ -44,6 +44,8 @@ import type {
 
 export interface SupabaseStaffAuthPort {
   capturePasswordAuthority(expectedAccountId?: string): Promise<string | null>;
+  captureSignOutAuthority(expectedAccountId: string): Promise<unknown>;
+  clearPrivateAuthContinuations(): void;
   releasePasswordAuthority(authorityHandle: string): void;
   acceptInvitation(
     request: AcceptStaffInvitationRequest,
@@ -82,15 +84,15 @@ export interface SupabaseStaffAuthPort {
   readTotpFactors(): Promise<unknown>;
   removeTotpFactor(factorId: string): Promise<unknown>;
   resendEmailVerification(email: string): Promise<unknown>;
-  revokeAllStaffSessions(): Promise<unknown>;
-  revokeCurrentStaffSession(): Promise<unknown>;
+  revokeAllStaffSessions(authorityHandle: string): Promise<unknown>;
+  revokeCurrentStaffSession(authorityHandle: string): Promise<unknown>;
   revokeInvitation(request: RevokeStaffInvitationRequest): Promise<unknown>;
   revokeMembership(request: RevokeStaffMembershipRequest): Promise<unknown>;
   signIn(input: {
     readonly email: string;
     readonly password: string;
   }): Promise<unknown>;
-  signOut(scope: "all" | "local", authorityHandle?: string): Promise<unknown>;
+  signOut(scope: "all" | "local", authorityHandle: string): Promise<unknown>;
   updatePassword(password: string, authorityHandle: string): Promise<unknown>;
   verifyInvitationToken(tokenHash: string): Promise<unknown>;
   verifyTotp(input: {
@@ -224,7 +226,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       "status",
     ]);
     if (session?.status === "signed_out") {
-      clearAuthorityState();
+      clearAuthorityState(false);
       invitationReceipts.clear();
       return { kind: "signed_out" };
     }
@@ -236,7 +238,13 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
         ? nextGeneration()
         : sessionGeneration;
 
-    const account = decodeAccount(await dependencies.port.readAccount());
+    const accountResult = await dependencies.port.readAccount();
+    if (decodeStatus(accountResult, ["signed_out"]) === "signed_out") {
+      clearAuthorityState(false);
+      invitationReceipts.clear();
+      return { kind: "signed_out" };
+    }
+    const account = decodeAccount(accountResult);
     if (account === null) {
       throw new Error("Staff authentication account result is unavailable");
     }
@@ -1073,43 +1081,71 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
   async function signOut(
     scope: "all" | "local",
   ): Promise<StaffAuthBoundaryResult> {
-    const revocationRows =
-      scope === "all"
-        ? await dependencies.port.revokeAllStaffSessions()
-        : await dependencies.port.revokeCurrentStaffSession();
-    const revocationCode = decodeRpcCode(revocationRows);
-    if (revocationCode !== "ok" && revocationCode !== "session_revoked") {
-      const loss = boundaryFailure(revocationCode);
-      if (loss !== null) {
-        return loss;
+    // Capture the account established by the visible authority before any await.
+    // A missing identity cannot authorize logout of whichever account storage
+    // happens to contain when a later SDK operation resumes.
+    const initiatingIdentity = identityFacts;
+    const expectedAccountId = initiatingIdentity?.accountId;
+    if (expectedAccountId === undefined) {
+      throw new Error("Sign-out requires authoritative re-entry");
+    }
+    const captured =
+      await dependencies.port.captureSignOutAuthority(expectedAccountId);
+    if (decodeStatus(captured, ["ended"]) === "ended") {
+      clearAuthorityState(false);
+      invitationReceipts.clear();
+      return { kind: "signed_out" };
+    }
+    const authority = snapshotExactRecord(captured, [
+      "status",
+      "authorityHandle",
+    ]);
+    if (
+      authority?.status !== "ready" ||
+      !validOpaqueCredential(authority.authorityHandle, 512)
+    ) {
+      throw new Error("Sign-out authority is unavailable; re-entry required");
+    }
+    const authorityHandle = authority.authorityHandle;
+    try {
+      if (identityFacts !== initiatingIdentity) {
+        throw new Error("Sign-out was abandoned; re-entry required");
       }
-      throw new Error("Application session revocation is unavailable");
+      const revocationRows =
+        scope === "all"
+          ? await dependencies.port.revokeAllStaffSessions(authorityHandle)
+          : await dependencies.port.revokeCurrentStaffSession(authorityHandle);
+      const revocationCode = decodeRpcCode(revocationRows);
+      if (revocationCode !== "ok" && revocationCode !== "session_revoked") {
+        const loss = boundaryFailure(revocationCode);
+        if (loss !== null) return loss;
+        throw new Error("Application session revocation is unavailable");
+      }
+      const providerResult = decodeStatus(
+        await dependencies.port.signOut(scope, authorityHandle),
+        ["signed_out"],
+      );
+      if (providerResult !== "signed_out") {
+        throw new Error("Provider sign-out is unavailable");
+      }
+      clearAuthorityState(false);
+      invitationReceipts.clear();
+      pendingVerificationEmail = null;
+      return { kind: "sign_out_complete", scope };
+    } finally {
+      dependencies.port.releasePasswordAuthority(authorityHandle);
     }
-    const providerResult = decodeStatus(
-      await dependencies.port.signOut(scope),
-      ["signed_out"],
-    );
-    if (providerResult !== "signed_out") {
-      throw new Error("Provider sign-out is unavailable");
-    }
-    clearAuthorityState();
-    invitationReceipts.clear();
-    pendingVerificationEmail = null;
-    return { kind: "sign_out_complete", scope };
   }
 
   async function resetToSignIn(): Promise<StaffAuthBoundaryResult> {
-    const providerResult = decodeStatus(
-      await dependencies.port.signOut("local"),
-      ["signed_out"],
-    );
-    if (providerResult !== "signed_out") {
-      throw new Error("Provider sign-out is unavailable");
-    }
-    clearAuthorityState();
+    // Navigation abandons this application's ceremonies. Provider sessions and
+    // factors are untouched, including an account installed by another tab.
+    dependencies.port.clearPrivateAuthContinuations();
+    clearAuthorityState(false);
     invitationReceipts.clear();
     pendingVerificationEmail = null;
-    return { kind: "sign_out_complete", scope: "local" };
+    recoveryContinuation = null;
+    return { kind: "reset_to_sign_in_complete" };
   }
 
   async function createStaffInvitation(
@@ -1546,6 +1582,20 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
           });
           trimMap(completedOperations, 64);
           return result;
+        })
+        .catch((error: unknown) => {
+          if (operationType === "sign_out") {
+            // An uncertain attempt cannot recapture a new account/session when
+            // the controller replays this operation ID. Re-enter first.
+            completedOperations.set(operationId, {
+              requestIdentity,
+              result: null,
+              type: operationType,
+            });
+            trimMap(completedOperations, 64);
+            clearAuthorityState(false);
+          }
+          throw error;
         })
         .finally(() => {
           inFlightOperations.delete(operationId);

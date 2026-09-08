@@ -113,6 +113,35 @@ function createPort(
   });
 }
 
+async function captureSignOutHandle(port: ReturnType<typeof createPort>) {
+  const authority = await port.captureSignOutAuthority(accountId);
+  expect(authority).toEqual({
+    authorityHandle: expect.any(String),
+    status: "ready",
+  });
+  if (
+    typeof authority !== "object" ||
+    authority === null ||
+    !("authorityHandle" in authority) ||
+    typeof authority.authorityHandle !== "string"
+  ) {
+    throw new Error("Missing captured authority");
+  }
+  return authority.authorityHandle;
+}
+
+function accountSession() {
+  return {
+    data: {
+      session: {
+        access_token: "synthetic-account-a-token",
+        user: { id: accountId },
+      },
+    },
+    error: null,
+  };
+}
+
 describe("Supabase staff auth port", () => {
   it("uses only the desmoslock_v2 schema and maps every RPC to its exact arguments", async () => {
     const rpc = vi.fn(
@@ -132,8 +161,6 @@ describe("Supabase staff auth port", () => {
     await port.readManageableInvitations();
     await port.revokeInvitation({ invitationId });
     await port.revokeMembership({ profileId, schoolId });
-    await port.revokeAllStaffSessions();
-    await port.revokeCurrentStaffSession();
 
     expect(schema).toHaveBeenCalledTimes(1);
     expect(schema).toHaveBeenCalledWith("desmoslock_v2");
@@ -144,8 +171,6 @@ describe("Supabase staff auth port", () => {
       ["current_manageable_staff_invitations"],
       ["revoke_staff_invitation", { invitation_id: invitationId }],
       ["revoke_membership", { profile_id: profileId, workspace_id: schoolId }],
-      ["revoke_all_current_user_staff_sessions"],
-      ["revoke_current_staff_session"],
     ]);
   });
 
@@ -237,7 +262,10 @@ describe("Supabase staff auth port", () => {
   });
 
   it("normalizes session and trusted account reads without returning SDK objects", async () => {
-    const sdkSession = { access_token: "synthetic-session-token" };
+    const sdkSession = {
+      access_token: "synthetic-session-token",
+      user: { id: accountId },
+    };
     const sdkUser = {
       email: "teacher@example.test",
       email_confirmed_at: "2026-09-03T12:00:00Z",
@@ -252,7 +280,20 @@ describe("Supabase staff auth port", () => {
       data: { user: sdkUser },
       error: null,
     }));
-    const port = createPort(fakeClient({ auth: { getSession, getUser } }));
+    const providerFetch = vi.fn<typeof fetch>(async () =>
+      recoveryResponse(
+        JSON.stringify(sdkUser),
+        {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        },
+        { url: `${backendUrl}/auth/v1/user` },
+      ),
+    );
+    const port = createPort(
+      fakeClient({ auth: { getSession, getUser } }),
+      providerFetch,
+    );
 
     await expect(port.readSession()).resolves.toEqual({
       status: "authenticated",
@@ -263,7 +304,12 @@ describe("Supabase staff auth port", () => {
       emailVerified: true,
     });
     expect(getSession).toHaveBeenCalledWith();
-    expect(getUser).toHaveBeenCalledWith();
+    expect(getUser).not.toHaveBeenCalled();
+    expect(
+      new Headers(providerFetch.mock.calls[0]?.[1]?.headers).get(
+        "authorization",
+      ),
+    ).toBe("Bearer synthetic-session-token");
   });
 
   it("maps absent and expired sessions to signed out and unknown failures to unavailable", async () => {
@@ -430,21 +476,611 @@ describe("Supabase staff auth port", () => {
     );
   });
 
-  it("maps ordinary unbound sign-out scopes without exposing auth failures", async () => {
-    const signOut = vi.fn(async () => ({ error: null }));
-    const port = createPort(fakeClient({ auth: { signOut } }));
+  it.each(["local", "all"] as const)(
+    "binds %s database revocation and logout to the account captured before an SDK switch",
+    async (scope) => {
+      const firstSession = {
+        access_token: "synthetic-account-a-token",
+        user: { id: accountId },
+      };
+      const nextSession = {
+        access_token: "synthetic-account-b-token",
+        user: { id: "account-b" },
+      };
+      let currentSession = firstSession;
+      const getSession = vi.fn(async () => ({
+        data: { session: currentSession },
+        error: null,
+      }));
+      const getUser = vi.fn(async () => externalFailure());
+      const signOut = vi.fn(async () => ({ error: null }));
+      const setSession = vi.fn(async () => externalFailure());
+      const rpc = vi.fn(async () => externalFailure());
+      let releaseVerification: ((response: Response) => void) | undefined;
+      const providerFetch = vi.fn<typeof fetch>(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/auth/v1/user")) {
+          return new Promise<Response>((resolve) => {
+            releaseVerification = resolve;
+          });
+        }
+        return recoveryResponse(
+          url.includes("/rest/v1/")
+            ? JSON.stringify({ code: "session_revoked", ok: true })
+            : null,
+          url.includes("/rest/v1/")
+            ? { headers: { "content-type": "application/json" }, status: 200 }
+            : { status: 204 },
+          { url },
+        );
+      });
+      const port = createPort(
+        fakeClient({
+          auth: { getSession, getUser, signOut, setSession },
+          schema: () => ({ rpc }),
+        }),
+        providerFetch,
+      );
+      const capture = port.captureSignOutAuthority(accountId);
+      await vi.waitFor(() =>
+        expect(releaseVerification).toBeTypeOf("function"),
+      );
+      currentSession = nextSession;
+      releaseVerification?.(
+        recoveryResponse(
+          JSON.stringify({ id: accountId }),
+          {
+            headers: { "content-type": "application/json" },
+            status: 200,
+          },
+          { url: `${backendUrl}/auth/v1/user` },
+        ),
+      );
+      const authority = await capture;
+      expect(authority).toEqual({
+        authorityHandle: expect.any(String),
+        status: "ready",
+      });
+      if (
+        typeof authority !== "object" ||
+        authority === null ||
+        !("authorityHandle" in authority) ||
+        typeof authority.authorityHandle !== "string"
+      )
+        throw new Error("Missing captured authority");
+      try {
+        await expect(
+          scope === "all"
+            ? port.revokeAllStaffSessions(authority.authorityHandle)
+            : port.revokeCurrentStaffSession(authority.authorityHandle),
+        ).resolves.toEqual({ code: "session_revoked", ok: true });
+        await expect(
+          port.signOut(scope, authority.authorityHandle),
+        ).resolves.toEqual({ status: "signed_out" });
+        expect(
+          providerFetch.mock.calls.map(([input]) => String(input)),
+        ).toEqual([
+          `${backendUrl}/auth/v1/user`,
+          `${backendUrl}/rest/v1/rpc/${scope === "all" ? "revoke_all_current_user_staff_sessions" : "revoke_current_staff_session"}`,
+          `${backendUrl}/auth/v1/logout?scope=${scope === "all" ? "global" : "local"}`,
+        ]);
+        for (const [, init] of providerFetch.mock.calls) {
+          expect(new Headers(init?.headers).get("authorization")).toBe(
+            `Bearer ${firstSession.access_token}`,
+          );
+          expect(init?.credentials).toBe("omit");
+          expect(init?.redirect).toBe("error");
+        }
+        expect(providerFetch.mock.calls[1]?.[1]?.body).toBe("{}");
+        expect(
+          new Headers(providerFetch.mock.calls[1]?.[1]?.headers).get(
+            "content-profile",
+          ),
+        ).toBe("desmoslock_v2");
+        expect(getSession).toHaveBeenCalledOnce();
+        expect(getUser).not.toHaveBeenCalled();
+        expect(signOut).not.toHaveBeenCalled();
+        expect(setSession).not.toHaveBeenCalled();
+        expect(rpc).not.toHaveBeenCalled();
+        expect(currentSession).toBe(nextSession);
+      } finally {
+        port.releasePasswordAuthority(authority.authorityHandle);
+      }
+    },
+  );
 
-    await expect(port.signOut("local")).resolves.toEqual({
-      status: "signed_out",
+  it.each([
+    ["absent session", { data: { session: null }, error: null }, "ended"],
+    ["missing session field", { data: {}, error: null }, "unavailable"],
+    [
+      "malformed session",
+      { data: { session: {} }, error: null },
+      "unavailable",
+    ],
+    [
+      "snapshot error",
+      { data: { session: null }, error: { code: "session_expired" } },
+      "unavailable",
+    ],
+    [
+      "missing account",
+      {
+        data: { session: { access_token: "synthetic-account-a-token" } },
+        error: null,
+      },
+      "unavailable",
+    ],
+    [
+      "empty token",
+      {
+        data: { session: { access_token: "", user: { id: accountId } } },
+        error: null,
+      },
+      "unavailable",
+    ],
+  ] as const)(
+    "distinguishes %s without provider egress",
+    async (_label, result, status) => {
+      const getUser = vi.fn(async () => externalFailure());
+      const signOut = vi.fn(async () => ({ error: null }));
+      const providerFetch = vi.fn<typeof fetch>();
+      const port = createPort(
+        fakeClient({
+          auth: { getSession: async () => result, getUser, signOut },
+        }),
+        providerFetch,
+      );
+      await expect(port.captureSignOutAuthority(accountId)).resolves.toEqual({
+        status,
+      });
+      await expect(port.readAccount()).resolves.toEqual(
+        status === "ended" ? { status: "signed_out" } : null,
+      );
+      expect(providerFetch).not.toHaveBeenCalled();
+      expect(getUser).not.toHaveBeenCalled();
+      expect(signOut).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not evaluate malformed session accessors or inherited identities", async () => {
+    const getter = vi.fn(() => "synthetic-account-a-token");
+    const inheritedUser = Object.create({ id: accountId }) as object;
+    const getSession = vi
+      .fn<SupabaseStaffAuthClient["auth"]["getSession"]>()
+      .mockResolvedValueOnce({
+        data: {
+          session: Object.defineProperty(
+            { user: { id: accountId } },
+            "access_token",
+            { get: getter },
+          ),
+        },
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: {
+          session: {
+            access_token: "synthetic-account-a-token",
+            user: inheritedUser,
+          },
+        },
+        error: null,
+      });
+    const providerFetch = vi.fn<typeof fetch>();
+    const port = createPort(
+      fakeClient({ auth: { getSession } }),
+      providerFetch,
+    );
+    await expect(port.captureSignOutAuthority(accountId)).resolves.toEqual({
+      status: "unavailable",
     });
-    await expect(port.signOut("all")).resolves.toEqual({
-      status: "signed_out",
-    });
-    expect(signOut.mock.calls).toEqual([
-      [{ scope: "local" }],
-      [{ scope: "global" }],
-    ]);
+    await expect(port.readAccount()).resolves.toBeNull();
+    expect(getter).not.toHaveBeenCalled();
+    expect(providerFetch).not.toHaveBeenCalled();
   });
+
+  it("rejects a snapshot-account mismatch before egress and provider-account mismatch after inert verification", async () => {
+    const providerFetch = vi.fn<typeof fetch>(async (input) =>
+      recoveryResponse(
+        JSON.stringify({ id: "other-account", email: "other@example.test" }),
+        {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        },
+        { url: String(input) },
+      ),
+    );
+    const port = createPort(
+      fakeClient({ auth: { getSession: async () => accountSession() } }),
+      providerFetch,
+    );
+    await expect(
+      port.captureSignOutAuthority("other-account"),
+    ).resolves.toEqual({ status: "rejected" });
+    expect(providerFetch).not.toHaveBeenCalled();
+    await expect(port.captureSignOutAuthority(accountId)).resolves.toEqual({
+      status: "rejected",
+    });
+    await expect(port.readAccount()).resolves.toBeNull();
+    expect(providerFetch).toHaveBeenCalledTimes(2);
+    expect(
+      providerFetch.mock.calls.every(([, init]) => init?.method === "GET"),
+    ).toBe(true);
+  });
+
+  it.each([
+    [
+      "missing session",
+      403,
+      JSON.stringify({ code: "session_not_found", message: "synthetic" }),
+      true,
+    ],
+    [
+      "expired session",
+      401,
+      JSON.stringify({ error_code: "session_expired", msg: "synthetic" }),
+      true,
+    ],
+    [
+      "generic unauthorized",
+      401,
+      JSON.stringify({ code: "bad_jwt", message: "synthetic" }),
+      false,
+    ],
+    [
+      "generic forbidden",
+      403,
+      JSON.stringify({ code: "unexpected", message: "synthetic" }),
+      false,
+    ],
+    [
+      "rate-limited ended-shaped error",
+      429,
+      JSON.stringify({ code: "session_not_found", message: "synthetic" }),
+      false,
+    ],
+    [
+      "unsupported client-error status",
+      400,
+      JSON.stringify({ code: "session_expired", message: "synthetic" }),
+      false,
+    ],
+    [
+      "refresh failure",
+      400,
+      JSON.stringify({ code: "refresh_token_not_found", message: "synthetic" }),
+      false,
+    ],
+    [
+      "server failure",
+      500,
+      JSON.stringify({ code: "session_not_found", message: "synthetic" }),
+      false,
+    ],
+    [
+      "success-shaped failure",
+      200,
+      JSON.stringify({ code: "session_expired", message: "synthetic" }),
+      false,
+    ],
+    [
+      "extra error field",
+      403,
+      JSON.stringify({
+        code: "session_not_found",
+        message: "synthetic",
+        extra: true,
+      }),
+      false,
+    ],
+    [
+      "missing message",
+      403,
+      JSON.stringify({ code: "session_not_found" }),
+      false,
+    ],
+    ["malformed body", 403, "not-json", false],
+    [
+      "oversized body",
+      403,
+      JSON.stringify({ code: "session_not_found", message: "x".repeat(4097) }),
+      false,
+    ],
+  ] as const)(
+    "treats %s as ended only with an exact authoritative error",
+    async (_label, httpStatus, body, ended) => {
+      const getUser = vi.fn(async () => externalFailure());
+      const signOut = vi.fn(async () => ({ error: null }));
+      const providerFetch = vi.fn<typeof fetch>(async (input) =>
+        recoveryResponse(
+          body,
+          {
+            headers: { "content-type": "application/json" },
+            status: httpStatus,
+          },
+          { url: String(input) },
+        ),
+      );
+      const port = createPort(
+        fakeClient({
+          auth: { getSession: async () => accountSession(), getUser, signOut },
+        }),
+        providerFetch,
+      );
+      await expect(port.captureSignOutAuthority(accountId)).resolves.toEqual({
+        status: ended ? "ended" : "unavailable",
+      });
+      await expect(port.readAccount()).resolves.toEqual(
+        ended ? { status: "signed_out" } : null,
+      );
+      expect(getUser).not.toHaveBeenCalled();
+      expect(signOut).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { redirected: true },
+    { url: "https://unexpected.example.test/auth/v1/user" },
+  ])(
+    "does not treat an out-of-bound provider response as ended",
+    async (options) => {
+      const port = createPort(
+        fakeClient({ auth: { getSession: async () => accountSession() } }),
+        async () =>
+          recoveryResponse(
+            JSON.stringify({ code: "session_not_found", message: "synthetic" }),
+            {
+              headers: { "content-type": "application/json" },
+              status: 403,
+            },
+            { url: `${backendUrl}/auth/v1/user`, ...options },
+          ),
+      );
+      await expect(port.captureSignOutAuthority(accountId)).resolves.toEqual({
+        status: "unavailable",
+      });
+      await expect(port.readAccount()).resolves.toBeNull();
+    },
+  );
+
+  it("does not remove a replacement SDK account when captured account verification has ended or failed", async () => {
+    const nextSession = {
+      access_token: "synthetic-account-b-token",
+      user: { id: "account-b" },
+    };
+    let currentSession = accountSession().data.session;
+    const getSession = vi.fn(async () => ({
+      data: { session: currentSession },
+      error: null,
+    }));
+    const getUser = vi.fn(async () => {
+      currentSession = nextSession;
+      return externalFailure();
+    });
+    const signOut = vi.fn(async () => {
+      currentSession = nextSession;
+      return { error: null };
+    });
+    let status = 403;
+    const providerFetch = vi.fn<typeof fetch>(async (input) => {
+      currentSession = nextSession;
+      if (status === 0) throw new Error("synthetic network failure");
+      return recoveryResponse(
+        JSON.stringify({ code: "session_not_found", message: "synthetic" }),
+        {
+          headers: { "content-type": "application/json" },
+          status,
+        },
+        { url: String(input) },
+      );
+    });
+    const port = createPort(
+      fakeClient({ auth: { getSession, getUser, signOut } }),
+      providerFetch,
+    );
+    await expect(port.readAccount()).resolves.toEqual({ status: "signed_out" });
+    expect(currentSession).toBe(nextSession);
+    currentSession = accountSession().data.session;
+    status = 0;
+    await expect(port.captureSignOutAuthority(accountId)).resolves.toEqual({
+      status: "unavailable",
+    });
+    expect(currentSession).toBe(nextSession);
+    expect(
+      providerFetch.mock.calls.every(
+        ([, init]) =>
+          new Headers(init?.headers).get("authorization") ===
+          "Bearer synthetic-account-a-token",
+      ),
+    ).toBe(true);
+    expect(getUser).not.toHaveBeenCalled();
+    expect(signOut).not.toHaveBeenCalled();
+  });
+
+  it.each(["capture", "read"] as const)(
+    "bounds a stalled %s session snapshot and ignores its late resolution",
+    async (operation) => {
+      vi.useFakeTimers();
+      try {
+        let release:
+          ((result: ReturnType<typeof accountSession>) => void) | undefined;
+        const getSession = vi.fn(
+          () =>
+            new Promise<ReturnType<typeof accountSession>>((resolve) => {
+              release = resolve;
+            }),
+        );
+        const providerFetch = vi.fn<typeof fetch>();
+        const port = createPort(
+          fakeClient({ auth: { getSession } }),
+          providerFetch,
+        );
+        const outcome =
+          operation === "capture"
+            ? port.captureSignOutAuthority(accountId)
+            : port.readAccount();
+        await vi.advanceTimersByTimeAsync(5_000);
+        await expect(outcome).resolves.toEqual(
+          operation === "capture" ? { status: "unavailable" } : null,
+        );
+        release?.(accountSession());
+        await vi.runAllTimersAsync();
+        expect(providerFetch).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([
+    ["capture", 200],
+    ["capture", 403],
+    ["read", 200],
+    ["read", 403],
+  ] as const)(
+    "bounds %s verification across delayed headers and a stalled HTTP %s body",
+    async (operation, status) => {
+      vi.useFakeTimers();
+      try {
+        const cancel = vi.fn(() => new Promise<void>(() => undefined));
+        const providerFetch = vi.fn<typeof fetch>(
+          (input) =>
+            new Promise((resolve) => {
+              setTimeout(
+                () =>
+                  resolve(
+                    recoveryResponse(
+                      new ReadableStream({
+                        start(controller) {
+                          controller.enqueue(
+                            new TextEncoder().encode('{"id":'),
+                          );
+                        },
+                        cancel,
+                      }),
+                      {
+                        headers: { "content-type": "application/json" },
+                        status,
+                      },
+                      { url: String(input) },
+                    ),
+                  ),
+                4_000,
+              );
+            }),
+        );
+        const port = createPort(
+          fakeClient({ auth: { getSession: async () => accountSession() } }),
+          providerFetch,
+        );
+        const outcome =
+          operation === "capture"
+            ? port.captureSignOutAuthority(accountId)
+            : port.readAccount();
+        await vi.advanceTimersByTimeAsync(5_000);
+        await expect(outcome).resolves.toEqual(
+          operation === "capture" ? { status: "unavailable" } : null,
+        );
+        expect(cancel).toHaveBeenCalledOnce();
+        expect(providerFetch.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+        expect(providerFetch).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["released", "expired", "cleared"] as const)(
+    "rejects %s and missing logout authorities without unbound fallback",
+    async (end) => {
+      vi.useFakeTimers();
+      try {
+        const signOut = vi.fn(async () => ({ error: null }));
+        const rpc = vi.fn(async () => externalFailure());
+        const providerFetch = vi.fn<typeof fetch>(async (input) =>
+          recoveryResponse(
+            JSON.stringify({ id: accountId }),
+            {
+              headers: { "content-type": "application/json" },
+              status: 200,
+            },
+            { url: String(input) },
+          ),
+        );
+        const port = createPort(
+          fakeClient({
+            auth: { getSession: async () => accountSession(), signOut },
+            schema: () => ({ rpc }),
+          }),
+          providerFetch,
+        );
+        const handle = await captureSignOutHandle(port);
+        if (end === "released") port.releasePasswordAuthority(handle);
+        else if (end === "cleared") port.clearPrivateAuthContinuations();
+        else await vi.advanceTimersByTimeAsync(60_000);
+        await expect(port.signOut("local", handle)).resolves.toEqual({
+          status: "unavailable",
+        });
+        await expect(
+          port.revokeCurrentStaffSession(handle),
+        ).resolves.toBeNull();
+        await expect(port.revokeAllStaffSessions(handle)).resolves.toBeNull();
+        await expect(
+          Reflect.apply(port.signOut, port, ["all"]),
+        ).resolves.toEqual({ status: "unavailable" });
+        expect(providerFetch).toHaveBeenCalledOnce();
+        expect(signOut).not.toHaveBeenCalled();
+        expect(rpc).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([
+    [403, { code: "session_not_found", message: "synthetic" }, "unavailable"],
+    [401, { error_code: "session_expired", msg: "synthetic" }, "unavailable"],
+    [401, { code: "bad_jwt", message: "synthetic" }, "unavailable"],
+    [503, { code: "session_not_found", message: "synthetic" }, "unavailable"],
+    [429, { code: "session_not_found", message: "synthetic" }, "unavailable"],
+  ] as const)(
+    "does not claim logout succeeded when the captured token receives HTTP %s",
+    async (status, body, expectedStatus) => {
+      const providerFetch = vi.fn<typeof fetch>(async (input) =>
+        recoveryResponse(
+          JSON.stringify(
+            String(input).endsWith("/user") ? { id: accountId } : body,
+          ),
+          {
+            headers: { "content-type": "application/json" },
+            status: String(input).endsWith("/user") ? 200 : status,
+          },
+          { url: String(input) },
+        ),
+      );
+      const signOut = vi.fn(async () => ({ error: null }));
+      const port = createPort(
+        fakeClient({
+          auth: { getSession: async () => accountSession(), signOut },
+        }),
+        providerFetch,
+      );
+      const handle = await captureSignOutHandle(port);
+      try {
+        for (const scope of ["local", "all"] as const) {
+          await expect(port.signOut(scope, handle)).resolves.toEqual({
+            status: expectedStatus,
+          });
+        }
+        expect(signOut).not.toHaveBeenCalled();
+      } finally {
+        port.releasePasswordAuthority(handle);
+      }
+    },
+  );
 
   it("normalizes assurance, all TOTP factors, enrollment, challenge, verification, and removal", async () => {
     const factorId = "61000000-0000-4000-8000-000000000001";
@@ -721,7 +1357,7 @@ describe("Supabase staff auth port", () => {
       access_token: accessToken,
       refresh_token: refreshToken,
     });
-    await port.signOut("local");
+    port.clearPrivateAuthContinuations();
   });
 
   it("bounds a stalled recovery fetch and never installs a late response", async () => {

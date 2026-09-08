@@ -634,13 +634,13 @@ describe("staff auth controller", () => {
     },
   );
 
-  it("clears a terminal provider session before returning to sign in", async () => {
+  it("returns to sign in with an explicit application reset completion", async () => {
     const clear = vi.fn();
     const requests: StaffAuthMutation[] = [];
     const controller = createController(
       createAdapter({ kind: "membership_inactive" }, async (request) => {
         requests.push(request);
-        return { kind: "sign_out_complete", scope: "local" };
+        return { kind: "reset_to_sign_in_complete" };
       }),
       { clear },
     );
@@ -656,6 +656,21 @@ describe("staff auth controller", () => {
     });
     expect(clear).toHaveBeenCalledOnce();
   });
+
+  it.each(["sign_out_local", "revoke_all_sessions"] as const)(
+    "projects an already-ended %s without claiming global revocation",
+    async (type) => {
+      const controller = createController(
+        createAdapter(access("teacher"), async () => ({ kind: "signed_out" })),
+      );
+      await controller.dispatch({ type: "bootstrap" });
+      await controller.dispatch({ type });
+      expect(controller.getSnapshot()).toMatchObject({
+        kind: "signed_out",
+        notice: null,
+      });
+    },
+  );
 
   it("rejects a generic or wrong-scope logout result", async () => {
     const clear = vi.fn();
@@ -1010,7 +1025,7 @@ describe("staff auth controller", () => {
     expect(JSON.stringify(controller.getSnapshot())).not.toContain("SENTINEL");
   });
 
-  it("retries uncertain global revocation with the same operation ID and never restores auth", async () => {
+  it("requires Start again after uncertain global logout and never replays it", async () => {
     const requests: StaffAuthMutation[] = [];
     const observed: string[] = [];
     const clear = vi.fn();
@@ -1022,7 +1037,7 @@ describe("staff auth controller", () => {
         if (attempt === 1) {
           throw new Error("SENTINEL-uncertain");
         }
-        return { kind: "sign_out_complete", scope: "all" };
+        return { kind: "reset_to_sign_in_complete" };
       }),
       { clear },
     );
@@ -1033,21 +1048,24 @@ describe("staff auth controller", () => {
     await controller.dispatch({ type: "revoke_all_sessions" });
     expect(controller.getSnapshot()).toMatchObject({
       kind: "dependency_failure",
-      retryable: true,
+      retryable: false,
     });
     expect(JSON.stringify(controller.getSnapshot())).not.toContain(
       "owner@example",
     );
     await controller.dispatch({ type: "retry" });
 
-    expect(requests[0]?.operationId).toBe(requests[1]?.operationId);
+    expect(requests).toHaveLength(1);
+    expect(controller.getSnapshot().kind).toBe("dependency_failure");
+    await controller.dispatch({ type: "back_to_sign_in" });
+    expect(requests[1]?.type).toBe("reset_to_sign_in");
     expect(observed).toEqual([
       "signing_out",
       "dependency_failure",
       "signing_out",
       "signed_out",
     ]);
-    expect(clear).toHaveBeenCalledOnce();
+    expect(clear).toHaveBeenCalledTimes(2);
   });
 
   it("does not retain or retry a recovery address after an uncertain request", async () => {
@@ -3049,7 +3067,7 @@ describe("composed authentication outcome separation", () => {
           if (request.type === "inspect_invitation")
             return invitationReady(request.operationId);
           if (request.type === "reset_to_sign_in")
-            return { kind: "sign_out_complete", scope: "local" };
+            return { kind: "reset_to_sign_in_complete" };
           return { kind: "invitation_accepted", passwordOutcome };
         }),
       );
@@ -3082,7 +3100,7 @@ describe("composed authentication outcome separation", () => {
       const controller = createController(
         createAdapter({ kind: "password_recovery_ready" }, async (request) => {
           if (request.type === "reset_to_sign_in")
-            return { kind: "sign_out_complete", scope: "local" };
+            return { kind: "reset_to_sign_in_complete" };
           return {
             kind: "password_recovery_uncertain",
             passwordOutcome: "unknown",

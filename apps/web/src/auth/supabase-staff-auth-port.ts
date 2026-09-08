@@ -653,6 +653,54 @@ export function createSupabaseStaffAuthPort(
     return result?.status === 200 ? result.body : null;
   }
 
+  async function snapshotSessionAuthority(): Promise<
+    | {
+        readonly status: "ready";
+        readonly accessToken: string;
+        readonly accountId: string;
+      }
+    | { readonly status: "ended" | "unavailable" }
+  > {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = externalResult(
+        await Promise.race([
+          Promise.resolve(dependencies.client.auth.getSession()),
+          new Promise<null>((resolve) => {
+            timeout = setTimeout(() => resolve(null), 5_000);
+          }),
+        ]),
+      );
+      if (result?.error !== null) return { status: "unavailable" };
+      const session = ownDataProperty(result.data, "session");
+      if (session?.value === null) return { status: "ended" };
+      const accessToken = objectProperty(session?.value, "access_token");
+      const accountId = objectProperty(
+        objectProperty(session?.value, "user"),
+        "id",
+      );
+      return isOpaqueToken(accessToken) &&
+        typeof accountId === "string" &&
+        accountId.length > 0
+        ? { accessToken, accountId, status: "ready" }
+        : { status: "unavailable" };
+    } catch {
+      return { status: "unavailable" };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  function isEndedAuthorityResponse(
+    result: Awaited<ReturnType<typeof directAuthorityRequest>>,
+  ): boolean {
+    if (result === null || (result.status !== 401 && result.status !== 403)) {
+      return false;
+    }
+    const code = decodeDirectPkceFailureCode(result.body);
+    return code === "session_not_found" || code === "session_expired";
+  }
+
   async function rpc(
     name: string,
     args?: Readonly<Record<string, unknown>>,
@@ -694,6 +742,48 @@ export function createSupabaseStaffAuthPort(
   }
 
   return {
+    async captureSignOutAuthority(expectedAccountId: string) {
+      try {
+        const snapshot = await snapshotSessionAuthority();
+        if (snapshot.status !== "ready") return { status: snapshot.status };
+        if (snapshot.accountId !== expectedAccountId) {
+          return { status: "rejected" };
+        }
+        const verified = await directAuthorityRequest(
+          snapshot.accessToken,
+          "/auth/v1/user",
+          "GET",
+        );
+        if (isEndedAuthorityResponse(verified)) return { status: "ended" };
+        if (verified?.status !== 200) return { status: "unavailable" };
+        const accountId = objectProperty(
+          objectProperty(verified.body, "user") ?? verified.body,
+          "id",
+        );
+        if (typeof accountId !== "string" || accountId.length === 0) {
+          return { status: "unavailable" };
+        }
+        if (accountId !== snapshot.accountId) return { status: "rejected" };
+        if (passwordAuthorities.size >= 16) return { status: "unavailable" };
+        const handle = crypto.randomUUID();
+        passwordAuthorities.set(handle, {
+          accessToken: snapshot.accessToken,
+          accountId,
+          expiresAt: Date.now() + 60_000,
+          passwordAttempted: false,
+          timeout: setTimeout(() => releasePasswordAuthority(handle), 60_000),
+        });
+        return { authorityHandle: handle, status: "ready" };
+      } catch {
+        return { status: "unavailable" };
+      }
+    },
+    clearPrivateAuthContinuations() {
+      clearRecoveryAuthority();
+      for (const handle of passwordAuthorities.keys()) {
+        releasePasswordAuthority(handle);
+      }
+    },
     async capturePasswordAuthority(expectedAccountId?: string) {
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
@@ -1004,15 +1094,23 @@ export function createSupabaseStaffAuthPort(
     },
     async readAccount() {
       try {
-        const result = externalResult(await dependencies.client.auth.getUser());
-        if (result === null || result.error !== null) return null;
-        const user = objectProperty(result.data, "user");
+        const snapshot = await snapshotSessionAuthority();
+        if (snapshot.status === "ended") return { status: "signed_out" };
+        if (snapshot.status !== "ready") return null;
+        const verified = await directAuthorityRequest(
+          snapshot.accessToken,
+          "/auth/v1/user",
+          "GET",
+        );
+        if (isEndedAuthorityResponse(verified)) return { status: "signed_out" };
+        if (verified?.status !== 200) return null;
+        const user = objectProperty(verified.body, "user") ?? verified.body;
         if (!isNonArrayObject(user)) return null;
         const accountId = objectProperty(user, "id");
         const email = objectProperty(user, "email");
         const confirmedAt = ownDataProperty(user, "email_confirmed_at");
         if (
-          typeof accountId !== "string" ||
+          accountId !== snapshot.accountId ||
           typeof email !== "string" ||
           (confirmedAt !== null &&
             confirmedAt.value !== null &&
@@ -1167,11 +1265,15 @@ export function createSupabaseStaffAuthPort(
         return { status: "unavailable" };
       }
     },
-    revokeAllStaffSessions() {
-      return rpc("revoke_all_current_user_staff_sessions");
+    revokeAllStaffSessions(authorityHandle: string) {
+      return authorityRpc(
+        authorityHandle,
+        "revoke_all_current_user_staff_sessions",
+        {},
+      );
     },
-    revokeCurrentStaffSession() {
-      return rpc("revoke_current_staff_session");
+    revokeCurrentStaffSession(authorityHandle: string) {
+      return authorityRpc(authorityHandle, "revoke_current_staff_session", {});
     },
     revokeInvitation(request: RevokeStaffInvitationRequest) {
       return rpc("revoke_staff_invitation", {
@@ -1221,49 +1323,30 @@ export function createSupabaseStaffAuthPort(
         };
       }
     },
-    async signOut(scope: "all" | "local", authorityHandle?: string) {
-      if (authorityHandle !== undefined) {
-        const authority = passwordAuthority(authorityHandle);
-        if (authority === null) return { status: "unavailable" };
-        const result = await directAuthorityRequest(
-          authority.accessToken,
-          `/auth/v1/logout?scope=${scope === "all" ? "global" : "local"}`,
-          "POST",
-        );
-        if (
-          result !== null &&
-          result.status >= 200 &&
-          result.status < 300 &&
-          recoveryAuthority?.accessToken === authority.accessToken
-        ) {
-          clearRecoveryAuthority();
-        }
-        // Do not call SDK signOut: it can revoke or erase another account that
-        // became active after this password operation captured its authority.
-        return {
-          status:
-            result !== null && result.status >= 200 && result.status < 300
-              ? "signed_out"
-              : "unavailable",
-        };
+    async signOut(scope: "all" | "local", authorityHandle: string) {
+      const authority = passwordAuthority(authorityHandle);
+      if (authority === null) return { status: "unavailable" };
+      const result = await directAuthorityRequest(
+        authority.accessToken,
+        `/auth/v1/logout?scope=${scope === "all" ? "global" : "local"}`,
+        "POST",
+      );
+      if (
+        result !== null &&
+        result.status >= 200 &&
+        result.status < 300 &&
+        recoveryAuthority?.accessToken === authority.accessToken
+      ) {
+        clearRecoveryAuthority();
       }
-      clearRecoveryAuthority();
-      try {
-        const result = await dependencies.client.auth.signOut({
-          scope: scope === "all" ? "global" : "local",
-        });
-        const error = ownDataProperty(result, "error");
-        if (
-          error !== null &&
-          (error.value === null ||
-            isSignedOutAuthError(authErrorCode(error.value)))
-        ) {
-          return { status: "signed_out" };
-        }
-      } catch {
-        // Unexpected provider errors are intentionally collapsed.
-      }
-      return { status: "unavailable" };
+      // Do not call SDK signOut: it can revoke or erase another account that
+      // became active after this operation captured its authority.
+      return {
+        status:
+          result !== null && result.status >= 200 && result.status < 300
+            ? "signed_out"
+            : "unavailable",
+      };
     },
     async updatePassword(password: string, authorityHandle: string) {
       const authority = passwordAuthority(authorityHandle);

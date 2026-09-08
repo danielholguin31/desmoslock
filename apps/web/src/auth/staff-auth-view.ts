@@ -727,6 +727,20 @@ export function createStaffAuthViewModel(
   }
 
   if (snapshot.kind === "dependency_failure") {
+    if (
+      snapshot.operation === "local_logout" ||
+      snapshot.operation === "revoke_all_sessions"
+    ) {
+      return {
+        actions: [{ id: "back_to_sign_in", label: "Start again" }],
+        fields: [],
+        heading: "Sign out unconfirmed",
+        message:
+          "We couldn’t confirm sign-out. Start again to check your session.",
+        status: snapshot.kind,
+        tone: "danger",
+      };
+    }
     return {
       actions: snapshot.retryable
         ? [

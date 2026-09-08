@@ -27,6 +27,11 @@ function port(
     acceptInvitation: unavailable,
     beginPasswordRecovery: unavailable,
     capturePasswordAuthority: async () => passwordAuthority,
+    captureSignOutAuthority: async () => ({
+      status: "ready",
+      authorityHandle: passwordAuthority,
+    }),
+    clearPrivateAuthContinuations: () => undefined,
     challengeTotp: unavailable,
     enrollTotp: unavailable,
     exchangeEmailVerificationCode: unavailable,
@@ -2528,7 +2533,7 @@ describe("Supabase staff auth adapter", () => {
         clock: { now: () => 1_788_300_000_000 },
         createBlobUrl: () => "blob:not-used",
         operationIds: operationIdSource(),
-        port: port({
+        port: ownerPort({
           revokeAllStaffSessions: async () => {
             calls.push("application:all");
             return [{ code: "ok" }];
@@ -2545,6 +2550,7 @@ describe("Supabase staff auth adapter", () => {
         revokeBlobUrl: () => undefined,
       });
 
+      await adapter.read();
       await expect(
         adapter.perform({
           operationId: `90000000-0000-4000-8000-00000000000${scope === "local" ? "6" : "7"}`,
@@ -2560,7 +2566,136 @@ describe("Supabase staff auth adapter", () => {
     },
   );
 
-  it("returns to sign in by clearing the provider locally without an application RPC", async () => {
+  it("maps authoritative ended-account validation to signed out without School access", async () => {
+    const readCurrentContext = vi.fn();
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => "unused",
+      operationIds: operationIdSource(),
+      revokeBlobUrl: () => undefined,
+      port: ownerPort({
+        readAccount: async () => ({ status: "signed_out" }),
+        readCurrentContext,
+      }),
+    });
+    expect(await adapter.read()).toEqual({ kind: "signed_out" });
+    expect(readCurrentContext).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+
+  it("releases a capture completed after inert reset without starting revocation", async () => {
+    let finishCapture: (value: unknown) => void = () => undefined;
+    const captureSignOutAuthority = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          finishCapture = resolve;
+        }),
+    );
+    const revokeAllStaffSessions = vi.fn();
+    const signOut = vi.fn();
+    const releasePasswordAuthority = vi.fn();
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => "unused",
+      operationIds: operationIdSource(),
+      revokeBlobUrl: () => undefined,
+      port: ownerPort({
+        captureSignOutAuthority,
+        revokeAllStaffSessions,
+        signOut,
+        releasePasswordAuthority,
+      }),
+    });
+    await adapter.read();
+    const pending = adapter.perform({
+      operationId: firstOperationId,
+      type: "sign_out",
+      scope: "all",
+    });
+    await vi.waitFor(() =>
+      expect(captureSignOutAuthority).toHaveBeenCalledOnce(),
+    );
+    await adapter.perform({
+      operationId: secondOperationId,
+      type: "reset_to_sign_in",
+    });
+    finishCapture({ status: "ready", authorityHandle: passwordAuthority });
+    await expect(pending).rejects.toThrow("abandoned");
+    expect(releasePasswordAuthority).toHaveBeenCalledWith(passwordAuthority);
+    expect(revokeAllStaffSessions).not.toHaveBeenCalled();
+    expect(signOut).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+
+  it("requires visible account authority before ordinary logout", async () => {
+    const captureSignOutAuthority = vi.fn();
+    const signOut = vi.fn();
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => "unused",
+      operationIds: operationIdSource(),
+      revokeBlobUrl: () => undefined,
+      port: port({ captureSignOutAuthority, signOut }),
+    });
+    await expect(
+      adapter.perform({
+        operationId: firstOperationId,
+        type: "sign_out",
+        scope: "all",
+      }),
+    ).rejects.toThrow("re-entry");
+    expect(captureSignOutAuthority).not.toHaveBeenCalled();
+    expect(signOut).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+
+  it("abandons pending TOTP presentation and private continuations without deleting factors", async () => {
+    const clearPrivateAuthContinuations = vi.fn();
+    const removeTotpFactor = vi.fn();
+    const signOut = vi.fn();
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => "blob:pending-totp",
+      operationIds: operationIdSource(),
+      revokeBlobUrl: () => undefined,
+      port: ownerPort({
+        clearPrivateAuthContinuations,
+        removeTotpFactor,
+        signOut,
+        enrollTotp: async () => ({
+          factorId,
+          qrCode: encodedQr(),
+          status: "enrolled",
+        }),
+        readAssurance: async () => ({
+          currentAuthenticationMethods: ["password"],
+          currentLevel: "aal1",
+          nextLevel: "aal2",
+        }),
+        readTotpFactors: async () => ({ factors: [] }),
+      }),
+    });
+    await adapter.read();
+    const enrolled = await adapter.perform({
+      operationId: firstOperationId,
+      type: "begin_totp_enrollment",
+    });
+    expect(enrolled.result.kind).toBe("totp_enrollment_ready");
+    expect(
+      (
+        await adapter.perform({
+          operationId: secondOperationId,
+          type: "reset_to_sign_in",
+        })
+      ).result,
+    ).toEqual({ kind: "reset_to_sign_in_complete" });
+    expect(clearPrivateAuthContinuations).toHaveBeenCalledOnce();
+    expect(removeTotpFactor).not.toHaveBeenCalled();
+    expect(signOut).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+
+  it("returns to sign in without any provider or application mutation", async () => {
     const signOut = vi.fn(async () => ({ status: "signed_out" }));
     const revokeAllStaffSessions = vi.fn(async () => [{ code: "ok" }]);
     const revokeCurrentStaffSession = vi.fn(async () => [{ code: "ok" }]);
@@ -2583,15 +2718,15 @@ describe("Supabase staff auth adapter", () => {
       }),
     ).resolves.toEqual({
       operationId: "90000000-0000-4000-8000-000000000007",
-      result: { kind: "sign_out_complete", scope: "local" },
+      result: { kind: "reset_to_sign_in_complete" },
     });
-    expect(signOut).toHaveBeenCalledWith("local");
+    expect(signOut).not.toHaveBeenCalled();
     expect(revokeCurrentStaffSession).not.toHaveBeenCalled();
     expect(revokeAllStaffSessions).not.toHaveBeenCalled();
     adapter.dispose();
   });
 
-  it("keeps an uncertain global sign-out pending and safely retries a DB-confirmed revocation", async () => {
+  it("requires re-entry after an uncertain global sign-out without recapturing authority", async () => {
     let attempts = 0;
     let providerCalls = 0;
     const request = {
@@ -2603,7 +2738,7 @@ describe("Supabase staff auth adapter", () => {
       clock: { now: () => 1_788_300_000_000 },
       createBlobUrl: () => "blob:not-used",
       operationIds: operationIdSource(),
-      port: port({
+      port: ownerPort({
         revokeAllStaffSessions: async () => {
           attempts += 1;
           if (attempts === 1) throw new Error("uncertain transport");
@@ -2617,13 +2752,12 @@ describe("Supabase staff auth adapter", () => {
       revokeBlobUrl: () => undefined,
     });
 
+    await adapter.read();
     await expect(adapter.perform(request)).rejects.toThrow();
     expect(providerCalls).toBe(0);
-    await expect(adapter.perform(request)).resolves.toMatchObject({
-      result: { kind: "sign_out_complete", scope: "all" },
-    });
-    expect(attempts).toBe(2);
-    expect(providerCalls).toBe(1);
+    await expect(adapter.perform(request)).rejects.toThrow("requires re-entry");
+    expect(attempts).toBe(1);
+    expect(providerCalls).toBe(0);
     adapter.dispose();
   });
 
@@ -2806,12 +2940,12 @@ describe("Supabase staff auth adapter", () => {
   it("emits a synchronous detail-free invalidation and defers reads behind mutations", async () => {
     let notify: () => void = () => undefined;
     let finishRevocation: ((value: unknown) => void) | undefined;
-    const readSession = vi.fn(async () => ({ status: "signed_out" }));
+    const readSession = vi.fn(async () => ({ status: "authenticated" }));
     const adapter = createSupabaseStaffAuthAdapter({
       clock: { now: () => 1_788_300_000_000 },
       createBlobUrl: () => "blob:not-used",
       operationIds: operationIdSource(),
-      port: port({
+      port: ownerPort({
         onAuthStateChange: (listener) => {
           notify = listener;
           return () => undefined;
@@ -2825,6 +2959,9 @@ describe("Supabase staff auth adapter", () => {
       }),
       revokeBlobUrl: () => undefined,
     });
+    await adapter.read();
+    readSession.mockClear();
+    readSession.mockResolvedValue({ status: "signed_out" });
     const eventOrder: string[] = [];
     adapter.subscribe((event) => {
       eventOrder.push(`event:${JSON.stringify(event)}`);
@@ -2835,6 +2972,7 @@ describe("Supabase staff auth adapter", () => {
       type: "sign_out",
     });
 
+    await vi.waitFor(() => expect(finishRevocation).toBeTypeOf("function"));
     eventOrder.push("before");
     notify();
     eventOrder.push("after");
@@ -3142,12 +3280,13 @@ describe("Supabase staff auth adapter", () => {
       clock: { now: () => 1_788_300_000_000 },
       createBlobUrl: () => "blob:not-used",
       operationIds: operationIdSource(),
-      port: port({
+      port: ownerPort({
         revokeCurrentStaffSession,
         signOut: async () => ({ status: "signed_out" }),
       }),
       revokeBlobUrl: () => undefined,
     });
+    await adapter.read();
     const operationId = "90000000-0000-4000-8000-000000000015";
     const request = {
       operationId,
@@ -3159,7 +3298,9 @@ describe("Supabase staff auth adapter", () => {
     await expect(
       adapter.perform({ operationId, scope: "all", type: "sign_out" }),
     ).rejects.toThrow("reused");
-    expect(revokeCurrentStaffSession).toHaveBeenCalledOnce();
+    await vi.waitFor(() =>
+      expect(revokeCurrentStaffSession).toHaveBeenCalledOnce(),
+    );
     revocationDeferred.resolve?.([{ code: "ok" }]);
     await expect(Promise.all([first, duplicate])).resolves.toEqual([
       {

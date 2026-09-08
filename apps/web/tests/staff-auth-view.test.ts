@@ -565,11 +565,31 @@ describe("staff auth view", () => {
     },
   );
 
+  it.each(["local_logout", "revoke_all_sessions"] as const)(
+    "describes uncertain %s without claiming no change or offering replay",
+    (operation) => {
+      expect(
+        createStaffAuthViewModel({
+          code: "dependency_unavailable",
+          kind: "dependency_failure",
+          operation,
+          retryable: false,
+          revision: 1,
+        }),
+      ).toMatchObject({
+        actions: [{ id: "back_to_sign_in", label: "Start again" }],
+        heading: "Sign out unconfirmed",
+        message:
+          "We couldn’t confirm sign-out. Start again to check your session.",
+      });
+    },
+  );
+
   it("renders a retry only for retryable dependency failures without provider detail", () => {
     const retryable = createStaffAuthViewModel({
       code: "dependency_unavailable",
       kind: "dependency_failure",
-      operation: "revoke_all_sessions",
+      operation: "bootstrap",
       retryable: true,
       revision: 1,
     });

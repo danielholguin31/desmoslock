@@ -304,6 +304,8 @@ function createRecoveryNotificationHarness() {
       acceptInvitation: unavailable,
       beginPasswordRecovery: unavailable,
       capturePasswordAuthority,
+      captureSignOutAuthority: unavailable,
+      clearPrivateAuthContinuations: () => undefined,
       challengeTotp: unavailable,
       enrollTotp: unavailable,
       exchangeEmailVerificationCode: unavailable,

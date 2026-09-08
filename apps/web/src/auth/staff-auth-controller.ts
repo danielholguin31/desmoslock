@@ -189,6 +189,7 @@ export type StaffAuthBoundaryResult =
       readonly kind: "sign_out_complete";
       readonly scope: "all" | "local";
     }
+  | { readonly kind: "reset_to_sign_in_complete" }
   | {
       readonly actor: StaffAuthAccessGrant;
       readonly invitedRole: StorageManagedStaffRole;
@@ -616,7 +617,7 @@ export interface StaffAuthPendingCallback {
 type RetryableMutation = Extract<
   StaffAuthMutation,
   {
-    type: "resend_email_verification" | "reset_to_sign_in" | "sign_out";
+    type: "resend_email_verification";
   }
 >;
 
@@ -627,17 +628,6 @@ type RetryPlan =
       readonly request: Extract<
         RetryableMutation,
         { type: "resend_email_verification" }
-      >;
-    }
-  | {
-      readonly kind: "sign_out";
-      readonly request: Extract<RetryableMutation, { type: "sign_out" }>;
-    }
-  | {
-      readonly kind: "reset_to_sign_in";
-      readonly request: Extract<
-        RetryableMutation,
-        { type: "reset_to_sign_in" }
       >;
     }
   | {
@@ -1400,29 +1390,16 @@ export function createStaffAuthController(dependencies: {
     applyInvitationInspectionResult(result, plan.inspectionOperationId);
   }
 
-  async function executeSignOut(
-    scope: "all" | "local",
-    existingRequest?: Extract<RetryableMutation, { type: "sign_out" }>,
-  ): Promise<void> {
+  async function executeSignOut(scope: "all" | "local"): Promise<void> {
     const operation = scope === "all" ? "revoke_all_sessions" : "local_logout";
     const epoch = beginOperation({ kind: "signing_out", scope });
-    if (existingRequest === undefined) {
-      clearProtectedSchoolData();
-    }
-    const operationId =
-      existingRequest?.operationId ?? allocateOperationId(operation);
+    clearProtectedSchoolData();
+    const operationId = allocateOperationId(operation);
     if (operationId === null || !isCurrent(epoch)) {
       return;
     }
-    const request = existingRequest ?? {
-      operationId,
-      scope,
-      type: "sign_out" as const,
-    };
-    const result = await performMutation(request, epoch, operation, {
-      kind: "sign_out",
-      request,
-    });
+    const request = { operationId, scope, type: "sign_out" as const };
+    const result = await performMutation(request, epoch, operation);
     if (result === null || !isCurrent(epoch)) {
       return;
     }
@@ -1432,14 +1409,15 @@ export function createStaffAuthController(dependencies: {
         kind: "signed_out",
         notice: scope === "all" ? "all_sessions_revoked" : "signed_out",
       });
+    } else if (result.kind === "signed_out") {
+      activeGrant = null;
+      transition({ kind: "signed_out", notice: null });
     } else if (!applyAccessLoss(result)) {
       rejectBoundaryResult(operation, result);
     }
   }
 
-  async function executeResetToSignIn(
-    existingRequest?: Extract<RetryableMutation, { type: "reset_to_sign_in" }>,
-  ): Promise<void> {
+  async function executeResetToSignIn(): Promise<void> {
     const epoch = beginOperation({ kind: "signing_out", scope: "local" });
     activeGrant = null;
     pendingCallback?.discard();
@@ -1447,26 +1425,18 @@ export function createStaffAuthController(dependencies: {
     callbackLinkLost = false;
     clearProtectedSchoolData();
     try {
-      // Reset must clear callback intent before sign-out can emit an auth event
-      // whose fresh signed-out read would otherwise restore the lost-link UI.
+      // Discard callback intent before the application-only reset completes.
       dependencies.callback.resetPending?.();
     } catch {
       fail("local_logout", "dependency_unavailable");
       return;
     }
-    const operationId =
-      existingRequest?.operationId ?? allocateOperationId("local_logout");
+    const operationId = allocateOperationId("local_logout");
     if (operationId === null || !isCurrent(epoch)) return;
-    const request = existingRequest ?? {
-      operationId,
-      type: "reset_to_sign_in" as const,
-    };
-    const result = await performMutation(request, epoch, "local_logout", {
-      kind: "reset_to_sign_in",
-      request,
-    });
+    const request = { operationId, type: "reset_to_sign_in" as const };
+    const result = await performMutation(request, epoch, "local_logout");
     if (result === null || !isCurrent(epoch)) return;
-    if (result.kind === "sign_out_complete" && result.scope === "local") {
+    if (result.kind === "reset_to_sign_in_complete") {
       transition({ kind: "signed_out", notice: null });
     } else if (!applyAccessLoss(result)) {
       rejectBoundaryResult("local_logout", result);
@@ -1572,12 +1542,6 @@ export function createStaffAuthController(dependencies: {
         return;
       case "email_verification":
         await executeResendVerification(plan.request);
-        return;
-      case "sign_out":
-        await executeSignOut(plan.request.scope, plan.request);
-        return;
-      case "reset_to_sign_in":
-        await executeResetToSignIn(plan.request);
         return;
       case "invitation_inspection":
         await executeResumeInvitationInspection(plan);
@@ -3258,6 +3222,11 @@ function decodeBoundaryResult(value: unknown): StaffAuthBoundaryResult | null {
           kind: "totp_enrollment_ready",
           presentation,
         }
+      : null;
+  }
+  if (record.kind === "reset_to_sign_in_complete") {
+    return hasExactKeys(record, ["kind"])
+      ? { kind: "reset_to_sign_in_complete" }
       : null;
   }
   if (record.kind === "sign_out_complete") {
