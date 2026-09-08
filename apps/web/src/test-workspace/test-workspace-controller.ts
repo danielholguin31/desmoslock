@@ -200,6 +200,7 @@ interface ReadIntent extends AuthorityIntent {
   readonly before: TestPageCursor | null;
   readonly selectedId: string | null;
   readonly operation: "load" | "select";
+  quiet: boolean;
   promise: Promise<TestWorkspaceSnapshot>;
 }
 interface EndIntent {
@@ -402,7 +403,7 @@ export function createTestWorkspaceController(
       });
       return;
     }
-    if (reading !== null) {
+    if (reading !== null && !reading.quiet) {
       if (page === null) publish({ kind: "loading", school });
       else
         publish({
@@ -696,6 +697,7 @@ export function createTestWorkspaceController(
     cursor: TestPageCursor | null,
     targetId: string | null,
     operation: "load" | "select",
+    quiet = false,
   ): Promise<TestWorkspaceSnapshot> {
     if (mutation !== null) return Promise.resolve(snapshot);
     const original = initiatingAuthority();
@@ -703,8 +705,14 @@ export function createTestWorkspaceController(
     if (result !== undefined && result.kind !== "fresh_authorized")
       return Promise.resolve(snapshot);
     const key = JSON.stringify([cursor, targetId]);
-    if (reading !== null && reading.key === key && isCurrent(reading))
-      return reading.promise;
+    if (reading !== null && reading.key === key && isCurrent(reading)) {
+      const current = reading;
+      if (!quiet && current.quiet) {
+        current.quiet = false;
+        project();
+      }
+      return current.promise;
+    }
     if (reading !== null) release(reading);
     const intent: ReadIntent = {
       epoch,
@@ -712,6 +720,7 @@ export function createTestWorkspaceController(
       before: cursor === null ? null : Object.freeze({ ...cursor }),
       selectedId: targetId,
       operation,
+      quiet,
       key,
       handle: null,
       promise: Promise.resolve(snapshot),
@@ -935,13 +944,20 @@ export function createTestWorkspaceController(
     if (
       disposed ||
       mutation !== null ||
-      reading !== null ||
+      (reading !== null && !reading.quiet) ||
       page === null ||
       (snapshot.kind !== "ready" &&
         !(retry && snapshot.kind === "create_unconfirmed") &&
         !(operation === "end" && snapshot.kind === "confirming_end"))
     )
       return Promise.resolve(snapshot);
+    if (reading !== null) {
+      // Obsolete the quiet read before capture or preflight. A late response
+      // cannot merge facts into this new immutable mutation intent.
+      const previous = reading;
+      reading = null;
+      release(previous);
+    }
     // Capture the rendered target, authority and submitted fields before any
     // refresh/capture promise. Later reads may update presentation, never intent.
     const original = initiatingAuthority();
@@ -1059,6 +1075,7 @@ export function createTestWorkspaceController(
         reading === null ? before : reading.before,
         reading === null ? selectedId : reading.selectedId,
         reading?.operation ?? "load",
+        true,
       );
     },
     async dispatch(action) {
@@ -1094,7 +1111,11 @@ export function createTestWorkspaceController(
           return snapshot;
         return startRead(undefined, before, action.testId, "select");
       }
-      if (mutation !== null || reading !== null || mode !== "ready")
+      if (
+        mutation !== null ||
+        (reading !== null && !reading.quiet) ||
+        mode !== "ready"
+      )
         return snapshot;
       if (action.type === "edit_create_title") {
         if (snapshot.kind !== "ready") return snapshot;
