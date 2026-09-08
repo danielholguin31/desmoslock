@@ -88,7 +88,11 @@ npm run test:staff-auth
 npm run db:stop
 ```
 
-CI owns startup and unconditional shutdown for that lane. The command verifies
+CI now runs that complete lane inside the disposable
+[`test:backup:roundtrip` harness](docs/product-completion/synthetic-restore-acceptance.md),
+which first exports and restores the pristine fixture across distinct fresh
+clusters, then runs the staff-auth suite without reseeding. Real restore
+execution remains pending. CI owns startup and unconditional shutdown. The command verifies
 database schema/RPC lifecycle contracts, local Auth/PostgREST/health prerequisites,
 observed two-connection authorization races, Edge handler behavior, unit tests,
 then real-provider invitation, PKCE recovery and revocation journeys. The final

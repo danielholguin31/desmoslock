@@ -753,6 +753,10 @@ test("staff Auth schema and composed journeys have a required disposable CI lane
     rootPackage.scripts?.["test:staff-auth:stack"],
     "node --test tests/acceptance/staff-auth-stack.test.mjs",
   );
+  assert.equal(
+    rootPackage.scripts?.["test:backup:roundtrip"],
+    "node --test tests/acceptance/synthetic-backup-roundtrip.test.mjs",
+  );
   assert.doesNotThrow(() => assertStaffAuthCiWorkflow(workflow));
   const lifecycleHeader = "  staff-auth-lifecycle:\n";
   const lifecycleBody = workflow
@@ -787,9 +791,7 @@ test("staff Auth schema and composed journeys have a required disposable CI lane
   );
 
   const lifecycleSteps = [
-    "      - run: npm run db:start:full",
-    "      - run: npm run db:reset",
-    "      - run: npm run test:staff-auth",
+    "      - run: npm run test:backup:roundtrip",
     "      - if: always()",
     "        run: npm run db:stop",
     "",

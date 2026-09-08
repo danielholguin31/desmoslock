@@ -61,12 +61,12 @@ export function assertStaffAuthCiWorkflow(ciWorkflow) {
     fail("Required staff Auth live-backend browser CI must provision Chromium");
   }
   if (
-    !/- run: npm run db:start:full\s+[\s\S]*?- run: npm run db:reset\s+[\s\S]*?- run: npm run test:staff-auth\s+[\s\S]*?- if: always\(\)\s+run: npm run db:stop/u.test(
+    !/- run: npm run test:backup:roundtrip\s+[\s\S]*?- if: always\(\)\s+run: npm run db:stop/u.test(
       lifecycleJob,
     )
   ) {
     fail(
-      "Required staff Auth schema and composed journey CI must reset and test a full disposable local stack with unconditional cleanup",
+      "Required staff Auth schema and composed journey CI must restore and test a full disposable local stack with unconditional cleanup",
     );
   }
 
@@ -131,6 +131,8 @@ export function verifyCiContract(repositoryRoot) {
     ".github/workflows/security.yml",
   );
   if (
+    rootPackage.scripts?.["test:backup:roundtrip"] !==
+      "node --test tests/acceptance/synthetic-backup-roundtrip.test.mjs" ||
     rootPackage.scripts?.["test:staff-auth"] !==
       "npm run test:db && npm run test:staff-auth:stack && npm run test:staff-auth:locks && npm run test:edge && npm run test:unit && npm run test:staff-auth:composed" ||
     rootPackage.scripts?.["test:staff-auth:composed"] !==
@@ -153,6 +155,15 @@ export function verifyCiContract(repositoryRoot) {
   readText(repositoryRoot, "tests/acceptance/staff-auth-composed.test.mjs");
   readText(repositoryRoot, "tests/acceptance/staff-auth-loopback.mjs");
   readText(repositoryRoot, "scripts/run-local-supabase.mjs");
+  readText(repositoryRoot, "tests/acceptance/synthetic-backup-runtime.mjs");
+  readText(
+    repositoryRoot,
+    "tests/acceptance/synthetic-backup-runtime.test.mjs",
+  );
+  readText(
+    repositoryRoot,
+    "tests/acceptance/synthetic-backup-roundtrip.test.mjs",
+  );
   for (const command of [
     "npm ci",
     "npm run format:check",
@@ -160,10 +171,9 @@ export function verifyCiContract(repositoryRoot) {
     "npm run typecheck",
     "npm run test:unit",
     "npm run test:evidence",
-    "npm run db:start:full",
     "npm run db:reset",
     "npm run test:db",
-    "npm run test:staff-auth",
+    "npm run test:backup:roundtrip",
     "npm run test:edge",
     "npm run test:web",
     "npm run test:electron",
