@@ -400,12 +400,14 @@ test("v2 data plane is migration-owned and clean-start only", () => {
     "supabase/migrations/20260907000100_staff_auth_callback_completion.sql",
     "supabase/migrations/20260907000200_runtime_owner_bootstrap.sql",
     "supabase/migrations/20260907000300_membership_revocation_authority.sql",
+    "supabase/migrations/20260907000400_membership_administration.sql",
     "supabase/seed.sql",
     "supabase/tests/database/internal_release_backend.test.sql",
     "supabase/tests/database/staff_auth_generation_4.test.sql",
     "supabase/tests/database/staff_auth_callback_completion.test.sql",
     "supabase/tests/database/runtime_owner_bootstrap.test.sql",
     "supabase/tests/database/membership_revocation_authority.test.sql",
+    "supabase/tests/database/membership_administration.test.sql",
     "supabase/tests/database/staff_auth_lifecycle.test.sql",
     "supabase/tests/database/v2_foundation.test.sql",
   ]) {
@@ -592,9 +594,15 @@ test("generation-4 attests the exact normalized migration history", () => {
         "43527d889ae0823057bba8ab7b4ed97eb9603220658c59c56cfda70889af75c9",
     },
     "20260907000300_membership_revocation_authority.sql": {
-      migrationSetSha256: expectedMigrationSetSha256,
+      migrationSetSha256:
+        "e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a",
       rawSha256:
         "9c59c0192b4f960f925db8c64be1c7b2aa6843591d6214a98b29c2bac5a326ad",
+    },
+    "20260907000400_membership_administration.sql": {
+      migrationSetSha256: expectedMigrationSetSha256,
+      rawSha256:
+        "078a886cc923b0d9349eca992ebf1d74b06e4bbd302ee165828b4003ca3326a5",
     },
   });
   assert.doesNotThrow(() => assertMigrationSetAttestation(migrations));
@@ -619,6 +627,7 @@ test("generation-4 attests the exact normalized migration history", () => {
     "20260903000200_staff_auth_generation_4.sql",
     "20260907000100_staff_auth_callback_completion.sql",
     "20260907000200_runtime_owner_bootstrap.sql",
+    "20260907000300_membership_revocation_authority.sql",
   ]) {
     assert.throws(
       () =>
@@ -655,7 +664,7 @@ test("generation-4 attests the exact normalized migration history", () => {
       assertMigrationSetAttestation(
         migrations.map(([fileName, source]) => [
           fileName,
-          fileName === "20260907000300_membership_revocation_authority.sql"
+          fileName === "20260907000400_membership_administration.sql"
             ? source.replace(expectedMigrationSetSha256, "0".repeat(64))
             : source,
         ]),
@@ -736,6 +745,27 @@ test("staff Auth schema and composed journeys have a required disposable CI lane
     "node --test tests/acceptance/staff-auth-stack.test.mjs",
   );
   assert.doesNotThrow(() => assertStaffAuthCiWorkflow(workflow));
+  const lifecycleHeader = "  staff-auth-lifecycle:\n";
+  const lifecycleBody = workflow
+    .split(lifecycleHeader)[1]
+    .split("\n  web:\n")[0];
+  const withoutLifecycleChromium = workflow.replace(
+    `${lifecycleHeader}${lifecycleBody}`,
+    `${lifecycleHeader}${lifecycleBody.replace(
+      "      - run: npx playwright install --with-deps chromium\n",
+      "",
+    )}`,
+  );
+  assert.notEqual(withoutLifecycleChromium, workflow);
+  assert.equal(
+    withoutLifecycleChromium.split("\n  web:\n")[1],
+    workflow.split("\n  web:\n")[1],
+    "the web job keeps its own Chromium installation",
+  );
+  assert.throws(
+    () => assertStaffAuthCiWorkflow(withoutLifecycleChromium),
+    /live-backend browser CI must provision Chromium/u,
+  );
   assert.throws(
     () =>
       assertStaffAuthCiWorkflow(

@@ -130,6 +130,30 @@ async function captureSignOutHandle(port: ReturnType<typeof createPort>) {
   return authority.authorityHandle;
 }
 
+async function captureManagementHandle(port: ReturnType<typeof createPort>) {
+  const authority = await port.captureStaffManagementAuthority(accountId);
+  expect(authority).toEqual({
+    authorityHandle: expect.any(String),
+    status: "ready",
+  });
+  if (
+    typeof authority !== "object" ||
+    authority === null ||
+    !("authorityHandle" in authority) ||
+    typeof authority.authorityHandle !== "string"
+  ) {
+    throw new Error("Missing captured management authority");
+  }
+  return authority.authorityHandle;
+}
+
+const invitationRequest = {
+  email: "teacher@example.test",
+  role: "teacher" as const,
+  schoolId,
+};
+const membershipRequest = { expectedRoleRevision: 7, profileId, schoolId };
+
 function accountSession() {
   return {
     data: {
@@ -142,8 +166,191 @@ function accountSession() {
   };
 }
 
+const authorityReadCases = [
+  {
+    method: "readCurrentContext",
+    data: [{ code: "ok" }],
+    expected: [{ code: "ok" }],
+    failed: null,
+  },
+  {
+    method: "readCurrentInvitations",
+    data: [{ code: "ok" }],
+    expected: [{ code: "ok" }],
+    failed: null,
+  },
+  {
+    method: "readManageableStaff",
+    data: [{ code: "ok" }],
+    expected: [{ code: "ok" }],
+    failed: null,
+  },
+  {
+    method: "readManageableInvitations",
+    data: [{ code: "ok" }],
+    expected: [{ code: "ok" }],
+    failed: null,
+  },
+  {
+    method: "readSession",
+    data: accountSession().data,
+    expected: { status: "authenticated" },
+    failed: { status: "unavailable" },
+  },
+  {
+    method: "readAssurance",
+    data: {
+      currentAuthenticationMethods: ["password", "totp"],
+      currentLevel: "aal2",
+      nextLevel: "aal2",
+    },
+    expected: {
+      currentAuthenticationMethods: ["password", "totp"],
+      currentLevel: "aal2",
+      nextLevel: "aal2",
+    },
+    failed: null,
+  },
+  {
+    method: "readTotpFactors",
+    data: { all: [] },
+    expected: { factors: [] },
+    failed: null,
+  },
+] as const;
+
+function authorityReadClient(
+  read: () => PromiseLike<{ readonly data: unknown; readonly error: unknown }>,
+) {
+  return fakeClient({
+    auth: {
+      getSession: read,
+      mfa: { getAuthenticatorAssuranceLevel: read, listFactors: read },
+    },
+    schema: () => ({ rpc: read }),
+  });
+}
+
 describe("Supabase staff auth port", () => {
-  it("uses only the desmoslock_v2 schema and maps every RPC to its exact arguments", async () => {
+  it.each(authorityReadCases)(
+    "bounds a stalled $method, ignores its late result and permits a fresh read",
+    async ({ method, data, expected, failed }) => {
+      vi.useFakeTimers();
+      try {
+        let complete:
+          | ((value: {
+              readonly data: unknown;
+              readonly error: unknown;
+            }) => void)
+          | undefined;
+        const read = vi
+          .fn<
+            () => Promise<{ readonly data: unknown; readonly error: unknown }>
+          >()
+          .mockImplementationOnce(
+            () =>
+              new Promise((resolve) => {
+                complete = resolve;
+              }),
+          )
+          .mockResolvedValue({ data, error: null });
+        const providerFetch = vi.fn<typeof fetch>();
+        const port = createPort(authorityReadClient(read), providerFetch);
+        const published = vi.fn();
+        const pending = port[method]().then(published);
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(published).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        await pending;
+        expect(published).toHaveBeenCalledExactlyOnceWith(failed);
+        expect(vi.getTimerCount()).toBe(0);
+        complete?.({ data, error: null });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(published).toHaveBeenCalledExactlyOnceWith(failed);
+        expect(read).toHaveBeenCalledOnce();
+        await expect(port[method]()).resolves.toEqual(expected);
+        expect(read).toHaveBeenCalledTimes(2);
+        expect(providerFetch).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(authorityReadCases)(
+    "contains early and late $method rejection without retaining a timer or retrying",
+    async ({ method, failed }) => {
+      vi.useFakeTimers();
+      try {
+        let rejectRead: ((reason?: unknown) => void) | undefined;
+        const read = vi
+          .fn<
+            () => Promise<{ readonly data: unknown; readonly error: unknown }>
+          >()
+          .mockRejectedValueOnce(new Error("synthetic early read failure"))
+          .mockImplementationOnce(
+            () =>
+              new Promise((_resolve, reject) => {
+                rejectRead = reject;
+              }),
+          );
+        const providerFetch = vi.fn<typeof fetch>();
+        const port = createPort(authorityReadClient(read), providerFetch);
+        await expect(port[method]()).resolves.toEqual(failed);
+        expect(vi.getTimerCount()).toBe(0);
+        const pending = port[method]();
+        await vi.advanceTimersByTimeAsync(5_000);
+        await expect(pending).resolves.toEqual(failed);
+        rejectRead?.(new Error("synthetic late read failure"));
+        await vi.advanceTimersByTimeAsync(0);
+        await expect(pending).resolves.toEqual(failed);
+        expect(read).toHaveBeenCalledTimes(2);
+        expect(providerFetch).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([
+    ["readCurrentContext", "current_staff_context"],
+    ["readCurrentInvitations", "current_staff_invitations"],
+    ["readManageableStaff", "current_manageable_staff"],
+    ["readManageableInvitations", "current_manageable_staff_invitations"],
+  ] as const)(
+    "cancels a stalled %s PostgREST request when the builder provides abortSignal",
+    async (method, name) => {
+      vi.useFakeTimers();
+      try {
+        const response = new Promise<{
+          readonly data: unknown;
+          readonly error: unknown;
+        }>(() => undefined);
+        const abortSignal = vi.fn((signal: AbortSignal) => {
+          expect(signal.aborted).toBe(false);
+          return response;
+        });
+        const request = Object.assign(response, { abortSignal });
+        const rpc = vi.fn(() => request);
+        const port = createPort(fakeClient({ schema: () => ({ rpc }) }));
+        const pending = port[method]();
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(rpc).toHaveBeenCalledExactlyOnceWith(name);
+        expect(abortSignal).toHaveBeenCalledOnce();
+        expect(abortSignal.mock.calls[0]?.[0].aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(pending).resolves.toBeNull();
+        expect(abortSignal.mock.calls[0]?.[0].aborted).toBe(true);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("uses only the desmoslock_v2 schema for authority reads", async () => {
     const rpc = vi.fn(
       async (name: string, args?: Readonly<Record<string, unknown>>) => ({
         data: [{ args: args ?? null, name }],
@@ -159,8 +366,6 @@ describe("Supabase staff auth port", () => {
     await port.readCurrentInvitations();
     await port.readManageableStaff();
     await port.readManageableInvitations();
-    await port.revokeInvitation({ invitationId });
-    await port.revokeMembership({ profileId, schoolId });
 
     expect(schema).toHaveBeenCalledTimes(1);
     expect(schema).toHaveBeenCalledWith("desmoslock_v2");
@@ -169,46 +374,27 @@ describe("Supabase staff auth port", () => {
       ["current_staff_invitations"],
       ["current_manageable_staff"],
       ["current_manageable_staff_invitations"],
-      ["revoke_staff_invitation", { invitation_id: invitationId }],
-      ["revoke_membership", { profile_id: profileId, workspace_id: schoolId }],
     ]);
   });
 
-  it("invokes the exact Edge functions and returns only parsed product responses", async () => {
-    const invitationRequest = {
-      email: "teacher@example.test",
-      role: "teacher" as const,
-      schoolId,
-    };
+  it("invokes the recovery Edge function and returns only parsed product responses", async () => {
     const recoveryRequest = {
       codeChallenge: "c".repeat(43),
       email: "teacher@example.test",
       flowId: "flow-1",
       state: "state-1",
     };
-    const invoke = vi.fn(async (name: string) =>
-      name === "staff-invitations"
-        ? {
-            data: { code: "invitation_created", ok: true },
-            error: null,
-          }
-        : {
-            data: { code: "recovery_requested", ok: true },
-            error: null,
-          },
-    );
+    const invoke = vi.fn(async () => ({
+      data: { code: "recovery_requested", ok: true },
+      error: null,
+    }));
     const port = createPort(fakeClient({ functions: { invoke } }));
 
-    await expect(port.invokeInvitation(invitationRequest)).resolves.toEqual({
-      code: "invitation_created",
-      ok: true,
-    });
     await expect(port.invokeRecovery(recoveryRequest)).resolves.toEqual({
       code: "recovery_requested",
       ok: true,
     });
     expect(invoke.mock.calls).toEqual([
-      ["staff-invitations", { body: invitationRequest }],
       ["account-recovery", { body: recoveryRequest }],
     ]);
   });
@@ -245,10 +431,11 @@ describe("Supabase staff auth port", () => {
     const port = createPort(fakeClient({ functions: { invoke } }));
 
     await expect(
-      port.invokeInvitation({
+      port.invokeRecovery({
+        codeChallenge: "c".repeat(43),
         email: "teacher@example.test",
-        role: "teacher",
-        schoolId,
+        flowId: "flow-1",
+        state: "state-1",
       }),
     ).resolves.toEqual({ code: "rate_limited", ok: false });
     await expect(
@@ -260,6 +447,461 @@ describe("Supabase staff auth port", () => {
       }),
     ).resolves.toEqual({ code: "service_unavailable", ok: false });
   });
+
+  it("binds every management write to the captured account across a real SDK storage replacement", async () => {
+    const storageKey = "synthetic-management-port-session";
+    const session = (id: string, accessToken: string) => ({
+      access_token: accessToken,
+      expires_at: Math.floor(Date.now() / 1_000) + 3_600,
+      expires_in: 3_600,
+      refresh_token: `synthetic-refresh-${id}`,
+      token_type: "bearer",
+      user: { id },
+    });
+    const first = session(accountId, "synthetic-management-a-token");
+    const replacement = session("account-b", "synthetic-management-b-token");
+    const storage = new Map([[storageKey, JSON.stringify(first)]]);
+    let finishVerification: (() => void) | undefined;
+    const providerFetch = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      const isVerification = url === `${backendUrl}/auth/v1/user`;
+      if (isVerification) {
+        await new Promise<void>((resolve) => {
+          finishVerification = resolve;
+        });
+      }
+      return recoveryResponse(
+        JSON.stringify(
+          isVerification
+            ? { id: accountId }
+            : url.includes("/functions/")
+              ? { code: "invitation_created", ok: true }
+              : [{ code: "ok" }],
+        ),
+        { headers: { "content-type": "application/json" }, status: 200 },
+        { url },
+      );
+    });
+    const client = createClient(backendUrl, publishableKey, {
+      auth: {
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+        persistSession: true,
+        storage: {
+          getItem: (key) => storage.get(key) ?? null,
+          removeItem: (key) => {
+            storage.delete(key);
+          },
+          setItem: (key, value) => {
+            storage.set(key, value);
+          },
+        },
+        storageKey,
+      },
+      global: { fetch: providerFetch },
+    });
+    await client.auth.getSession();
+    const getSession = vi.spyOn(client.auth, "getSession");
+    const getUser = vi.spyOn(client.auth, "getUser");
+    const invoke = vi.spyOn(client.functions, "invoke");
+    const sdkRpc = vi.spyOn(client, "rpc");
+    const port = createPort(
+      client as unknown as SupabaseStaffAuthClient,
+      providerFetch,
+    );
+    const capture = captureManagementHandle(port);
+    await vi.waitFor(() => expect(finishVerification).toBeTypeOf("function"));
+    storage.set(storageKey, JSON.stringify(replacement));
+    finishVerification?.();
+    const handle = await capture;
+    try {
+      await expect(
+        port.invokeInvitation(invitationRequest, handle),
+      ).resolves.toEqual({
+        code: "invitation_created",
+        ok: true,
+      });
+      await expect(
+        port.revokeInvitation({ invitationId }, handle),
+      ).resolves.toEqual([{ code: "ok" }]);
+      await expect(
+        port.revokeMembership(membershipRequest, handle),
+      ).resolves.toEqual([{ code: "ok" }]);
+      for (const role of ["administrator", "teacher"] as const) {
+        await expect(
+          port.changeMembershipRole({ ...membershipRequest, role }, handle),
+        ).resolves.toEqual([{ code: "ok" }]);
+      }
+      expect(
+        providerFetch.mock.calls.map(([input, init]) => [
+          String(input),
+          init?.body === undefined
+            ? null
+            : (JSON.parse(String(init.body)) as unknown),
+        ]),
+      ).toEqual([
+        [`${backendUrl}/auth/v1/user`, null],
+        [`${backendUrl}/functions/v1/staff-invitations`, invitationRequest],
+        [
+          `${backendUrl}/rest/v1/rpc/revoke_staff_invitation`,
+          { invitation_id: invitationId },
+        ],
+        [
+          `${backendUrl}/rest/v1/rpc/revoke_membership`,
+          {
+            expected_role_revision: 7,
+            profile_id: profileId,
+            workspace_id: schoolId,
+          },
+        ],
+        [
+          `${backendUrl}/rest/v1/rpc/change_membership_role`,
+          {
+            expected_role_revision: 7,
+            profile_id: profileId,
+            role: "admin",
+            workspace_id: schoolId,
+          },
+        ],
+        [
+          `${backendUrl}/rest/v1/rpc/change_membership_role`,
+          {
+            expected_role_revision: 7,
+            profile_id: profileId,
+            role: "teacher",
+            workspace_id: schoolId,
+          },
+        ],
+      ]);
+      for (const [input, init] of providerFetch.mock.calls) {
+        expect(new Headers(init?.headers).get("authorization")).toBe(
+          `Bearer ${first.access_token}`,
+        );
+        expect(new Headers(init?.headers).get("apikey")).toBe(publishableKey);
+        expect(init?.credentials).toBe("omit");
+        expect(init?.redirect).toBe("error");
+        expect(init?.referrerPolicy).toBe("no-referrer");
+        if (String(input).includes("/rest/")) {
+          expect(new Headers(init?.headers).get("content-profile")).toBe(
+            "desmoslock_v2",
+          );
+        } else if (String(input).includes("/functions/")) {
+          expect([...new Headers(init?.headers).keys()].sort()).toEqual([
+            "apikey",
+            "authorization",
+            "content-type",
+            "x-client-info",
+          ]);
+        }
+      }
+      expect(getSession).toHaveBeenCalledOnce();
+      expect(getUser).not.toHaveBeenCalled();
+      expect(invoke).not.toHaveBeenCalled();
+      expect(sdkRpc).not.toHaveBeenCalled();
+      expect(storage.get(storageKey)).toBe(JSON.stringify(replacement));
+    } finally {
+      port.releaseStaffManagementAuthority(handle);
+    }
+  });
+
+  it.each([
+    "missing",
+    "released",
+    "expired",
+    "cleared",
+    "password",
+    "logout",
+  ] as const)(
+    "rejects %s management authority without any SDK or direct mutation fallback",
+    async (kind) => {
+      vi.useFakeTimers();
+      try {
+        const rpc = vi.fn(async () => externalFailure());
+        const invoke = vi.fn(async () => externalFailure());
+        const getSession = vi.fn(async () => accountSession());
+        const providerFetch = vi.fn<typeof fetch>(async (input) =>
+          recoveryResponse(
+            JSON.stringify({ id: accountId }),
+            { headers: { "content-type": "application/json" }, status: 200 },
+            { url: String(input) },
+          ),
+        );
+        const port = createPort(
+          fakeClient({
+            auth: { getSession },
+            functions: { invoke },
+            schema: () => ({ rpc }),
+          }),
+          providerFetch,
+        );
+        const handle =
+          kind === "password"
+            ? await port.capturePasswordAuthority(accountId)
+            : kind === "logout"
+              ? await captureSignOutHandle(port)
+              : await captureManagementHandle(port);
+        if (handle === null) throw new Error("Missing fixture authority");
+        if (kind === "released") port.releaseStaffManagementAuthority(handle);
+        if (kind === "cleared") port.clearPrivateAuthContinuations();
+        if (kind === "expired") await vi.advanceTimersByTimeAsync(60_000);
+        const args = kind === "missing" ? [] : [handle];
+        await expect(
+          Reflect.apply(port.invokeInvitation, port, [
+            invitationRequest,
+            ...args,
+          ]),
+        ).resolves.toEqual({ code: "service_unavailable", ok: false });
+        await expect(
+          Reflect.apply(port.revokeInvitation, port, [
+            { invitationId },
+            ...args,
+          ]),
+        ).resolves.toBeNull();
+        await expect(
+          Reflect.apply(port.revokeMembership, port, [
+            membershipRequest,
+            ...args,
+          ]),
+        ).resolves.toBeNull();
+        await expect(
+          Reflect.apply(port.changeMembershipRole, port, [
+            { ...membershipRequest, role: "teacher" },
+            ...args,
+          ]),
+        ).resolves.toBeNull();
+        expect(getSession).toHaveBeenCalledOnce();
+        expect(providerFetch).toHaveBeenCalledOnce();
+        expect(rpc).not.toHaveBeenCalled();
+        expect(invoke).not.toHaveBeenCalled();
+        port.clearPrivateAuthContinuations();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("prevents a management handle from authorizing password, recovery, invitation acceptance or logout", async () => {
+    const providerFetch = vi.fn<typeof fetch>(async (input) =>
+      recoveryResponse(
+        JSON.stringify({ id: accountId }),
+        { headers: { "content-type": "application/json" }, status: 200 },
+        { url: String(input) },
+      ),
+    );
+    const port = createPort(
+      fakeClient({ auth: { getSession: async () => accountSession() } }),
+      providerFetch,
+    );
+    const handle = await captureManagementHandle(port);
+    try {
+      await expect(
+        port.acceptInvitation({ displayName: "Teacher", invitationId }, handle),
+      ).resolves.toBeNull();
+      await expect(
+        port.beginPasswordRecovery("operation-1", handle),
+      ).resolves.toBeNull();
+      await expect(
+        port.finishPasswordRecovery("operation-1", handle),
+      ).resolves.toBeNull();
+      await expect(
+        port.updatePassword("synthetic-password", handle),
+      ).resolves.toEqual({ status: "unavailable" });
+      await expect(port.signOut("all", handle)).resolves.toEqual({
+        status: "unavailable",
+      });
+      await expect(port.revokeAllStaffSessions(handle)).resolves.toBeNull();
+      await expect(port.revokeCurrentStaffSession(handle)).resolves.toBeNull();
+      expect(providerFetch).toHaveBeenCalledOnce();
+    } finally {
+      port.releaseStaffManagementAuthority(handle);
+    }
+  });
+
+  it.each([
+    [
+      200,
+      { code: "invitation_created", ok: true },
+      { code: "invitation_created", ok: true },
+    ],
+    [
+      429,
+      { code: "rate_limited", ok: false },
+      { code: "rate_limited", ok: false },
+    ],
+    [
+      403,
+      { code: "authorization_denied", ok: false },
+      { code: "authorization_denied", ok: false },
+    ],
+    [
+      503,
+      { code: "invitation_created", ok: true },
+      { code: "service_unavailable", ok: false },
+    ],
+    [
+      200,
+      { code: "invitation_created", ok: true, debug: "private" },
+      { code: "service_unavailable", ok: false },
+    ],
+    [
+      500,
+      { code: "unexpected_provider_failure", message: "private" },
+      { code: "service_unavailable", ok: false },
+    ],
+  ] as const)(
+    "parses only exact captured-authority invitation envelopes for HTTP %s",
+    async (status, body, expected) => {
+      const providerFetch = vi.fn<typeof fetch>(async (input) => {
+        const verification = String(input).endsWith("/user");
+        return recoveryResponse(
+          JSON.stringify(verification ? { id: accountId } : body),
+          {
+            headers: { "content-type": "application/json" },
+            status: verification ? 200 : status,
+          },
+          { url: String(input) },
+        );
+      });
+      const port = createPort(
+        fakeClient({ auth: { getSession: async () => accountSession() } }),
+        providerFetch,
+      );
+      const handle = await captureManagementHandle(port);
+      try {
+        await expect(
+          port.invokeInvitation(invitationRequest, handle),
+        ).resolves.toEqual(expected);
+        expect(providerFetch).toHaveBeenCalledTimes(2);
+      } finally {
+        port.releaseStaffManagementAuthority(handle);
+      }
+    },
+  );
+
+  it.each([
+    ["snapshot mismatch", "account-b", 200, { id: accountId }, "rejected"],
+    ["provider mismatch", accountId, 200, { id: "account-b" }, "rejected"],
+    [
+      "ended session",
+      accountId,
+      403,
+      { code: "session_not_found", message: "synthetic" },
+      "ended",
+    ],
+    [
+      "expired session",
+      accountId,
+      401,
+      { code: "session_expired", message: "synthetic" },
+      "ended",
+    ],
+    [
+      "unverified authority",
+      accountId,
+      503,
+      { code: "session_expired" },
+      "unavailable",
+    ],
+    ["malformed account", accountId, 200, {}, "unavailable"],
+  ] as const)(
+    "returns a bounded management capture result for %s",
+    async (_label, expectedAccountId, status, body, expectedStatus) => {
+      const providerFetch = vi.fn<typeof fetch>(async (input) =>
+        recoveryResponse(
+          JSON.stringify(body),
+          { headers: { "content-type": "application/json" }, status },
+          { url: String(input) },
+        ),
+      );
+      const getUser = vi.fn(async () => externalFailure());
+      const port = createPort(
+        fakeClient({
+          auth: { getSession: async () => accountSession(), getUser },
+        }),
+        providerFetch,
+      );
+      await expect(
+        port.captureStaffManagementAuthority(expectedAccountId),
+      ).resolves.toEqual({ status: expectedStatus });
+      expect(providerFetch).toHaveBeenCalledTimes(
+        expectedAccountId === accountId ? 1 : 0,
+      );
+      expect(getUser).not.toHaveBeenCalled();
+    },
+  );
+
+  it("invalidates a pending management capture when private continuations are cleared", async () => {
+    let finishVerification: (() => void) | undefined;
+    const providerFetch = vi.fn<typeof fetch>(async (input) => {
+      await new Promise<void>((resolve) => {
+        finishVerification = resolve;
+      });
+      return recoveryResponse(
+        JSON.stringify({ id: accountId }),
+        {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        },
+        { url: String(input) },
+      );
+    });
+    const port = createPort(
+      fakeClient({ auth: { getSession: async () => accountSession() } }),
+      providerFetch,
+    );
+    const capture = port.captureStaffManagementAuthority(accountId);
+    await vi.waitFor(() => expect(finishVerification).toBeTypeOf("function"));
+    port.clearPrivateAuthContinuations();
+    finishVerification?.();
+    await expect(capture).resolves.toEqual({ status: "unavailable" });
+    expect(providerFetch).toHaveBeenCalledOnce();
+  });
+
+  it.each(["invitation", "role change"] as const)(
+    "bounds a stalled management %s without mutation retry",
+    async (kind) => {
+      vi.useFakeTimers();
+      try {
+        const providerFetch = vi.fn<typeof fetch>(async (input) => {
+          if (!String(input).endsWith("/user"))
+            return new Promise<Response>(() => undefined);
+          return recoveryResponse(
+            JSON.stringify({ id: accountId }),
+            {
+              headers: { "content-type": "application/json" },
+              status: 200,
+            },
+            { url: String(input) },
+          );
+        });
+        const port = createPort(
+          fakeClient({ auth: { getSession: async () => accountSession() } }),
+          providerFetch,
+        );
+        const handle = await captureManagementHandle(port);
+        const operation =
+          kind === "invitation"
+            ? port.invokeInvitation(invitationRequest, handle)
+            : port.changeMembershipRole(
+                { ...membershipRequest, role: "teacher" },
+                handle,
+              );
+        await vi.advanceTimersByTimeAsync(5_000);
+        await expect(operation).resolves.toEqual(
+          kind === "invitation"
+            ? { code: "service_unavailable", ok: false }
+            : null,
+        );
+        expect(providerFetch).toHaveBeenCalledTimes(2);
+        expect(providerFetch.mock.calls[1]?.[1]?.signal?.aborted).toBe(true);
+        port.releaseStaffManagementAuthority(handle);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("normalizes session and trusted account reads without returning SDK objects", async () => {
     const sdkSession = {

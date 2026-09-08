@@ -111,7 +111,13 @@
   font-weight: 700;
 }
 
-.staff-auth button[data-auth-action-tone="danger"]:hover {
+.staff-auth button:disabled,
+.staff-auth select:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.staff-auth button[data-auth-action-tone="danger"]:hover:not(:disabled) {
   background: var(--staff-auth-danger-hover, #912018);
   border-color: var(--staff-auth-danger-hover, #912018);
 }

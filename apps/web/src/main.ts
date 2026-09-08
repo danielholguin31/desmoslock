@@ -85,27 +85,97 @@ export function registerWebApplicationLifecycle(
   runtime: Window,
   application: Pick<
     StartedStaffAuthApplication,
-    "dispose" | "resume" | "suspend"
+    "dispose" | "refreshMembership" | "resume" | "suspend"
   >,
 ): () => void {
+  let disposed = false;
+  let pageActive = true;
+  let generation = 0;
+  let refreshTimer: number | null = null;
+  let refreshInFlight: Promise<void> | null = null;
+  const documentRoot = runtime.document;
+
+  const isVisible = () =>
+    !disposed && pageActive && documentRoot.visibilityState === "visible";
+  const stopRefreshTimer = () => {
+    if (refreshTimer === null) return;
+    runtime.clearInterval(refreshTimer);
+    refreshTimer = null;
+  };
+  const refreshMembership = () => {
+    if (!isVisible() || refreshInFlight !== null) return;
+    const requestGeneration = generation;
+    const refresh = Promise.resolve()
+      .then(() => {
+        if (generation !== requestGeneration || !isVisible()) return;
+        return application.refreshMembership();
+      })
+      .catch(() => undefined);
+    refreshInFlight = refresh;
+    void refresh.then(() => {
+      if (refreshInFlight === refresh) refreshInFlight = null;
+    });
+  };
+  const startRefreshTimer = () => {
+    if (!isVisible() || refreshTimer !== null) return;
+    refreshTimer = runtime.setInterval(refreshMembership, 15_000);
+  };
+  const handleVisibilityChange = () => {
+    if (!isVisible()) {
+      stopRefreshTimer();
+      return;
+    }
+    startRefreshTimer();
+    refreshMembership();
+  };
   const handlePageHide = (event: PageTransitionEvent) => {
+    if (disposed) return;
+    pageActive = false;
+    generation += 1;
+    refreshInFlight = null;
+    stopRefreshTimer();
     if (event.persisted) {
       application.suspend();
     } else {
+      unregister();
       application.dispose();
     }
   };
   const handlePageShow = (event: PageTransitionEvent) => {
-    if (event.persisted) {
-      void application.resume().catch(() => undefined);
-    }
+    if (disposed || !event.persisted) return;
+    const resumeGeneration = ++generation;
+    pageActive = false;
+    refreshInFlight = null;
+    stopRefreshTimer();
+    void application
+      .resume()
+      .catch(() => undefined)
+      .then(() => {
+        if (disposed || generation !== resumeGeneration) return;
+        pageActive = true;
+        startRefreshTimer();
+      });
+  };
+  const unregister = () => {
+    if (disposed) return;
+    disposed = true;
+    generation += 1;
+    refreshInFlight = null;
+    stopRefreshTimer();
+    runtime.removeEventListener("pagehide", handlePageHide);
+    runtime.removeEventListener("pageshow", handlePageShow);
+    runtime.removeEventListener("focus", refreshMembership);
+    documentRoot.removeEventListener(
+      "visibilitychange",
+      handleVisibilityChange,
+    );
   };
   runtime.addEventListener("pagehide", handlePageHide);
   runtime.addEventListener("pageshow", handlePageShow);
-  return () => {
-    runtime.removeEventListener("pagehide", handlePageHide);
-    runtime.removeEventListener("pageshow", handlePageShow);
-  };
+  runtime.addEventListener("focus", refreshMembership);
+  documentRoot.addEventListener("visibilitychange", handleVisibilityChange);
+  startRefreshTimer();
+  return unregister;
 }
 
 export function mountWebApplication(

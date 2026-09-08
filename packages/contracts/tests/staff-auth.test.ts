@@ -13,6 +13,8 @@ import {
   mapStaffAuthInternalFailure,
   parseAcceptStaffInvitationRequest,
   parseAcceptStaffInvitationResponse,
+  parseChangeStaffMembershipRoleRequest,
+  parseChangeStaffMembershipRoleResponse,
   parseCreateStaffInvitationRequest,
   parseCreateStaffInvitationResponse,
   parseBeginStaffPasswordRecoveryOperationRequest,
@@ -62,6 +64,7 @@ const expectedWireSuccesses = {
   manageable_invitations_listed: true,
   manageable_staff_listed: true,
   membership_revoked: true,
+  membership_role_changed: true,
   recovery_completed: true,
   recovery_requested: true,
   school_selected: true,
@@ -76,6 +79,7 @@ function manageableStaffRpcRow(
     email: "taylor@example.invalid",
     membership_role: "admin",
     profile_id: profileId,
+    role_revision: 1,
     school_id: alphaSchoolId,
     ...overrides,
   };
@@ -319,15 +323,17 @@ describe("staff auth request contracts", () => {
     ).toBeNull();
   });
 
-  it("revokes a Profile in one School without exposing a Membership identifier", () => {
+  it("binds revocation to a Profile's reviewed revision in one School", () => {
     expect(
       parseRevokeStaffMembershipRequest({
+        expectedRoleRevision: 2,
         profileId,
         schoolId: alphaSchoolId,
       }),
-    ).toEqual({ profileId, schoolId: alphaSchoolId });
+    ).toEqual({ expectedRoleRevision: 2, profileId, schoolId: alphaSchoolId });
     expect(
       parseRevokeStaffMembershipRequest({
+        expectedRoleRevision: 2,
         membershipId: "40000000-0000-4000-8000-000000000001",
         schoolId: alphaSchoolId,
       }),
@@ -336,12 +342,95 @@ describe("staff auth request contracts", () => {
       parseRevokeStaffMembershipRequest({ schoolId: alphaSchoolId }),
     ).toBeNull();
     expect(
+      parseRevokeStaffMembershipRequest({ profileId, schoolId: alphaSchoolId }),
+    ).toBeNull();
+    expect(
       parseRevokeStaffMembershipRequest({
+        expectedRoleRevision: 2,
         profileId,
         reason: "provider-specific-detail",
         schoolId: alphaSchoolId,
       }),
     ).toBeNull();
+  });
+
+  it.each(["administrator", "teacher"] as const)(
+    "parses an exact revision-bound role change to %s",
+    (role) => {
+      const request = {
+        expectedRoleRevision: Number.MAX_SAFE_INTEGER,
+        profileId,
+        role,
+        schoolId: alphaSchoolId,
+      };
+      expect(parseChangeStaffMembershipRoleRequest(request)).toEqual(request);
+      expect(
+        parseRevokeStaffMembershipRequest({
+          expectedRoleRevision: Number.MAX_SAFE_INTEGER,
+          profileId,
+          schoolId: alphaSchoolId,
+        }),
+      ).toEqual({
+        expectedRoleRevision: Number.MAX_SAFE_INTEGER,
+        profileId,
+        schoolId: alphaSchoolId,
+      });
+    },
+  );
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER + 1,
+    "1",
+    1n,
+    true,
+    null,
+    undefined,
+  ])("rejects unsafe or nonnumeric expected revision %s", (revision) => {
+    const request = {
+      expectedRoleRevision: revision,
+      profileId,
+      schoolId: alphaSchoolId,
+    };
+    expect(parseRevokeStaffMembershipRequest(request)).toBeNull();
+    expect(
+      parseChangeStaffMembershipRoleRequest({ ...request, role: "teacher" }),
+    ).toBeNull();
+  });
+
+  it("rejects role changes with storage roles, missing fields, or extra authority", () => {
+    const request = {
+      expectedRoleRevision: 1,
+      profileId,
+      role: "teacher",
+      schoolId: alphaSchoolId,
+    };
+    for (const field of Object.keys(request)) {
+      expect(
+        parseChangeStaffMembershipRoleRequest(
+          Object.fromEntries(
+            Object.entries(request).filter(([key]) => key !== field),
+          ),
+        ),
+      ).toBeNull();
+    }
+    for (const override of [
+      { role: "owner" },
+      { role: "admin" },
+      { profileId: "not-a-profile" },
+      { schoolId: "not-a-school" },
+      { membershipId: profileId },
+      { actorRole: "owner" },
+      { currentRole: "administrator" },
+    ]) {
+      expect(
+        parseChangeStaffMembershipRoleRequest({ ...request, ...override }),
+      ).toBeNull();
+    }
   });
 
   it("keeps School selection explicitly scoped", () => {
@@ -602,12 +691,13 @@ describe("password-recovery operation contracts", () => {
   });
 });
 
-describe("Owner management-list contracts", () => {
+describe("staff management-list contracts", () => {
   const staffFailureFields = [
     "display_name",
     "email",
     "membership_role",
     "profile_id",
+    "role_revision",
     "school_id",
   ] as const;
   const invitationFailureFields = [
@@ -633,6 +723,7 @@ describe("Owner management-list contracts", () => {
       manageableStaffRpcRow(),
       manageableStaffRpcRow({
         membership_role: "teacher",
+        role_revision: 3,
         school_id: betaSchoolId,
       }),
       manageableStaffRpcRow({
@@ -651,6 +742,7 @@ describe("Owner management-list contracts", () => {
           email: "taylor@example.invalid",
           profileId,
           role: "administrator",
+          roleRevision: 1,
           schoolId: alphaSchoolId,
         },
         {
@@ -658,6 +750,7 @@ describe("Owner management-list contracts", () => {
           email: "taylor@example.invalid",
           profileId,
           role: "teacher",
+          roleRevision: 3,
           schoolId: betaSchoolId,
         },
         {
@@ -665,11 +758,105 @@ describe("Owner management-list contracts", () => {
           email: "morgan@example.invalid",
           profileId: secondProfileId,
           role: "teacher",
+          roleRevision: 1,
           schoolId: alphaSchoolId,
         },
       ],
       ok: true,
     });
+    expect(parseManageableStaffListResponse(mapped)).toEqual(mapped);
+  });
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER + 1,
+    "1",
+    1n,
+    true,
+    null,
+    undefined,
+  ])("rejects unsafe or nonnumeric listed revision %s", (revision) => {
+    expect(
+      mapCurrentManageableStaffRpcRows([
+        manageableStaffRpcRow({ role_revision: revision }),
+      ]),
+    ).toEqual({ code: "service_unavailable", ok: false });
+    expect(
+      parseManageableStaffListResponse({
+        code: "manageable_staff_listed",
+        items: [
+          {
+            displayName: "Taylor Rivera",
+            email: "taylor@example.invalid",
+            profileId,
+            role: "administrator",
+            roleRevision: revision,
+            schoolId: alphaSchoolId,
+          },
+        ],
+        ok: true,
+      }),
+    ).toBeNull();
+  });
+
+  it("requires the listed revision and keeps failure data null", () => {
+    const mapped = mapCurrentManageableStaffRpcRows([
+      manageableStaffRpcRow({ role_revision: Number.MAX_SAFE_INTEGER }),
+    ]);
+    expect(mapped.ok).toBe(true);
+    expect(parseManageableStaffListResponse(mapped)).toEqual(mapped);
+    expect(
+      mapCurrentManageableStaffRpcRows([
+        Object.fromEntries(
+          Object.entries(manageableStaffRpcRow()).filter(
+            ([key]) => key !== "role_revision",
+          ),
+        ),
+      ]),
+    ).toEqual({ code: "service_unavailable", ok: false });
+    expect(
+      parseManageableStaffListResponse({
+        code: "manageable_staff_listed",
+        items: [
+          {
+            displayName: "Taylor Rivera",
+            email: "taylor@example.invalid",
+            profileId,
+            role: "administrator",
+            schoolId: alphaSchoolId,
+          },
+        ],
+        ok: true,
+      }),
+    ).toBeNull();
+    expect(
+      mapCurrentManageableStaffRpcRows([
+        {
+          ...managementFailureRow("forbidden", staffFailureFields),
+          role_revision: 2,
+        },
+      ]),
+    ).toEqual({ code: "service_unavailable", ok: false });
+  });
+
+  it("accepts the full management-list bound with revision evidence", () => {
+    const rows = Array.from(
+      { length: STAFF_AUTH_MANAGEMENT_LIST_MAXIMUM_ITEMS },
+      (_, index) =>
+        manageableStaffRpcRow({
+          email: `teacher-${index}@example.invalid`,
+          profile_id: `30000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+          role_revision: index + 1,
+        }),
+    );
+    const mapped = mapCurrentManageableStaffRpcRows(rows);
+    expect(mapped.ok).toBe(true);
+    if (!mapped.ok) throw new Error("Expected exact bounded staff list");
+    expect(mapped.items).toHaveLength(STAFF_AUTH_MANAGEMENT_LIST_MAXIMUM_ITEMS);
     expect(parseManageableStaffListResponse(mapped)).toEqual(mapped);
   });
 
@@ -878,6 +1065,7 @@ describe("Owner management-list contracts", () => {
           email: row.email,
           profileId: row.profile_id,
           role: "administrator",
+          roleRevision: row.role_revision,
           schoolId: row.school_id,
         })),
         ok: true,
@@ -891,6 +1079,7 @@ describe("Owner management-list contracts", () => {
       email: "taylor@example.invalid",
       profileId,
       role: "administrator",
+      roleRevision: 1,
       schoolId: alphaSchoolId,
     };
     const invitationItem = {
@@ -1054,6 +1243,7 @@ describe("Owner management-list contracts", () => {
           email: "taylor@example.invalid",
           profileId,
           role: "administrator",
+          roleRevision: 1,
           schoolId: alphaSchoolId,
         },
       ],
@@ -1151,6 +1341,12 @@ describe("operation-specific staff auth response contracts", () => {
       }),
     ).toEqual({ code: "membership_revoked", ok: true });
     expect(
+      parseChangeStaffMembershipRoleResponse({
+        code: "membership_role_changed",
+        ok: true,
+      }),
+    ).toEqual({ code: "membership_role_changed", ok: true });
+    expect(
       parseRequestStaffPasswordRecoveryResponse({
         code: "recovery_requested",
         ok: true,
@@ -1167,15 +1363,16 @@ describe("operation-specific staff auth response contracts", () => {
     ).toEqual({ code: "email_verified", ok: true });
   });
 
-  it.each(staffAuthErrorCodes)(
-    "accepts create-invitation product error %s",
-    (code) => {
-      expect(parseCreateStaffInvitationResponse({ code, ok: false })).toEqual({
-        code,
-        ok: false,
-      });
-    },
-  );
+  it.each(
+    staffAuthErrorCodes.filter(
+      (code) => code !== "membership_revision_conflict",
+    ),
+  )("accepts create-invitation product error %s", (code) => {
+    expect(parseCreateStaffInvitationResponse({ code, ok: false })).toEqual({
+      code,
+      ok: false,
+    });
+  });
 
   it("accepts only the documented failures for each remaining operation", () => {
     const cases = [
@@ -1216,6 +1413,21 @@ describe("operation-specific staff auth response contracts", () => {
           "authentication_required",
           "authorization_denied",
           "invalid_request",
+          "membership_revision_conflict",
+          "rate_limited",
+          "service_unavailable",
+          "session_expired",
+          "session_revoked",
+          "step_up_required",
+        ],
+      ],
+      [
+        parseChangeStaffMembershipRoleResponse,
+        [
+          "authentication_required",
+          "authorization_denied",
+          "invalid_request",
+          "membership_revision_conflict",
           "rate_limited",
           "service_unavailable",
           "session_expired",
@@ -1357,6 +1569,46 @@ describe("operation-specific staff auth response contracts", () => {
     ).toBeNull();
   });
 
+  it("keeps role-change outcomes exact and excludes them from unrelated operations", () => {
+    for (const response of [
+      { code: "membership_role_changed" },
+      { ok: true },
+      { code: "membership_role_changed", ok: false },
+      { code: "membership_revision_conflict", ok: true },
+      { code: "membership_revoked", ok: true },
+      { code: "invitation_not_found", ok: false },
+      { code: "conflict", ok: false },
+      { code: "membership_role_changed", ok: true, roleRevision: 2 },
+      { code: "membership_revision_conflict", ok: false, roleRevision: 2 },
+    ]) {
+      expect(parseChangeStaffMembershipRoleResponse(response)).toBeNull();
+    }
+    expect(
+      parseRevokeStaffMembershipResponse({
+        code: "membership_role_changed",
+        ok: true,
+      }),
+    ).toBeNull();
+    expect(
+      parseCreateStaffInvitationResponse({
+        code: "membership_revision_conflict",
+        ok: false,
+      }),
+    ).toBeNull();
+    expect(
+      parseAcceptStaffInvitationResponse({
+        code: "membership_revision_conflict",
+        ok: false,
+      }),
+    ).toBeNull();
+    expect(
+      parseRevokeStaffInvitationResponse({
+        code: "membership_revision_conflict",
+        ok: false,
+      }),
+    ).toBeNull();
+  });
+
   it("snapshots descriptor values instead of rereading a time-varying Proxy", () => {
     let propertyReads = 0;
     const source = { code: "invitation_created", ok: true };
@@ -1387,6 +1639,7 @@ describe("internal staff auth result mapping", () => {
     ["invitation_expired", "invitation_expired"],
     ["invitation_not_found", "invitation_not_found"],
     ["membership_inactive", "authorization_denied"],
+    ["membership_revision_conflict", "membership_revision_conflict"],
     ["rate_limited", "rate_limited"],
     ["session_expired", "session_expired"],
     ["session_revoked", "session_revoked"],
@@ -1430,6 +1683,13 @@ describe("internal staff auth result mapping", () => {
   });
 
   it("publishes create success only after the invitation becomes usable", () => {
+    expect(
+      mapCreateStaffInvitationInternalResult({
+        code: "membership_revision_conflict",
+        ok: false,
+        source: "rpc",
+      }),
+    ).toEqual({ code: "service_unavailable", ok: false });
     expect(
       mapCreateStaffInvitationInternalResult({
         code: "invitation_usable",

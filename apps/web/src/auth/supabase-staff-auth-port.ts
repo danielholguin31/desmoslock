@@ -2,6 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 
 import type {
   AcceptStaffInvitationRequest,
+  ChangeStaffMembershipRoleRequest,
   CreateStaffInvitationRequest,
   RequestStaffPasswordRecoveryRequest,
   RevokeStaffInvitationRequest,
@@ -23,6 +24,10 @@ interface SupabaseExternalResult {
 
 interface SupabaseExternalErrorResult {
   readonly error: unknown;
+}
+
+interface SupabaseExternalRpcRequest extends PromiseLike<SupabaseExternalResult> {
+  abortSignal?(signal: AbortSignal): PromiseLike<SupabaseExternalResult>;
 }
 
 /** The small, pinned supabase-js surface used by this adapter. */
@@ -91,7 +96,7 @@ export interface SupabaseStaffAuthClient {
     rpc(
       name: string,
       args?: Readonly<Record<string, unknown>>,
-    ): PromiseLike<SupabaseExternalResult>;
+    ): SupabaseExternalRpcRequest;
   };
 }
 
@@ -546,32 +551,51 @@ export function createSupabaseStaffAuthPort(
     recoveryAuthority = null;
   }
 
-  const passwordAuthorities = new Map<
+  let authorityGeneration = 0;
+  type AuthorityPurpose = "password" | "staff_management";
+  const capturedAuthorities = new Map<
     string,
     {
       readonly accessToken: string;
       readonly accountId: string;
       readonly expiresAt: number;
+      readonly purpose: AuthorityPurpose;
       readonly timeout: ReturnType<typeof setTimeout>;
       passwordAttempted: boolean;
     }
   >();
 
-  function releasePasswordAuthority(handle: string): void {
-    const authority = passwordAuthorities.get(handle);
+  function releaseCapturedAuthority(handle: string): void {
+    const authority = capturedAuthorities.get(handle);
     if (authority === undefined) return;
     clearTimeout(authority.timeout);
-    passwordAuthorities.delete(handle);
+    capturedAuthorities.delete(handle);
   }
 
-  function passwordAuthority(handle: string) {
-    const authority = passwordAuthorities.get(handle);
-    if (authority === undefined) return null;
+  function capturedAuthority(handle: string, purpose: AuthorityPurpose) {
+    const authority = capturedAuthorities.get(handle);
+    if (authority === undefined || authority.purpose !== purpose) return null;
     if (Date.now() >= authority.expiresAt) {
-      releasePasswordAuthority(handle);
+      releaseCapturedAuthority(handle);
       return null;
     }
     return authority;
+  }
+
+  function passwordAuthority(handle: string) {
+    return capturedAuthority(handle, "password");
+  }
+
+  function releasePasswordAuthority(handle: string): void {
+    if (capturedAuthorities.get(handle)?.purpose === "password") {
+      releaseCapturedAuthority(handle);
+    }
+  }
+
+  function releaseStaffManagementAuthority(handle: string): void {
+    if (capturedAuthorities.get(handle)?.purpose === "staff_management") {
+      releaseCapturedAuthority(handle);
+    }
   }
 
   async function directAuthorityRequest(
@@ -594,7 +618,9 @@ export function createSupabaseStaffAuthPort(
             "content-type": "application/json",
             ...(path.startsWith("/rest/v1/")
               ? { "content-profile": "desmoslock_v2" }
-              : { "x-supabase-api-version": "2024-01-01" }),
+              : path.startsWith("/functions/v1/")
+                ? { "x-client-info": "desmoslock-web" }
+                : { "x-supabase-api-version": "2024-01-01" }),
           },
           method,
           redirect: "error",
@@ -653,6 +679,22 @@ export function createSupabaseStaffAuthPort(
     return result?.status === 200 ? result.body : null;
   }
 
+  async function staffManagementRpc(
+    handle: string,
+    name: string,
+    args: Readonly<Record<string, unknown>>,
+  ): Promise<unknown> {
+    const authority = capturedAuthority(handle, "staff_management");
+    if (authority === null) return null;
+    const result = await directAuthorityRequest(
+      authority.accessToken,
+      `/rest/v1/rpc/${name}`,
+      "POST",
+      args,
+    );
+    return result?.status === 200 ? result.body : null;
+  }
+
   async function snapshotSessionAuthority(): Promise<
     | {
         readonly status: "ready";
@@ -701,24 +743,51 @@ export function createSupabaseStaffAuthPort(
     return code === "session_not_found" || code === "session_expired";
   }
 
-  async function rpc(
-    name: string,
-    args?: Readonly<Record<string, unknown>>,
+  async function boundedAuthorityRead(
+    read: (signal: AbortSignal) => PromiseLike<unknown>,
   ): Promise<unknown> {
+    const abort = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
-      const result =
-        args === undefined
-          ? await database.rpc(name)
-          : await database.rpc(name, args);
-      const snapshot = externalResult(result);
-      return snapshot?.error === null ? snapshot.data : null;
+      // Release the caller even when an SDK operation ignores cancellation.
+      // SDK-owned session refresh may still finish internally; its late result
+      // cannot resume this authority read or publish an old access grant.
+      return await Promise.race([
+        Promise.resolve().then(() => read(abort.signal)),
+        new Promise<null>((resolve) => {
+          timeout = setTimeout(() => {
+            resolve(null);
+            abort.abort();
+          }, 5_000);
+        }),
+      ]);
     } catch {
       return null;
+    } finally {
+      clearTimeout(timeout);
+      abort.abort();
     }
   }
 
+  async function readAuthorityRpc(
+    name:
+      | "current_staff_context"
+      | "current_staff_invitations"
+      | "current_manageable_staff"
+      | "current_manageable_staff_invitations",
+  ): Promise<unknown> {
+    const result = await boundedAuthorityRead((signal) => {
+      const request = database.rpc(name);
+      return request.abortSignal === undefined
+        ? request
+        : request.abortSignal(signal);
+    });
+    const snapshot = externalResult(result);
+    return snapshot?.error === null ? snapshot.data : null;
+  }
+
   async function invokeProductFunction(
-    name: "account-recovery" | "staff-invitations",
+    name: "account-recovery",
     body: unknown,
     parse: (value: unknown) => { readonly ok: boolean } | null,
   ): Promise<unknown> {
@@ -741,47 +810,63 @@ export function createSupabaseStaffAuthPort(
     return { code: "service_unavailable", ok: false };
   }
 
-  return {
-    async captureSignOutAuthority(expectedAccountId: string) {
-      try {
-        const snapshot = await snapshotSessionAuthority();
-        if (snapshot.status !== "ready") return { status: snapshot.status };
-        if (snapshot.accountId !== expectedAccountId) {
-          return { status: "rejected" };
-        }
-        const verified = await directAuthorityRequest(
-          snapshot.accessToken,
-          "/auth/v1/user",
-          "GET",
-        );
-        if (isEndedAuthorityResponse(verified)) return { status: "ended" };
-        if (verified?.status !== 200) return { status: "unavailable" };
-        const accountId = objectProperty(
-          objectProperty(verified.body, "user") ?? verified.body,
-          "id",
-        );
-        if (typeof accountId !== "string" || accountId.length === 0) {
-          return { status: "unavailable" };
-        }
-        if (accountId !== snapshot.accountId) return { status: "rejected" };
-        if (passwordAuthorities.size >= 16) return { status: "unavailable" };
-        const handle = crypto.randomUUID();
-        passwordAuthorities.set(handle, {
-          accessToken: snapshot.accessToken,
-          accountId,
-          expiresAt: Date.now() + 60_000,
-          passwordAttempted: false,
-          timeout: setTimeout(() => releasePasswordAuthority(handle), 60_000),
-        });
-        return { authorityHandle: handle, status: "ready" };
-      } catch {
+  async function captureAccountAuthority(
+    expectedAccountId: string,
+    purpose: AuthorityPurpose,
+  ) {
+    const generation = authorityGeneration;
+    try {
+      const snapshot = await snapshotSessionAuthority();
+      if (generation !== authorityGeneration) return { status: "unavailable" };
+      if (snapshot.status !== "ready") return { status: snapshot.status };
+      if (snapshot.accountId !== expectedAccountId) {
+        return { status: "rejected" };
+      }
+      const verified = await directAuthorityRequest(
+        snapshot.accessToken,
+        "/auth/v1/user",
+        "GET",
+      );
+      if (generation !== authorityGeneration) return { status: "unavailable" };
+      if (isEndedAuthorityResponse(verified)) return { status: "ended" };
+      if (verified?.status !== 200) return { status: "unavailable" };
+      const accountId = objectProperty(
+        objectProperty(verified.body, "user") ?? verified.body,
+        "id",
+      );
+      if (typeof accountId !== "string" || accountId.length === 0) {
         return { status: "unavailable" };
       }
+      if (accountId !== snapshot.accountId) return { status: "rejected" };
+      if (capturedAuthorities.size >= 16) return { status: "unavailable" };
+      const handle = crypto.randomUUID();
+      capturedAuthorities.set(handle, {
+        accessToken: snapshot.accessToken,
+        accountId,
+        expiresAt: Date.now() + 60_000,
+        passwordAttempted: false,
+        purpose,
+        timeout: setTimeout(() => releaseCapturedAuthority(handle), 60_000),
+      });
+      return { authorityHandle: handle, status: "ready" };
+    } catch {
+      return { status: "unavailable" };
+    }
+  }
+
+  return {
+    captureSignOutAuthority(expectedAccountId: string) {
+      return captureAccountAuthority(expectedAccountId, "password");
     },
+    captureStaffManagementAuthority(expectedAccountId: string) {
+      return captureAccountAuthority(expectedAccountId, "staff_management");
+    },
+    releaseStaffManagementAuthority,
     clearPrivateAuthContinuations() {
+      authorityGeneration += 1;
       clearRecoveryAuthority();
-      for (const handle of passwordAuthorities.keys()) {
-        releasePasswordAuthority(handle);
+      for (const handle of capturedAuthorities.keys()) {
+        releaseCapturedAuthority(handle);
       }
     },
     async capturePasswordAuthority(expectedAccountId?: string) {
@@ -841,14 +926,15 @@ export function createSupabaseStaffAuthPort(
         ) {
           return null;
         }
-        if (passwordAuthorities.size >= 16) return null;
+        if (capturedAuthorities.size >= 16) return null;
         const handle = crypto.randomUUID();
-        passwordAuthorities.set(handle, {
+        capturedAuthorities.set(handle, {
           accessToken,
           accountId,
           expiresAt: Date.now() + 60_000,
           passwordAttempted: false,
-          timeout: setTimeout(() => releasePasswordAuthority(handle), 60_000),
+          purpose: "password",
+          timeout: setTimeout(() => releaseCapturedAuthority(handle), 60_000),
         });
         return handle;
       } catch {
@@ -1067,12 +1153,24 @@ export function createSupabaseStaffAuthPort(
         operation_id: operationId,
       });
     },
-    invokeInvitation(request: CreateStaffInvitationRequest) {
-      return invokeProductFunction(
-        "staff-invitations",
+    async invokeInvitation(
+      request: CreateStaffInvitationRequest,
+      authorityHandle: string,
+    ) {
+      const authority = capturedAuthority(authorityHandle, "staff_management");
+      if (authority === null) return { code: "service_unavailable", ok: false };
+      const result = await directAuthorityRequest(
+        authority.accessToken,
+        "/functions/v1/staff-invitations",
+        "POST",
         request,
-        parseCreateStaffInvitationResponse,
       );
+      const parsed = parseCreateStaffInvitationResponse(result?.body);
+      return result !== null &&
+        parsed !== null &&
+        ((result.status >= 200 && result.status < 300) || !parsed.ok)
+        ? parsed
+        : { code: "service_unavailable", ok: false };
     },
     invokeRecovery(request: RequestStaffPasswordRecoveryRequest) {
       return invokeProductFunction(
@@ -1133,7 +1231,9 @@ export function createSupabaseStaffAuthPort(
     async readAssurance() {
       try {
         const result = externalResult(
-          await dependencies.client.auth.mfa.getAuthenticatorAssuranceLevel(),
+          await boundedAuthorityRead(() =>
+            dependencies.client.auth.mfa.getAuthenticatorAssuranceLevel(),
+          ),
         );
         if (result === null || result.error !== null) return null;
         const currentLevel = objectProperty(result.data, "currentLevel");
@@ -1154,21 +1254,23 @@ export function createSupabaseStaffAuthPort(
       }
     },
     readCurrentContext() {
-      return rpc("current_staff_context");
+      return readAuthorityRpc("current_staff_context");
     },
     readCurrentInvitations() {
-      return rpc("current_staff_invitations");
+      return readAuthorityRpc("current_staff_invitations");
     },
     readManageableInvitations() {
-      return rpc("current_manageable_staff_invitations");
+      return readAuthorityRpc("current_manageable_staff_invitations");
     },
     readManageableStaff() {
-      return rpc("current_manageable_staff");
+      return readAuthorityRpc("current_manageable_staff");
     },
     async readSession() {
       try {
         const result = externalResult(
-          await dependencies.client.auth.getSession(),
+          await boundedAuthorityRead(() =>
+            dependencies.client.auth.getSession(),
+          ),
         );
         if (result === null) return { status: "unavailable" };
         if (result.error !== null) {
@@ -1194,7 +1296,9 @@ export function createSupabaseStaffAuthPort(
     async readTotpFactors() {
       try {
         const result = externalResult(
-          await dependencies.client.auth.mfa.listFactors(),
+          await boundedAuthorityRead(() =>
+            dependencies.client.auth.mfa.listFactors(),
+          ),
         );
         if (result === null || result.error !== null) return null;
         const all = objectProperty(result.data, "all");
@@ -1275,14 +1379,32 @@ export function createSupabaseStaffAuthPort(
     revokeCurrentStaffSession(authorityHandle: string) {
       return authorityRpc(authorityHandle, "revoke_current_staff_session", {});
     },
-    revokeInvitation(request: RevokeStaffInvitationRequest) {
-      return rpc("revoke_staff_invitation", {
+    revokeInvitation(
+      request: RevokeStaffInvitationRequest,
+      authorityHandle: string,
+    ) {
+      return staffManagementRpc(authorityHandle, "revoke_staff_invitation", {
         invitation_id: request.invitationId,
       });
     },
-    revokeMembership(request: RevokeStaffMembershipRequest) {
-      return rpc("revoke_membership", {
+    revokeMembership(
+      request: RevokeStaffMembershipRequest,
+      authorityHandle: string,
+    ) {
+      return staffManagementRpc(authorityHandle, "revoke_membership", {
+        expected_role_revision: request.expectedRoleRevision,
         profile_id: request.profileId,
+        workspace_id: request.schoolId,
+      });
+    },
+    changeMembershipRole(
+      request: ChangeStaffMembershipRoleRequest,
+      authorityHandle: string,
+    ) {
+      return staffManagementRpc(authorityHandle, "change_membership_role", {
+        expected_role_revision: request.expectedRoleRevision,
+        profile_id: request.profileId,
+        role: request.role === "administrator" ? "admin" : request.role,
         workspace_id: request.schoolId,
       });
     },

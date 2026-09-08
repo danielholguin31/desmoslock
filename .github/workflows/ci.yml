@@ -125,6 +125,7 @@ jobs:
           test "$(node --version)" = "v24.20.0"
           test "$(npm --version)" = "11.12.1"
       - run: npm ci
+      - run: npx playwright install --with-deps chromium
       - run: npm run db:start:full
       - run: npm run db:reset
       - run: npm run test:staff-auth

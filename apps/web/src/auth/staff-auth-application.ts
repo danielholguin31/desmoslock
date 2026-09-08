@@ -72,6 +72,7 @@ export interface StaffAuthApplicationElements {
 
 export interface StaffAuthApplicationLifecycleHandlers {
   dispose(): void;
+  refreshMembership(): Promise<void>;
   resume(): Promise<void>;
   suspend(): void;
 }
@@ -267,6 +268,7 @@ interface StaffAuthApplicationGeneration {
   readonly initialization: Promise<unknown>;
   disposeView: (() => void) | null;
   disposed: boolean;
+  membershipRefresh: Promise<void> | null;
 }
 
 function startScrubbedStaffAuthApplication(
@@ -359,6 +361,7 @@ function startScrubbedStaffAuthApplication(
         controller,
         disposeView: null,
         disposed: false,
+        membershipRefresh: null,
         initialization: options.bootstrap
           ? controller.dispatch({ type: "bootstrap" })
           : Promise.resolve(controller.getSnapshot()),
@@ -467,6 +470,30 @@ function startScrubbedStaffAuthApplication(
     disposeGeneration(generation);
   }
 
+  function refreshMembership(): Promise<void> {
+    const generation = currentGeneration;
+    if (generation === null || !generationIsCurrent(generation)) {
+      return Promise.resolve();
+    }
+    if (generation.membershipRefresh !== null) {
+      return generation.membershipRefresh;
+    }
+    const refresh = generation.initialization
+      .catch(() => undefined)
+      .then(async () => {
+        if (!generationIsCurrent(generation)) return;
+        await generation.controller.refreshMembership();
+      })
+      .catch(() => undefined);
+    generation.membershipRefresh = refresh;
+    void refresh.then(() => {
+      if (generation.membershipRefresh === refresh) {
+        generation.membershipRefresh = null;
+      }
+    });
+    return refresh;
+  }
+
   function resume(): Promise<void> {
     if (terminallyDisposed) return Promise.resolve();
     if (!suspended) return resumeInFlight ?? Promise.resolve();
@@ -533,6 +560,7 @@ function startScrubbedStaffAuthApplication(
   const application: StartedStaffAuthApplication = {
     dispose,
     ready,
+    refreshMembership,
     resume,
     suspend,
   };
@@ -572,6 +600,10 @@ function createInertStaffAuthApplication(
   return {
     dispose: keepInert,
     ready: Promise.resolve(),
+    refreshMembership() {
+      keepInert();
+      return Promise.resolve();
+    },
     resume() {
       keepInert();
       return Promise.resolve();

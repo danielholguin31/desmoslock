@@ -17,11 +17,15 @@ export type StaffAuthViewActionId =
   | "create_teacher_invitation"
   | "confirm_staff_invitation_revocation"
   | "confirm_staff_membership_revocation"
+  | "confirm_staff_membership_role_change"
   | "cancel_staff_invitation_revocation"
   | "cancel_staff_membership_revocation"
+  | "cancel_staff_membership_role_change"
+  | "refresh_staff"
   | "request_recovery"
   | "review_staff_invitation_revocation"
   | "review_staff_membership_revocation"
+  | "review_staff_membership_role_change"
   | "resend_email_verification"
   | "retry"
   | "revoke_all_sessions"
@@ -31,6 +35,7 @@ export type StaffAuthViewActionId =
   | "verify_totp";
 
 export interface StaffAuthViewAction {
+  readonly disabled?: boolean;
   readonly group?: "invitation" | "membership" | "session";
   readonly id: StaffAuthViewActionId;
   readonly label: string;
@@ -93,6 +98,7 @@ export interface StaffAuthViewImage {
 export interface StaffAuthViewModel {
   readonly actions: readonly StaffAuthViewAction[];
   readonly fields: readonly StaffAuthViewField[];
+  readonly groupMessages?: Partial<Record<"invitation" | "membership", string>>;
   readonly heading: string;
   readonly image?: StaffAuthViewImage;
   readonly message: string;
@@ -124,6 +130,7 @@ export type StaffAuthViewIntent =
   | { readonly type: "confirm_callback" }
   | { readonly type: "bootstrap" }
   | { readonly type: "back_to_sign_in" }
+  | { readonly type: "refresh_staff" }
   | { readonly password: string; readonly type: "complete_password_recovery" }
   | {
       readonly email: string;
@@ -137,6 +144,11 @@ export type StaffAuthViewIntent =
       readonly type: "review_staff_membership_revocation";
     }
   | {
+      readonly profileId: string;
+      readonly schoolId: string;
+      readonly type: "review_staff_membership_role_change";
+    }
+  | {
       readonly invitationId: string;
       readonly schoolId: string;
       readonly type: "review_staff_invitation_revocation";
@@ -144,7 +156,9 @@ export type StaffAuthViewIntent =
   | { readonly type: "confirm_staff_invitation_revocation" }
   | { readonly type: "cancel_staff_invitation_revocation" }
   | { readonly type: "confirm_staff_membership_revocation" }
-  | { readonly type: "cancel_staff_membership_revocation" };
+  | { readonly type: "cancel_staff_membership_revocation" }
+  | { readonly type: "confirm_staff_membership_role_change" }
+  | { readonly type: "cancel_staff_membership_role_change" };
 
 const emailField: StaffAuthViewField = {
   autocomplete: "email",
@@ -511,62 +525,124 @@ export function createStaffAuthViewModel(
 
   if (snapshot.kind === "authenticated") {
     const role = snapshot.identity.membership.role;
-    const ownerActions: StaffAuthViewAction[] =
-      role === "owner"
-        ? [
-            {
-              group: "invitation",
-              id: "create_administrator_invitation",
-              label: "Invite Administrator",
-            },
-            {
-              group: "invitation",
-              id: "create_teacher_invitation",
-              label: "Invite Teacher",
-            },
-            {
-              group: "invitation",
-              id: "review_staff_invitation_revocation",
-              label: "Review pending invitation revocation",
-              tone: "danger",
-            },
-            {
-              group: "membership",
-              id: "review_staff_membership_revocation",
-              label: "Review staff access revocation",
-              tone: "danger",
-            },
-          ]
-        : [];
+    const canManage =
+      snapshot.assuranceLevel === "aal2" &&
+      (role === "owner" || role === "administrator");
+    const manageableInvitations = snapshot.manageableInvitations.filter(
+      (entry) =>
+        entry.schoolId === snapshot.identity.school.id &&
+        (entry.role === "teacher" ||
+          (role === "owner" && entry.role === "administrator")),
+    );
+    const manageableStaff = snapshot.manageableStaff.filter(
+      (entry) =>
+        entry.schoolId === snapshot.identity.school.id &&
+        entry.profile.id !== snapshot.identity.profile.id &&
+        (entry.role === "teacher" ||
+          (role === "owner" && entry.role === "administrator")),
+    );
+    const managementActions: StaffAuthViewAction[] = canManage
+      ? [
+          ...(role === "owner"
+            ? [
+                {
+                  group: "invitation" as const,
+                  id: "create_administrator_invitation" as const,
+                  label: "Invite Administrator",
+                },
+              ]
+            : []),
+          {
+            group: "invitation",
+            id: "create_teacher_invitation",
+            label: "Invite Teacher",
+          },
+          {
+            disabled: manageableInvitations.length === 0,
+            group: "invitation",
+            id: "review_staff_invitation_revocation",
+            label: "Review pending invitation revocation",
+            tone: "danger",
+          },
+          {
+            disabled: manageableStaff.length === 0,
+            group: "membership",
+            id: "review_staff_membership_revocation",
+            label: "Review staff access revocation",
+            tone: "danger",
+          },
+          ...(role === "owner"
+            ? [
+                {
+                  disabled: manageableStaff.length === 0,
+                  group: "membership" as const,
+                  id: "review_staff_membership_role_change" as const,
+                  label: "Review role change",
+                },
+              ]
+            : []),
+        ]
+      : [];
+    const notice =
+      snapshot.notice === "staff_access_changed"
+        ? "Your School access changed. "
+        : snapshot.notice === "staff_selection_changed"
+          ? "Staff access changed while you were reviewing it. Review the current staff details before continuing. "
+          : "";
     return {
       actions: [
-        ...ownerActions,
+        ...managementActions,
         {
-          ...(role === "owner" ? { group: "session" as const } : {}),
+          ...(canManage ? { group: "session" as const } : {}),
           id: "sign_out_local",
           label: "Sign out here",
         },
         {
-          ...(role === "owner" ? { group: "session" as const } : {}),
+          ...(canManage ? { group: "session" as const } : {}),
           id: "revoke_all_sessions",
           label: "Sign out everywhere",
           tone: "danger",
         },
       ],
-      fields: role === "owner" ? [targetEmailField] : [],
+      fields: canManage ? [targetEmailField] : [],
+      ...(canManage
+        ? {
+            groupMessages: {
+              ...(manageableInvitations.length === 0
+                ? {
+                    invitation:
+                      role === "owner"
+                        ? "No pending Administrator or Teacher invitations."
+                        : "No pending Teacher invitations.",
+                  }
+                : {}),
+              ...(manageableStaff.length === 0
+                ? {
+                    membership:
+                      role === "owner"
+                        ? "No active Administrators or Teachers to manage."
+                        : "No active Teachers.",
+                  }
+                : {}),
+            },
+          }
+        : {}),
       heading: `${roleLabel(role)} access`,
-      message: `Signed in as ${snapshot.identity.email} at ${snapshot.identity.school.label}${
+      message: `${notice}Signed in as ${snapshot.identity.email} at ${snapshot.identity.school.label}${
         snapshot.assuranceLevel === "aal2" ? " with step-up verification" : ""
       }.`,
       status: snapshot.kind,
-      ...(role === "owner"
+      ...(canManage
         ? {
             selects: [
               {
                 group: "invitation" as const,
                 id: "staff_invitation" as const,
-                label: "Pending Administrator or Teacher invitation",
-                options: snapshot.manageableInvitations.map((entry) => ({
+                label:
+                  role === "owner"
+                    ? "Pending Administrator or Teacher invitation"
+                    : "Pending Teacher invitation",
+                options: manageableInvitations.map((entry) => ({
                   invitationId: entry.invitationId,
                   label: `${entry.email} — ${roleLabel(entry.role)} — ${entry.state === "delivery_unconfirmed" ? "email dispatch unconfirmed" : "email provider accepted dispatch"} — expires ${entry.expiresAt}`,
                   schoolId: entry.schoolId,
@@ -576,8 +652,9 @@ export function createStaffAuthViewModel(
               {
                 group: "membership" as const,
                 id: "staff_membership" as const,
-                label: "Administrator or Teacher",
-                options: snapshot.manageableStaff.map((entry) => ({
+                label:
+                  role === "owner" ? "Administrator or Teacher" : "Teacher",
+                options: manageableStaff.map((entry) => ({
                   label: `${entry.profile.displayName} — ${entry.profile.email} — ${roleLabel(entry.role)}`,
                   profileId: entry.profile.id,
                   schoolId: entry.schoolId,
@@ -587,7 +664,71 @@ export function createStaffAuthViewModel(
             ],
           }
         : {}),
+      tone: snapshot.notice === undefined ? "success" : "warning",
+    };
+  }
+
+  if (snapshot.kind === "confirming_staff_membership_role_change") {
+    return {
+      actions: [
+        {
+          id: "confirm_staff_membership_role_change",
+          label: `Make ${roleLabel(snapshot.targetRole)}`,
+        },
+        { id: "cancel_staff_membership_role_change", label: "Cancel" },
+      ],
+      fields: [],
+      heading: "Confirm staff role change",
+      message: `Change ${snapshot.target.displayName} (${snapshot.target.email}) from ${roleLabel(snapshot.target.role)} to ${roleLabel(snapshot.targetRole)} at ${snapshot.schoolLabel}?`,
+      status: snapshot.kind,
+      tone: "warning",
+    };
+  }
+
+  if (snapshot.kind === "staff_membership_role_changed") {
+    return {
+      actions: [{ id: "refresh_staff", label: "Refresh staff" }],
+      fields: [],
+      heading: "Staff role changed",
+      message: `Changed ${snapshot.targetName}’s role to ${roleLabel(snapshot.targetRole)} at ${snapshot.schoolLabel}.`,
+      status: snapshot.kind,
       tone: "success",
+    };
+  }
+
+  if (snapshot.kind === "staff_membership_revision_conflict") {
+    return {
+      actions: [{ id: "refresh_staff", label: "Refresh staff" }],
+      fields: [],
+      heading: "Staff access changed",
+      message:
+        "Staff access changed while you were reviewing it. Refresh staff and review the current details before confirming again.",
+      status: snapshot.kind,
+      tone: "warning",
+    };
+  }
+
+  if (snapshot.kind === "staff_membership_role_change_unconfirmed") {
+    return {
+      actions: [{ id: "refresh_staff", label: "Refresh staff" }],
+      fields: [],
+      heading: "Role change unconfirmed",
+      message:
+        "We could not confirm the role change. Refresh staff to check current access before reviewing another change.",
+      status: snapshot.kind,
+      tone: "warning",
+    };
+  }
+
+  if (snapshot.kind === "staff_membership_role_change_rejected") {
+    return {
+      actions: [{ id: "refresh_staff", label: "Refresh staff" }],
+      fields: [],
+      heading: "Role change unavailable",
+      message:
+        "Your current access cannot make this change, or the staff member is unavailable to manage. Refresh staff to check current access.",
+      status: snapshot.kind,
+      tone: "warning",
     };
   }
 
@@ -728,6 +869,20 @@ export function createStaffAuthViewModel(
 
   if (snapshot.kind === "dependency_failure") {
     if (
+      snapshot.operation === "staff_membership" ||
+      snapshot.operation === "staff_invitation_revocation"
+    ) {
+      return {
+        actions: [{ id: "refresh_staff", label: "Refresh staff" }],
+        fields: [],
+        heading: "Revocation unconfirmed",
+        message:
+          "We could not confirm the revocation. Refresh staff to check current access before reviewing another change.",
+        status: snapshot.kind,
+        tone: "warning",
+      };
+    }
+    if (
       snapshot.operation === "local_logout" ||
       snapshot.operation === "revoke_all_sessions"
     ) {
@@ -764,6 +919,17 @@ export function createStaffAuthViewModel(
       fields: [],
       heading: "Authentication view closed",
       message: "This authentication view is no longer active.",
+      status: snapshot.kind,
+      tone: "info",
+    };
+  }
+
+  if (snapshot.kind === "changing_staff_membership_role") {
+    return {
+      actions: [],
+      fields: [],
+      heading: `Changing staff role to ${roleLabel(snapshot.targetRole)}`,
+      message: "Please wait.",
       status: snapshot.kind,
       tone: "info",
     };
@@ -824,6 +990,251 @@ export function createStaffAuthViewModel(
   return assertNever(snapshot);
 }
 
+type AuthenticatedSnapshot = Extract<
+  StaffAuthSnapshot,
+  { kind: "authenticated" }
+>;
+type ReviewAction =
+  | "review_staff_membership_revocation"
+  | "review_staff_membership_role_change"
+  | "review_staff_invitation_revocation";
+type CancelAction =
+  | "cancel_staff_membership_revocation"
+  | "cancel_staff_membership_role_change"
+  | "cancel_staff_invitation_revocation";
+
+interface RenderedManagement {
+  attached: boolean;
+  readonly buttons: Map<StaffAuthViewActionId, HTMLButtonElement>;
+  readonly groupMessages: Partial<
+    Record<"invitation" | "membership", HTMLElement>
+  >;
+  readonly heading: HTMLHeadingElement;
+  readonly message: HTMLParagraphElement;
+  onIntent: (intent: StaffAuthViewIntent) => Promise<void> | void;
+  restoreRequested: boolean;
+  reviewAction?: ReviewAction;
+  readonly section: HTMLElement;
+  readonly selects: Partial<
+    Record<StaffAuthViewSelect["id"], HTMLSelectElement>
+  >;
+  staleSelection?: "staff_invitation" | "staff_membership";
+  snapshot: AuthenticatedSnapshot;
+  view: StaffAuthViewModel;
+}
+
+// Only authenticated, nonsecret form controls are retained. Callback, password,
+// recovery and MFA surfaces never enter this cache, and identity changes drop it.
+const renderedManagement = new WeakMap<HTMLElement, RenderedManagement>();
+
+function sameManagementAuthority(
+  left: AuthenticatedSnapshot,
+  right: AuthenticatedSnapshot,
+): boolean {
+  return (
+    left.identityGeneration === right.identityGeneration &&
+    left.sessionGeneration === right.sessionGeneration &&
+    left.assuranceLevel === right.assuranceLevel &&
+    left.identity.accountId === right.identity.accountId &&
+    left.identity.email === right.identity.email &&
+    left.identity.profile.id === right.identity.profile.id &&
+    left.identity.school.id === right.identity.school.id &&
+    left.identity.membership.id === right.identity.membership.id &&
+    left.identity.membership.role === right.identity.membership.role
+  );
+}
+
+function isReviewAction(action: StaffAuthViewActionId): action is ReviewAction {
+  return (
+    action === "review_staff_membership_revocation" ||
+    action === "review_staff_membership_role_change" ||
+    action === "review_staff_invitation_revocation"
+  );
+}
+
+function isCancelAction(action: StaffAuthViewActionId): action is CancelAction {
+  return (
+    action === "cancel_staff_membership_revocation" ||
+    action === "cancel_staff_membership_role_change" ||
+    action === "cancel_staff_invitation_revocation"
+  );
+}
+
+function cancelMatchesReview(
+  action: CancelAction,
+  review: ReviewAction | undefined,
+): boolean {
+  return (
+    (action === "cancel_staff_membership_revocation" &&
+      review === "review_staff_membership_revocation") ||
+    (action === "cancel_staff_membership_role_change" &&
+      review === "review_staff_membership_role_change") ||
+    (action === "cancel_staff_invitation_revocation" &&
+      review === "review_staff_invitation_revocation")
+  );
+}
+
+function isReviewedConfirmation(
+  kind: StaffAuthSnapshot["kind"],
+  review: ReviewAction | undefined,
+): boolean {
+  return (
+    (kind === "confirming_staff_membership_revocation" &&
+      review === "review_staff_membership_revocation") ||
+    (kind === "confirming_staff_membership_role_change" &&
+      review === "review_staff_membership_role_change") ||
+    (kind === "confirming_staff_invitation_revocation" &&
+      review === "review_staff_invitation_revocation")
+  );
+}
+
+function populateSelect(
+  document: Document,
+  select: HTMLSelectElement,
+  model: StaffAuthViewSelect,
+  value = "",
+): void {
+  const placeholder = document.createElement("option");
+  placeholder.disabled = true;
+  placeholder.selected = value === "";
+  placeholder.textContent =
+    model.id === "staff_invitation"
+      ? "Select pending invitation"
+      : model.id === "totp_factor"
+        ? "Select authenticator"
+        : "Select staff member";
+  placeholder.value = "";
+  const options = model.options.map((optionModel) => {
+    const option = document.createElement("option");
+    option.textContent = optionModel.label;
+    option.value = optionModel.value;
+    return option;
+  });
+  select.replaceChildren(placeholder, ...options);
+  select.disabled = model.options.length === 0;
+  select.value = model.options.some((option) => option.value === value)
+    ? value
+    : "";
+}
+
+function selectionUnchanged(
+  id: StaffAuthViewSelect["id"],
+  value: string,
+  previous: AuthenticatedSnapshot,
+  next: AuthenticatedSnapshot,
+): boolean {
+  if (value === "") return true;
+  if (id === "staff_membership") {
+    const before = previous.manageableStaff.find(
+      (entry) => entry.profile.id === value,
+    );
+    const after = next.manageableStaff.find(
+      (entry) => entry.profile.id === value,
+    );
+    return (
+      before !== undefined &&
+      after !== undefined &&
+      before.schoolId === after.schoolId &&
+      before.role === after.role &&
+      before.roleRevision === after.roleRevision &&
+      before.profile.displayName === after.profile.displayName &&
+      before.profile.email === after.profile.email
+    );
+  }
+  if (id === "staff_invitation") {
+    const before = previous.manageableInvitations.find(
+      (entry) => entry.invitationId === value,
+    );
+    const after = next.manageableInvitations.find(
+      (entry) => entry.invitationId === value,
+    );
+    return (
+      before !== undefined &&
+      after !== undefined &&
+      before.schoolId === after.schoolId &&
+      before.role === after.role &&
+      before.email === after.email &&
+      before.expiresAt === after.expiresAt &&
+      before.state === after.state
+    );
+  }
+  return false;
+}
+
+function refreshManagementView(
+  root: HTMLElement,
+  rendered: RenderedManagement,
+  snapshot: AuthenticatedSnapshot,
+  view: StaffAuthViewModel,
+  onIntent: RenderedManagement["onIntent"],
+): void {
+  const wasDetached = !rendered.attached;
+  for (const model of view.selects ?? []) {
+    const select = rendered.selects[model.id];
+    if (select === undefined) continue;
+    const value =
+      rendered.staleSelection !== model.id &&
+      selectionUnchanged(model.id, select.value, rendered.snapshot, snapshot)
+        ? select.value
+        : "";
+    const oldModel = rendered.view.selects?.find(
+      (entry) => entry.id === model.id,
+    );
+    if (JSON.stringify(oldModel?.options) !== JSON.stringify(model.options)) {
+      populateSelect(root.ownerDocument, select, model, value);
+    } else if (select.value !== value) {
+      select.value = value;
+    }
+  }
+  for (const action of view.actions) {
+    const button = rendered.buttons.get(action.id);
+    if (button !== undefined) {
+      button.disabled = action.disabled ?? false;
+      button.textContent = action.label;
+    }
+  }
+  for (const group of ["invitation", "membership"] as const) {
+    const message = rendered.groupMessages[group];
+    if (message !== undefined) {
+      message.textContent = view.groupMessages?.[group] ?? "";
+      message.hidden = view.groupMessages?.[group] === undefined;
+    }
+  }
+  rendered.heading.textContent = view.heading;
+  rendered.message.textContent = view.message;
+  rendered.message.setAttribute(
+    "aria-live",
+    view.tone === "danger" ? "assertive" : "polite",
+  );
+  rendered.section.dataset.authTone = view.tone;
+  rendered.snapshot = snapshot;
+  rendered.view = view;
+  rendered.onIntent = onIntent;
+  rendered.attached = true;
+  rendered.restoreRequested = false;
+  if (wasDetached) {
+    root.replaceChildren(rendered.section);
+    const selection =
+      rendered.reviewAction === "review_staff_invitation_revocation"
+        ? rendered.selects.staff_invitation
+        : rendered.selects.staff_membership;
+    const button =
+      rendered.reviewAction === undefined
+        ? undefined
+        : rendered.buttons.get(rendered.reviewAction);
+    if (selection?.value && button !== undefined && !button.disabled) {
+      button.focus();
+    } else if (selection !== undefined && !selection.disabled) {
+      selection.focus();
+    } else {
+      rendered.heading.tabIndex = -1;
+      rendered.heading.focus();
+    }
+  }
+  delete rendered.reviewAction;
+  delete rendered.staleSelection;
+}
+
 export function renderStaffAuthView(
   root: HTMLElement,
   snapshot: StaffAuthSnapshot,
@@ -831,6 +1242,50 @@ export function renderStaffAuthView(
 ): void {
   const document = root.ownerDocument;
   const view = createStaffAuthViewModel(snapshot);
+  const previous = renderedManagement.get(root);
+  const invitationSelectionChanged =
+    snapshot.kind === "authenticated" &&
+    snapshot.notice === "staff_selection_changed" &&
+    previous !== undefined &&
+    !previous.attached &&
+    previous.reviewAction === "review_staff_invitation_revocation";
+  if (invitationSelectionChanged) {
+    previous.staleSelection = "staff_invitation";
+  }
+  if (
+    snapshot.kind === "authenticated" &&
+    previous !== undefined &&
+    sameManagementAuthority(previous.snapshot, snapshot) &&
+    (previous.attached ||
+      previous.restoreRequested ||
+      invitationSelectionChanged)
+  ) {
+    refreshManagementView(root, previous, snapshot, view, onIntent);
+    return;
+  }
+  if (
+    previous !== undefined &&
+    isReviewedConfirmation(snapshot.kind, previous.reviewAction)
+  ) {
+    previous.attached = false;
+  } else if (
+    previous !== undefined &&
+    snapshot.kind === "staff_membership_revision_conflict" &&
+    (previous.reviewAction === "review_staff_membership_role_change" ||
+      previous.reviewAction === "review_staff_membership_revocation")
+  ) {
+    previous.attached = false;
+    previous.staleSelection = "staff_membership";
+  } else if (
+    previous?.restoreRequested &&
+    previous.staleSelection !== undefined &&
+    snapshot.kind === "bootstrapping"
+  ) {
+    previous.attached = false;
+  } else {
+    renderedManagement.delete(root);
+  }
+  let management: RenderedManagement | undefined;
   const section = document.createElement("section");
   section.className = "staff-auth";
   section.dataset.authStatus = view.status;
@@ -859,6 +1314,10 @@ export function renderStaffAuthView(
     {};
   const selects: Partial<Record<StaffAuthViewSelect["id"], HTMLSelectElement>> =
     {};
+  const buttons = new Map<StaffAuthViewActionId, HTMLButtonElement>();
+  const groupMessages: Partial<
+    Record<"invitation" | "membership", HTMLElement>
+  > = {};
   const reportIntentFailure = () => {
     section.dataset.authTone = "danger";
     message.setAttribute("aria-live", "assertive");
@@ -868,6 +1327,12 @@ export function renderStaffAuthView(
     message.focus();
   };
   const emit = (action: StaffAuthViewActionId) => {
+    const currentView = management?.view ?? view;
+    const currentSnapshot = management?.snapshot ?? snapshot;
+    const currentAction = currentView.actions.find(
+      (candidate) => candidate.id === action,
+    );
+    if (currentAction === undefined || currentAction.disabled) return;
     if (
       action === "accept_invitation" &&
       parseStaffDisplayName(inputs.display_name?.value) === null
@@ -881,7 +1346,13 @@ export function renderStaffAuthView(
       return;
     }
     inputs.display_name?.removeAttribute("aria-invalid");
-    const intent = createIntent(action, inputs, selects, view, snapshot);
+    const intent = createIntent(
+      action,
+      inputs,
+      selects,
+      currentView,
+      currentSnapshot,
+    );
     if (intent === null) {
       const pendingInvitation = action === "review_staff_invitation_revocation";
       const pendingFactor = action === "select_totp_factor";
@@ -889,8 +1360,8 @@ export function renderStaffAuthView(
       message.textContent = pendingFactor
         ? "Select an authenticator to continue."
         : pendingInvitation
-          ? "Select a pending Administrator or Teacher invitation to continue."
-          : "Select an Administrator or Teacher to continue.";
+          ? "Select a pending invitation to continue."
+          : "Select a staff member to continue.";
       (pendingFactor
         ? selects.totp_factor
         : pendingInvitation
@@ -899,9 +1370,30 @@ export function renderStaffAuthView(
       )?.focus();
       return;
     }
+    if (isReviewAction(action) && management !== undefined) {
+      management.reviewAction = action;
+      management.restoreRequested = false;
+    } else if (isCancelAction(action)) {
+      const retained = renderedManagement.get(root);
+      if (
+        retained !== undefined &&
+        cancelMatchesReview(action, retained.reviewAction)
+      ) {
+        retained.restoreRequested = true;
+      }
+    } else if (currentSnapshot.kind !== "authenticated") {
+      const retained = renderedManagement.get(root);
+      if (action === "refresh_staff" && retained?.staleSelection) {
+        retained.restoreRequested = true;
+      } else if (
+        !isReviewedConfirmation(currentSnapshot.kind, retained?.reviewAction)
+      ) {
+        renderedManagement.delete(root);
+      }
+    }
     let outcome: Promise<void> | void;
     try {
-      outcome = onIntent(intent);
+      outcome = (management?.onIntent ?? onIntent)(intent);
     } catch {
       reportIntentFailure();
       return;
@@ -939,12 +1431,19 @@ export function renderStaffAuthView(
       const legend = document.createElement("legend");
       legend.textContent = {
         invitation: "Manage staff invitations",
-        membership: "Revoke staff access",
+        membership: "Manage staff access",
         session: "Session controls",
       }[group];
       fieldset.append(legend);
       controls.append(fieldset);
       container = fieldset;
+      if (group === "invitation" || group === "membership") {
+        const emptyMessage = document.createElement("p");
+        emptyMessage.textContent = view.groupMessages?.[group] ?? "";
+        emptyMessage.hidden = view.groupMessages?.[group] === undefined;
+        groupMessages[group] = emptyMessage;
+        container.append(emptyMessage);
+      }
     }
     for (const field of fields) {
       const label = document.createElement("label");
@@ -971,23 +1470,7 @@ export function renderStaffAuthView(
       const select = document.createElement("select");
       select.name = field.id;
       select.required = true;
-      const placeholder = document.createElement("option");
-      placeholder.disabled = true;
-      placeholder.selected = true;
-      placeholder.textContent =
-        field.id === "staff_invitation"
-          ? "Select pending invitation"
-          : field.id === "totp_factor"
-            ? "Select authenticator"
-            : "Select staff member";
-      placeholder.value = "";
-      select.append(placeholder);
-      for (const optionModel of field.options) {
-        const option = document.createElement("option");
-        option.textContent = optionModel.label;
-        option.value = optionModel.value;
-        select.append(option);
-      }
+      populateSelect(document, select, field);
       selects[field.id] = select;
       label.append(labelText, select);
       container.append(label);
@@ -1008,6 +1491,8 @@ export function renderStaffAuthView(
         button.dataset.authActionTone = action.tone;
       }
       button.textContent = action.label;
+      button.disabled = action.disabled ?? false;
+      buttons.set(action.id, button);
       button.type = isPrimary ? "submit" : "button";
       if (!isPrimary) {
         button.addEventListener("click", (event) => {
@@ -1020,6 +1505,22 @@ export function renderStaffAuthView(
     section.append(controls);
   }
   root.replaceChildren(section);
+  if (snapshot.kind === "authenticated") {
+    management = {
+      attached: true,
+      buttons,
+      groupMessages,
+      heading,
+      message,
+      onIntent,
+      restoreRequested: false,
+      section,
+      selects,
+      snapshot,
+      view,
+    };
+    renderedManagement.set(root, management);
+  }
   const firstInput = Object.values(inputs)[0];
   const firstControl = firstInput ?? Object.values(selects)[0];
   if (firstControl !== undefined) {
@@ -1084,6 +1585,8 @@ function createIntent(
       return { type: "back_to_sign_in" };
     case "continue_authenticated":
       return { type: "bootstrap" };
+    case "refresh_staff":
+      return { type: "refresh_staff" };
     case "complete_password_recovery":
       return {
         password: inputs.new_password?.value ?? "",
@@ -1093,7 +1596,12 @@ function createIntent(
     case "create_teacher_invitation": {
       if (
         snapshot.kind !== "authenticated" ||
-        snapshot.identity.membership.role !== "owner"
+        snapshot.assuranceLevel !== "aal2" ||
+        (snapshot.identity.membership.role !== "owner" &&
+          !(
+            snapshot.identity.membership.role === "administrator" &&
+            action === "create_teacher_invitation"
+          ))
       ) {
         return null;
       }
@@ -1105,7 +1613,8 @@ function createIntent(
         type: "create_staff_invitation",
       };
     }
-    case "review_staff_membership_revocation": {
+    case "review_staff_membership_revocation":
+    case "review_staff_membership_role_change": {
       const selectedValue = selects.staff_membership?.value ?? "";
       const selected = view.selects
         ?.find((model) => model.id === "staff_membership")
@@ -1115,7 +1624,7 @@ function createIntent(
         : {
             profileId: selected.profileId,
             schoolId: selected.schoolId,
-            type: "review_staff_membership_revocation",
+            type: action,
           };
     }
     case "review_staff_invitation_revocation": {
@@ -1139,6 +1648,10 @@ function createIntent(
       return { type: "confirm_staff_membership_revocation" };
     case "cancel_staff_membership_revocation":
       return { type: "cancel_staff_membership_revocation" };
+    case "confirm_staff_membership_role_change":
+      return { type: "confirm_staff_membership_role_change" };
+    case "cancel_staff_membership_role_change":
+      return { type: "cancel_staff_membership_role_change" };
   }
 }
 
@@ -1186,6 +1699,7 @@ export function bindStaffAuthView(
     bound = false;
     unsubscribe();
     controller.dispose();
+    renderedManagement.delete(root);
     root.replaceChildren();
   };
 }

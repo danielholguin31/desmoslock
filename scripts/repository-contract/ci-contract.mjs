@@ -54,6 +54,13 @@ export function assertStaffAuthCiWorkflow(ciWorkflow) {
     );
   }
   if (
+    !/^ {6}- run: npx playwright install --with-deps chromium$/mu.test(
+      lifecycleJob,
+    )
+  ) {
+    fail("Required staff Auth live-backend browser CI must provision Chromium");
+  }
+  if (
     !/- run: npm run db:start:full\s+[\s\S]*?- run: npm run db:reset\s+[\s\S]*?- run: npm run test:staff-auth\s+[\s\S]*?- if: always\(\)\s+run: npm run db:stop/u.test(
       lifecycleJob,
     )

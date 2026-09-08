@@ -5,6 +5,8 @@ import {
   parseAcceptStaffInvitationRequest,
   parseAcceptStaffInvitationResponse,
   parseBeginStaffPasswordRecoveryRpcResult,
+  parseChangeStaffMembershipRoleRequest,
+  parseChangeStaffMembershipRoleResponse,
   parseCreateStaffInvitationRequest,
   parseCreateStaffInvitationResponse,
   parseFinishStaffPasswordRecoveryRpcResult,
@@ -20,6 +22,7 @@ import {
   staffAuthRpcFailureCodes,
   type AcceptStaffInvitationRequest,
   type BeginStaffPasswordRecoveryRpcResult,
+  type ChangeStaffMembershipRoleRequest,
   type CreateStaffInvitationRequest,
   type FinishStaffPasswordRecoveryRpcResult,
   type ManageableStaffInvitation,
@@ -45,6 +48,12 @@ import type {
 export interface SupabaseStaffAuthPort {
   capturePasswordAuthority(expectedAccountId?: string): Promise<string | null>;
   captureSignOutAuthority(expectedAccountId: string): Promise<unknown>;
+  captureStaffManagementAuthority(expectedAccountId: string): Promise<unknown>;
+  releaseStaffManagementAuthority(authorityHandle: string): void;
+  changeMembershipRole(
+    request: ChangeStaffMembershipRoleRequest,
+    authorityHandle: string,
+  ): Promise<unknown>;
   clearPrivateAuthContinuations(): void;
   releasePasswordAuthority(authorityHandle: string): void;
   acceptInvitation(
@@ -69,7 +78,10 @@ export interface SupabaseStaffAuthPort {
     operationId: string,
     authorityHandle: string,
   ): Promise<unknown>;
-  invokeInvitation(request: CreateStaffInvitationRequest): Promise<unknown>;
+  invokeInvitation(
+    request: CreateStaffInvitationRequest,
+    authorityHandle: string,
+  ): Promise<unknown>;
   invokeRecovery(
     request: RequestStaffPasswordRecoveryRequest,
   ): Promise<unknown>;
@@ -86,8 +98,14 @@ export interface SupabaseStaffAuthPort {
   resendEmailVerification(email: string): Promise<unknown>;
   revokeAllStaffSessions(authorityHandle: string): Promise<unknown>;
   revokeCurrentStaffSession(authorityHandle: string): Promise<unknown>;
-  revokeInvitation(request: RevokeStaffInvitationRequest): Promise<unknown>;
-  revokeMembership(request: RevokeStaffMembershipRequest): Promise<unknown>;
+  revokeInvitation(
+    request: RevokeStaffInvitationRequest,
+    authorityHandle: string,
+  ): Promise<unknown>;
+  revokeMembership(
+    request: RevokeStaffMembershipRequest,
+    authorityHandle: string,
+  ): Promise<unknown>;
   signIn(input: {
     readonly email: string;
     readonly password: string;
@@ -318,7 +336,10 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     };
     let manageableInvitations: StaffAuthBoundaryManagedInvitation[] = [];
     let manageableStaff: StaffAuthBoundaryManagedStaff[] = [];
-    if (context.role === "owner" && assurance.currentLevel === "aal2") {
+    if (
+      (context.role === "owner" || context.role === "admin") &&
+      assurance.currentLevel === "aal2"
+    ) {
       const [rawStaff, rawInvitations] = await Promise.all([
         dependencies.port.readManageableStaff(),
         dependencies.port.readManageableInvitations(),
@@ -337,6 +358,13 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       }
       if (!invitations.ok) {
         return managementFailure(invitations.code);
+      }
+      if (
+        context.role === "admin" &&
+        (staff.items.some((entry) => entry.role !== "teacher") ||
+          invitations.items.some((entry) => entry.role !== "teacher"))
+      ) {
+        throw new Error("Administrator staff management result is malformed");
       }
       manageableStaff = staff.items
         .filter((entry) => entry.schoolId === context.schoolId)
@@ -572,6 +600,8 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       result = await revokeStaffInvitation(request);
     } else if (request.type === "revoke_staff_membership") {
       result = await revokeStaffMembership(request);
+    } else if (request.type === "change_staff_membership_role") {
+      result = await changeStaffMembershipRole(request);
     } else {
       throw new Error("Staff authentication mutation is unavailable");
     }
@@ -1148,64 +1178,201 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     return { kind: "reset_to_sign_in_complete" };
   }
 
+  type ManagementRequest = Extract<
+    StaffAuthMutation,
+    {
+      readonly type:
+        | "create_staff_invitation"
+        | "revoke_staff_invitation"
+        | "revoke_staff_membership"
+        | "change_staff_membership_role";
+    }
+  >;
+  interface ManagementIntent {
+    readonly accountId: string;
+    readonly identityGeneration: string;
+    readonly sessionGeneration: string;
+    readonly revision: number;
+  }
+
+  function captureManagementIntent(
+    request: ManagementRequest,
+  ): ManagementIntent {
+    // Snapshot the visible initiating account before any asynchronous SDK read.
+    // Never infer the initiator from whichever account later occupies storage.
+    if (
+      identityFacts === null ||
+      identityGeneration === null ||
+      sessionGeneration === null ||
+      identityGeneration !== request.expectedIdentityGeneration ||
+      sessionGeneration !== request.expectedSessionGeneration ||
+      eventRevision !== processedEventRevision
+    ) {
+      throw new Error("Staff management actor continuity failed");
+    }
+    return {
+      accountId: identityFacts.accountId,
+      identityGeneration,
+      sessionGeneration,
+      revision: eventRevision,
+    };
+  }
+
+  function managementIntentCurrent(intent: ManagementIntent): boolean {
+    return (
+      !disposed &&
+      eventRevision === intent.revision &&
+      identityGeneration === intent.identityGeneration &&
+      sessionGeneration === intent.sessionGeneration &&
+      identityFacts?.accountId === intent.accountId
+    );
+  }
+
+  async function withManagementAuthority(
+    request: ManagementRequest,
+    action: (
+      actor: StaffAuthAccessGrant,
+      authorityHandle: string,
+      intent: ManagementIntent,
+    ) => Promise<StaffAuthBoundaryResult>,
+  ): Promise<StaffAuthBoundaryResult> {
+    const intent = captureManagementIntent(request);
+    const captured = await dependencies.port.captureStaffManagementAuthority(
+      intent.accountId,
+    );
+    const ready = snapshotExactRecord(captured, ["status", "authorityHandle"]);
+    if (ready?.status !== "ready" || !validText(ready.authorityHandle, 256)) {
+      if (decodeStatus(captured, ["ended"]) === "ended")
+        return { kind: "signed_out" };
+      throw new Error("Staff management authority is unavailable");
+    }
+    const authorityHandle = ready.authorityHandle;
+    try {
+      if (!managementIntentCurrent(intent))
+        throw new Error("Staff management actor continuity failed");
+      const actor = await readAuthority();
+      if (eventRevision !== intent.revision)
+        throw new Error("Staff management actor continuity failed");
+      if (actor.kind !== "access_granted") return actor;
+      if (actor.identity.accountId !== intent.accountId)
+        throw new Error("Staff management actor continuity failed");
+      // A real same-account downgrade remains a valid current role. It cannot
+      // inherit a command prepared under the prior management authority.
+      if (
+        !managementIntentCurrent(intent) ||
+        actor.identity.school.id !== request.schoolId ||
+        (actor.identity.membership.role !== "owner" &&
+          actor.identity.membership.role !== "admin")
+      )
+        return actor;
+      if (actor.assuranceLevel !== "aal2" || actor.secondFactor !== "satisfied")
+        return { kind: "step_up_required" };
+      return await action(actor, authorityHandle, intent);
+    } finally {
+      dependencies.port.releaseStaffManagementAuthority(authorityHandle);
+    }
+  }
+
+  function requireManagementContinuity(intent: ManagementIntent): void {
+    if (!managementIntentCurrent(intent))
+      throw new Error("Staff management actor continuity failed");
+  }
+
+  async function refreshManagementActor(
+    expected: StaffAuthAccessGrant,
+    intent: ManagementIntent,
+  ): Promise<StaffAuthBoundaryResult> {
+    requireManagementContinuity(intent);
+    const authority = await readAuthority();
+    if (disposed || eventRevision !== intent.revision)
+      throw new Error("Staff management actor continuity failed");
+    if (authority.kind !== "access_granted") return authority;
+    if (authority.identity.accountId !== intent.accountId)
+      throw new Error("Staff management actor continuity failed");
+    if (
+      authority.identity.school.id !== expected.identity.school.id ||
+      authority.identity.membership.role !== expected.identity.membership.role
+    )
+      return authority;
+    if (!sameAccessAuthority(authority, expected))
+      throw new Error("Staff management actor continuity failed");
+    return authority;
+  }
+
+  function actorRetainsManagement(
+    authority: StaffAuthAccessGrant,
+    expected: StaffAuthAccessGrant,
+  ): boolean {
+    return (
+      authority.identity.school.id === expected.identity.school.id &&
+      authority.identity.membership.role ===
+        expected.identity.membership.role &&
+      authority.assuranceLevel === "aal2" &&
+      authority.secondFactor === "satisfied"
+    );
+  }
+
   async function createStaffInvitation(
     request: Extract<
       StaffAuthMutation,
       { readonly type: "create_staff_invitation" }
     >,
   ): Promise<StaffAuthBoundaryResult> {
-    const actor = await readOwnerActor(request.schoolId);
-    if (actor.kind !== "access_granted") {
-      return actor;
-    }
-    if (
-      actor.identityGeneration !== request.expectedIdentityGeneration ||
-      actor.sessionGeneration !== request.expectedSessionGeneration ||
-      eventRevision !== processedEventRevision
-    ) {
-      return { actor, kind: "staff_invitation_rejected" };
-    }
-    const input = parseCreateStaffInvitationRequest({
-      email: request.email,
-      role:
-        request.targetRole === "admin" ? "administrator" : request.targetRole,
-      schoolId: request.schoolId,
-    });
-    if (input === null) {
-      return { actor, kind: "staff_invitation_rejected" };
-    }
-    const response = parseCreateStaffInvitationResponse(
-      await dependencies.port.invokeInvitation(input),
-    );
-    if (response === null) {
-      throw new Error("Staff invitation result is malformed");
-    }
-    const refreshed = await readSameOwnerActor(actor);
-    if (refreshed.kind !== "access_granted") {
-      return refreshed;
-    }
-    if (!response.ok) {
-      if (
-        response.code === "invitation_delivery_unconfirmed" ||
-        response.code === "invitation_delivery_rejected"
-      ) {
+    return withManagementAuthority(
+      request,
+      async (actor, authorityHandle, intent) => {
+        const input = parseCreateStaffInvitationRequest({
+          email: request.email,
+          role:
+            request.targetRole === "admin"
+              ? "administrator"
+              : request.targetRole,
+          schoolId: request.schoolId,
+        });
+        if (
+          input === null ||
+          (actor.identity.membership.role === "admin" &&
+            request.targetRole !== "teacher")
+        )
+          return { actor, kind: "staff_invitation_rejected" };
+        requireManagementContinuity(intent);
+        const response = parseCreateStaffInvitationResponse(
+          await dependencies.port.invokeInvitation(input, authorityHandle),
+        );
+        if (response === null)
+          throw new Error("Staff invitation result is malformed");
+        const refreshed = await refreshManagementActor(actor, intent);
+        if (
+          refreshed.kind !== "access_granted" ||
+          !actorRetainsManagement(refreshed, actor)
+        )
+          return refreshed;
+        if (!response.ok) {
+          if (
+            response.code === "invitation_delivery_unconfirmed" ||
+            response.code === "invitation_delivery_rejected"
+          ) {
+            return {
+              actor: refreshed,
+              kind: "staff_invitation_delivery",
+              outcome:
+                response.code === "invitation_delivery_unconfirmed"
+                  ? "unconfirmed"
+                  : "rejected",
+            };
+          }
+          const loss = boundaryFailure(response.code);
+          return (
+            loss ?? { actor: refreshed, kind: "staff_invitation_rejected" }
+          );
+        }
         return {
           actor: refreshed,
-          kind: "staff_invitation_delivery",
-          outcome:
-            response.code === "invitation_delivery_unconfirmed"
-              ? "unconfirmed"
-              : "rejected",
+          invitedRole: request.targetRole,
+          kind: "staff_invitation_created",
         };
-      }
-      const loss = boundaryFailure(response.code);
-      return loss ?? { actor: refreshed, kind: "staff_invitation_rejected" };
-    }
-    return {
-      actor: refreshed,
-      invitedRole: request.targetRole,
-      kind: "staff_invitation_created",
-    };
+      },
+    );
   }
 
   async function revokeStaffInvitation(
@@ -1214,50 +1381,57 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       { readonly type: "revoke_staff_invitation" }
     >,
   ): Promise<StaffAuthBoundaryResult> {
-    const actor = await readOwnerActor(request.schoolId);
-    if (actor.kind !== "access_granted") {
-      return actor;
-    }
-    const target = actor.manageableInvitations.find(
-      (entry) =>
-        entry.invitationId === request.invitationId &&
-        entry.schoolId === request.schoolId,
-    );
-    const input = parseRevokeStaffInvitationRequest({
-      invitationId: request.invitationId,
-    });
-    if (input === null || target === undefined) {
-      return { actor, kind: "staff_invitation_revocation_rejected" };
-    }
-    const response = parseRevokeStaffInvitationResponse(
-      productRpcResponse(
-        exactSingleRow(await dependencies.port.revokeInvitation(input)),
-        "invitation_revoked",
-      ),
-    );
-    if (response === null) {
-      throw new Error("Staff invitation revocation result is malformed");
-    }
-    const refreshed = await readSameOwnerActor(actor);
-    if (refreshed.kind !== "access_granted") {
-      return refreshed;
-    }
-    if (!response.ok) {
-      const loss = boundaryFailure(response.code);
-      return (
-        loss ?? {
+    return withManagementAuthority(
+      request,
+      async (actor, authorityHandle, intent) => {
+        const target = actor.manageableInvitations.find(
+          (entry) =>
+            entry.invitationId === request.invitationId &&
+            entry.schoolId === request.schoolId,
+        );
+        const input = parseRevokeStaffInvitationRequest({
+          invitationId: request.invitationId,
+        });
+        if (
+          input === null ||
+          target === undefined ||
+          (actor.identity.membership.role === "admin" &&
+            target.role !== "teacher")
+        )
+          return { actor, kind: "staff_invitation_revocation_rejected" };
+        requireManagementContinuity(intent);
+        const response = parseRevokeStaffInvitationResponse(
+          productRpcResponse(
+            exactSingleRow(
+              await dependencies.port.revokeInvitation(input, authorityHandle),
+            ),
+            "invitation_revoked",
+          ),
+        );
+        if (response === null)
+          throw new Error("Staff invitation revocation result is malformed");
+        const refreshed = await refreshManagementActor(actor, intent);
+        if (
+          refreshed.kind !== "access_granted" ||
+          !actorRetainsManagement(refreshed, actor)
+        )
+          return refreshed;
+        if (!response.ok)
+          return (
+            boundaryFailure(response.code) ?? {
+              actor: refreshed,
+              kind: "staff_invitation_revocation_rejected",
+            }
+          );
+        return {
           actor: refreshed,
-          kind: "staff_invitation_revocation_rejected",
-        }
-      );
-    }
-    return {
-      actor: refreshed,
-      invitationId: request.invitationId,
-      kind: "staff_invitation_revoked",
-      revokedRole: target.role,
-      schoolId: request.schoolId,
-    };
+          invitationId: request.invitationId,
+          kind: "staff_invitation_revoked",
+          revokedRole: target.role,
+          schoolId: request.schoolId,
+        };
+      },
+    );
   }
 
   async function revokeStaffMembership(
@@ -1266,92 +1440,167 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       { readonly type: "revoke_staff_membership" }
     >,
   ): Promise<StaffAuthBoundaryResult> {
-    const actor = await readOwnerActor(request.schoolId);
-    if (actor.kind !== "access_granted") {
-      return actor;
-    }
-    const target = actor.manageableStaff.find(
-      (entry) =>
-        entry.profile.id === request.profileId &&
-        entry.schoolId === request.schoolId,
-    );
-    const input = parseRevokeStaffMembershipRequest({
-      profileId: request.profileId,
-      schoolId: request.schoolId,
-    });
-    if (input === null || target === undefined) {
-      return { actor, kind: "staff_membership_revocation_rejected" };
-    }
-    const response = parseRevokeStaffMembershipResponse(
-      productRpcResponse(
-        exactSingleRow(await dependencies.port.revokeMembership(input)),
-        "membership_revoked",
-      ),
-    );
-    if (response === null) {
-      throw new Error("Staff membership revocation result is malformed");
-    }
-    const refreshed = await readSameOwnerActor(actor);
-    if (refreshed.kind !== "access_granted") {
-      return refreshed;
-    }
-    if (!response.ok) {
-      if (response.code === "authorization_denied") {
+    return withManagementAuthority(
+      request,
+      async (actor, authorityHandle, intent) => {
+        const target = actor.manageableStaff.find(
+          (entry) =>
+            entry.profile.id === request.profileId &&
+            entry.schoolId === request.schoolId,
+        );
+        const input = parseRevokeStaffMembershipRequest({
+          profileId: request.profileId,
+          schoolId: request.schoolId,
+          expectedRoleRevision: request.expectedRoleRevision,
+        });
+        if (
+          input === null ||
+          target === undefined ||
+          target.profile.id === actor.identity.profile.id ||
+          (actor.identity.membership.role === "admin" &&
+            target.role !== "teacher")
+        )
+          return { actor, kind: "staff_membership_revocation_rejected" };
+        if (target.roleRevision !== request.expectedRoleRevision)
+          return { actor, kind: "staff_membership_revision_conflict" };
+        requireManagementContinuity(intent);
+        const response = parseRevokeStaffMembershipResponse(
+          productRpcResponse(
+            exactSingleRow(
+              await dependencies.port.revokeMembership(input, authorityHandle),
+            ),
+            "membership_revoked",
+          ),
+        );
+        if (response === null)
+          throw new Error("Staff membership revocation result is malformed");
+        const refreshed = await refreshManagementActor(actor, intent);
+        if (
+          refreshed.kind !== "access_granted" ||
+          !actorRetainsManagement(refreshed, actor)
+        )
+          return refreshed;
+        if (!response.ok) {
+          if (response.code === "membership_revision_conflict")
+            return {
+              actor: refreshed,
+              kind: "staff_membership_revision_conflict",
+            };
+          if (response.code === "authorization_denied")
+            return {
+              actor: refreshed,
+              kind: "staff_membership_revocation_rejected",
+            };
+          return (
+            boundaryFailure(response.code) ?? {
+              actor: refreshed,
+              kind: "staff_membership_revocation_rejected",
+            }
+          );
+        }
         return {
           actor: refreshed,
-          kind: "staff_membership_revocation_rejected",
+          kind: "staff_membership_revoked",
+          profileId: request.profileId,
+          revokedRole: target.role,
+          schoolId: request.schoolId,
         };
-      }
-      const loss = boundaryFailure(response.code);
-      return (
-        loss ?? {
-          actor: refreshed,
-          kind: "staff_membership_revocation_rejected",
+      },
+    );
+  }
+
+  async function changeStaffMembershipRole(
+    request: Extract<
+      StaffAuthMutation,
+      { readonly type: "change_staff_membership_role" }
+    >,
+  ): Promise<StaffAuthBoundaryResult> {
+    return withManagementAuthority(
+      request,
+      async (actor, authorityHandle, intent) => {
+        const target = actor.manageableStaff.find(
+          (entry) =>
+            entry.profile.id === request.profileId &&
+            entry.schoolId === request.schoolId,
+        );
+        const input = parseChangeStaffMembershipRoleRequest({
+          profileId: request.profileId,
+          schoolId: request.schoolId,
+          expectedRoleRevision: request.expectedRoleRevision,
+          role:
+            request.targetRole === "admin"
+              ? "administrator"
+              : request.targetRole,
+        });
+        if (
+          actor.identity.membership.role !== "owner" ||
+          input === null ||
+          target === undefined ||
+          target.profile.id === actor.identity.profile.id
+        )
+          return { actor, kind: "staff_membership_role_change_rejected" };
+        if (target.roleRevision !== request.expectedRoleRevision)
+          return { actor, kind: "staff_membership_revision_conflict" };
+        if (target.role === request.targetRole)
+          return { actor, kind: "staff_membership_role_change_rejected" };
+        requireManagementContinuity(intent);
+        let response;
+        try {
+          response = parseChangeStaffMembershipRoleResponse(
+            productRpcResponse(
+              exactSingleRow(
+                await dependencies.port.changeMembershipRole(
+                  input,
+                  authorityHandle,
+                ),
+              ),
+              "membership_role_changed",
+            ),
+          );
+        } catch {
+          return { kind: "staff_membership_role_change_unconfirmed" };
         }
-      );
-    }
-    return {
-      actor: refreshed,
-      kind: "staff_membership_revoked",
-      profileId: request.profileId,
-      revokedRole: target.role,
-      schoolId: request.schoolId,
-    };
-  }
-
-  async function readOwnerActor(
-    schoolId: string,
-  ): Promise<StaffAuthBoundaryResult> {
-    const authority = await readAuthority();
-    if (authority.kind !== "access_granted") {
-      return authority;
-    }
-    if (
-      authority.identity.school.id !== schoolId ||
-      authority.identity.membership.role !== "owner"
-    ) {
-      return { kind: "membership_inactive" };
-    }
-    if (
-      authority.assuranceLevel !== "aal2" ||
-      authority.secondFactor !== "satisfied"
-    ) {
-      return { kind: "step_up_required" };
-    }
-    return authority;
-  }
-
-  async function readSameOwnerActor(
-    expected: StaffAuthAccessGrant,
-  ): Promise<StaffAuthBoundaryResult> {
-    const authority = await readOwnerActor(expected.identity.school.id);
-    if (authority.kind !== "access_granted") {
-      return authority;
-    }
-    if (!sameAccessAuthority(authority, expected)) {
-      throw new Error("Staff management actor continuity failed");
-    }
-    return authority;
+        // An unknown mutation response cannot be resolved by inspecting whether
+        // a later list happens to contain the requested role. Never replay it.
+        if (
+          response === null ||
+          (!response.ok && response.code === "service_unavailable") ||
+          !managementIntentCurrent(intent)
+        )
+          return { kind: "staff_membership_role_change_unconfirmed" };
+        const refreshed = await refreshManagementActor(actor, intent);
+        if (
+          refreshed.kind !== "access_granted" ||
+          !actorRetainsManagement(refreshed, actor)
+        )
+          return refreshed;
+        if (!response.ok) {
+          if (response.code === "membership_revision_conflict")
+            return {
+              actor: refreshed,
+              kind: "staff_membership_revision_conflict",
+            };
+          if (response.code === "authorization_denied")
+            return {
+              actor: refreshed,
+              kind: "staff_membership_role_change_rejected",
+            };
+          return (
+            boundaryFailure(response.code) ?? {
+              actor: refreshed,
+              kind: "staff_membership_role_change_rejected",
+            }
+          );
+        }
+        return {
+          actor: refreshed,
+          changedRole: request.targetRole,
+          kind: "staff_membership_role_changed",
+          profileId: request.profileId,
+          schoolId: request.schoolId,
+        };
+      },
+    );
   }
 
   async function completePasswordRecovery(
@@ -1575,6 +1824,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
             requestIdentity,
             result:
               requestIdentity === null ||
+              isManagementMutation(operationType) ||
               requiresCredentialReentry(result.result)
                 ? null
                 : result.result,
@@ -1584,7 +1834,10 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
           return result;
         })
         .catch((error: unknown) => {
-          if (operationType === "sign_out") {
+          if (
+            operationType === "sign_out" ||
+            isManagementMutation(operationType)
+          ) {
             // An uncertain attempt cannot recapture a new account/session when
             // the controller replays this operation ID. Re-enter first.
             completedOperations.set(operationId, {
@@ -1593,7 +1846,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
               type: operationType,
             });
             trimMap(completedOperations, 64);
-            clearAuthorityState(false);
+            if (operationType === "sign_out") clearAuthorityState(false);
           }
           throw error;
         })
@@ -1866,6 +2119,7 @@ function mapManagedStaff(
       id: staff.profileId,
     },
     role: staff.role === "administrator" ? "admin" : "teacher",
+    roleRevision: staff.roleRevision,
     schoolId: staff.schoolId,
   };
 }
@@ -1976,12 +2230,27 @@ function operationRequestIdentity(request: StaffAuthMutation): string | null {
         request.type,
         request.schoolId,
         request.invitationId,
+        request.expectedIdentityGeneration,
+        request.expectedSessionGeneration,
       ]);
     case "revoke_staff_membership":
       return JSON.stringify([
         request.type,
         request.schoolId,
         request.profileId,
+        request.expectedIdentityGeneration,
+        request.expectedSessionGeneration,
+        request.expectedRoleRevision,
+      ]);
+    case "change_staff_membership_role":
+      return JSON.stringify([
+        request.type,
+        request.schoolId,
+        request.profileId,
+        request.targetRole,
+        request.expectedIdentityGeneration,
+        request.expectedSessionGeneration,
+        request.expectedRoleRevision,
       ]);
     case "sign_in":
     case "exchange_email_verification_code":
@@ -1994,6 +2263,15 @@ function operationRequestIdentity(request: StaffAuthMutation): string | null {
     case "create_staff_invitation":
       return null;
   }
+}
+
+function isManagementMutation(type: StaffAuthMutation["type"]): boolean {
+  return (
+    type === "create_staff_invitation" ||
+    type === "revoke_staff_invitation" ||
+    type === "revoke_staff_membership" ||
+    type === "change_staff_membership_role"
+  );
 }
 
 function requiresCredentialReentry(result: StaffAuthBoundaryResult): boolean {

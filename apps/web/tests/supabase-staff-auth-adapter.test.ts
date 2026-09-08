@@ -27,6 +27,12 @@ function port(
     acceptInvitation: unavailable,
     beginPasswordRecovery: unavailable,
     capturePasswordAuthority: async () => passwordAuthority,
+    captureStaffManagementAuthority: async () => ({
+      status: "ready",
+      authorityHandle: "synthetic-management-authority",
+    }),
+    releaseStaffManagementAuthority: () => undefined,
+    changeMembershipRole: unavailable,
     captureSignOutAuthority: async () => ({
       status: "ready",
       authorityHandle: passwordAuthority,
@@ -510,6 +516,7 @@ describe("Supabase staff auth adapter", () => {
             email: "ada@example.test",
             membership_role: "admin",
             profile_id: "21000000-0000-4000-8000-000000000002",
+            role_revision: 3,
             school_id: schoolId,
           },
           {
@@ -518,6 +525,7 @@ describe("Supabase staff auth adapter", () => {
             email: "theo@example.test",
             membership_role: "teacher",
             profile_id: "21000000-0000-4000-8000-000000000003",
+            role_revision: 3,
             school_id: otherSchoolId,
           },
         ],
@@ -2277,7 +2285,12 @@ describe("Supabase staff auth adapter", () => {
         targetRole: "teacher",
         type: "create_staff_invitation",
       }),
-    ).resolves.toMatchObject({ result: { kind: "membership_inactive" } });
+    ).resolves.toMatchObject({
+      result: {
+        kind: "access_granted",
+        identity: { school: { id: schoolId } },
+      },
+    });
     expect(called).toBe(false);
     adapter.dispose();
   });
@@ -2342,9 +2355,7 @@ describe("Supabase staff auth adapter", () => {
           targetRole: "admin",
           type: "create_staff_invitation",
         }),
-      ).resolves.toMatchObject({
-        result: { kind: "staff_invitation_rejected" },
-      });
+      ).rejects.toThrow("continuity");
       expect(invokeInvitation).not.toHaveBeenCalled();
       adapter.dispose();
     },
@@ -2410,6 +2421,7 @@ describe("Supabase staff auth adapter", () => {
               email: "ada@example.test",
               membership_role: "admin",
               profile_id: targetProfileId,
+              role_revision: 3,
               school_id: schoolId,
             },
           ]
@@ -2448,7 +2460,9 @@ describe("Supabase staff auth adapter", () => {
       }),
       revokeBlobUrl: () => undefined,
     });
-    await adapter.read();
+    const actor = await adapter.read();
+    if (actor.kind !== "access_granted")
+      throw new Error("expected visible authority");
 
     await expect(
       adapter.perform({
@@ -2456,6 +2470,8 @@ describe("Supabase staff auth adapter", () => {
         operationId: "90000000-0000-4000-8000-000000000004",
         schoolId,
         type: "revoke_staff_invitation",
+        expectedIdentityGeneration: actor.identityGeneration,
+        expectedSessionGeneration: actor.sessionGeneration,
       }),
     ).resolves.toMatchObject({
       result: {
@@ -2471,6 +2487,9 @@ describe("Supabase staff auth adapter", () => {
         profileId: targetProfileId,
         schoolId,
         type: "revoke_staff_membership",
+        expectedIdentityGeneration: actor.identityGeneration,
+        expectedSessionGeneration: actor.sessionGeneration,
+        expectedRoleRevision: 3,
       }),
     ).resolves.toMatchObject({
       result: {
@@ -2482,7 +2501,7 @@ describe("Supabase staff auth adapter", () => {
     });
     expect(calls).toEqual([
       { invitationId },
-      { profileId: targetProfileId, schoolId },
+      { profileId: targetProfileId, schoolId, expectedRoleRevision: 3 },
     ]);
     adapter.dispose();
   });
@@ -2500,6 +2519,7 @@ describe("Supabase staff auth adapter", () => {
             email: "ada@example.test",
             membership_role: "admin",
             profile_id: targetProfileId,
+            role_revision: 3,
             school_id: schoolId,
           },
         ],
@@ -2507,7 +2527,9 @@ describe("Supabase staff auth adapter", () => {
       }),
       revokeBlobUrl: () => undefined,
     });
-    await adapter.read();
+    const actor = await adapter.read();
+    if (actor.kind !== "access_granted")
+      throw new Error("expected visible authority");
 
     await expect(
       adapter.perform({
@@ -2515,6 +2537,9 @@ describe("Supabase staff auth adapter", () => {
         profileId: targetProfileId,
         schoolId,
         type: "revoke_staff_membership",
+        expectedIdentityGeneration: actor.identityGeneration,
+        expectedSessionGeneration: actor.sessionGeneration,
+        expectedRoleRevision: 3,
       }),
     ).resolves.toMatchObject({
       result: {
@@ -3332,6 +3357,7 @@ describe("Supabase staff auth adapter", () => {
             email: "ada@example.test",
             membership_role: "admin",
             profile_id: targetProfileId,
+            role_revision: 3,
             school_id: schoolId,
           },
         ],
@@ -3342,13 +3368,18 @@ describe("Supabase staff auth adapter", () => {
       }),
       revokeBlobUrl: () => undefined,
     });
-    await adapter.read();
+    const actor = await adapter.read();
+    if (actor.kind !== "access_granted")
+      throw new Error("expected visible authority");
     const operationId = "90000000-0000-4000-8000-000000000016";
     const first = adapter.perform({
       operationId,
       profileId: targetProfileId,
       schoolId,
       type: "revoke_staff_membership",
+      expectedIdentityGeneration: actor.identityGeneration,
+      expectedSessionGeneration: actor.sessionGeneration,
+      expectedRoleRevision: 3,
     });
     await expect(
       adapter.perform({
@@ -3356,6 +3387,9 @@ describe("Supabase staff auth adapter", () => {
         profileId: "21000000-0000-4000-8000-000000000003",
         schoolId: "11000000-0000-4000-8000-000000000002",
         type: "revoke_staff_membership",
+        expectedIdentityGeneration: actor.identityGeneration,
+        expectedSessionGeneration: actor.sessionGeneration,
+        expectedRoleRevision: 3,
       }),
     ).rejects.toThrow("reused");
     await vi.waitFor(() =>
@@ -3402,4 +3436,486 @@ describe("delivery result composition", () => {
       adapter.dispose();
     },
   );
+});
+
+describe("staff membership administration authority", () => {
+  async function managementHarness(
+    options: {
+      readonly actorRole?: "owner" | "admin";
+      readonly targetRole?: "admin" | "teacher";
+      readonly overrides?: Partial<SupabaseStaffAuthPort>;
+    } = {},
+  ) {
+    const release = vi.fn();
+    const capture = vi.fn(async () => ({
+      status: "ready",
+      authorityHandle: "synthetic-management-authority",
+    }));
+    const change = vi.fn(async () => [{ code: "membership_role_changed" }]);
+    const revoke = vi.fn(async () => [{ code: "membership_revoked" }]);
+    const invite = vi.fn(async () => ({
+      code: "invitation_created",
+      ok: true,
+    }));
+    const revokeInvitation = vi.fn(async () => [
+      { code: "invitation_revoked" },
+    ]);
+    const staff = vi.fn(async () => [
+      {
+        code: "ok",
+        display_name: "Taylor Teacher",
+        email: "teacher@example.test",
+        membership_role: options.targetRole ?? "teacher",
+        profile_id: targetProfileId,
+        role_revision: 3,
+        school_id: schoolId,
+      },
+    ]);
+    let notify: () => void = () => undefined;
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => Date.parse("2026-09-03T20:00:00.000Z") },
+      createBlobUrl: () => "unused",
+      operationIds: operationIdSource(),
+      port: ownerPort({
+        captureStaffManagementAuthority: capture,
+        releaseStaffManagementAuthority: release,
+        changeMembershipRole: change,
+        revokeMembership: revoke,
+        invokeInvitation: invite,
+        revokeInvitation,
+        readCurrentContext: async () => [
+          {
+            code: "ok",
+            display_name: "Staff Manager",
+            membership_role: options.actorRole ?? "owner",
+            profile_id: profileId,
+            role_revision: 8,
+            school_id: schoolId,
+            school_name: "Example School",
+            school_slug: "example-school",
+          },
+        ],
+        readManageableStaff: staff,
+        readManageableInvitations: async () => [
+          {
+            code: "ok",
+            expires_at: "2026-09-04T12:00:00+00:00",
+            invitation_id: invitationId,
+            invitation_status: "pending_acceptance",
+            invited_email: "pending@example.test",
+            invited_role: options.targetRole ?? "teacher",
+            school_id: schoolId,
+          },
+        ],
+        onAuthStateChange: (listener) => {
+          notify = listener;
+          return () => undefined;
+        },
+        ...options.overrides,
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+    const actor = await adapter.read().catch((error: unknown) => {
+      adapter.dispose();
+      throw error;
+    });
+    if (actor.kind !== "access_granted")
+      throw new Error("expected visible actor");
+    const command = {
+      expectedIdentityGeneration: actor.identityGeneration,
+      expectedSessionGeneration: actor.sessionGeneration,
+      expectedRoleRevision: 3,
+      operationId: "90000000-0000-4000-8000-000000000020",
+      profileId: targetProfileId,
+      schoolId,
+      targetRole: "admin" as const,
+      type: "change_staff_membership_role" as const,
+    };
+    return {
+      adapter,
+      actor,
+      command,
+      release,
+      capture,
+      change,
+      revoke,
+      invite,
+      revokeInvitation,
+      staff,
+      notify: () => notify(),
+    };
+  }
+
+  it("changes an active Teacher only with the visible Owner's captured authority and target revision", async () => {
+    const test = await managementHarness();
+    try {
+      expect(test.actor.manageableStaff[0]?.roleRevision).toBe(3);
+      const result = await test.adapter.perform(test.command);
+      expect(test.capture).toHaveBeenCalledExactlyOnceWith(accountId);
+      expect(test.change).toHaveBeenCalledExactlyOnceWith(
+        {
+          profileId: targetProfileId,
+          schoolId,
+          role: "administrator",
+          expectedRoleRevision: 3,
+        },
+        "synthetic-management-authority",
+      );
+      expect(test.release).toHaveBeenCalledExactlyOnceWith(
+        "synthetic-management-authority",
+      );
+      expect(test.staff).toHaveBeenCalledTimes(3);
+      expect(result).toMatchObject({
+        result: {
+          kind: "staff_membership_role_changed",
+          changedRole: "admin",
+          profileId: targetProfileId,
+          schoolId,
+        },
+      });
+      await expect(test.adapter.perform(test.command)).rejects.toThrow(
+        "re-entry",
+      );
+      expect(test.change).toHaveBeenCalledOnce();
+    } finally {
+      test.adapter.dispose();
+    }
+  });
+
+  it.each(["revision", "same-role", "admin-actor"] as const)(
+    "rejects %s role commands before mutation",
+    async (scenario) => {
+      const test = await managementHarness({
+        actorRole: scenario === "admin-actor" ? "admin" : "owner",
+      });
+      try {
+        const request = {
+          ...test.command,
+          expectedRoleRevision: scenario === "revision" ? 2 : 3,
+          targetRole:
+            scenario === "same-role"
+              ? ("teacher" as const)
+              : ("admin" as const),
+        };
+        expect(await test.adapter.perform(request)).toMatchObject({
+          result: {
+            kind:
+              scenario === "revision"
+                ? "staff_membership_revision_conflict"
+                : "staff_membership_role_change_rejected",
+          },
+        });
+        expect(test.change).not.toHaveBeenCalled();
+        expect(test.release).toHaveBeenCalledOnce();
+      } finally {
+        test.adapter.dispose();
+      }
+    },
+  );
+
+  it.each(["malformed", "dependency", "throws"] as const)(
+    "does not infer a committed role or replay after %s response",
+    async (outcome) => {
+      const test = await managementHarness({
+        overrides: {
+          changeMembershipRole: async () => {
+            if (outcome === "throws")
+              throw new Error("private-provider-diagnostic");
+            return outcome === "dependency"
+              ? [{ code: "dependency_unavailable" }]
+              : [{ role: "admin" }];
+          },
+        },
+      });
+      try {
+        const result = await test.adapter.perform(test.command);
+        expect(result).toEqual({
+          operationId: test.command.operationId,
+          result: { kind: "staff_membership_role_change_unconfirmed" },
+        });
+        expect(test.staff).toHaveBeenCalledTimes(2);
+        expect(JSON.stringify(result)).not.toContain("private-provider");
+        await expect(test.adapter.perform(test.command)).rejects.toThrow(
+          "re-entry",
+        );
+        expect(test.capture).toHaveBeenCalledOnce();
+        expect(test.release).toHaveBeenCalledOnce();
+      } finally {
+        test.adapter.dispose();
+      }
+    },
+  );
+
+  it("treats a changed-back target revision as conflict even when the current role equals the requested role", async () => {
+    const test = await managementHarness({ targetRole: "admin" });
+    try {
+      expect(
+        await test.adapter.perform({
+          ...test.command,
+          expectedRoleRevision: 2,
+        }),
+      ).toMatchObject({
+        result: { kind: "staff_membership_revision_conflict" },
+      });
+      expect(test.change).not.toHaveBeenCalled();
+    } finally {
+      test.adapter.dispose();
+    }
+  });
+
+  it.each(["change_staff_membership_role", "revoke_staff_membership"] as const)(
+    "rejects a forged self selector for %s",
+    async (type) => {
+      const test = await managementHarness({
+        overrides: {
+          readManageableStaff: async () => [
+            {
+              code: "ok",
+              display_name: "Forged Self",
+              email: "owner@example.test",
+              membership_role: "teacher",
+              profile_id: profileId,
+              role_revision: 3,
+              school_id: schoolId,
+            },
+          ],
+        },
+      });
+      try {
+        expect(
+          await test.adapter.perform({ ...test.command, type, profileId }),
+        ).toMatchObject({
+          result: {
+            kind:
+              type === "change_staff_membership_role"
+                ? "staff_membership_role_change_rejected"
+                : "staff_membership_revocation_rejected",
+          },
+        });
+        expect(test.change).not.toHaveBeenCalled();
+        expect(test.revoke).not.toHaveBeenCalled();
+      } finally {
+        test.adapter.dispose();
+      }
+    },
+  );
+
+  it.each(["active", "revoked"] as const)(
+    "distinguishes a disappeared role target from the Owner's %s authority",
+    async (actorState) => {
+      let mutationAttempted = false;
+      const readStaff = vi.fn(async () =>
+        mutationAttempted
+          ? []
+          : [
+              {
+                code: "ok",
+                display_name: "Taylor Teacher",
+                email: "teacher@example.test",
+                membership_role: "teacher",
+                profile_id: targetProfileId,
+                role_revision: 3,
+                school_id: schoolId,
+              },
+            ],
+      );
+      const change = vi.fn(async () => {
+        mutationAttempted = true;
+        return [{ code: "forbidden" }];
+      });
+      const test = await managementHarness({
+        overrides: {
+          changeMembershipRole: change,
+          readManageableStaff: readStaff,
+          readCurrentInvitations: async () => [
+            {
+              code: "invitation_not_found",
+              expires_at: null,
+              invitation_id: null,
+              invited_role: null,
+              school_id: null,
+              school_name: null,
+            },
+          ],
+          readCurrentContext: async () =>
+            mutationAttempted && actorState === "revoked"
+              ? inactiveContext()
+              : [
+                  {
+                    code: "ok",
+                    display_name: "Staff Manager",
+                    membership_role: "owner",
+                    profile_id: profileId,
+                    role_revision: 8,
+                    school_id: schoolId,
+                    school_name: "Example School",
+                    school_slug: "example-school",
+                  },
+                ],
+        },
+      });
+      try {
+        const result = await test.adapter.perform(test.command);
+        if (actorState === "active") {
+          expect(result).toMatchObject({
+            result: {
+              kind: "staff_membership_role_change_rejected",
+              actor: {
+                assuranceLevel: "aal2",
+                secondFactor: "satisfied",
+                identity: {
+                  accountId,
+                  membership: { role: "owner", status: "active" },
+                },
+                manageableStaff: [],
+              },
+            },
+          });
+          expect(readStaff).toHaveBeenCalledTimes(3);
+        } else {
+          expect(result).toEqual({
+            operationId: test.command.operationId,
+            result: { kind: "membership_inactive" },
+          });
+        }
+        expect(change).toHaveBeenCalledOnce();
+        expect(test.release).toHaveBeenCalledOnce();
+      } finally {
+        test.adapter.dispose();
+      }
+    },
+  );
+
+  it("returns authoritative revision conflicts without presenting a successful role change", async () => {
+    const test = await managementHarness({
+      overrides: {
+        changeMembershipRole: async () => [
+          { code: "membership_revision_conflict" },
+        ],
+      },
+    });
+    try {
+      expect(await test.adapter.perform(test.command)).toMatchObject({
+        result: {
+          kind: "staff_membership_revision_conflict",
+          actor: { identity: { accountId } },
+        },
+      });
+      expect(test.staff).toHaveBeenCalledTimes(3);
+    } finally {
+      test.adapter.dispose();
+    }
+  });
+
+  it("Admin management permits Teacher invites and revocations, while refusing Admin invitations and role changes", async () => {
+    const test = await managementHarness({ actorRole: "admin" });
+    try {
+      const common = {
+        expectedIdentityGeneration: test.actor.identityGeneration,
+        expectedSessionGeneration: test.actor.sessionGeneration,
+        schoolId,
+      };
+      expect(
+        await test.adapter.perform({
+          ...common,
+          email: "teacher@example.test",
+          targetRole: "teacher",
+          operationId: firstOperationId,
+          type: "create_staff_invitation",
+        }),
+      ).toMatchObject({ result: { kind: "staff_invitation_created" } });
+      expect(
+        await test.adapter.perform({
+          ...common,
+          invitationId,
+          operationId: secondOperationId,
+          type: "revoke_staff_invitation",
+        }),
+      ).toMatchObject({ result: { kind: "staff_invitation_revoked" } });
+      expect(
+        await test.adapter.perform({
+          ...common,
+          profileId: targetProfileId,
+          expectedRoleRevision: 3,
+          operationId: "90000000-0000-4000-8000-000000000021",
+          type: "revoke_staff_membership",
+        }),
+      ).toMatchObject({ result: { kind: "staff_membership_revoked" } });
+      expect(
+        await test.adapter.perform({
+          ...common,
+          email: "admin@example.test",
+          targetRole: "admin",
+          operationId: "90000000-0000-4000-8000-000000000022",
+          type: "create_staff_invitation",
+        }),
+      ).toMatchObject({ result: { kind: "staff_invitation_rejected" } });
+      expect(test.invite).toHaveBeenCalledOnce();
+      expect(test.revoke).toHaveBeenCalledExactlyOnceWith(
+        { profileId: targetProfileId, schoolId, expectedRoleRevision: 3 },
+        "synthetic-management-authority",
+      );
+      expect(test.revokeInvitation).toHaveBeenCalledExactlyOnceWith(
+        { invitationId },
+        "synthetic-management-authority",
+      );
+    } finally {
+      test.adapter.dispose();
+    }
+  });
+
+  it("rejects an Admin's malicious list containing an Admin target", async () => {
+    await expect(
+      managementHarness({ actorRole: "admin", targetRole: "admin" }),
+    ).rejects.toThrow("malformed");
+  });
+
+  it("rejects stale visible generations synchronously before authority capture", async () => {
+    const test = await managementHarness();
+    try {
+      test.notify();
+      await expect(test.adapter.perform(test.command)).rejects.toThrow(
+        "continuity",
+      );
+      expect(test.capture).not.toHaveBeenCalled();
+      expect(test.change).not.toHaveBeenCalled();
+    } finally {
+      test.adapter.dispose();
+    }
+  });
+
+  it("preserves a downgraded same-account Teacher as current authority instead of inventing inactive membership", async () => {
+    let contextReads = 0;
+    const test = await managementHarness({
+      overrides: {
+        readCurrentContext: async () => [
+          {
+            code: "ok",
+            display_name: "Staff Manager",
+            membership_role: ++contextReads === 1 ? "owner" : "teacher",
+            profile_id: profileId,
+            role_revision: contextReads === 1 ? 8 : 9,
+            school_id: schoolId,
+            school_name: "Example School",
+            school_slug: "example-school",
+          },
+        ],
+      },
+    });
+    try {
+      expect(await test.adapter.perform(test.command)).toMatchObject({
+        result: {
+          kind: "access_granted",
+          identity: {
+            accountId,
+            membership: { role: "teacher", status: "active" },
+          },
+        },
+      });
+      expect(test.change).not.toHaveBeenCalled();
+      expect(test.release).toHaveBeenCalledOnce();
+    } finally {
+      test.adapter.dispose();
+    }
+  });
 });
