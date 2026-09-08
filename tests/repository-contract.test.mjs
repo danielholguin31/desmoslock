@@ -401,6 +401,8 @@ test("v2 data plane is migration-owned and clean-start only", () => {
     "supabase/migrations/20260907000200_runtime_owner_bootstrap.sql",
     "supabase/migrations/20260907000300_membership_revocation_authority.sql",
     "supabase/migrations/20260907000400_membership_administration.sql",
+    "supabase/migrations/20260908000100_school_display_name.sql",
+    "supabase/tests/database/school_display_name.test.sql",
     "supabase/seed.sql",
     "supabase/tests/database/internal_release_backend.test.sql",
     "supabase/tests/database/staff_auth_generation_4.test.sql",
@@ -600,9 +602,15 @@ test("generation-4 attests the exact normalized migration history", () => {
         "9c59c0192b4f960f925db8c64be1c7b2aa6843591d6214a98b29c2bac5a326ad",
     },
     "20260907000400_membership_administration.sql": {
-      migrationSetSha256: expectedMigrationSetSha256,
+      migrationSetSha256:
+        "7c3e7403b61d5c66123b15d2fe4de28ee2259d71a304ce8695d16630f5353a56",
       rawSha256:
         "078a886cc923b0d9349eca992ebf1d74b06e4bbd302ee165828b4003ca3326a5",
+    },
+    "20260908000100_school_display_name.sql": {
+      migrationSetSha256: expectedMigrationSetSha256,
+      rawSha256:
+        "96febd78bbec6859771cb26ae095458553e19ddd75dbc438e99b54ee86549e18",
     },
   });
   assert.doesNotThrow(() => assertMigrationSetAttestation(migrations));
@@ -628,6 +636,7 @@ test("generation-4 attests the exact normalized migration history", () => {
     "20260907000100_staff_auth_callback_completion.sql",
     "20260907000200_runtime_owner_bootstrap.sql",
     "20260907000300_membership_revocation_authority.sql",
+    "20260907000400_membership_administration.sql",
   ]) {
     assert.throws(
       () =>
@@ -664,7 +673,7 @@ test("generation-4 attests the exact normalized migration history", () => {
       assertMigrationSetAttestation(
         migrations.map(([fileName, source]) => [
           fileName,
-          fileName === "20260907000400_membership_administration.sql"
+          fileName === "20260908000100_school_display_name.sql"
             ? source.replace(expectedMigrationSetSha256, "0".repeat(64))
             : source,
         ]),

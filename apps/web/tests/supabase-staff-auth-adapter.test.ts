@@ -25,6 +25,9 @@ function port(
   };
   return {
     acceptInvitation: unavailable,
+    captureSchoolSettingsAuthority: unavailable,
+    releaseSchoolSettingsAuthority: () => undefined,
+    updateSchoolDisplayName: unavailable,
     beginPasswordRecovery: unavailable,
     capturePasswordAuthority: async () => passwordAuthority,
     captureStaffManagementAuthority: async () => ({
@@ -93,6 +96,7 @@ function ownerPort(
         role_revision: 8,
         school_id: schoolId,
         school_name: "Example School",
+        school_settings_revision: 1,
         school_slug: "example-school",
       },
     ],
@@ -128,6 +132,7 @@ function inactiveContext() {
       role_revision: null,
       school_id: null,
       school_name: null,
+      school_settings_revision: null,
       school_slug: null,
     },
   ];
@@ -143,6 +148,7 @@ function acceptedInvitationContext() {
       role_revision: 1,
       school_id: schoolId,
       school_name: "Example School",
+      school_settings_revision: 1,
       school_slug: "example-school",
     },
   ];
@@ -268,6 +274,7 @@ describe("Supabase staff auth adapter", () => {
             role_revision: null,
             school_id: null,
             school_name: null,
+            school_settings_revision: null,
             school_slug: null,
           },
         ],
@@ -319,6 +326,7 @@ describe("Supabase staff auth adapter", () => {
               role_revision: null,
               school_id: null,
               school_name: null,
+              school_settings_revision: null,
               school_slug: null,
             },
           ],
@@ -415,6 +423,7 @@ describe("Supabase staff auth adapter", () => {
             role_revision: 3,
             school_id: schoolId,
             school_name: "Example School",
+            school_settings_revision: 1,
             school_slug: "example-school",
           },
         ],
@@ -434,7 +443,7 @@ describe("Supabase staff auth adapter", () => {
           status: "active",
         },
         profile: { displayName: "Taylor Teacher", id: profileId },
-        school: { id: schoolId, label: "Example School" },
+        school: { id: schoolId, label: "Example School", settingsRevision: 1 },
       },
       identityGeneration: secondOperationId,
       kind: "access_granted",
@@ -477,6 +486,7 @@ describe("Supabase staff auth adapter", () => {
             role_revision: 8,
             school_id: schoolId,
             school_name: "Example School",
+            school_settings_revision: 1,
             school_slug: "example-school",
           },
         ],
@@ -630,6 +640,7 @@ describe("Supabase staff auth adapter", () => {
               role_revision: 8,
               school_id: schoolId,
               school_name: "Example School",
+              school_settings_revision: 1,
               school_slug: "example-school",
             },
           ],
@@ -743,6 +754,7 @@ describe("Supabase staff auth adapter", () => {
             role_revision: 1,
             school_id: schoolId,
             school_name: "Example School",
+            school_settings_revision: 1,
             school_slug: "example-school",
           },
         ],
@@ -1500,6 +1512,7 @@ describe("Supabase staff auth adapter", () => {
                   role_revision: 1,
                   school_id: schoolId,
                   school_name: "Example School",
+                  school_settings_revision: 1,
                   school_slug: "example-school",
                 },
               ]
@@ -1512,6 +1525,7 @@ describe("Supabase staff auth adapter", () => {
                   role_revision: null,
                   school_id: null,
                   school_name: null,
+                  school_settings_revision: null,
                   school_slug: null,
                 },
               ],
@@ -2383,6 +2397,7 @@ describe("Supabase staff auth adapter", () => {
               role_revision: contextReads >= 3 ? 9 : 8,
               school_id: schoolId,
               school_name: "Example School",
+              school_settings_revision: 1,
               school_slug: "example-school",
             },
           ];
@@ -3053,6 +3068,7 @@ describe("Supabase staff auth adapter", () => {
               school_id: school,
               school_name:
                 school === schoolId ? "Example School" : "Second School",
+              school_settings_revision: 1,
               school_slug:
                 school === schoolId ? "example-school" : "second-school",
             },
@@ -3130,6 +3146,7 @@ describe("Supabase staff auth adapter", () => {
               role_revision: 1,
               school_id: schoolId,
               school_name: "Example School",
+              school_settings_revision: 1,
               school_slug: "example-school",
             },
           ];
@@ -3201,6 +3218,7 @@ describe("Supabase staff auth adapter", () => {
               role_revision: 1,
               school_id: schoolId,
               school_name: "Example School",
+              school_settings_revision: 1,
               school_slug: "example-school",
             },
           ];
@@ -3231,6 +3249,7 @@ describe("Supabase staff auth adapter", () => {
         role_revision: null,
         school_id: null,
         school_name: null,
+        school_settings_revision: null,
         school_slug: null,
       },
     ]);
@@ -3403,6 +3422,410 @@ describe("Supabase staff auth adapter", () => {
   });
 });
 
+describe("School presentation authority", () => {
+  function context(overrides: Readonly<Record<string, unknown>> = {}) {
+    return {
+      code: "ok",
+      display_name: "Olivia Owner",
+      membership_role: "owner",
+      profile_id: profileId,
+      role_revision: 8,
+      school_id: schoolId,
+      school_name: "Original School",
+      school_settings_revision: 5,
+      school_slug: "example-school",
+      ...overrides,
+    };
+  }
+
+  function harness() {
+    let row: Readonly<Record<string, unknown>> = context();
+    let assurance: "aal1" | "aal2" = "aal2";
+    let notify: () => void = () => undefined;
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => "unused",
+      operationIds: operationIdSource(),
+      port: ownerPort({
+        onAuthStateChange: (listener) => {
+          notify = listener;
+          return () => undefined;
+        },
+        readCurrentContext: async () => [row],
+        readCurrentInvitations: async () => [
+          {
+            code: "invitation_not_found",
+            expires_at: null,
+            invitation_id: null,
+            invited_role: null,
+            school_id: null,
+            school_name: null,
+          },
+        ],
+        readAssurance: async () => ({
+          currentAuthenticationMethods: ["password"],
+          currentLevel: assurance,
+          nextLevel: "aal2",
+        }),
+        readTotpFactors: async () => ({ factors: [] }),
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+    return {
+      adapter,
+      setContext(value: Readonly<Record<string, unknown>>) {
+        row = value;
+      },
+      dropAssurance() {
+        assurance = "aal1";
+      },
+      notify() {
+        notify();
+      },
+    };
+  }
+
+  it("keeps identity/session generations stable for increasing or identical School presentation and rejects a stale rollback", async () => {
+    const h = harness();
+    try {
+      const initial = await h.adapter.read();
+      if (initial.kind !== "access_granted") throw new Error("Expected Owner");
+      h.setContext(
+        context({ school_name: "Renamed School", school_settings_revision: 6 }),
+      );
+      const renamed = await h.adapter.read();
+      expect(renamed).toMatchObject({
+        kind: "access_granted",
+        identityGeneration: initial.identityGeneration,
+        sessionGeneration: initial.sessionGeneration,
+        identity: {
+          school: {
+            id: schoolId,
+            label: "Renamed School",
+            settingsRevision: 6,
+          },
+        },
+      });
+      await expect(h.adapter.read()).resolves.toEqual(renamed);
+      h.setContext(context());
+      await expect(h.adapter.read()).resolves.toEqual(renamed);
+    } finally {
+      h.adapter.dispose();
+    }
+  });
+
+  it("rejects an equal settings revision with a different name and clears the presentation cache after failure", async () => {
+    const h = harness();
+    try {
+      await h.adapter.read();
+      h.setContext(context({ school_name: "Inconsistent School" }));
+      await expect(h.adapter.read()).rejects.toThrow(
+        "revision is inconsistent",
+      );
+      h.setContext(
+        context({
+          school_name: "Freshly verified School",
+          school_settings_revision: 2,
+        }),
+      );
+      await expect(h.adapter.read()).resolves.toMatchObject({
+        identity: {
+          school: { label: "Freshly verified School", settingsRevision: 2 },
+        },
+      });
+    } finally {
+      h.adapter.dispose();
+    }
+  });
+
+  it.each([undefined, null, 0, -1, 1.5, "5", Number.MAX_SAFE_INTEGER + 1])(
+    "rejects a missing or unsafe settings revision %s",
+    async (revision) => {
+      const h = harness();
+      try {
+        const row: Record<string, unknown> = context({
+          school_settings_revision: revision,
+        });
+        if (revision === undefined) delete row.school_settings_revision;
+        h.setContext(row);
+        await expect(h.adapter.read()).rejects.toThrow("context");
+      } finally {
+        h.adapter.dispose();
+      }
+    },
+  );
+
+  it.each([" School", "School\n", "School\u0085Name", "界".repeat(54)])(
+    "rejects noncanonical School presentation %j",
+    async (name) => {
+      const h = harness();
+      try {
+        h.setContext(context({ school_name: name }));
+        await expect(h.adapter.read()).rejects.toThrow("context");
+      } finally {
+        h.adapter.dispose();
+      }
+    },
+  );
+
+  it("accepts the maximum safe settings revision", async () => {
+    const h = harness();
+    try {
+      h.setContext(
+        context({ school_settings_revision: Number.MAX_SAFE_INTEGER }),
+      );
+      await expect(h.adapter.read()).resolves.toMatchObject({
+        identity: { school: { settingsRevision: Number.MAX_SAFE_INTEGER } },
+      });
+    } finally {
+      h.adapter.dispose();
+    }
+  });
+
+  it("preserves profile-name authority checks while allowing a lower School revision after an actual identity change", async () => {
+    const h = harness();
+    try {
+      const initial = await h.adapter.read();
+      if (initial.kind !== "access_granted") throw new Error("Expected Owner");
+      h.setContext(
+        context({
+          display_name: "Changed Owner",
+          school_name: "Current School",
+          school_settings_revision: 1,
+        }),
+      );
+      const changed = await h.adapter.read();
+      expect(changed).toMatchObject({
+        kind: "access_granted",
+        identity: {
+          profile: { displayName: "Changed Owner" },
+          school: { label: "Current School", settingsRevision: 1 },
+        },
+      });
+      if (changed.kind !== "access_granted") throw new Error("Expected Owner");
+      expect(changed.identityGeneration).not.toBe(initial.identityGeneration);
+      expect(changed.sessionGeneration).toBe(initial.sessionGeneration);
+    } finally {
+      h.adapter.dispose();
+    }
+  });
+
+  it("does not suppress a role downgrade observed with lower School presentation", async () => {
+    const h = harness();
+    try {
+      const initial = await h.adapter.read();
+      if (initial.kind !== "access_granted") throw new Error("Expected Owner");
+      h.setContext(
+        context({
+          membership_role: "teacher",
+          role_revision: 9,
+          school_name: "Current School",
+          school_settings_revision: 1,
+        }),
+      );
+      const changed = await h.adapter.read();
+      expect(changed).toMatchObject({
+        kind: "access_granted",
+        identity: {
+          membership: { role: "teacher" },
+          school: { label: "Current School", settingsRevision: 1 },
+        },
+        manageableStaff: [],
+        manageableInvitations: [],
+      });
+      if (changed.kind !== "access_granted")
+        throw new Error("Expected Teacher");
+      expect(changed.identityGeneration).not.toBe(initial.identityGeneration);
+    } finally {
+      h.adapter.dispose();
+    }
+  });
+
+  it("does not suppress MFA loss observed with lower School presentation", async () => {
+    const h = harness();
+    try {
+      await h.adapter.read();
+      h.dropAssurance();
+      h.setContext(
+        context({ school_name: "Current School", school_settings_revision: 1 }),
+      );
+      await expect(h.adapter.read()).resolves.toMatchObject({
+        kind: "access_granted",
+        assuranceLevel: "aal1",
+        secondFactor: "enrollment_required",
+        identity: { school: { label: "Current School", settingsRevision: 1 } },
+      });
+    } finally {
+      h.adapter.dispose();
+    }
+  });
+
+  it.each([
+    "session_revoked",
+    "session_expired",
+    "membership_inactive",
+  ] as const)(
+    "clears the presentation cache on %s without inventing an old grant",
+    async (code) => {
+      const h = harness();
+      try {
+        const initial = await h.adapter.read();
+        if (initial.kind !== "access_granted")
+          throw new Error("Expected Owner");
+        h.setContext({ ...inactiveContext()[0], code });
+        if (code !== "membership_inactive")
+          h.setContext({ ...inactiveContext()[0], code, profile_id: null });
+        await expect(h.adapter.read()).resolves.toEqual({ kind: code });
+        h.setContext(
+          context({ school_name: "Fresh School", school_settings_revision: 1 }),
+        );
+        const fresh = await h.adapter.read();
+        expect(fresh).toMatchObject({
+          identity: { school: { label: "Fresh School", settingsRevision: 1 } },
+        });
+        if (fresh.kind !== "access_granted") throw new Error("Expected Owner");
+        expect(fresh.identityGeneration).not.toBe(initial.identityGeneration);
+      } finally {
+        h.adapter.dispose();
+      }
+    },
+  );
+
+  it("requires null School revision on a failed context", async () => {
+    const h = harness();
+    try {
+      h.setContext({ ...inactiveContext()[0], school_settings_revision: 1 });
+      await expect(h.adapter.read()).rejects.toThrow("failure is malformed");
+    } finally {
+      h.adapter.dispose();
+    }
+  });
+
+  it("clears cached presentation after a provider event rotates the session generation", async () => {
+    const h = harness();
+    try {
+      const initial = await h.adapter.read();
+      if (initial.kind !== "access_granted") throw new Error("Expected Owner");
+      h.notify();
+      h.setContext(
+        context({ school_name: "Current School", school_settings_revision: 1 }),
+      );
+      const current = await h.adapter.read();
+      expect(current).toMatchObject({
+        identity: { school: { label: "Current School", settingsRevision: 1 } },
+      });
+      if (current.kind !== "access_granted") throw new Error("Expected Owner");
+      expect(current.sessionGeneration).not.toBe(initial.sessionGeneration);
+    } finally {
+      h.adapter.dispose();
+    }
+  });
+
+  it("keeps a newer presentation when an older overlapping read completes after a management check", async () => {
+    let finishOld: ((value: unknown) => void) | undefined;
+    const readCurrentContext = vi
+      .fn<() => Promise<unknown>>()
+      .mockResolvedValueOnce([context()])
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishOld = resolve;
+          }),
+      )
+      .mockResolvedValue([
+        context({ school_name: "Newest School", school_settings_revision: 7 }),
+      ]);
+    const invokeInvitation = vi.fn(async () => ({
+      code: "invitation_created",
+      ok: true,
+    }));
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => "unused",
+      operationIds: operationIdSource(),
+      port: ownerPort({ readCurrentContext, invokeInvitation }),
+      revokeBlobUrl: () => undefined,
+    });
+    try {
+      const actor = await adapter.read();
+      if (actor.kind !== "access_granted") throw new Error("Expected Owner");
+      const oldRead = adapter.read();
+      await vi.waitFor(() => expect(finishOld).toBeTypeOf("function"));
+      await expect(
+        adapter.perform({
+          type: "create_staff_invitation",
+          operationId: "90000000-0000-4000-8000-000000000081",
+          email: "teacher@example.test",
+          schoolId,
+          targetRole: "teacher",
+          expectedIdentityGeneration: actor.identityGeneration,
+          expectedSessionGeneration: actor.sessionGeneration,
+        }),
+      ).resolves.toMatchObject({
+        result: { kind: "staff_invitation_created" },
+      });
+      finishOld?.([
+        context({ school_name: "Older School", school_settings_revision: 6 }),
+      ]);
+      await expect(oldRead).resolves.toMatchObject({
+        identity: { school: { label: "Newest School", settingsRevision: 7 } },
+        identityGeneration: actor.identityGeneration,
+        sessionGeneration: actor.sessionGeneration,
+      });
+      expect(invokeInvitation).toHaveBeenCalledOnce();
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("accepts the same invitation and recipient when the School was renamed after inspection", async () => {
+    let accepted = false;
+    const fixture = invitationHarness({
+      acceptInvitation: async () => {
+        accepted = true;
+        return [{ code: "invitation_accepted" }];
+      },
+      readCurrentContext: async () =>
+        accepted
+          ? acceptedInvitationContext().map((row) => ({
+              ...row,
+              school_name: "Renamed School",
+              school_settings_revision: 2,
+            }))
+          : inactiveContext(),
+    });
+    try {
+      await expect(fixture.accept()).resolves.toMatchObject({
+        result: {
+          kind: "access_granted",
+          identity: {
+            school: {
+              id: schoolId,
+              label: "Renamed School",
+              settingsRevision: 2,
+            },
+          },
+        },
+      });
+      await expect(fixture.adapter.read()).resolves.toMatchObject({
+        kind: "access_granted",
+        identity: {
+          accountId,
+          membership: { role: "teacher" },
+          school: {
+            id: schoolId,
+            label: "Renamed School",
+            settingsRevision: 2,
+          },
+        },
+      });
+      expect(fixture.updatePassword).toHaveBeenCalledOnce();
+    } finally {
+      fixture.adapter.dispose();
+    }
+  });
+});
+
 describe("delivery result composition", () => {
   it.each(["unconfirmed", "rejected"] as const)(
     "keeps the Owner's %s dispatch outcome distinct from invitation denial",
@@ -3492,6 +3915,7 @@ describe("staff membership administration authority", () => {
             role_revision: 8,
             school_id: schoolId,
             school_name: "Example School",
+            school_settings_revision: 1,
             school_slug: "example-school",
           },
         ],
@@ -3749,6 +4173,7 @@ describe("staff membership administration authority", () => {
                     role_revision: 8,
                     school_id: schoolId,
                     school_name: "Example School",
+                    school_settings_revision: 1,
                     school_slug: "example-school",
                   },
                 ],
@@ -3897,6 +4322,7 @@ describe("staff membership administration authority", () => {
             role_revision: contextReads === 1 ? 8 : 9,
             school_id: schoolId,
             school_name: "Example School",
+            school_settings_revision: 1,
             school_slug: "example-school",
           },
         ],

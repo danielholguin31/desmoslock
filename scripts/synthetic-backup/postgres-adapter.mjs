@@ -616,7 +616,14 @@ const COPY_COLUMNS = Object.freeze({
   profiles: ["id", "display_name", "seed_key", "auth_user_id"],
   student_sessions: ["id", "workspace_id", "test_id", "state", "seed_key"],
   tests: ["id", "workspace_id", "created_by_profile_id", "title", "seed_key"],
-  workspaces: ["id", "kind", "slug", "display_name", "seed_key"],
+  workspaces: [
+    "id",
+    "kind",
+    "slug",
+    "display_name",
+    "seed_key",
+    "settings_revision",
+  ],
 });
 const RESTORE_TABLE_ORDER = Object.freeze([
   "foundation_seed",
@@ -774,13 +781,16 @@ function canonicalEntityPayload(tables, counts) {
   const compareSeedKeys = (left, right) =>
     left.seedKey < right.seedKey ? -1 : left.seedKey > right.seedKey ? 1 : 0;
   const groups = [
-    tables.get("workspaces").map(([id, kind, slug, displayName, seedKey]) => {
-      if (kind !== "school") archiveContentError();
-      return {
-        parts: ["school", seedKey, id, slug, displayName],
-        seedKey,
-      };
-    }),
+    tables
+      .get("workspaces")
+      .map(([id, kind, slug, displayName, seedKey, settingsRevision]) => {
+        if (kind !== "school" || settingsRevision !== "1")
+          archiveContentError();
+        return {
+          parts: ["school", seedKey, id, slug, displayName],
+          seedKey,
+        };
+      }),
     tables.get("profiles").map(([id, displayName, seedKey, authUserId]) => {
       if (authUserId !== POSTGRES_NULL) archiveContentError();
       return {

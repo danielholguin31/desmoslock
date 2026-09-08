@@ -1,0 +1,358 @@
+{
+  "date": "2026-09-08",
+  "status": "reviewed_ci_compatibility_repair_frozen_awaiting_root_publication_and_exact_commit_ci",
+  "base_commit": "73d8b8ade195db445bbd5e0d5877b00ede9a2683",
+  "branch": "codex/desmoslock-school-settings",
+  "supersedes": "Changed source hashes supersede corresponding prior Membership/auth receipts; earlier CI and rendered evidence do not attest this School candidate.",
+  "files_sha256": {
+    "README.md": "fe12284eea2e342b6b8e4072a2b35a50c8d0dd0877be8a22c7a7d38b0c5b9063",
+    "apps/web/src/auth/staff-auth-application.ts": "bb0c50afe937aaa9b3f2c517b48190130a02c09a18d4c88e98f716c26cd7280b",
+    "apps/web/src/auth/staff-auth-controller.ts": "79a5f5e5690af3f6d0938e63d4ef2ed3748eee382a3f39e9b30eb828baa6648f",
+    "apps/web/src/auth/staff-auth-view.ts": "abec10831dd737318d72bee43f4270dda2d0d545370d99949ec74d2a3e56c822",
+    "apps/web/src/auth/staff-product-access.ts": "d407d50d525a50256806914af7f163007695f5884e01b5fb3a7afa855fb16a74",
+    "apps/web/src/auth/supabase-staff-auth-adapter.ts": "f2190056de00f831073941ada8e4c86399dedea1c27c09b40e7c3b7d52affd31",
+    "apps/web/src/auth/supabase-staff-auth-port.ts": "442f46583c2ce08b1c4527281c1f9bce8cb5eb2e21c23ebec13b9c458b0b4788",
+    "apps/web/src/school-settings/school-settings-controller.ts": "c5c57ae300d0d1f7cda1d32cf37e2450b9585706810b2772b594608a062a15cb",
+    "apps/web/src/school-settings/school-settings-view.ts": "671fb0818996f3c8f7134aef6bc50b119ae5779576b29025c3e776e59b4105d1",
+    "apps/web/src/school-settings/school-settings.css": "59a685ee14e1f4a6b35b3a929bef345f24ff65361d39b79a27adffba4ca6d2ba",
+    "apps/web/src/styles.css": "12069927652bf63589de05733ac199ed9935351b169bbdd23692df3ba03cb395",
+    "apps/web/tests/school-settings-authority-sdk.test.ts": "a24947dc4e4ea76d1d5978fb7ace4693cddef8705f75c458ff6874d1f9893c88",
+    "apps/web/tests/school-settings-controller.test.ts": "a5997ab2adfba09932223b10c41f563dd4b9814369ae8de9d901051dc60e8dce",
+    "apps/web/tests/school-settings-view.test.ts": "33e543609d1a9ef45ab0ff51cd6348dd5cfb4e759c90d94b7630482e86d04742",
+    "apps/web/tests/staff-auth-application.test.ts": "57427275a4048e0c522b14fcacf9a5cdde655441150790ba21e3af4d239f82d7",
+    "apps/web/tests/staff-auth-controller.test.ts": "a0e9d980b5deefba0ab96a8f8dc89bb98927a1aefb0554f289903fc0a88ded8f",
+    "apps/web/tests/staff-auth-logout-sdk.test.ts": "f63de498683f81cc01351c35538bdb022aad513bd6dec087f4ab3fe9f36eb654",
+    "apps/web/tests/staff-auth-view.test.ts": "1127b7b232269f02bf853a6a3b080c6c564a47d1752c218b22e8ec4540757f43",
+    "apps/web/tests/staff-membership-authority-timeout.test.ts": "3b4a4a32de86a96e9b6cc1947fcb636ebec7b5735f8c1640cf14b758b5b4babf",
+    "apps/web/tests/staff-membership-controller.test.ts": "0de0ed10e69dba25fcc36396ecbdeac1d797aead3c7ebae7a2b8acc0f97b48f9",
+    "apps/web/tests/staff-membership-sdk-authority.test.ts": "50068adda3067156049a73e00c3d5015fcb8ff7869a3bd653686ceacfed22fa4",
+    "apps/web/tests/supabase-staff-auth-adapter.test.ts": "fb9ff6836abbb20116755f015654a9c225362aaf3276590324802e7f01484d22",
+    "apps/web/tests/supabase-staff-auth-port.test.ts": "87da5f596ec116e6897f22679eb12e44f5c856ed8cd0a5cdfdd93fc7591d6747",
+    "docs/product-completion/reproducible-supabase.md": "1a955d679ae7811d23867b4f1a9a19725bdc1ed660126d94a34092d89176c14b",
+    "docs/product-completion/school-display-name-web-sha256.json": "f57880fb5ce727809b4e697712a6c1f2c9a5339b86d465fa032829aa30745e0f",
+    "docs/product-completion/school-display-name.md": "cbbe8250fcf47d209d65c767a02ad63d27175c9867f8b9c50863af0d037a5e1d",
+    "docs/product-completion/synthetic-restore-acceptance.md": "c8f015269f9e308bbddbf6415b54919c34a82f64619c0451e4f170b3505a8acc",
+    "packages/contracts/src/index.ts": "47b3e2bbead6bc6157d4e5b2996fa2de5d25d019fc38e46fa87fc9d4172210cf",
+    "packages/contracts/src/school-settings.ts": "20993b91077688fed16102f80f12c60205fbd9c4ef9c96511948a8b79bfa42b0",
+    "packages/contracts/tests/school-settings.test.ts": "57e78991f657cefd096af8877fda0d728087c699d8ba28195fed3d1622d3bcba",
+    "scripts/build-app.mjs": "8741f58290f31b00ba6cd2ef2105ff177e4ddf46f5094722d2c6de768891da3e",
+    "scripts/repository-contract/supabase-contract.mjs": "6ceb646dc1d24de9d4a4af62592eeac162924d4193a4dc1f22efb702d4c1a4f3",
+    "scripts/synthetic-backup/operator.mjs": "5d9349f4b7a7d9d7f89df120171224994078068ea1cbb968f4753bfd49acc21c",
+    "scripts/synthetic-backup/postgres-adapter.mjs": "dbd373aaab71a637b41ce7099f0ea1cf72781bdc4bbee1fc957cfe943f49a83e",
+    "supabase/functions/health/index.test.ts": "eeed43ab99222f19a6d143b9ab103076b09ed39ca92376d5e9f93dff5245ae4d",
+    "supabase/functions/health/index.ts": "3b1b06a245e3b3273abff71af217896f7fc21ef201770b73a8861fb3cffcf995",
+    "supabase/migrations/20260908000100_school_display_name.sql": "96febd78bbec6859771cb26ae095458553e19ddd75dbc438e99b54ee86549e18",
+    "supabase/tests/database/internal_release_backend.test.sql": "5b684f8faadef0ba7f51b9ffd6aa6962c76dc250acdce949566b4f8387204807",
+    "supabase/tests/database/school_display_name.test.sql": "da3359910d14c4ad60325629f7f21218886311248746025a6be6a5bf43d19f25",
+    "supabase/tests/database/staff_auth_lifecycle.test.sql": "d4652085b3517911d23a8a52117afadb9b4217e155bf615759a134e5a8edcddc",
+    "tests/acceptance/clean-build.test.mjs": "774c645203f516cac72c8e28d2ca2d437f8b8be8845f6c64dd3adbca31773755",
+    "tests/acceptance/postgres-backup-adapter.test.mjs": "53e25826a240d0d1bbe40f7757448510bc10a667b5c7f576e88a07aae201e7a7",
+    "tests/acceptance/revoke-membership-lock.test.mjs": "76dea9de7cdae33d9bd50f0808ca43c59e6b25aa05fe34bada568fa80dc0341c",
+    "tests/acceptance/staff-auth-composed.test.mjs": "e0b7925161cb62fd28ef84d3c02dfb22e629a169b39f0faac93c43b4cd34e33e",
+    "tests/acceptance/staff-auth-loopback.mjs": "c965daa09eb9ee3909278212c62abec7683b086253e733f0b2ce943e0aaa641d",
+    "tests/acceptance/staff-membership-browser.mjs": "6f303147aae5769b77427017e9852314fe462a0b9e1caf5f443f26fc0d4cbff5",
+    "tests/acceptance/synthetic-backup.test.mjs": "5f21c7a01fd5c603ee408b7f71ea12ece2351aebb8f71c580fc41149600cd728",
+    "tests/repository-contract.test.mjs": "58c326c1f1f94a3c70eaeb523807b3328cd01b101506db888d5191dfb9c15383"
+  },
+  "candidate_paths": [
+    "README.md",
+    "apps/web/src/auth/staff-auth-application.ts",
+    "apps/web/src/auth/staff-auth-controller.ts",
+    "apps/web/src/auth/staff-auth-view.ts",
+    "apps/web/src/auth/staff-product-access.ts",
+    "apps/web/src/auth/supabase-staff-auth-adapter.ts",
+    "apps/web/src/auth/supabase-staff-auth-port.ts",
+    "apps/web/src/school-settings/school-settings-controller.ts",
+    "apps/web/src/school-settings/school-settings-view.ts",
+    "apps/web/src/school-settings/school-settings.css",
+    "apps/web/src/styles.css",
+    "apps/web/tests/school-settings-authority-sdk.test.ts",
+    "apps/web/tests/school-settings-controller.test.ts",
+    "apps/web/tests/school-settings-view.test.ts",
+    "apps/web/tests/staff-auth-application.test.ts",
+    "apps/web/tests/staff-auth-controller.test.ts",
+    "apps/web/tests/staff-auth-logout-sdk.test.ts",
+    "apps/web/tests/staff-auth-view.test.ts",
+    "apps/web/tests/staff-membership-authority-timeout.test.ts",
+    "apps/web/tests/staff-membership-controller.test.ts",
+    "apps/web/tests/staff-membership-sdk-authority.test.ts",
+    "apps/web/tests/supabase-staff-auth-adapter.test.ts",
+    "apps/web/tests/supabase-staff-auth-port.test.ts",
+    "docs/product-completion/reproducible-supabase.md",
+    "docs/product-completion/school-display-name-receipt.json",
+    "docs/product-completion/school-display-name-web-sha256.json",
+    "docs/product-completion/school-display-name.md",
+    "docs/product-completion/synthetic-restore-acceptance.md",
+    "packages/contracts/src/index.ts",
+    "packages/contracts/src/school-settings.ts",
+    "packages/contracts/tests/school-settings.test.ts",
+    "scripts/build-app.mjs",
+    "scripts/repository-contract/supabase-contract.mjs",
+    "scripts/synthetic-backup/operator.mjs",
+    "scripts/synthetic-backup/postgres-adapter.mjs",
+    "supabase/functions/health/index.test.ts",
+    "supabase/functions/health/index.ts",
+    "supabase/migrations/20260908000100_school_display_name.sql",
+    "supabase/tests/database/internal_release_backend.test.sql",
+    "supabase/tests/database/school_display_name.test.sql",
+    "supabase/tests/database/staff_auth_lifecycle.test.sql",
+    "tests/acceptance/clean-build.test.mjs",
+    "tests/acceptance/postgres-backup-adapter.test.mjs",
+    "tests/acceptance/revoke-membership-lock.test.mjs",
+    "tests/acceptance/staff-auth-composed.test.mjs",
+    "tests/acceptance/staff-auth-loopback.mjs",
+    "tests/acceptance/staff-membership-browser.mjs",
+    "tests/acceptance/synthetic-backup.test.mjs",
+    "tests/repository-contract.test.mjs"
+  ],
+  "candidate_source_file_count": 48,
+  "candidate_total_path_count": 49,
+  "precommit_tracked_diff_sha256": "7be3a50e1e44a2d330daf1e8c429d7cfd82c35c777fb4fbb51be3dc5be1b6396",
+  "wire": {
+    "packet": "state/execution-packets/desmoslock-astra-2026-09-04/school-settings-wire-proposal.md",
+    "sha256": "e840c04ba8581f9510282ba446feeddbb7073fd6c6afec8fcd954e3ba6049474"
+  },
+  "local_verification": {
+    "coordinated_package_build": {
+      "exit_code": 0,
+      "workspaces": ["domain", "contracts", "test-support"]
+    },
+    "full_unit": {
+      "exit_code": 0,
+      "passed": 1395,
+      "test_files": 41
+    },
+    "all_workspace_typescript": {
+      "exit_code": 0,
+      "workspaces": 5
+    },
+    "root_test_typescript": {
+      "exit_code": 0
+    },
+    "repository_tests": {
+      "exit_code": 0,
+      "passed": 17
+    },
+    "repository_verifier": {
+      "exit_code": 0
+    },
+    "synthetic_backup_and_postgres_adapter_tests": {
+      "exit_code": 0,
+      "passed": 109,
+      "boundary": "injected adapter/source contract; no real database"
+    },
+    "health_edge_tests": {
+      "exit_code": 0,
+      "passed": 14
+    },
+    "health_deno_lint_check": {
+      "exit_code": 0
+    },
+    "scoped_eslint": {
+      "exit_code": 0,
+      "paths": 31
+    },
+    "scoped_prettier": {
+      "exit_code": 0,
+      "paths": 40
+    },
+    "scoped_secretlint": {
+      "exit_code": 0,
+      "paths": 40,
+      "findings": 0
+    },
+    "git_diff_check": {
+      "exit_code": 0
+    },
+    "root_index": {
+      "staged_paths": 0
+    },
+    "historical_migrations": {
+      "count": 8,
+      "byte_mismatches": 0
+    },
+    "new_sql_tests": {
+      "assertions": 90,
+      "static_review": "clean",
+      "executed": false
+    },
+    "observed_lock_suite": {
+      "preserved_membership_scenarios": 12,
+      "new_school_scenarios": 9,
+      "static_review": "clean",
+      "executed": false
+    },
+    "real_provider_composed_suite": {
+      "preserved_journeys": 9,
+      "new_school_journeys": 2,
+      "static_review": "clean",
+      "executed": false
+    },
+    "post_restore_integration": {
+      "operator_adapter_runtime_helper_tests": {
+        "passed": 119,
+        "failed": 0,
+        "skipped": 0
+      },
+      "repository_tests": {
+        "passed": 17,
+        "failed": 0,
+        "skipped": 0
+      },
+      "repository_verifier": "passed",
+      "actionlint": {
+        "passed": true,
+        "workflows": 3
+      },
+      "ci_source_contract": "passed",
+      "changed_runtime_hooks_asset_syntax_lint_format": "passed",
+      "synthetic_web_build": "passed; no services/providers contacted",
+      "css_imports": "both root stylesheet imports resolve to byte-identical built assets",
+      "clean_build_artifact_assertion": "new School CSS expected output added; full clean-build not rerun locally",
+      "unchanged_unit_type_gates": "preintegration1395 units and all workspace/root-test types retained; application/port/contracts/view/test bytes unchanged; no redundant broad rerun"
+    }
+  },
+  "independent_source_review": {
+    "contracts_and_bound_transport": "clean; purpose/account/session/revision binding and actual installed-SDK intercepted regressions reviewed",
+    "product_controller": "clean; immutable save and idle-only conflict behavior reviewed",
+    "ui": "clean;131 focused view tests and128 selected actual-entrypoint synthetic browser outcomes; root inspected five final images",
+    "database": "Atlas clean on ninth migration, 90-assertion SQL matrix and 21-scenario observed lock source",
+    "real_provider_browser_source": "bounded writer reviews clean; actual execution pending",
+    "accepted_composition_repairs": [
+      "Explicit paused-only product cleanup preserves same-authority private draft while detaching the view; unavailable/ready cleanup and lifecycle loss discard it.",
+      "Fresh-authorized completion synchronizes the current product projection even when unchanged auth snapshots intentionally do not publish; obsolete/skipped reads cannot authorize saving."
+    ],
+    "composition_fixed_byte_review": "Atlas clean at app bb0c50afe937aaa9b3f2c517b48190130a02c09a18d4c88e98f716c26cd7280b and app test57427275a4048e0c522b14fcacf9a5cdde655441150790ba21e3af4d239f82d7",
+    "root_cumulative_review": "passed; root committed reviewed School source and merged verified restore normally",
+    "post_restore_assets": "root approved narrow School CSS copy and existing clean-build artifact assertion; duplicate helper tuple removed, original already-correct helper bytes restored",
+    "backup_ci_compatibility": "Atlas clean: exact six-column archive layout, pristine revision guard, unchanged framing/digest, 15 adversarial variants and two current SQL pins."
+  },
+  "ui_source_handoff": {
+    "packet_relative": "qa/school-settings-preview/implementation-check.json",
+    "sha256": "677beb54025ba1f3d48e07934ed3087bb797cf9439594accce81e7f8a4dc4ec8",
+    "implementation_handoff_sha256": "c97625bec68e4b90e12c297c5171be13a7a06adaf3033911a6b1f6fbbb4f56c9"
+  },
+  "workspace_isolation": {
+    "setup": "fixed-base 238-file positive source manifest; no full checkout; index populated without staging excluded deletions",
+    "verifier_materialization": "nine additional approved nonsecret exact-HEAD files, original skip-worktree flags retained; no semantic changes or legacy execution",
+    "outputs": "all five @desmoslock workspace links and all build/cache/temp outputs resolve within this School worktree; existing third-party links read-only",
+    "backup_test_temp": "approved private external scratch required by production no-backup-inside-repository guard; owned test children cleaned and directory empty",
+    "provider_config_dependencies_root_package_ci": "School did not change provider configuration/dependencies/root package/CI; root normal merge imported reviewed restore package/CI hooks"
+  },
+  "pending_gates": [
+    "Root final four-file repair/receipt review and explicit Git publication.",
+    "Exact corrected-commit nine-migration SQL and complete restored-target staff acceptance, including 21 observed-lock scenarios, 11 composed groups and actual-entrypoint School browser. Failed prior CI did not reach these later groups.",
+    "Root merge gate after all required CI passes.",
+    "Hosted inventory, schema application and deployment remain separate authority and evidence."
+  ],
+  "preintegration_source_gate": {
+    "base_commit": "a2143701541303293ca2c93ffcdf0e035218305f",
+    "precommit_tracked_diff_sha256": "47c43544771f7f4c29825b1a71b900bad0d289f68ca6e538cdfbe492def19a2c",
+    "candidate_source_file_count": 40,
+    "candidate_total_path_count": 41,
+    "receipt_sha256": "1643d8c50d8683ad742c3c312ef9f4406dc0361524e8327a0e52cdb67b4a3d5f",
+    "root_review": "passed exact41 paths/40 source hashes",
+    "local_implementation_commit": "9a139e038a92435cf29c375c462c894fea3f0e85"
+  },
+  "integration_head": "f66fcba0eef58738947aaf5c6c0561db6770f66e",
+  "tracked_diff_basis": "git diff --binary base_commit -- candidate source paths, including committed School changes and current evidence/asset delta",
+  "web_manifest": {
+    "path": "docs/product-completion/school-display-name-web-sha256.json",
+    "sha256": "f57880fb5ce727809b4e697712a6c1f2c9a5339b86d465fa032829aa30745e0f",
+    "source_inputs": 34,
+    "compiled_workspace_inputs": 10,
+    "output_files": 6,
+    "run_id": "school-display-name-f66fcba-v1",
+    "rendered_result": "passed128 selected outcomes; frozen historical manifest unchanged; this cumulative receipt records completion"
+  },
+  "restore_integration": {
+    "source_commit": "5b5722b20a87961663f6680efe34a0497e739ea1",
+    "merge_main_commit": "73d8b8ade195db445bbd5e0d5877b00ede9a2683",
+    "school_merge_commit": "f66fcba0eef58738947aaf5c6c0561db6770f66e",
+    "identical_source_main_tree": "eb6eea68514ed08c2b53f91349ee48c24c1ec0d8",
+    "source_verification": "https://github.com/danielholguin31/desmoslock/actions/runs/34189874469",
+    "source_security": "https://github.com/danielholguin31/desmoslock/actions/runs/34189874479",
+    "main_verification": "https://github.com/danielholguin31/desmoslock/actions/runs/34190379428",
+    "main_security": "https://github.com/danielholguin31/desmoslock/actions/runs/34190379415",
+    "result": "all12 jobs green on eight-migration source/main, with real full restored-target staff suite; nine-migration School runtime remains pending",
+    "current_runtime_helper_sha256": "c570c53fab0c3ff84e6ae1cf0f4ac4748e4a592665bd81312b081f1eec044e35"
+  },
+  "rendered_acceptance": {
+    "packet_relative_directory": "qa/school-settings-preview/runs/school-display-name-f66fcba-v1-final",
+    "run_id": "school-display-name-f66fcba-v1",
+    "receipt_sha256": "ff0bac9910034371d3267b6394e9f62fdd65696ed6302a8e62094b796bb3732e",
+    "results_sha256": "47f03b972709f438e0d670e549e924bb10c812b0acfb4a1039f31318bd3ebefe",
+    "final_check_sha256": "208db83a83941f680ca5c12c9e57a3b42a23c4e82a75a2ed4b327ba975674f50",
+    "receipt_index_sha256": "ddf4eef387832daa143f32869851ebf1c25b010d8353a4406a1e29b7dcf7c4c7",
+    "selected_passed": 128,
+    "groups": {
+      "school_display_name": 70,
+      "membership": 16,
+      "logout_and_account_replacement": 22,
+      "invitation_and_recovery": 8,
+      "callback": 2,
+      "invitation_rename_and_guards": 10
+    },
+    "root_independent_review": "accepted128 distinct passing source records,9 original result hashes,54 isolated asset copies and five final inspected images; no remaining scoped high/medium finding",
+    "final_source_checks": {
+      "source": 34,
+      "compiled": 10,
+      "outputs": 6,
+      "mismatches": 0
+    },
+    "loaded_school_stylesheet": "HTTP200 text/css observed in every School matrix scenario; built bytes match source",
+    "cleanup": {
+      "browsers_closed": 9,
+      "owned_servers_exit_zero": 18,
+      "ports_free": [43173, 43174]
+    },
+    "fixture_history": "first smoke and five first-matrix setup failures preserved, explained and rerun; no product assertions weakened and no source/build repair during QA",
+    "limitations": [
+      "Synthetic provider responses establish rendered application behavior, not real SQL/provider authorization or audit/lock execution.",
+      "Native hidden-tab/focus transitions and actual BFCache eligibility remain unverified; synthetic lifecycle probes are separately labeled.",
+      "Browser no-op checks establish disabled unchanged Save; acknowledged backend no-op/max revision/audit remain controller/SQL gates.",
+      "The eight-migration restored-target success is historical evidence; the nine-migration School runtime and actual-backend browser still require exact-commit CI."
+    ]
+  },
+  "ci_compatibility_repair": {
+    "source_base_commit": "4df3e649ca178ca203620da54c4816790bdfeca0",
+    "failed_verification": "https://github.com/danielholguin31/desmoslock/actions/runs/34193658469",
+    "security": "https://github.com/danielholguin31/desmoslock/actions/runs/34193658450",
+    "observed_fresh_database": {
+      "files": 9,
+      "tests": 599,
+      "failed_assertions": [11, 19],
+      "failed_file": "internal_release_backend.test.sql",
+      "cause": "Both native have/want diagnostics compared the current nine-migration digest with stale eight-migration test expectations."
+    },
+    "observed_restored_target": {
+      "failure_code": "OPERATOR_WORKER_EXPORT",
+      "full_staff_suite_reached": false,
+      "later_lock_provider_school_browser_evidence": "Not reached; no runtime acceptance claimed."
+    },
+    "changed_paths": [
+      "scripts/synthetic-backup/postgres-adapter.mjs",
+      "supabase/tests/database/internal_release_backend.test.sql",
+      "tests/acceptance/postgres-backup-adapter.test.mjs"
+    ],
+    "repair": "Only the two current SQL test pins now match 9264f3b4; the archive parser accepts exactly the six-column workspaces layout and requires settings_revision to be the exact string 1. The canonical fixture framing and digest remain unchanged; legacy layouts and noncanonical revision values are rejected.",
+    "local_reproduction": "The current six-column synthetic archive fixture failed the original real parser with POSTGRES_ARCHIVE_CONTENT_INVALID before the parser correction.",
+    "local_verification": {
+      "focused_operator_adapter_runtime_helper_repository": {
+        "passed": 151,
+        "failed": 0,
+        "skipped": 0
+      },
+      "added_hostile_workspace_variants": 15,
+      "repository_verifier_exit": 0,
+      "scoped_eslint_exit": 0,
+      "scoped_secretlint_exit": 0,
+      "prettier_exit": 0,
+      "diff_check_exit": 0,
+      "boundary": "Source/parser/subprocess-fixture tests; no local database, services, provider or browser execution."
+    },
+    "unchanged_web_evidence": "All original 45 source hashes, web manifest and 128 selected rendered QA observations are unchanged; no duplicate browser QA.",
+    "review": "Atlas independent scoped source review clean at the three repaired source hashes; no high or medium findings.",
+    "runtime_status": "Corrected source awaits normal PR synchronization CI."
+  }
+}

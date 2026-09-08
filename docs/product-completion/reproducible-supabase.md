@@ -3,8 +3,8 @@
 ## Scope and safety boundary
 
 This is the generation-4 internal-release backend for local development and
-approved synthetic staging. Its eight versioned migrations include the staff
-authentication lifecycle and the first Membership administration slice.
+approved synthetic staging. Its nine versioned migrations include the staff
+authentication lifecycle, Membership administration, and School display-name settings.
 Student Session capabilities and calculator isolation remain later work.
 
 Generation 4 preserves the synthetic fixture across these follow-on migrations.
@@ -54,6 +54,7 @@ health function, and operator modules in this repository are the authority.
 - `supabase/migrations/20260907000200_runtime_owner_bootstrap.sql`
 - `supabase/migrations/20260907000300_membership_revocation_authority.sql`
 - `supabase/migrations/20260907000400_membership_administration.sql`
+- `supabase/migrations/20260908000100_school_display_name.sql`
 - `supabase/seed.sql`
 - `supabase/config.toml`
 - `supabase/functions/deno.json`
@@ -70,7 +71,7 @@ The fixture contract is generation `4`, version `internal-baseline-v2`, with
 SHA-256
 `f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201`.
 The exact discovered migration file set has normalized SHA-256
-`7c3e7403b61d5c66123b15d2fe4de28ee2259d71a304ce8695d16630f5353a56`.
+`9264f3b4933e4f1bb207d5a1a130ab0b3edafea787ac37fb25268b09afba2538`.
 The published generation-3 migration retains its contemporaneous digest
 `06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49`;
 the original generation-4 migration likewise retains
@@ -87,12 +88,16 @@ The Membership revocation authority migration retains its seven-file digest
 `e1a9a879948a685a263f24fad98e7fc9a30817fe6ce9461e32fc121080d00a4a`
 and raw SHA-256
 `9c59c0192b4f960f925db8c64be1c7b2aa6843591d6214a98b29c2bac5a326ad`.
-Only the Membership administration migration records the current aggregate.
-Its raw SHA-256 is
+The Membership administration migration retains its eight-file digest
+`7c3e7403b61d5c66123b15d2fe4de28ee2259d71a304ce8695d16630f5353a56`
+and raw SHA-256
 `078a886cc923b0d9349eca992ebf1d74b06e4bbd302ee165828b4003ca3326a5`.
+Only the School display-name migration records the current aggregate.
+Its raw SHA-256 is
+`96febd78bbec6859771cb26ae095458553e19ddd75dbc438e99b54ee86549e18`.
 The repository contract pins each attested migration's raw SHA-256 and literal
-independently, then zeroes only those six delimited self-references when deriving
-the eight-file aggregate. The follow-on migration updates the existing singleton
+independently, then zeroes only those seven delimited self-references when deriving
+the nine-file aggregate. The follow-on migration updates the existing singleton
 attestation without changing schema generation `4` or the seven-table fixture;
 the upgrade path does not depend on rewriting or replaying historical migrations.
 The seed takes a transaction advisory lock, refuses altered or partial targets,
@@ -380,9 +385,14 @@ It exports the pristine fixture from one fresh cluster through the real
 `verify-full` staging-profile adapter, restores a separate empty migrated
 cluster, refuses a second restore, and runs the unchanged complete staff-auth
 suite without reseeding. This lane requires a fresh disposable CI runner and
-must not target an existing local or hosted database. Actual execution is
-pending; see [source, operation and evidence boundaries](synthetic-restore-acceptance.md)
-for the exact imported candidate, TLS prerequisites and cleanup contract.
+must not target an existing local or hosted database. The eight-migration
+baseline passed actual restore and the full restored-target staff suite on
+[source `5b5722b`](https://github.com/danielholguin31/desmoslock/actions/runs/34189874469)
+and [merged main `73d8b8a`](https://github.com/danielholguin31/desmoslock/actions/runs/34190379428).
+The current nine-migration School settings extension remains runtime-pending;
+those earlier runs do not attest its new schema or journeys. See
+[source, operation and evidence boundaries](synthetic-restore-acceptance.md)
+for the exact receipts, TLS prerequisites and cleanup contract.
 
 ## Remote staging acceptance gate
 
@@ -414,7 +424,7 @@ agent can perform.
 The existing approved target is `adlhhdbglpamaftcbmce`. Its last recorded public
 health response was generation 3, which is evidence of a version gap, not proof
 that the target is empty or ready for these migrations. Recheck its current
-inventory and identity before planning an upgrade; the local eight-migration
+inventory and identity before planning an upgrade; the local nine-migration
 foundation does not establish hosted state or require a replacement project.
 
 1. Verify and reuse an approved empty synthetic-only staging target when one is

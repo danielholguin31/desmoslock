@@ -6,6 +6,10 @@ import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
 import { createClient } from "@supabase/supabase-js";
+import {
+  parseSchoolDisplayName,
+  parseUpdateSchoolDisplayNameRpcResult,
+} from "@desmoslock/contracts";
 
 import { prepareStaffRecoveryCallback } from "../../apps/web/src/auth/staff-auth-callback.ts";
 import { createBackendProbe } from "../../supabase/functions/health/index.ts";
@@ -354,7 +358,85 @@ export async function rpcRows(supabase, name, args = {}) {
 export async function rpc(supabase, name, args = {}) {
   const rows = await rpcRows(supabase, name, args);
   check(rows.length === 1, "Product RPC did not return exactly one outcome");
+  if (name === "current_staff_context") checkStaffContext(rows[0]);
+  if (name === "update_school_display_name")
+    check(
+      parseUpdateSchoolDisplayNameRpcResult(rows) !== null,
+      "School update did not return an exact code-only outcome",
+    );
   return rows[0];
+}
+
+function checkStaffContext(row) {
+  const keys = [
+    "code",
+    "profile_id",
+    "display_name",
+    "school_id",
+    "school_slug",
+    "school_name",
+    "school_settings_revision",
+    "membership_role",
+    "role_revision",
+  ];
+  check(
+    row !== null &&
+      typeof row === "object" &&
+      Object.keys(row).length === keys.length &&
+      keys.every((key) => Object.hasOwn(row, key)),
+    "Staff context did not return the exact nine-column projection",
+  );
+  if (row.code === "ok") {
+    requireUuid(row.profile_id);
+    requireUuid(row.school_id);
+    check(
+      typeof row.display_name === "string" &&
+        row.display_name.length > 0 &&
+        typeof row.school_slug === "string" &&
+        row.school_slug.length > 0 &&
+        parseSchoolDisplayName(row.school_name) !== null &&
+        Number.isSafeInteger(row.school_settings_revision) &&
+        row.school_settings_revision >= 1 &&
+        ["owner", "admin", "teacher"].includes(row.membership_role) &&
+        Number.isSafeInteger(row.role_revision) &&
+        row.role_revision >= 1,
+      "Staff context returned malformed School presentation or Membership facts",
+    );
+    return;
+  }
+  check(
+    typeof row.code === "string" &&
+      row.code.length > 0 &&
+      keys
+        .filter((key) => key !== "code" && key !== "profile_id")
+        .every((key) => row[key] === null) &&
+      (row.profile_id === null || row.code === "membership_inactive"),
+    "Denied staff context retained protected School presentation or Membership facts",
+  );
+  if (row.profile_id !== null) requireUuid(row.profile_id);
+}
+
+export async function directSchoolTableDenied(supabase, schoolId) {
+  requireUuid(schoolId);
+  for (const write of [false, true]) {
+    let result;
+    try {
+      const table = supabase.schema("desmoslock_v2").from("workspaces");
+      result = await (
+        write
+          ? table.update({ display_name: "Forbidden direct School rename" })
+          : table.select("id,display_name,settings_revision")
+      ).eq("id", schoolId);
+    } catch {
+      throw new Error(
+        "Direct School table denial was not observed; details redacted",
+      );
+    }
+    check(
+      result?.data === null && result.error?.code === "42501",
+      "Direct School table access did not fail at the privilege boundary",
+    );
+  }
 }
 
 export async function rpcDenied(supabase, name, args, expectedCodes) {

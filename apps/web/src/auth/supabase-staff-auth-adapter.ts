@@ -18,6 +18,7 @@ import {
   parseRevokeStaffInvitationResponse,
   parseRevokeStaffMembershipRequest,
   parseRevokeStaffMembershipResponse,
+  parseSchoolDisplayName,
   parseStaffDisplayName,
   staffAuthRpcFailureCodes,
   type AcceptStaffInvitationRequest,
@@ -30,6 +31,7 @@ import {
   type RequestStaffPasswordRecoveryRequest,
   type RevokeStaffInvitationRequest,
   type RevokeStaffMembershipRequest,
+  type UpdateSchoolDisplayNameRequest,
 } from "@desmoslock/contracts";
 
 import type {
@@ -46,6 +48,12 @@ import type {
 } from "./staff-auth-controller.js";
 
 export interface SupabaseStaffAuthPort {
+  captureSchoolSettingsAuthority(expectedAccountId: string): Promise<unknown>;
+  releaseSchoolSettingsAuthority(authorityHandle: string): void;
+  updateSchoolDisplayName(
+    request: UpdateSchoolDisplayNameRequest,
+    authorityHandle: string,
+  ): Promise<unknown>;
   capturePasswordAuthority(expectedAccountId?: string): Promise<string | null>;
   captureSignOutAuthority(expectedAccountId: string): Promise<unknown>;
   captureStaffManagementAuthority(expectedAccountId: string): Promise<unknown>;
@@ -135,6 +143,13 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
   let sessionGeneration: string | null = null;
   let identityGeneration: string | null = null;
   let identityFacts: IdentityFacts | null = null;
+  let schoolPresentation: {
+    readonly identityGeneration: string;
+    readonly sessionGeneration: string;
+    readonly assuranceLevel: StaffAuthAccessGrant["assuranceLevel"];
+    readonly secondFactor: StaffAuthAccessGrant["secondFactor"];
+    readonly school: StaffAuthBoundaryIdentity["school"];
+  } | null = null;
   let pendingVerificationEmail: string | null = null;
   // Route intent only. Every ready projection still verifies the port's private
   // original recovery binding; this object carries no provider authority.
@@ -211,12 +226,63 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     sessionGeneration = null;
     identityGeneration = null;
     identityFacts = null;
+    schoolPresentation = null;
     invitationInspectionContinuations.clear();
     challengeReceipts.clear();
     clearEnrollmentReceipts(removeEnrollmentFactors);
   }
 
   async function readAuthority(
+    options: { readonly rotateSession?: boolean } = {},
+  ): Promise<StaffAuthBoundaryResult> {
+    try {
+      const result = await readAuthorityResult(options);
+      if (disposed) throw new Error("Staff authentication adapter is disposed");
+      if (result.kind !== "access_granted") {
+        schoolPresentation = null;
+        return result;
+      }
+      const current = result.identity.school;
+      const previous = schoolPresentation;
+      let school = current;
+      if (
+        previous !== null &&
+        previous.identityGeneration === result.identityGeneration &&
+        previous.sessionGeneration === result.sessionGeneration &&
+        previous.assuranceLevel === result.assuranceLevel &&
+        previous.secondFactor === result.secondFactor &&
+        previous.school.id === current.id
+      ) {
+        if (
+          current.settingsRevision === previous.school.settingsRevision &&
+          current.label !== previous.school.label
+        ) {
+          throw new Error("School presentation revision is inconsistent");
+        }
+        if (current.settingsRevision < previous.school.settingsRevision) {
+          school = previous.school;
+        }
+      }
+      schoolPresentation = {
+        identityGeneration: result.identityGeneration,
+        sessionGeneration: result.sessionGeneration,
+        assuranceLevel: result.assuranceLevel,
+        secondFactor: result.secondFactor,
+        school: { ...school },
+      };
+      return school === current
+        ? result
+        : {
+            ...result,
+            identity: { ...result.identity, school: { ...school } },
+          };
+    } catch (error: unknown) {
+      schoolPresentation = null;
+      throw error;
+    }
+  }
+
+  async function readAuthorityResult(
     options: { readonly rotateSession?: boolean } = {},
   ): Promise<StaffAuthBoundaryResult> {
     const continuation = recoveryContinuation;
@@ -310,7 +376,6 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       role: context.role,
       roleRevision: context.roleRevision,
       schoolId: context.schoolId,
-      schoolLabel: context.schoolLabel,
     };
     const identityChanged =
       identityFacts === null || !sameIdentityFacts(identityFacts, facts);
@@ -332,7 +397,11 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
         displayName: context.displayName,
         id: context.profileId,
       },
-      school: { id: context.schoolId, label: context.schoolLabel },
+      school: {
+        id: context.schoolId,
+        label: context.schoolLabel,
+        settingsRevision: context.schoolSettingsRevision,
+      },
     };
     let manageableInvitations: StaffAuthBoundaryManagedInvitation[] = [];
     let manageableStaff: StaffAuthBoundaryManagedStaff[] = [];
@@ -2106,7 +2175,6 @@ interface IdentityFacts {
   readonly role: "admin" | "owner" | "teacher";
   readonly roleRevision: number;
   readonly schoolId: string;
-  readonly schoolLabel: string;
 }
 
 function mapManagedStaff(
@@ -2200,8 +2268,7 @@ function sameAccessAuthority(
     left.identity.membership.status === right.identity.membership.status &&
     left.identity.profile.displayName === right.identity.profile.displayName &&
     left.identity.profile.id === right.identity.profile.id &&
-    left.identity.school.id === right.identity.school.id &&
-    left.identity.school.label === right.identity.school.label
+    left.identity.school.id === right.identity.school.id
   );
 }
 
@@ -2377,6 +2444,7 @@ type CurrentContextResult =
       readonly roleRevision: number;
       readonly schoolId: string;
       readonly schoolLabel: string;
+      readonly schoolSettingsRevision: number;
     }
   | {
       readonly kind:
@@ -2551,6 +2619,7 @@ function decodeCurrentContext(value: unknown): CurrentContextResult {
     "role_revision",
     "school_id",
     "school_name",
+    "school_settings_revision",
     "school_slug",
   ]);
   if (row === null || typeof row.code !== "string") {
@@ -2567,6 +2636,7 @@ function decodeCurrentContext(value: unknown): CurrentContextResult {
       row.role_revision !== null ||
       row.school_id !== null ||
       row.school_name !== null ||
+      row.school_settings_revision !== null ||
       row.school_slug !== null
     ) {
       throw new Error("Staff authentication context failure is malformed");
@@ -2578,11 +2648,15 @@ function decodeCurrentContext(value: unknown): CurrentContextResult {
     return { kind };
   }
   const displayName = parseStaffDisplayName(row.display_name);
+  const schoolLabel = parseSchoolDisplayName(row.school_name);
   if (
     displayName === null ||
     !isCanonicalUuid(row.profile_id) ||
     !isCanonicalUuid(row.school_id) ||
-    !validText(row.school_name, 200) ||
+    schoolLabel === null ||
+    typeof row.school_settings_revision !== "number" ||
+    !Number.isSafeInteger(row.school_settings_revision) ||
+    row.school_settings_revision < 1 ||
     typeof row.school_slug !== "string" ||
     row.school_slug.length > 100 ||
     !canonicalSlugPattern.test(row.school_slug) ||
@@ -2602,7 +2676,8 @@ function decodeCurrentContext(value: unknown): CurrentContextResult {
     role: row.membership_role,
     roleRevision: row.role_revision,
     schoolId: row.school_id,
-    schoolLabel: row.school_name,
+    schoolLabel,
+    schoolSettingsRevision: row.school_settings_revision,
   };
 }
 
@@ -2633,8 +2708,7 @@ function sameIdentityFacts(left: IdentityFacts, right: IdentityFacts): boolean {
     left.profileId === right.profileId &&
     left.role === right.role &&
     left.roleRevision === right.roleRevision &&
-    left.schoolId === right.schoolId &&
-    left.schoolLabel === right.schoolLabel
+    left.schoolId === right.schoolId
   );
 }
 

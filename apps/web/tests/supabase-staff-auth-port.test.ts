@@ -147,12 +147,36 @@ async function captureManagementHandle(port: ReturnType<typeof createPort>) {
   return authority.authorityHandle;
 }
 
+async function captureSchoolSettingsHandle(
+  port: ReturnType<typeof createPort>,
+) {
+  const authority = await port.captureSchoolSettingsAuthority(accountId);
+  expect(authority).toEqual({
+    authorityHandle: expect.any(String),
+    status: "ready",
+  });
+  if (
+    typeof authority !== "object" ||
+    authority === null ||
+    !("authorityHandle" in authority) ||
+    typeof authority.authorityHandle !== "string"
+  ) {
+    throw new Error("Missing captured School settings authority");
+  }
+  return authority.authorityHandle;
+}
+
 const invitationRequest = {
   email: "teacher@example.test",
   role: "teacher" as const,
   schoolId,
 };
 const membershipRequest = { expectedRoleRevision: 7, profileId, schoolId };
+const schoolSettingsRequest = {
+  displayName: "Renamed School",
+  expectedSettingsRevision: 7,
+  schoolId,
+};
 
 function accountSession() {
   return {
@@ -232,6 +256,175 @@ function authorityReadClient(
 }
 
 describe("Supabase staff auth port", () => {
+  it.each([
+    "missing",
+    "unknown",
+    "released",
+    "expired",
+    "cleared",
+    "password",
+    "logout",
+    "staff_management",
+  ] as const)(
+    "rejects %s School settings authority without SDK or direct mutation fallback",
+    async (kind) => {
+      vi.useFakeTimers();
+      try {
+        const rpc = vi.fn(async () => externalFailure());
+        const getSession = vi.fn(async () => accountSession());
+        const providerFetch = vi.fn<typeof fetch>(async (input) =>
+          recoveryResponse(
+            JSON.stringify({ id: accountId }),
+            {
+              headers: { "content-type": "application/json" },
+              status: 200,
+            },
+            { url: String(input) },
+          ),
+        );
+        const port = createPort(
+          fakeClient({
+            auth: { getSession },
+            schema: () => ({ rpc }),
+          }),
+          providerFetch,
+        );
+        const handle =
+          kind === "password"
+            ? await port.capturePasswordAuthority(accountId)
+            : kind === "logout"
+              ? await captureSignOutHandle(port)
+              : kind === "staff_management"
+                ? await captureManagementHandle(port)
+                : await captureSchoolSettingsHandle(port);
+        if (handle === null) throw new Error("Missing fixture authority");
+        if (kind === "released") port.releaseSchoolSettingsAuthority(handle);
+        if (kind === "cleared") port.clearPrivateAuthContinuations();
+        if (kind === "expired") await vi.advanceTimersByTimeAsync(60_000);
+        const args =
+          kind === "missing"
+            ? []
+            : [kind === "unknown" ? "unknown-handle" : handle];
+        await expect(
+          Reflect.apply(port.updateSchoolDisplayName, port, [
+            schoolSettingsRequest,
+            ...args,
+          ]),
+        ).resolves.toBeNull();
+        expect(getSession).toHaveBeenCalledOnce();
+        expect(providerFetch).toHaveBeenCalledOnce();
+        expect(rpc).not.toHaveBeenCalled();
+        port.clearPrivateAuthContinuations();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("isolates School settings handles from every other captured-authority operation", async () => {
+    const providerFetch = vi.fn<typeof fetch>(async (input) =>
+      recoveryResponse(
+        JSON.stringify(
+          String(input).endsWith("/user")
+            ? { id: accountId }
+            : [{ code: "school_display_name_updated" }],
+        ),
+        {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        },
+        { url: String(input) },
+      ),
+    );
+    const port = createPort(
+      fakeClient({ auth: { getSession: async () => accountSession() } }),
+      providerFetch,
+    );
+    const handle = await captureSchoolSettingsHandle(port);
+    try {
+      await expect(
+        port.acceptInvitation({ displayName: "Teacher", invitationId }, handle),
+      ).resolves.toBeNull();
+      await expect(
+        port.beginPasswordRecovery("operation-1", handle),
+      ).resolves.toBeNull();
+      await expect(
+        port.finishPasswordRecovery("operation-1", handle),
+      ).resolves.toBeNull();
+      await expect(
+        port.updatePassword("synthetic-password", handle),
+      ).resolves.toEqual({ status: "unavailable" });
+      await expect(port.signOut("all", handle)).resolves.toEqual({
+        status: "unavailable",
+      });
+      await expect(port.revokeAllStaffSessions(handle)).resolves.toBeNull();
+      await expect(port.revokeCurrentStaffSession(handle)).resolves.toBeNull();
+      await expect(
+        port.invokeInvitation(invitationRequest, handle),
+      ).resolves.toEqual({ code: "service_unavailable", ok: false });
+      await expect(
+        port.revokeInvitation({ invitationId }, handle),
+      ).resolves.toBeNull();
+      await expect(
+        port.revokeMembership(membershipRequest, handle),
+      ).resolves.toBeNull();
+      await expect(
+        port.changeMembershipRole(
+          { ...membershipRequest, role: "teacher" },
+          handle,
+        ),
+      ).resolves.toBeNull();
+      expect(providerFetch).toHaveBeenCalledOnce();
+      // Unrelated releases cannot revoke a School settings capability.
+      port.releasePasswordAuthority(handle);
+      port.releaseStaffManagementAuthority(handle);
+      await expect(
+        port.updateSchoolDisplayName(schoolSettingsRequest, handle),
+      ).resolves.toEqual([{ code: "school_display_name_updated" }]);
+      expect(providerFetch).toHaveBeenCalledTimes(2);
+    } finally {
+      port.releaseSchoolSettingsAuthority(handle);
+    }
+  });
+
+  it.each(["password", "staff_management"] as const)(
+    "does not release a %s handle through the School settings release method",
+    async (purpose) => {
+      const providerFetch = vi.fn<typeof fetch>(async (input) =>
+        recoveryResponse(
+          JSON.stringify(
+            String(input).endsWith("/user")
+              ? { id: accountId }
+              : [{ code: "ok" }],
+          ),
+          { headers: { "content-type": "application/json" }, status: 200 },
+          { url: String(input) },
+        ),
+      );
+      const port = createPort(
+        fakeClient({ auth: { getSession: async () => accountSession() } }),
+        providerFetch,
+      );
+      const handle =
+        purpose === "password"
+          ? await port.capturePasswordAuthority(accountId)
+          : await captureManagementHandle(port);
+      if (handle === null) throw new Error("Missing fixture authority");
+      try {
+        port.releaseSchoolSettingsAuthority(handle);
+        await expect(
+          purpose === "password"
+            ? port.revokeCurrentStaffSession(handle)
+            : port.revokeMembership(membershipRequest, handle),
+        ).resolves.toEqual([{ code: "ok" }]);
+        expect(providerFetch).toHaveBeenCalledTimes(2);
+      } finally {
+        port.clearPrivateAuthContinuations();
+      }
+    },
+  );
+
   it.each(authorityReadCases)(
     "bounds a stalled $method, ignores its late result and permits a fresh read",
     async ({ method, data, expected, failed }) => {

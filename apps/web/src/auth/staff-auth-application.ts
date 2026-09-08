@@ -22,12 +22,16 @@ import {
   type StaffRecoveryFlowStorage,
   type StaffRecoveryFlowLock,
 } from "./staff-recovery-flow-store.js";
-import {
-  createSupabaseStaffAuthAdapter,
-  type SupabaseStaffAuthAdapter,
-} from "./supabase-staff-auth-adapter.js";
+import { createSupabaseStaffAuthAdapter } from "./supabase-staff-auth-adapter.js";
 import { createProductionSupabaseStaffAuthPort } from "./supabase-staff-auth-port.js";
 import { bindStaffAuthView } from "./staff-auth-view.js";
+import type { StaffProductRefreshResult } from "./staff-product-access.js";
+import {
+  createSchoolSettingsController,
+  type SchoolSettingsController,
+  type SchoolSettingsPort,
+} from "../school-settings/school-settings-controller.js";
+import { bindSchoolSettingsView } from "../school-settings/school-settings-view.js";
 
 const sensitiveCallbackKeys = new Set([
   "access_token",
@@ -110,10 +114,17 @@ export interface StaffAuthApplicationFactories {
     root: HTMLElement,
     controller: StaffAuthController,
   ) => () => void;
-  readonly createAdapter: (
+  readonly bindSchoolSettingsView: (
+    root: HTMLElement,
+    controller: SchoolSettingsController,
+  ) => () => void;
+  readonly createStaffServices: (
     configuration: PublicWebConfiguration,
     operationIds: StaffAuthOperationIdSource,
-  ) => StaffAuthApplicationAdapter;
+  ) => {
+    readonly adapter: StaffAuthApplicationAdapter;
+    readonly schoolSettingsPort: SchoolSettingsPort;
+  };
   readonly observeHealth: (
     configuration: PublicWebConfiguration,
     fetchImplementation: BackendHealthFetch,
@@ -266,9 +277,13 @@ interface StaffAuthApplicationGeneration {
   readonly adapter: StaffAuthApplicationAdapter;
   readonly controller: StaffAuthController;
   readonly initialization: Promise<unknown>;
+  readonly settingsController: SchoolSettingsController;
+  unsubscribeProduct: (() => void) | null;
+  disposeSettingsView: (() => void) | null;
   disposeView: (() => void) | null;
   disposed: boolean;
-  membershipRefresh: Promise<void> | null;
+  membershipRefresh: Promise<StaffProductRefreshResult> | null;
+  membershipRefreshCompletion: Promise<void> | null;
 }
 
 function startScrubbedStaffAuthApplication(
@@ -316,10 +331,16 @@ function startScrubbedStaffAuthApplication(
     readonly callbackLost: boolean;
     readonly pendingCallback: PrivateStaffAuthPendingCallback | null;
   }): StaffAuthApplicationGeneration {
-    const adapter =
+    const { adapter, schoolSettingsPort } =
       runtimeConfiguration === null
-        ? createUnavailableAdapter()
-        : factories.createAdapter(runtimeConfiguration, operationIds);
+        ? {
+            adapter: createUnavailableAdapter(),
+            schoolSettingsPort: createUnavailableSchoolSettingsPort(),
+          }
+        : factories.createStaffServices(runtimeConfiguration, operationIds);
+    let clearProduct = () =>
+      clearProtectedSchoolDataRoot(elements.protectedSchoolDataRoot);
+    let constructedSettings: SchoolSettingsController | null = null;
     try {
       const flows = createStaffRecoveryFlowStore({
         clock,
@@ -352,21 +373,49 @@ function startScrubbedStaffAuthApplication(
         operationIds,
         protectedSchoolData: {
           clear() {
-            clearProtectedSchoolDataRoot(elements.protectedSchoolDataRoot);
+            clearProduct();
           },
         },
       });
-      return {
+      const settingsController = createSchoolSettingsController({
+        port: schoolSettingsPort,
+        getAccess: () => controller.getProductAccess(),
+        refreshAccess: () => refreshGenerationMembership(generation),
+      });
+      constructedSettings = settingsController;
+      const generation: StaffAuthApplicationGeneration = {
         adapter,
         controller,
+        settingsController,
+        unsubscribeProduct: null,
+        disposeSettingsView: null,
         disposeView: null,
         disposed: false,
         membershipRefresh: null,
+        membershipRefreshCompletion: null,
         initialization: options.bootstrap
           ? controller.dispatch({ type: "bootstrap" })
           : Promise.resolve(controller.getSnapshot()),
       };
+      clearProduct = () => {
+        const access = controller.getProductAccess();
+        settingsController.setAccess(
+          access.kind === "paused" ? access : { kind: "unavailable" },
+        );
+        detachSettingsView(generation);
+        clearProtectedSchoolDataRoot(elements.protectedSchoolDataRoot);
+      };
+      generation.unsubscribeProduct = controller.subscribe(() =>
+        synchronizeProduct(generation),
+      );
+      settingsController.setAccess(controller.getProductAccess());
+      return generation;
     } catch (error) {
+      try {
+        constructedSettings?.dispose();
+      } catch {
+        // Provider disposal remains required after product setup fails.
+      }
       try {
         adapter.dispose();
       } catch {
@@ -387,11 +436,69 @@ function startScrubbedStaffAuthApplication(
     );
   }
 
+  function detachSettingsView(
+    generation: StaffAuthApplicationGeneration,
+  ): void {
+    const dispose = generation.disposeSettingsView;
+    generation.disposeSettingsView = null;
+    try {
+      dispose?.();
+    } catch {
+      // The protected root is still scrubbed by the caller.
+    }
+  }
+
+  function synchronizeProduct(
+    generation: StaffAuthApplicationGeneration,
+  ): void {
+    if (!generationIsCurrent(generation)) return;
+    const access = generation.controller.getProductAccess();
+    generation.settingsController.setAccess(access);
+    if (access.kind !== "ready") {
+      detachSettingsView(generation);
+      clearProtectedSchoolDataRoot(elements.protectedSchoolDataRoot);
+      return;
+    }
+    if (
+      generation.disposeView === null ||
+      generation.disposeSettingsView !== null
+    )
+      return;
+    try {
+      const dispose = factories.bindSchoolSettingsView(
+        elements.protectedSchoolDataRoot,
+        generation.settingsController,
+      );
+      if (!generationIsCurrent(generation)) {
+        dispose();
+        return;
+      }
+      generation.disposeSettingsView = dispose;
+      revealFreshStaffAuthRoot(elements.protectedSchoolDataRoot);
+    } catch {
+      generation.settingsController.setAccess({ kind: "unavailable" });
+      clearProtectedSchoolDataRoot(elements.protectedSchoolDataRoot);
+    }
+  }
+
   function disposeGeneration(
     generation: StaffAuthApplicationGeneration | null,
   ): void {
     if (generation === null || generation.disposed) return;
     generation.disposed = true;
+    const unsubscribeProduct = generation.unsubscribeProduct;
+    generation.unsubscribeProduct = null;
+    try {
+      unsubscribeProduct?.();
+    } catch {
+      // Continue through product and provider disposal.
+    }
+    try {
+      generation.settingsController.dispose();
+    } catch {
+      // A product failure cannot preserve auth authority.
+    }
+    detachSettingsView(generation);
     const disposeView = generation.disposeView;
     generation.disposeView = null;
     if (disposeView !== null) {
@@ -435,6 +542,7 @@ function startScrubbedStaffAuthApplication(
       }
       generation.disposeView = disposeView;
       revealFreshStaffAuthRoot(elements.authRoot);
+      synchronizeProduct(generation);
       if (runtimeConfiguration === null) {
         renderBackendObservation(elements.status, {
           reason: "configuration_invalid",
@@ -470,28 +578,45 @@ function startScrubbedStaffAuthApplication(
     disposeGeneration(generation);
   }
 
-  function refreshMembership(): Promise<void> {
-    const generation = currentGeneration;
-    if (generation === null || !generationIsCurrent(generation)) {
-      return Promise.resolve();
+  function refreshGenerationMembership(
+    generation: StaffAuthApplicationGeneration,
+  ): Promise<StaffProductRefreshResult> {
+    if (!generationIsCurrent(generation)) {
+      return Promise.resolve({ kind: "unavailable" });
     }
     if (generation.membershipRefresh !== null) {
       return generation.membershipRefresh;
     }
     const refresh = generation.initialization
       .catch(() => undefined)
-      .then(async () => {
-        if (!generationIsCurrent(generation)) return;
-        await generation.controller.refreshMembership();
+      .then(async (): Promise<StaffProductRefreshResult> => {
+        if (!generationIsCurrent(generation)) return { kind: "unavailable" };
+        const result = await generation.controller.refreshMembership();
+        if (!generationIsCurrent(generation)) return { kind: "unavailable" };
+        // An unchanged read deliberately does not publish an auth snapshot.
+        // Still resume a product paused by a superseded earlier read.
+        if (result.kind === "fresh_authorized") synchronizeProduct(generation);
+        return result;
       })
-      .catch(() => undefined);
+      .catch((): StaffProductRefreshResult => ({ kind: "unavailable" }));
     generation.membershipRefresh = refresh;
+    generation.membershipRefreshCompletion = refresh.then(() => undefined);
     void refresh.then(() => {
       if (generation.membershipRefresh === refresh) {
         generation.membershipRefresh = null;
+        generation.membershipRefreshCompletion = null;
       }
     });
     return refresh;
+  }
+
+  function refreshMembership(): Promise<void> {
+    const generation = currentGeneration;
+    if (generation === null) return Promise.resolve();
+    const refresh = refreshGenerationMembership(generation);
+    return (
+      generation.membershipRefreshCompletion ?? refresh.then(() => undefined)
+    );
   }
 
   function resume(): Promise<void> {
@@ -775,17 +900,26 @@ export function createProductionStaffAuthApplicationFactories(dependencies: {
 }): StaffAuthApplicationFactories {
   return {
     bindView: bindStaffAuthView,
-    createAdapter(configuration, operationIds): SupabaseStaffAuthAdapter {
-      return createSupabaseStaffAuthAdapter({
-        clock: dependencies.clock,
-        createBlobUrl: dependencies.createBlobUrl,
-        operationIds,
-        port: createProductionSupabaseStaffAuthPort(
-          configuration,
-          dependencies.fetch,
-        ),
-        revokeBlobUrl: dependencies.revokeBlobUrl,
-      });
+    bindSchoolSettingsView,
+    createStaffServices(configuration, operationIds) {
+      const port = createProductionSupabaseStaffAuthPort(
+        configuration,
+        dependencies.fetch,
+      );
+      return {
+        adapter: createSupabaseStaffAuthAdapter({
+          clock: dependencies.clock,
+          createBlobUrl: dependencies.createBlobUrl,
+          operationIds,
+          port,
+          revokeBlobUrl: dependencies.revokeBlobUrl,
+        }),
+        schoolSettingsPort: {
+          captureSchoolSettingsAuthority: port.captureSchoolSettingsAuthority,
+          updateSchoolDisplayName: port.updateSchoolDisplayName,
+          releaseSchoolSettingsAuthority: port.releaseSchoolSettingsAuthority,
+        },
+      };
     },
     observeHealth(configuration, fetchImplementation) {
       return observeWebBackend(
@@ -796,6 +930,18 @@ export function createProductionStaffAuthApplicationFactories(dependencies: {
         createBackendHealthReader(fetchImplementation),
       );
     },
+  };
+}
+
+function createUnavailableSchoolSettingsPort(): SchoolSettingsPort {
+  return {
+    async captureSchoolSettingsAuthority() {
+      return { status: "unavailable" };
+    },
+    async updateSchoolDisplayName() {
+      return null;
+    },
+    releaseSchoolSettingsAuthority() {},
   };
 }
 

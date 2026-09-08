@@ -14,6 +14,7 @@ import {
   client,
   code,
   createRuntimeHealthCheck,
+  directSchoolTableDenied,
   loopbackFetch,
   openDisposableStack,
   password,
@@ -35,7 +36,7 @@ import { runMembershipBrowserAcceptance } from "./staff-membership-browser.mjs";
 
 // Source-handler integration with real GoTrue/PostgREST. Invitation mail uses an
 // in-memory transport; PKCE recovery mail reaches the disposable local SMTP sink.
-// The final Membership group also runs the production browser entrypoint. This
+// The final Membership group also runs School settings in the production browser. This
 // does not attest deployed Edge, external email delivery or hosted configuration.
 test(
   "real provider composes authentication and School Membership administration",
@@ -623,6 +624,68 @@ commit;`);
     return { profileId };
   }
 
+  function schoolSnapshot(schoolId = schoolA) {
+    return sql(`select jsonb_build_object(
+'school',(select to_jsonb(w)||jsonb_build_object('tuple',w.ctid::text) from desmoslock_v2.workspaces w where id=${sqlUuid(schoolId)}),
+'audit',coalesce((select jsonb_agg(to_jsonb(e)||jsonb_build_object('tuple',e.ctid::text) order by e.id) from desmoslock_v2.staff_audit_events e where workspace_id=${sqlUuid(schoolId)}),'[]'::jsonb));`);
+  }
+  async function schoolDenialDoesNotWrite(caller, request, expected) {
+    const before = schoolSnapshot(request.workspace_id);
+    code(await rpc(caller, "update_school_display_name", request), expected);
+    check(
+      schoolSnapshot(request.workspace_id) === before,
+      "Nonmutating School outcome changed the School row or audit",
+    );
+  }
+  async function checkSchoolRenameAudit(staff, previousRevision) {
+    check(
+      Number.isSafeInteger(previousRevision) && previousRevision >= 1,
+      "School audit assertion received an invalid revision",
+    );
+    const { session } = await auth(() => staff.client.auth.getSession());
+    const sessionId = sessionClaims(session).session_id;
+    check(
+      sql(`select count(*)=1
+and bool_and(e.actor_profile_id=${sqlUuid(staff.profileId)} and e.session_id=${sqlUuid(sessionId)}
+and e.result_code='school_display_name_updated' and e.new_settings_revision=${previousRevision + 1}
+and e.subject_profile_id is null and e.invitation_id is null
+and e.previous_role is null and e.new_role is null and e.previous_role_revision is null and e.new_role_revision is null)
+from desmoslock_v2.staff_audit_events e
+where e.workspace_id=${sqlUuid(staff.schoolId)} and e.event_type='school_display_name_updated' and e.previous_settings_revision=${previousRevision};`) ===
+        "t",
+      "School rename omitted its one attributable typed audit",
+    );
+  }
+  async function renameSchool(staff, displayName) {
+    const before = await rpc(staff.client, "current_staff_context");
+    code(before, "ok");
+    code(
+      await rpc(staff.client, "update_school_display_name", {
+        workspace_id: staff.schoolId,
+        display_name: displayName,
+        expected_settings_revision: before.school_settings_revision,
+      }),
+      "school_display_name_updated",
+    );
+    const after = await rpc(staff.client, "current_staff_context");
+    check(
+      after.code === "ok" &&
+        after.school_name === displayName &&
+        after.school_settings_revision ===
+          before.school_settings_revision + 1 &&
+        [
+          "profile_id",
+          "display_name",
+          "school_id",
+          "school_slug",
+          "membership_role",
+          "role_revision",
+        ].every((key) => after[key] === before[key]),
+      "School rename failed to update presentation alone through the existing context",
+    );
+    await checkSchoolRenameAudit(staff, before.school_settings_revision);
+  }
+
   await t.test(
     "two real Schools enforce the Owner, Administrator, Teacher and unaffiliated matrix",
     async () => {
@@ -855,6 +918,237 @@ commit;`);
   );
 
   await t.test(
+    "real School settings enforce scoped reads, AAL2 edits and exact nonmutating outcomes",
+    async () => {
+      await checkRuntimeHealth("before real School settings matrix");
+      const contexts = new Map();
+      for (const staff of [
+        ownerA,
+        ownerB,
+        administrator,
+        teacher,
+        foreignTeacher,
+      ]) {
+        const context = await rpc(staff.client, "current_staff_context");
+        check(
+          context.code === "ok" &&
+            context.school_id === staff.schoolId &&
+            context.school_settings_revision === 1 &&
+            context.school_name ===
+              (staff.schoolId === schoolA
+                ? "Disposable Membership School A"
+                : "Disposable Membership School B"),
+          "A real provider context exposed a foreign School or omitted its initial settings revision",
+        );
+        contexts.set(staff, context);
+      }
+      const aal1Context = await rpc(ownerAal1, "current_staff_context");
+      check(
+        aal1Context.code === "ok" &&
+          aal1Context.school_id === schoolA &&
+          aal1Context.school_settings_revision === 1,
+        "AAL1 School presentation read incorrectly required editing authority",
+      );
+      await rpcDenied(anonymous, "current_staff_context", {}, ["42501"]);
+      await rpcDenied(
+        ownerA.client,
+        "current_staff_context",
+        { workspace_id: schoolB },
+        ["PGRST202"],
+      );
+
+      await renameSchool(ownerA, "Owner renamed School é");
+      await renameSchool(administrator, "Administrator renamed School 学校");
+      const current = await rpc(ownerA.client, "current_staff_context");
+      for (const [staff, original] of contexts) {
+        const updated = await rpc(staff.client, "current_staff_context");
+        check(
+          [
+            "profile_id",
+            "display_name",
+            "school_id",
+            "school_slug",
+            "membership_role",
+            "role_revision",
+          ].every((key) => updated[key] === original[key]) &&
+            updated.school_name ===
+              (staff.schoolId === schoolA
+                ? current.school_name
+                : original.school_name) &&
+            updated.school_settings_revision ===
+              (staff.schoolId === schoolA
+                ? current.school_settings_revision
+                : original.school_settings_revision),
+          "School presentation propagation changed identity, Membership or another School",
+        );
+      }
+      const request = {
+        workspace_id: schoolA,
+        display_name: "Denied School rename",
+        expected_settings_revision: current.school_settings_revision,
+      };
+      for (const [caller, expected] of [
+        [teacher.client, "forbidden"],
+        [ownerAal1, "step_up_required"],
+        [uninvited.client, "membership_inactive"],
+        [ownerB.client, "membership_inactive"],
+      ])
+        await schoolDenialDoesNotWrite(caller, request, expected);
+      await schoolDenialDoesNotWrite(
+        foreignTeacher.client,
+        {
+          workspace_id: schoolB,
+          display_name: "AAL1 Teacher cannot rename",
+          expected_settings_revision: 1,
+        },
+        "step_up_required",
+      );
+      const beforeAnonymous = schoolSnapshot();
+      await rpcDenied(anonymous, "update_school_display_name", request, [
+        "42501",
+      ]);
+      check(
+        schoolSnapshot() === beforeAnonymous,
+        "Anonymous School request changed protected data",
+      );
+
+      const beforeDirectA = schoolSnapshot();
+      const beforeDirectB = schoolSnapshot(schoolB);
+      for (const caller of [
+        ownerA.client,
+        administrator.client,
+        teacher.client,
+        ownerAal1,
+        uninvited.client,
+        anonymous,
+      ]) {
+        await directSchoolTableDenied(caller, schoolA);
+        await directSchoolTableDenied(caller, schoolB);
+      }
+      check(
+        schoolSnapshot() === beforeDirectA &&
+          schoolSnapshot(schoolB) === beforeDirectB,
+        "Denied direct-table access changed a School or audit",
+      );
+      await schoolDenialDoesNotWrite(
+        administrator.client,
+        {
+          ...request,
+          display_name: current.school_name,
+        },
+        "school_display_name_unchanged",
+      );
+      await schoolDenialDoesNotWrite(
+        ownerA.client,
+        {
+          ...request,
+          display_name: current.school_name,
+          expected_settings_revision: current.school_settings_revision - 1,
+        },
+        "school_settings_revision_conflict",
+      );
+      await checkRuntimeHealth("after real School settings matrix");
+    },
+  );
+
+  await t.test(
+    "two contending actual School rename RPCs commit one revision and one audit",
+    async () => {
+      verifyDisposableDatabase();
+      const before = await rpc(ownerA.client, "current_staff_context");
+      const revision = before.school_settings_revision;
+      const beforeAudits = sql(
+        `select count(*) from desmoslock_v2.staff_audit_events where workspace_id=${sqlUuid(schoolA)} and event_type='school_display_name_updated';`,
+      );
+      check(
+        /^[0-9]+$/u.test(beforeAudits),
+        "School audit baseline is malformed",
+      );
+      const contenders = [
+        { staff: ownerA, displayName: "Concurrent Owner School name" },
+        {
+          staff: administrator,
+          displayName: "Concurrent Administrator School name",
+        },
+      ];
+      const blocker = await openConnection(
+        `composed-school-${randomUUID().slice(0, 8)}`,
+      );
+      let requests = [];
+      try {
+        await blocker.query(
+          `begin; select 1 from desmoslock_v2.workspaces where id=${sqlUuid(schoolA)} for update;`,
+        );
+        requests = contenders.map(({ staff, displayName }) =>
+          rpc(staff.client, "update_school_display_name", {
+            workspace_id: schoolA,
+            display_name: displayName,
+            expected_settings_revision: revision,
+          }),
+        );
+        const settled = Promise.allSettled(requests);
+        const deadline = Date.now() + 4_000;
+        let observed = false;
+        while (Date.now() < deadline) {
+          const rows = await blocker.query(`select pg_stat_clear_snapshot();
+select count(*)=2 and bool_or(${blocker.pid}=any(pg_blocking_pids(a.pid)))
+from pg_stat_activity a where a.pid<>pg_backend_pid() and a.state='active' and a.wait_event_type='Lock'
+and a.query like '%"update_school_display_name"%';`);
+          if (rows.length === 1 && rows[0] === "t") {
+            observed = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        check(
+          observed,
+          "Both actual School RPCs did not demonstrate School row lock contention",
+        );
+        await blocker.query("commit;");
+        const results = await settled;
+        check(
+          results.every((entry) => entry.status === "fulfilled"),
+          "Competing real School RPC did not complete",
+        );
+        const codes = results.map((entry) => entry.value.code);
+        check(
+          codes.filter((value) => value === "school_display_name_updated")
+            .length === 1 &&
+            codes.filter(
+              (value) => value === "school_settings_revision_conflict",
+            ).length === 1,
+          "Competing School RPCs did not return exactly one update and one conflict",
+        );
+        const winner = contenders[codes.indexOf("school_display_name_updated")];
+        const after = await rpc(ownerA.client, "current_staff_context");
+        check(
+          after.code === "ok" &&
+            after.school_settings_revision === revision + 1 &&
+            after.school_name === winner.displayName &&
+            sql(
+              `select count(*)=${beforeAudits}+1 from desmoslock_v2.staff_audit_events where workspace_id=${sqlUuid(schoolA)} and event_type='school_display_name_updated';`,
+            ) === "t",
+          "Competing School commits split the winning name, revision or audit count",
+        );
+        await checkSchoolRenameAudit(winner.staff, revision);
+        await schoolDenialDoesNotWrite(
+          ownerA.client,
+          {
+            workspace_id: schoolA,
+            display_name: after.school_name,
+            expected_settings_revision: revision,
+          },
+          "school_settings_revision_conflict",
+        );
+      } finally {
+        await blocker.close();
+        await Promise.allSettled(requests);
+      }
+      await checkRuntimeHealth("after contending real School RPC commits");
+    },
+  );
+
+  await t.test(
     "real Administrator revocation is attributable and cannot resurrect revoked staff",
     async () => {
       const revokee = addTarget();
@@ -1075,6 +1369,24 @@ rollback;`) === "t",
             "The existing provider session did not reflect its current Teacher role",
           );
         const denied = removal ? "membership_inactive" : "forbidden";
+        const schoolContext = await rpc(ownerA.client, "current_staff_context");
+        await schoolDenialDoesNotWrite(
+          administrator.client,
+          {
+            workspace_id: schoolA,
+            display_name: "Former Administrator cannot rename",
+            expected_settings_revision: schoolContext.school_settings_revision,
+          },
+          denied,
+        );
+        if (!removal)
+          check(
+            changedContext.school_id === schoolA &&
+              changedContext.school_name === schoolContext.school_name &&
+              changedContext.school_settings_revision ===
+                schoolContext.school_settings_revision,
+            "Downgraded Administrator lost the authorized Teacher School presentation read",
+          );
         code(
           await rpc(administrator.client, "current_manageable_staff"),
           denied,
@@ -1158,6 +1470,13 @@ rollback;`) === "t",
         owner: ownerA.client,
         actor: browserActor,
         schoolId: schoolA,
+        schoolSettings: {
+          localDisplayName: "Browser Administrator School name",
+          externalDisplayName: "Other tab Owner School name",
+          confirmationTargetEmail: teacher.email,
+          renameExternally: async (displayName) =>
+            renameSchool(ownerA, displayName),
+        },
       });
       await checkRuntimeHealth(
         "after real Membership browser downgrade and revocation",

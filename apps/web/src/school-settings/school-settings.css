@@ -1,0 +1,131 @@
+.school-settings {
+  background: rgb(255 255 255 / 88%);
+  border: 1px solid var(--staff-auth-border, #cbd5e1);
+  border-radius: 1rem;
+  box-sizing: border-box;
+  display: grid;
+  gap: 1rem;
+  inline-size: min(100%, 44rem);
+  margin-inline: auto;
+  overflow-wrap: anywhere;
+  padding: clamp(1rem, 4vw, 2rem);
+}
+
+.school-settings *,
+.school-settings *::before,
+.school-settings *::after {
+  box-sizing: inherit;
+}
+
+.school-settings h2,
+.school-settings h3,
+.school-settings p {
+  margin: 0;
+}
+
+.school-settings h2 {
+  font-size: clamp(1.25rem, 4vw, 1.65rem);
+  line-height: 1.25;
+}
+
+.school-settings h3 {
+  font-size: 1.05rem;
+  line-height: 1.4;
+}
+
+.school-settings p {
+  color: var(--staff-auth-muted, #475569);
+  line-height: 1.6;
+}
+
+.school-settings__form,
+.school-settings__field,
+.school-settings__conflict {
+  display: grid;
+  gap: 0.875rem;
+  min-inline-size: 0;
+}
+
+.school-settings__form {
+  margin: 0;
+}
+
+.school-settings__field {
+  gap: 0.4rem;
+  font-weight: 650;
+}
+
+.school-settings input,
+.school-settings button {
+  border-radius: 0.55rem;
+  font: inherit;
+  max-inline-size: 100%;
+  min-block-size: 44px;
+}
+
+.school-settings input {
+  background: var(--staff-auth-control-background, #fff);
+  border: 1px solid var(--staff-auth-border-strong, #94a3b8);
+  color: var(--staff-auth-foreground, #0f172a);
+  inline-size: 100%;
+  padding: 0.65rem 0.75rem;
+}
+
+.school-settings input[aria-invalid="true"] {
+  border-color: var(--staff-auth-danger, #b42318);
+}
+
+.school-settings input:read-only {
+  background: #f1f5f9;
+}
+
+.school-settings__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.school-settings button {
+  background: var(--staff-auth-action-background, #0f172a);
+  border: 2px solid transparent;
+  color: var(--staff-auth-action-foreground, #fff);
+  cursor: pointer;
+  padding: 0.6rem 1rem;
+}
+
+.school-settings button + button {
+  background: transparent;
+  border-color: var(--staff-auth-border-strong, #94a3b8);
+  color: var(--staff-auth-foreground, #0f172a);
+}
+
+.school-settings button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.school-settings__conflict {
+  border-inline-start: 3px solid #a16207;
+  padding-inline-start: 1rem;
+}
+
+.school-settings .school-settings__error {
+  color: var(--staff-auth-danger, #b42318);
+}
+
+.school-settings :is(input, button):focus-visible {
+  outline: 3px solid var(--staff-auth-focus, #2563eb);
+  outline-offset: 2px;
+}
+
+@media (max-width: 30rem) {
+  .school-settings button {
+    inline-size: 100%;
+  }
+}
+
+@media (forced-colors: active) {
+  .school-settings button {
+    border-color: ButtonText;
+  }
+}

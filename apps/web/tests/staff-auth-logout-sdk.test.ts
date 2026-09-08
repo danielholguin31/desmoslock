@@ -164,6 +164,7 @@ async function harness() {
           role_revision: 1,
           school_id: "11000000-0000-4000-8000-000000000001",
           school_name: "Synthetic School",
+          school_settings_revision: 1,
           school_slug: "synthetic-school",
         },
       ]);

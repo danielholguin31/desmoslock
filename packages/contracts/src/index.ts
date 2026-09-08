@@ -137,3 +137,21 @@ export type {
   StaffPasswordRecoveryOperationRequest,
   StaffPasswordRecoveryRpcFailureCode,
 } from "./staff-auth.js";
+export {
+  parseSchoolDisplayName,
+  parseSchoolSettings,
+  parseUpdateSchoolDisplayNameRequest,
+  parseUpdateSchoolDisplayNameRpcResult,
+  updateSchoolDisplayNameRpcFailureCodes,
+  updateSchoolDisplayNameRpcSuccessCodes,
+  validateSchoolDisplayNameDraft,
+} from "./school-settings.js";
+export type {
+  SchoolDisplayNameDraftValidation,
+  SchoolNameValidation,
+  SchoolSettings,
+  UpdateSchoolDisplayNameRequest,
+  UpdateSchoolDisplayNameRpcFailureCode,
+  UpdateSchoolDisplayNameRpcResult,
+  UpdateSchoolDisplayNameRpcSuccessCode,
+} from "./school-settings.js";
