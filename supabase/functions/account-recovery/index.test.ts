@@ -120,7 +120,7 @@ Deno.test(
   },
 );
 
-Deno.test("account recovery CORS matches Supabase SDK", async () => {
+Deno.test("account recovery CORS matches both SDK states", async () => {
   const valid = await handleRequest(
     recoveryRequest(undefined, {
       headers: {
@@ -136,6 +136,47 @@ Deno.test("account recovery CORS matches Supabase SDK", async () => {
     valid.headers.get("access-control-allow-headers"),
     "apikey, content-type, x-client-info",
   );
+
+  const authenticated = await handleRequest(
+    recoveryRequest(undefined, {
+      headers: {
+        "access-control-request-headers":
+          "X-Client-Info, Authorization, Content-Type, ApiKey",
+        "access-control-request-method": "POST",
+      },
+      method: "OPTIONS",
+    }),
+    dependencies(),
+  );
+  assertEquals(authenticated.status, 204);
+  assertEquals(
+    authenticated.headers.get("access-control-allow-headers"),
+    "apikey, authorization, content-type, x-client-info",
+  );
+
+  for (const requestedHeaders of [
+    "apikey, authorization, content-type",
+    "apikey, authorization, content-type, x-client-info, x-extra",
+    "apikey, authorization, Authorization, content-type, x-client-info",
+    "apikey, authorization, content-type, x-client-info,",
+    "authorization",
+  ]) {
+    const rejected = await handleRequest(
+      recoveryRequest(undefined, {
+        headers: {
+          "access-control-request-headers": requestedHeaders,
+          "access-control-request-method": "POST",
+        },
+        method: "OPTIONS",
+      }),
+      dependencies(),
+    );
+    assertEquals(rejected.status, 400);
+    assertEquals(await rejected.json(), {
+      code: "invalid_request",
+      ok: false,
+    });
+  }
 
   const omittedSdkHeader = await handleRequest(
     recoveryRequest(undefined, {

@@ -10,15 +10,15 @@ import {
 const WEB_ORIGIN = "https://staff.desmoslock.invalid";
 const BACKEND_ORIGIN = "https://abcdefghijklmnopqrst.supabase.co";
 const CALLBACK = `${WEB_ORIGIN}/`;
-const INVITATION_ID = "10000000-0000-0000-0000-000000000001";
-const USER_ID = "20000000-0000-0000-0000-000000000002";
+const INVITATION_ID = "10000000-0000-4000-8000-000000000001";
+const USER_ID = "20000000-0000-4000-8000-000000000002";
 const WORKSPACE_ID = "30000000-0000-4000-8000-000000000003";
 const REQUEST_KEY = "40000000-0000-4000-8000-000000000004";
 const SECOND_REQUEST_KEY = "50000000-0000-4000-8000-000000000005";
 const THIRD_REQUEST_KEY = "60000000-0000-4000-8000-000000000006";
 const JWT = "synthetic-header.synthetic-payload.synthetic-signature";
 const TOKEN_HASH = "a".repeat(56);
-const INVITE_CALLBACK = `${CALLBACK}?auth=invite&token_hash=${TOKEN_HASH}`;
+const INVITE_CALLBACK = `${CALLBACK}?auth=invite#token_hash=${TOKEN_HASH}`;
 const ACTION_LINK =
   `${BACKEND_ORIGIN}/auth/v1/verify?token=${TOKEN_HASH}` +
   `&type=invite&redirect_to=${encodeURIComponent(CALLBACK)}`;
@@ -159,8 +159,11 @@ Deno.test(
       [
         "deliver",
         {
+          attemptId: REQUEST_KEY,
+          attemptStartedAt: "2026-08-30T12:00:00.000Z",
           callbackUrl: INVITE_CALLBACK,
           expiresAt: "2026-08-30T13:00:00.000Z",
+          invitationId: INVITATION_ID,
           recipientEmail: "teacher@example.com",
         },
       ],
@@ -770,7 +773,7 @@ Deno.test(
 );
 
 Deno.test(
-  "staff invitation leaves delivery-ready non-consumable after delivery failure",
+  "staff invitation preserves delivery-ready after unconfirmed delivery",
   async () => {
     const calls: unknown[] = [];
     const response = await handleRequest(
@@ -796,19 +799,19 @@ Deno.test(
     );
     assertEquals(response.status, 503);
     assertEquals(await response.json(), {
-      code: "service_unavailable",
+      code: "invitation_delivery_unconfirmed",
       ok: false,
     });
     assertEquals(calls, [
       "prepare",
       "deliver",
-      ["fail", INVITATION_ID, "dependency_unavailable"],
+      ["fail", INVITATION_ID, "delivery_unconfirmed"],
     ]);
   },
 );
 
 Deno.test(
-  "SMTP sent-then-throw remains non-consumable even when failure recording fails",
+  "Provider sent-then-throw remains unconfirmed even when failure recording fails",
   async () => {
     for (const failureOutcome of ["throws", "unexpected"] as const) {
       const events: unknown[] = [];
@@ -845,17 +848,17 @@ Deno.test(
       assertEquals(response.status, 503);
       assertEquals(
         body,
-        JSON.stringify({ code: "service_unavailable", ok: false }),
+        JSON.stringify({ code: "invitation_delivery_unconfirmed", ok: false }),
       );
       assertEquals(deliveries, 1);
       assertEquals(publications, 0);
       const expectedEvents: unknown[] = [
         "ready",
         "smtp-sent-then-threw",
-        ["fail", INVITATION_ID, "dependency_unavailable"],
+        ["fail", INVITATION_ID, "delivery_unconfirmed"],
       ];
       if (failureOutcome === "throws") {
-        expectedEvents.push(["fail", INVITATION_ID, "dependency_unavailable"]);
+        expectedEvents.push(["fail", INVITATION_ID, "delivery_unconfirmed"]);
       }
       assertEquals(events, expectedEvents);
       assert(!body.includes(TOKEN_HASH), "Action token hash leaked");
@@ -931,7 +934,7 @@ Deno.test(
     assertEquals(response.status, 503);
     assertEquals(
       body,
-      JSON.stringify({ code: "service_unavailable", ok: false }),
+      JSON.stringify({ code: "invitation_delivery_unconfirmed", ok: false }),
     );
     assertEquals(deliveries, 1);
     assertEquals(publications, 2);
@@ -1028,6 +1031,9 @@ function runtimeConfiguration(
     DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: BACKEND_ORIGIN,
     DESMOSLOCK_STAFF_INVITATION_CALLBACK: CALLBACK,
     DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS: "3600",
+    DESMOSLOCK_STAFF_INVITATION_FROM: "DesmosLock <mail@example.invalid>",
+    DESMOSLOCK_STAFF_INVITATION_REPLY_TO: "support@example.invalid",
+    RESEND_API_KEY: "synthetic-provider-key",
     SUPABASE_ANON_KEY: "synthetic-publishable-sentinel",
     SUPABASE_SERVICE_ROLE_KEY: "synthetic-service-role-sentinel",
     SUPABASE_URL: BACKEND_ORIGIN,
@@ -1465,6 +1471,9 @@ Deno.test(
     );
 
     await service.deliverInvitation({
+      attemptId: REQUEST_KEY,
+      attemptStartedAt: "2026-08-30T12:00:00.000Z",
+      invitationId: INVITATION_ID,
       callbackUrl: INVITE_CALLBACK,
       expiresAt: "2026-08-30T13:00:00.000Z",
       recipientEmail: "teacher@example.com",
@@ -1735,17 +1744,19 @@ Deno.test(
 );
 
 Deno.test(
-  "staff invitation runtime fails closed without an approved delivery transport",
+  "staff invitation runtime fails closed without valid Resend configuration",
   async () => {
-    const service = createStaffInvitationDependencies(runtimeConfiguration());
-    assertEquals(
-      await service.deliverInvitation({
-        callbackUrl: INVITE_CALLBACK,
-        expiresAt: "2026-08-30T13:00:00.000Z",
-        recipientEmail: "teacher@example.com",
-      }),
-      "dependency_unavailable",
-    );
+    for (const key of [
+      "RESEND_API_KEY",
+      "DESMOSLOCK_STAFF_INVITATION_FROM",
+      "DESMOSLOCK_STAFF_INVITATION_REPLY_TO",
+    ]) {
+      await assertRejects(async () => {
+        createStaffInvitationDependencies(
+          runtimeConfiguration({ [key]: undefined }),
+        );
+      });
+    }
   },
 );
 
@@ -1811,5 +1822,394 @@ Deno.test(
       });
     }
     assertEquals(requests, 0);
+  },
+);
+
+type ProviderBoundaryOutcome =
+  "accepted" | "timeout" | "rejected" | "server_error";
+
+// These tests exercise the actual handler, RPC adapter and Resend transport.
+// HTTP responders are test doubles; database transition proof belongs to pgTAP.
+function deliveryBoundary(options: {
+  readonly outcomes: readonly ProviderBoundaryOutcome[];
+  readonly prepareResponsesLost?: boolean;
+  readonly publishResponsesLost?: number;
+  readonly publishCommitsBeforeLoss?: boolean;
+  readonly failResponsesLost?: boolean;
+}) {
+  const clock = Date.UTC(2026, 7, 30, 12);
+  const providerRequests: Array<{
+    body: string;
+    headers: Headers;
+    url: string;
+  }> = [];
+  const rpcRequests: Array<{ body: Record<string, unknown>; name: string }> =
+    [];
+  const row: {
+    state: string;
+    userId: unknown;
+    expiresAt: unknown;
+    reason: unknown;
+  } = {
+    state: "pending_delivery",
+    userId: null,
+    expiresAt: null,
+    reason: null,
+  };
+  let publicationCalls = 0;
+  let timeoutCallback: (() => void) | undefined;
+  const service = createStaffInvitationDependencies(
+    runtimeConfiguration(),
+    async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/auth/v1/admin/generate_link") {
+        return Response.json(generatedProviderResponse());
+      }
+      const name = url.pathname.split("/").at(-1)!;
+      const body = JSON.parse(String(init?.body));
+      rpcRequests.push({ name, body });
+      if (name === "begin_staff_invitation") {
+        assertEquals(body, {
+          email: "teacher@example.com",
+          request_key: REQUEST_KEY,
+          role: "admin",
+          workspace_id: WORKSPACE_ID,
+        });
+        return Response.json([
+          { code: "invitation_pending", invitation_id: INVITATION_ID },
+        ]);
+      }
+      if (name === "internal_prepare_staff_invitation") {
+        assertEquals(Object.keys(body).sort(), [
+          "expires_at",
+          "invitation_id",
+          "invited_user_id",
+        ]);
+        row.userId = body.invited_user_id;
+        row.expiresAt = body.expires_at;
+        row.state = "delivery_ready";
+        if (options.prepareResponsesLost)
+          throw new Error("synthetic-prepare-diagnostic");
+        return Response.json([{ code: "invitation_delivery_ready" }]);
+      }
+      if (name === "internal_publish_staff_invitation") {
+        publicationCalls += 1;
+        assertEquals(body, { invitation_id: INVITATION_ID });
+        if (
+          options.publishCommitsBeforeLoss ||
+          publicationCalls > (options.publishResponsesLost ?? 0)
+        ) {
+          row.state = "pending_acceptance";
+        }
+        if (publicationCalls <= (options.publishResponsesLost ?? 0))
+          throw new Error("synthetic-publish-diagnostic");
+        return Response.json([{ code: "invitation_usable" }]);
+      }
+      if (name === "internal_fail_staff_invitation") {
+        assertEquals(Object.keys(body).sort(), [
+          "invitation_id",
+          "reason_code",
+        ]);
+        if (options.failResponsesLost)
+          throw new Error("synthetic-failure-diagnostic");
+        row.reason = body.reason_code;
+        return Response.json([{ code: "invitation_delivery_ready" }]);
+      }
+      throw new Error("Unexpected RPC at invitation boundary");
+    },
+    () => clock,
+    undefined,
+    {
+      clearTimeout: () => undefined,
+      fetch: async (input, init) => {
+        const outcome = options.outcomes[providerRequests.length];
+        assert(outcome !== undefined, "Unexpected provider retry");
+        providerRequests.push({
+          url: String(input),
+          body: String(init?.body),
+          headers: new Headers(init?.headers),
+        });
+        assertEquals(row.state, "delivery_ready");
+        if (outcome === "timeout") {
+          const callback = timeoutCallback;
+          assert(callback !== undefined);
+          queueMicrotask(callback);
+          return await new Promise<Response>(() => undefined);
+        }
+        if (outcome === "rejected")
+          return Response.json(
+            { message: "synthetic-private-provider-diagnostic" },
+            { status: 400 },
+          );
+        if (outcome === "server_error")
+          return Response.json(
+            { message: "synthetic-private-provider-diagnostic" },
+            { status: 503 },
+          );
+        return Response.json({ id: "70000000-0000-4000-8000-000000000007" });
+      },
+      now: () => clock,
+      setTimeout: (callback) => {
+        timeoutCallback = callback;
+        return 1;
+      },
+    },
+  );
+  return {
+    service: { ...service, newRequestKey: () => REQUEST_KEY },
+    providerRequests,
+    rpcRequests,
+    row,
+  };
+}
+
+async function assertPublicBoundaryResponse(
+  response: Response,
+  code: string,
+  status: number,
+): Promise<void> {
+  assertEquals(response.status, status);
+  assertEquals(response.headers.get("cache-control"), "no-store");
+  const text = await response.text();
+  assertEquals(text, JSON.stringify({ code, ok: status === 201 }));
+  for (const privateValue of [
+    TOKEN_HASH,
+    JWT,
+    INVITATION_ID,
+    USER_ID,
+    "teacher@example.com",
+    "synthetic-service-role-sentinel",
+    "synthetic-provider-key",
+    "diagnostic",
+  ]) {
+    assert(
+      !text.includes(privateValue),
+      "Private delivery material reached a public response",
+    );
+  }
+}
+
+function assertPreparedBinding(
+  boundary: ReturnType<typeof deliveryBoundary>,
+): void {
+  assertEquals(boundary.row.userId, USER_ID);
+  assertEquals(boundary.row.expiresAt, "2026-08-30T13:00:00.000Z");
+  const rpcText = JSON.stringify(boundary.rpcRequests);
+  assert(
+    !rpcText.includes(TOKEN_HASH),
+    "Bearer invitation material reached RPC persistence",
+  );
+  assert(
+    !rpcText.includes("synthetic-provider-key"),
+    "Provider key reached RPC persistence",
+  );
+  for (const provider of boundary.providerRequests) {
+    assertEquals(provider.url, "https://api.resend.com/emails");
+    assertEquals(
+      provider.headers.get("authorization"),
+      "Bearer synthetic-provider-key",
+    );
+    assertEquals(
+      provider.headers.get("idempotency-key"),
+      `desmoslock.staff-invitation.${INVITATION_ID}.${REQUEST_KEY}`,
+    );
+    const body = JSON.parse(provider.body);
+    assertEquals(body.to, ["teacher@example.com"]);
+    assert(
+      body.text.includes(INVITE_CALLBACK),
+      "Mail did not contain the exact direct fragment callback",
+    );
+    assert(
+      !body.text.includes("?auth=invite&token_hash="),
+      "Mail used a query bearer token",
+    );
+  }
+  if (boundary.providerRequests.length === 2) {
+    assertEquals(
+      boundary.providerRequests[1].body,
+      boundary.providerRequests[0].body,
+    );
+    assertEquals(
+      [...boundary.providerRequests[1].headers],
+      [...boundary.providerRequests[0].headers],
+    );
+  }
+}
+
+Deno.test(
+  "composed invitation runtime publishes only after exact provider acknowledgment",
+  async () => {
+    const boundary = deliveryBoundary({ outcomes: ["accepted"] });
+    await assertPublicBoundaryResponse(
+      await handleRequest(invitationRequest(), boundary.service),
+      "invitation_created",
+      201,
+    );
+    assertEquals(boundary.providerRequests.length, 1);
+    assertEquals(boundary.row.state, "pending_acceptance");
+    assertEquals(
+      boundary.rpcRequests.map(({ name }) => name),
+      [
+        "begin_staff_invitation",
+        "internal_prepare_staff_invitation",
+        "internal_publish_staff_invitation",
+      ],
+    );
+    assertPreparedBinding(boundary);
+  },
+);
+
+Deno.test(
+  "composed invitation runtime retries a lost provider response with identical in-memory bytes",
+  async () => {
+    const boundary = deliveryBoundary({ outcomes: ["timeout", "accepted"] });
+    await assertPublicBoundaryResponse(
+      await handleRequest(invitationRequest(), boundary.service),
+      "invitation_created",
+      201,
+    );
+    assertEquals(boundary.providerRequests.length, 2);
+    assertEquals(boundary.row.state, "pending_acceptance");
+    assertPreparedBinding(boundary);
+  },
+);
+
+Deno.test(
+  "composed invitation unknown outcomes preserve prepared recipient and expiry",
+  async () => {
+    for (const outcomes of [
+      ["timeout", "timeout"],
+      ["server_error", "server_error"],
+      ["timeout", "rejected"],
+    ] as const) {
+      const boundary = deliveryBoundary({ outcomes });
+      await assertPublicBoundaryResponse(
+        await handleRequest(invitationRequest(), boundary.service),
+        "invitation_delivery_unconfirmed",
+        503,
+      );
+      assertEquals(boundary.providerRequests.length, 2);
+      assertEquals(boundary.row.state, "delivery_ready");
+      assertEquals(boundary.row.reason, "delivery_unconfirmed");
+      assertEquals(
+        boundary.rpcRequests.filter(
+          ({ name }) => name === "internal_publish_staff_invitation",
+        ).length,
+        0,
+      );
+      assertPreparedBinding(boundary);
+    }
+  },
+);
+
+Deno.test(
+  "composed invitation exact provider rejection is distinct and never retried",
+  async () => {
+    const boundary = deliveryBoundary({ outcomes: ["rejected"] });
+    await assertPublicBoundaryResponse(
+      await handleRequest(invitationRequest(), boundary.service),
+      "invitation_delivery_rejected",
+      503,
+    );
+    assertEquals(boundary.providerRequests.length, 1);
+    assertEquals(boundary.row.state, "delivery_ready");
+    assertEquals(boundary.row.reason, "delivery_rejected");
+    assertPreparedBinding(boundary);
+  },
+);
+
+Deno.test(
+  "composed invitation lost publication responses do not resend or discard prepared mail",
+  async () => {
+    for (const publishCommitsBeforeLoss of [false, true]) {
+      const boundary = deliveryBoundary({
+        outcomes: ["accepted"],
+        publishResponsesLost: 2,
+        publishCommitsBeforeLoss,
+      });
+      await assertPublicBoundaryResponse(
+        await handleRequest(invitationRequest(), boundary.service),
+        "invitation_delivery_unconfirmed",
+        503,
+      );
+      assertEquals(boundary.providerRequests.length, 1);
+      assertEquals(
+        boundary.row.state,
+        publishCommitsBeforeLoss ? "pending_acceptance" : "delivery_ready",
+      );
+      assertEquals(
+        boundary.rpcRequests.filter(
+          ({ name }) => name === "internal_publish_staff_invitation",
+        ).length,
+        2,
+      );
+      assertEquals(
+        boundary.rpcRequests.filter(
+          ({ name }) => name === "internal_fail_staff_invitation",
+        ).length,
+        0,
+      );
+      assertPreparedBinding(boundary);
+    }
+  },
+);
+
+Deno.test(
+  "composed invitation lost publication acknowledgment reconciles without repeating mail",
+  async () => {
+    const boundary = deliveryBoundary({
+      outcomes: ["accepted"],
+      publishResponsesLost: 1,
+      publishCommitsBeforeLoss: true,
+    });
+    await assertPublicBoundaryResponse(
+      await handleRequest(invitationRequest(), boundary.service),
+      "invitation_created",
+      201,
+    );
+    assertEquals(boundary.providerRequests.length, 1);
+    assertEquals(boundary.row.state, "pending_acceptance");
+    assertPreparedBinding(boundary);
+  },
+);
+
+Deno.test(
+  "composed invitation uncertain preparation prevents egress and retains a possibly committed binding",
+  async () => {
+    const boundary = deliveryBoundary({
+      outcomes: [],
+      prepareResponsesLost: true,
+    });
+    await assertPublicBoundaryResponse(
+      await handleRequest(invitationRequest(), boundary.service),
+      "service_unavailable",
+      503,
+    );
+    assertEquals(boundary.providerRequests.length, 0);
+    assertEquals(boundary.row.state, "delivery_ready");
+    assertPreparedBinding(boundary);
+  },
+);
+
+Deno.test(
+  "composed invitation unknown dispatch remains prepared when failure diagnostics cannot save",
+  async () => {
+    const boundary = deliveryBoundary({
+      outcomes: ["timeout", "timeout"],
+      failResponsesLost: true,
+    });
+    await assertPublicBoundaryResponse(
+      await handleRequest(invitationRequest(), boundary.service),
+      "invitation_delivery_unconfirmed",
+      503,
+    );
+    assertEquals(boundary.row.state, "delivery_ready");
+    assertEquals(
+      boundary.rpcRequests.filter(
+        ({ name }) => name === "internal_fail_staff_invitation",
+      ).length,
+      2,
+    );
+    assertPreparedBinding(boundary);
   },
 );

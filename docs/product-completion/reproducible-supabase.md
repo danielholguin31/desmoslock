@@ -8,10 +8,12 @@ lifecycle foundation from issue 31 while remaining deliberately smaller than
 the future role-policy, Student Session capability, and calculator-isolation
 work in issues 32–34.
 
-Generation 4 is a schema and RPC foundation, not an operational staff-auth
-capability. No delivery transport is configured in this repository baseline,
-so health and the local verification lane do not claim delivered invitations,
-completed callbacks, or cross-browser session revocation.
+Generation 4 includes the callback-completion follow-on migration while
+preserving the synthetic fixture. Repository implementation and migration
+attestations alone do not establish operational staff-auth readiness. Delivered
+invitations, completed callbacks, and cross-browser session revocation require
+separate runtime evidence; health and the local schema verification lane do not
+claim those journeys.
 
 The baseline contains exactly the generation-2 foundation marker, two fictional
 Schools, six fictional staff profiles and memberships, two Tests, and two
@@ -38,6 +40,7 @@ health function, and operator modules in this repository are the authority.
 - `supabase/migrations/20260828000100_internal_release_backend.sql`
 - `supabase/migrations/20260903000100_staff_auth_lifecycle.sql`
 - `supabase/migrations/20260903000200_staff_auth_generation_4.sql`
+- `supabase/migrations/20260907000100_staff_auth_callback_completion.sql`
 - `supabase/seed.sql`
 - `supabase/config.toml`
 - `supabase/functions/deno.json`
@@ -54,15 +57,19 @@ The fixture contract is generation `4`, version `internal-baseline-v2`, with
 SHA-256
 `f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201`.
 The exact discovered migration file set has normalized SHA-256
-`ce79427901195258897e0b75c80acfb7b50699eb223af5289cf5d5d59958f2b7`.
+`1b499b73aca1ff812cbc244f9eb9908e8dad839ecc6befbcb1a496865a2d5f52`.
 The published generation-3 migration retains its contemporaneous digest
 `06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49`;
-only the later generation-4 migration records the current aggregate. The
-repository contract pins each attested migration's raw SHA-256 and literal
-independently, then zeroes only those two delimited self-references when deriving
-the four-file aggregate. The later migration updates already-migrated singleton
-attestations and constraints, so the upgrade path does not depend on rewriting
-or replaying the earlier migration.
+the original generation-4 migration likewise retains
+`ce79427901195258897e0b75c80acfb7b50699eb223af5289cf5d5d59958f2b7`.
+Only the callback-completion migration records the current aggregate. Its raw
+SHA-256 is
+`79ab31e822b4f04f4148c50bb98446210a37d975a646119b42d78fe1349a8862`.
+The repository contract pins each attested migration's raw SHA-256 and literal
+independently, then zeroes only those three delimited self-references when deriving
+the five-file aggregate. The follow-on migration updates the existing singleton
+attestation without changing schema generation `4` or the seven-table fixture;
+the upgrade path does not depend on rewriting or replaying historical migrations.
 The seed takes a transaction advisory lock, refuses altered or partial targets,
 and verifies this digest plus the exact generation-2 foundation marker after
 insertion. The fixture digest length-frames every seeded identity and content

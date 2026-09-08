@@ -32,19 +32,30 @@ export interface StaffRecoveryFlowStorage {
   setItem(key: string, value: string): void;
 }
 
+export interface StaffRecoveryFlowLock {
+  request<T>(name: string, callback: () => Promise<T> | T): Promise<T>;
+}
+
 /**
- * Creates the origin-local PKCE store used by the controller. Operations are
- * serialized so a consume removes verifier bytes before its promise resolves.
+ * Creates the application-owned, temporary origin-local PKCE store used by the controller. Operations are
+ * serialized under an origin-wide Web Lock in the browser, so a consume removes
+ * verifier bytes before its promise resolves. Provider session persistence remains
+ * owned by Supabase Auth; this store contains only five-minute flow bindings.
  */
 export function createStaffRecoveryFlowStore(dependencies: {
   readonly clock: { readonly now: () => number };
   readonly crypto: Pick<Crypto, "getRandomValues" | "subtle">;
   readonly storage: StaffRecoveryFlowStorage;
+  readonly lock?: StaffRecoveryFlowLock;
 }): StaffRecoveryFlowStore {
   let tail: Promise<void> = Promise.resolve();
 
   function serialize<T>(operation: () => Promise<T> | T): Promise<T> {
-    const result = tail.then(operation, operation);
+    const locked = () =>
+      dependencies.lock === undefined
+        ? operation()
+        : dependencies.lock.request(storageKey, operation);
+    const result = tail.then(locked, locked);
     tail = result.then(
       () => undefined,
       () => undefined,
@@ -53,6 +64,22 @@ export function createStaffRecoveryFlowStore(dependencies: {
   }
 
   return {
+    check(flowId, state) {
+      return serialize(() => {
+        const now = readTime(dependencies.clock);
+        const flows = readFlows(dependencies.storage).filter(
+          (flow) => flow.expiresAt > now,
+        );
+        writeFlows(dependencies.storage, flows);
+        return flows.some(
+          (flow) =>
+            flow.kind === "active" &&
+            flow.flowId === flowId &&
+            flow.state === state &&
+            flow.createdAt <= now,
+        );
+      });
+    },
     create() {
       return serialize(async () => {
         const now = readTime(dependencies.clock);

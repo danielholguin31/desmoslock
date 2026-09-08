@@ -17,6 +17,8 @@ export interface StaffRecoveryFlowStore {
     readonly flowId: string;
     readonly state: string;
   }>;
+  /** Non-consuming preflight before following a mailed verification link. */
+  check?(flowId: string, state: string): Promise<boolean>;
   /** Atomically removes and returns one flow record; implementations cap at 16. */
   consume(flowId: string): Promise<StaffRecoveryFlowConsumeResult>;
 }
@@ -37,7 +39,12 @@ export type StaffAuthCallbackReceipt =
       readonly status: "accepted";
     }
   | {
+      readonly code: "recovery_verification_started";
+      readonly status: "redirecting";
+    }
+  | {
       readonly code:
+        | "callback_already_used"
         | "invalid_callback"
         | "malformed_callback"
         | "recovery_flow_expired"
@@ -55,6 +62,17 @@ type StaffAuthCallbackRejectedReceipt = Extract<
 >;
 
 type CallbackConsumer = (tokenHash: string) => Promise<void>;
+
+export type PreparedStaffRecoveryCallback =
+  | StaffAuthCallbackRejectedReceipt
+  | {
+      readonly confirm: () => Promise<StaffAuthCallbackReceipt>;
+      readonly status: "confirmation_required";
+    }
+  | {
+      readonly exchange: () => Promise<StaffAuthCallbackReceipt>;
+      readonly status: "exchange_required";
+    };
 
 /**
  * Scrubs and consumes one application-root invitation callback. The token hash
@@ -124,76 +142,205 @@ export function consumeStaffEmailVerificationCallback(
   return consumeEmailVerificationCode(authorizationCode, flowId, options);
 }
 
-async function consumeEmailVerificationCode(
-  authorizationCode: string,
-  flowId: string,
+/**
+ * Validates a scrubbed recovery callback and returns only an opaque one-shot
+ * command. Callback credentials remain captured by the command closure and are
+ * never exposed through the returned result.
+ */
+export function prepareStaffRecoveryCallback(
+  callbackUrl: string,
   options: {
+    readonly backendOrigin: string;
     readonly exchange: (input: {
       readonly authorizationCode: string;
       readonly flowId: string;
+      readonly state: string;
     }) => Promise<void>;
+    readonly history: StaffAuthCallbackHistory;
+    readonly navigate: (url: string) => void;
+    readonly route: StaffAuthCallbackRoute;
   },
-): Promise<StaffAuthCallbackReceipt> {
-  try {
-    await options.exchange({ authorizationCode, flowId });
-  } catch {
-    return rejected("token_consumption_unavailable");
+): PreparedStaffRecoveryCallback {
+  const parsed = scrubAndParseRoute(callbackUrl, options, true);
+  if (parsed.status === "rejected") return parsed;
+  const backendOrigin = parseTrustedOrigin(options.backendOrigin);
+  if (backendOrigin === null) return rejected("invalid_callback");
+
+  const { url } = parsed;
+  const appOrigin = url.origin;
+  const searchEntries = [...url.searchParams.entries()];
+  const flowId = url.searchParams.get("flow");
+  const state = url.searchParams.get("state");
+  if (
+    searchEntries.length === 3 &&
+    searchEntries[0]?.[0] === "auth" &&
+    searchEntries[1]?.[0] === "flow" &&
+    searchEntries[2]?.[0] === "state" &&
+    url.searchParams.get("auth") === "recovery" &&
+    isBase64Url(flowId, 22) &&
+    isBase64Url(state, 43)
+  ) {
+    const fragmentEntries = [
+      ...new URLSearchParams(url.hash.slice(1)).entries(),
+    ];
+    const tokenHash = fragmentEntries[0]?.[1];
+    if (
+      fragmentEntries.length !== 2 ||
+      fragmentEntries[0]?.[0] !== "token_hash" ||
+      fragmentEntries[1]?.[0] !== "type" ||
+      fragmentEntries[1]?.[1] !== "recovery" ||
+      tokenHash === undefined ||
+      !isRecoveryVerificationToken(tokenHash) ||
+      url.search !== `?auth=recovery&flow=${flowId}&state=${state}` ||
+      url.hash !== `#token_hash=${tokenHash}&type=recovery`
+    ) {
+      return rejected("malformed_callback");
+    }
+
+    let captured:
+      | {
+          readonly flowId: string;
+          readonly state: string;
+          readonly tokenHash: string;
+        }
+      | undefined = { flowId, state, tokenHash };
+    return {
+      async confirm() {
+        const current = captured;
+        captured = undefined;
+        if (current === undefined) return rejected("callback_already_used");
+        const redirectTo = `${appOrigin}/?auth=recovery&flow=${current.flowId}&state=${current.state}`;
+        const verification = new URL("/auth/v1/verify", backendOrigin);
+        verification.searchParams.append("token", current.tokenHash);
+        verification.searchParams.append("type", "recovery");
+        verification.searchParams.append("redirect_to", redirectTo);
+        try {
+          options.navigate(verification.href);
+        } catch {
+          return rejected("token_consumption_unavailable");
+        }
+        return {
+          code: "recovery_verification_started",
+          status: "redirecting",
+        };
+      },
+      status: "confirmation_required",
+    };
   }
-  return { code: "accepted", kind: "email-verification", status: "accepted" };
+
+  const authorizationCode = url.searchParams.get("code");
+  const codeQueryParts = url.search.slice(1).split("&");
+  if (
+    searchEntries.length === 4 &&
+    new Set(searchEntries.map(([key]) => key)).size === 4 &&
+    searchEntries.every(
+      ([key]) =>
+        key === "auth" || key === "flow" || key === "state" || key === "code",
+    ) &&
+    url.searchParams.get("auth") === "recovery" &&
+    isBase64Url(flowId, 22) &&
+    isBase64Url(state, 43) &&
+    authorizationCode !== null &&
+    authorizationCode.length > 0 &&
+    authorizationCode === authorizationCode.trim() &&
+    encodedByteLength(authorizationCode) <= 2048 &&
+    !hasControlText(authorizationCode) &&
+    url.hash === "" &&
+    !callbackUrl.includes("#") &&
+    codeQueryParts.length === 4 &&
+    codeQueryParts.includes("auth=recovery") &&
+    codeQueryParts.includes(`flow=${flowId}`) &&
+    codeQueryParts.includes(`state=${state}`) &&
+    codeQueryParts.some((part) => part.startsWith("code="))
+  ) {
+    let captured:
+      | {
+          readonly authorizationCode: string;
+          readonly flowId: string;
+          readonly state: string;
+        }
+      | undefined = { authorizationCode, flowId, state };
+    return {
+      async exchange() {
+        const current = captured;
+        captured = undefined;
+        if (current === undefined) return rejected("callback_already_used");
+        try {
+          await options.exchange(current);
+        } catch {
+          return rejected("token_consumption_unavailable");
+        }
+        return { code: "accepted", kind: "recovery", status: "accepted" };
+      },
+      status: "exchange_required",
+    };
+  }
+
+  return rejected("malformed_callback");
 }
 
-/**
- * Scrubs and consumes one application-root recovery callback. Provider session
- * establishment remains behind the injected adapter boundary.
- */
-export function consumeStaffRecoveryCallback(
+/** Called only after the application has obtained explicit confirmation. */
+export async function consumeStaffRecoveryCallback(
   callbackUrl: string,
   options: {
+    readonly backendOrigin?: string;
     readonly clock: { readonly now: () => number };
     readonly exchange: (input: {
       readonly authorizationCode: string;
       readonly verifier: string;
     }) => Promise<void>;
-    readonly history: StaffAuthCallbackHistory;
-    readonly route: StaffAuthCallbackRoute;
     readonly flows: StaffRecoveryFlowStore;
+    readonly history: StaffAuthCallbackHistory;
+    readonly navigate?: (url: string) => void;
+    readonly route: StaffAuthCallbackRoute;
   },
 ): Promise<StaffAuthCallbackReceipt> {
-  const route = scrubAndParseRoute(callbackUrl, options);
-  if (route.status === "rejected") {
-    return Promise.resolve(route);
+  let flowReceipt: StaffAuthCallbackReceipt | null = null;
+  const prepared = prepareStaffRecoveryCallback(callbackUrl, {
+    backendOrigin: options.backendOrigin ?? options.route.origin,
+    exchange: async ({ authorizationCode, flowId, state }) => {
+      flowReceipt = await consumeRecoveryFlow(
+        authorizationCode,
+        flowId,
+        state,
+        options,
+      );
+    },
+    history: options.history,
+    navigate(url) {
+      if (
+        options.backendOrigin === undefined ||
+        options.navigate === undefined
+      ) {
+        throw new Error("recovery navigation unavailable");
+      }
+      options.navigate(url);
+    },
+    route: options.route,
+  });
+  if (prepared.status === "rejected") return prepared;
+  if (prepared.status === "confirmation_required") {
+    // A different browser, an expired flow, or a consumed flow must not burn the
+    // mailed token merely to discover that the originating verifier is absent.
+    if (options.flows.check === undefined)
+      return rejected("recovery_flow_unavailable");
+    const url = new URL(callbackUrl);
+    try {
+      if (
+        !(await options.flows.check(
+          url.searchParams.get("flow")!,
+          url.searchParams.get("state")!,
+        ))
+      ) {
+        return rejected("recovery_flow_invalid");
+      }
+    } catch {
+      return rejected("recovery_flow_unavailable");
+    }
+    return prepared.confirm();
   }
-  const url = route.url;
-  const entries = [...url.searchParams.entries()];
-  if (
-    entries.length !== 4 ||
-    url.searchParams.getAll("auth").length !== 1 ||
-    url.searchParams.getAll("code").length !== 1 ||
-    url.searchParams.getAll("flow").length !== 1 ||
-    url.searchParams.getAll("state").length !== 1 ||
-    entries.some(
-      ([key]) =>
-        key !== "auth" && key !== "code" && key !== "flow" && key !== "state",
-    ) ||
-    url.searchParams.get("auth") !== "recovery"
-  ) {
-    return Promise.resolve(rejected("malformed_callback"));
-  }
-  const authorizationCode = url.searchParams.get("code");
-  const flowId = url.searchParams.get("flow");
-  const state = url.searchParams.get("state");
-  if (
-    authorizationCode === null ||
-    authorizationCode.length === 0 ||
-    authorizationCode !== authorizationCode.trim() ||
-    encodedByteLength(authorizationCode) > 2048 ||
-    hasControlText(authorizationCode) ||
-    !isBase64Url(flowId, 22) ||
-    !isBase64Url(state, 43)
-  ) {
-    return Promise.resolve(rejected("malformed_callback"));
-  }
-  return consumeRecoveryFlow(authorizationCode, flowId, state, options);
+  const exchangeReceipt = await prepared.exchange();
+  return flowReceipt ?? exchangeReceipt;
 }
 
 async function consumeRecoveryFlow(
@@ -320,6 +467,24 @@ function hasExactKeys(record: ExactRecord, keys: readonly string[]): boolean {
   );
 }
 
+async function consumeEmailVerificationCode(
+  authorizationCode: string,
+  flowId: string,
+  options: {
+    readonly exchange: (input: {
+      readonly authorizationCode: string;
+      readonly flowId: string;
+    }) => Promise<void>;
+  },
+): Promise<StaffAuthCallbackReceipt> {
+  try {
+    await options.exchange({ authorizationCode, flowId });
+  } catch {
+    return rejected("token_consumption_unavailable");
+  }
+  return { code: "accepted", kind: "email-verification", status: "accepted" };
+}
+
 async function consumeTokenHashCallback(
   callbackUrl: string,
   expectedKind: StaffAuthCallbackKind,
@@ -329,29 +494,12 @@ async function consumeTokenHashCallback(
     readonly route: StaffAuthCallbackRoute;
   },
 ): Promise<StaffAuthCallbackReceipt> {
-  const route = scrubAndParseRoute(callbackUrl, options);
-  if (route.status === "rejected") {
-    return route;
-  }
-  const url = route.url;
-
-  const entries = [...url.searchParams.entries()];
-  if (
-    entries.length !== 2 ||
-    url.searchParams.getAll("auth").length !== 1 ||
-    url.searchParams.getAll("token_hash").length !== 1 ||
-    entries.some(([key]) => key !== "auth" && key !== "token_hash")
-  ) {
-    return rejected("malformed_callback");
-  }
-
-  const kind = url.searchParams.get("auth");
-  const tokenHash = url.searchParams.get("token_hash");
-  if (
-    kind !== expectedKind ||
-    tokenHash === null ||
-    !/^[0-9a-f]{56}$/.test(tokenHash)
-  ) {
+  const route = scrubAndParseRoute(callbackUrl, options, true);
+  if (route.status === "rejected") return route;
+  const { url } = route;
+  const fragment = /^#token_hash=([0-9a-f]{56})$/u.exec(url.hash);
+  const tokenHash = fragment?.[1];
+  if (url.search !== `?auth=${expectedKind}` || tokenHash === undefined) {
     return rejected("malformed_callback");
   }
 
@@ -369,6 +517,7 @@ function scrubAndParseRoute(
     readonly history: StaffAuthCallbackHistory;
     readonly route: StaffAuthCallbackRoute;
   },
+  allowFragment = false,
 ):
   | StaffAuthCallbackRejectedReceipt
   | { readonly status: "parsed"; readonly url: URL } {
@@ -397,11 +546,38 @@ function scrubAndParseRoute(
     url.pathname !== "/" ||
     url.username !== "" ||
     url.password !== "" ||
-    url.hash !== ""
+    (!allowFragment && url.hash !== "")
   ) {
     return rejected("invalid_callback");
   }
   return { status: "parsed", url };
+}
+
+function parseTrustedOrigin(value: string): string | null {
+  if (typeof value !== "string" || hasControlText(value)) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return null;
+  }
+  const loopbackHostname =
+    parsed.hostname === "127.0.0.1" ||
+    parsed.hostname === "localhost" ||
+    parsed.hostname === "[::1]";
+  if (
+    parsed.origin !== value ||
+    parsed.pathname !== "/" ||
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    (parsed.protocol !== "https:" &&
+      !(parsed.protocol === "http:" && loopbackHostname))
+  ) {
+    return null;
+  }
+  return parsed.origin;
 }
 
 function parseTrustedRootRoute(
@@ -436,7 +612,7 @@ function parseTrustedRootRoute(
 }
 
 function rejected(
-  code: Exclude<StaffAuthCallbackReceipt["code"], "accepted">,
+  code: StaffAuthCallbackRejectedReceipt["code"],
 ): StaffAuthCallbackRejectedReceipt {
   return { code, status: "rejected" };
 }
@@ -453,6 +629,17 @@ function isBase64Url(value: unknown, length: number): value is string {
   );
 }
 
+function isRecoveryVerificationToken(value: string): boolean {
+  return /^pkce_[0-9a-f]{56}$/u.test(value);
+}
+
+function hasControlText(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
+  });
+}
+
 function constantTimeEqual(left: string, right: string): boolean {
   const maximum = Math.max(left.length, right.length);
   let difference = left.length ^ right.length;
@@ -461,11 +648,4 @@ function constantTimeEqual(left: string, right: string): boolean {
       (left.charCodeAt(index) || 0) ^ (right.charCodeAt(index) || 0);
   }
   return difference === 0;
-}
-
-function hasControlText(value: string): boolean {
-  return [...value].some((character) => {
-    const codePoint = character.codePointAt(0) ?? 0;
-    return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
-  });
 }

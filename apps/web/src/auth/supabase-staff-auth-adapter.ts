@@ -43,8 +43,16 @@ import type {
 } from "./staff-auth-controller.js";
 
 export interface SupabaseStaffAuthPort {
-  acceptInvitation(request: AcceptStaffInvitationRequest): Promise<unknown>;
-  beginPasswordRecovery(operationId: string): Promise<unknown>;
+  capturePasswordAuthority(expectedAccountId?: string): Promise<string | null>;
+  releasePasswordAuthority(authorityHandle: string): void;
+  acceptInvitation(
+    request: AcceptStaffInvitationRequest,
+    authorityHandle: string,
+  ): Promise<unknown>;
+  beginPasswordRecovery(
+    operationId: string,
+    authorityHandle: string,
+  ): Promise<unknown>;
   challengeTotp(factorId: string): Promise<unknown>;
   enrollTotp(): Promise<unknown>;
   exchangeEmailVerificationCode(input: {
@@ -55,7 +63,10 @@ export interface SupabaseStaffAuthPort {
     readonly authorizationCode: string;
     readonly verifier: string;
   }): Promise<unknown>;
-  finishPasswordRecovery(operationId: string): Promise<unknown>;
+  finishPasswordRecovery(
+    operationId: string,
+    authorityHandle: string,
+  ): Promise<unknown>;
   invokeInvitation(request: CreateStaffInvitationRequest): Promise<unknown>;
   invokeRecovery(
     request: RequestStaffPasswordRecoveryRequest,
@@ -79,8 +90,8 @@ export interface SupabaseStaffAuthPort {
     readonly email: string;
     readonly password: string;
   }): Promise<unknown>;
-  signOut(scope: "all" | "local"): Promise<unknown>;
-  updatePassword(password: string): Promise<unknown>;
+  signOut(scope: "all" | "local", authorityHandle?: string): Promise<unknown>;
+  updatePassword(password: string, authorityHandle: string): Promise<unknown>;
   verifyInvitationToken(tokenHash: string): Promise<unknown>;
   verifyTotp(input: {
     readonly challengeId: string;
@@ -105,6 +116,9 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
   let identityGeneration: string | null = null;
   let identityFacts: IdentityFacts | null = null;
   let pendingVerificationEmail: string | null = null;
+  // Route intent only. Every ready projection still verifies the port's private
+  // original recovery binding; this object carries no provider authority.
+  let recoveryContinuation: { ready: boolean } | null = null;
   const challengeReceipts = new Map<string, ChallengeReceipt>();
   const enrollmentReceipts = new Map<string, EnrollmentReceipt>();
   const invitationInspectionContinuations = new Map<
@@ -125,8 +139,9 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
   >();
   let eventRevision = 0;
   let processedEventRevision = 0;
-  let eventRead: Promise<void> | null = null;
+  let authorityRead: Promise<StaffAuthBoundaryResult> | null = null;
   let activeMutations = 0;
+  const mutationWaiters = new Set<() => void>();
 
   function nextGeneration(): string {
     const generation = dependencies.operationIds.next();
@@ -172,18 +187,39 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     }
   }
 
-  function clearAuthorityState(): void {
+  function clearAuthorityState(removeEnrollmentFactors = true): void {
     sessionGeneration = null;
     identityGeneration = null;
     identityFacts = null;
     invitationInspectionContinuations.clear();
     challengeReceipts.clear();
-    clearEnrollmentReceipts(true);
+    clearEnrollmentReceipts(removeEnrollmentFactors);
   }
 
   async function readAuthority(
     options: { readonly rotateSession?: boolean } = {},
   ): Promise<StaffAuthBoundaryResult> {
+    const continuation = recoveryContinuation;
+    if (continuation !== null) {
+      if (!continuation.ready) return { kind: "password_recovery_rejected" };
+      let authorityHandle: string | null = null;
+      try {
+        authorityHandle = await dependencies.port.capturePasswordAuthority();
+      } finally {
+        if (authorityHandle !== null) {
+          dependencies.port.releasePasswordAuthority(authorityHandle);
+        }
+      }
+      if (continuation !== recoveryContinuation) {
+        return { kind: "password_recovery_rejected" };
+      }
+      continuation.ready = authorityHandle !== null;
+      return {
+        kind: continuation.ready
+          ? "password_recovery_ready"
+          : "password_recovery_rejected",
+      };
+    }
     const session = snapshotExactRecord(await dependencies.port.readSession(), [
       "status",
     ]);
@@ -222,6 +258,17 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       identityFacts = null;
       challengeReceipts.clear();
       clearEnrollmentReceipts(true);
+      if (context.kind === "membership_inactive") {
+        const invitation = decodeCurrentInvitation(
+          await dependencies.port.readCurrentInvitations(),
+        );
+        if (
+          invitation.kind === "ready" &&
+          invitation.expiresAtMilliseconds > readNow(dependencies.clock)
+        ) {
+          return projectInvitation(account, invitation, nextGeneration());
+        }
+      }
       return { kind: context.kind };
     }
     const assurance = decodeAssurance(await dependencies.port.readAssurance());
@@ -292,7 +339,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     }
     const base: Omit<
       StaffAuthAccessGrant,
-      "challengeReceipt" | "secondFactor"
+      "challengeReceipt" | "factorChoices" | "secondFactor"
     > = {
       assuranceLevel: assurance.currentLevel,
       identity,
@@ -303,10 +350,10 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       sessionGeneration: candidateSessionGeneration,
     };
     let result: StaffAuthAccessGrant;
-    let pendingChallenge: {
+    let pendingChallenges: Array<{
       readonly factorId: string;
       readonly receipt: string;
-    } | null = null;
+    }> = [];
     if (context.role === "teacher" || assurance.currentLevel === "aal2") {
       result = { ...base, secondFactor: "satisfied" };
     } else {
@@ -323,35 +370,45 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
         if (assurance.nextLevel !== "aal2") {
           throw new Error("Privileged staff assurance is unavailable");
         }
-        const factor = verified.length === 1 ? verified[0] : undefined;
-        if (factor === undefined) {
-          throw new Error("Staff authentication factors are ambiguous");
-        }
-        const challengeReceipt = nextGeneration();
-        pendingChallenge = {
+        pendingChallenges = verified.map((factor) => ({
           factorId: factor.factorId,
-          receipt: challengeReceipt,
-        };
-        result = {
-          ...base,
-          challengeReceipt,
-          secondFactor: "challenge_required",
-        };
+          receipt: nextGeneration(),
+        }));
+        const firstChallenge = pendingChallenges[0];
+        const firstFactor = verified[0];
+        if (firstChallenge === undefined || firstFactor === undefined) {
+          throw new Error("Staff authentication factor is unavailable");
+        }
+        result =
+          verified.length === 1
+            ? {
+                ...base,
+                challengeReceipt: firstChallenge.receipt,
+                secondFactor: "challenge_required",
+              }
+            : {
+                ...base,
+                factorChoices: verified.map((factor, index) => ({
+                  challengeReceipt: pendingChallenges[index]!.receipt,
+                  label: factorChoiceLabel(factor.friendlyName, index),
+                })),
+                secondFactor: "factor_selection_required",
+              };
       }
     }
     if (identityChanged || sessionChanged) {
       challengeReceipts.clear();
       clearEnrollmentReceipts(true);
     }
-    if (pendingChallenge !== null) {
+    for (const pendingChallenge of pendingChallenges) {
       challengeReceipts.set(pendingChallenge.receipt, {
         expiresAt: readNow(dependencies.clock) + 5 * 60 * 1000,
         factorId: pendingChallenge.factorId,
         identityGeneration: candidateIdentityGeneration,
         sessionGeneration: candidateSessionGeneration,
       });
-      trimMap(challengeReceipts, 16);
     }
+    trimMap(challengeReceipts, 16);
     sessionGeneration = candidateSessionGeneration;
     identityGeneration = candidateIdentityGeneration;
     identityFacts = facts;
@@ -365,6 +422,18 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       throw new Error("Staff authentication operation is invalid");
     }
     let result: StaffAuthBoundaryResult;
+    if (
+      request.type === "sign_in" ||
+      request.type === "exchange_email_verification_code" ||
+      request.type === "request_password_recovery" ||
+      request.type === "exchange_recovery_code" ||
+      request.type === "complete_password_recovery" ||
+      request.type === "inspect_invitation" ||
+      request.type === "sign_out" ||
+      request.type === "reset_to_sign_in"
+    ) {
+      recoveryContinuation = null;
+    }
     if (request.type === "sign_in") {
       if (!isCanonicalEmail(request.email) || !isPassword(request.password)) {
         result = { kind: "sign_in_rejected" };
@@ -443,6 +512,8 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       }
       result = { kind: "recovery_request_received" };
     } else if (request.type === "exchange_recovery_code") {
+      const continuation = { ready: false };
+      recoveryContinuation = continuation;
       if (
         !validOpaqueCredential(request.authorizationCode, 2048) ||
         !isBase64Url(request.verifier, 43)
@@ -459,11 +530,13 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
         if (response === null) {
           throw new Error("Password recovery callback is unavailable");
         }
+        const ready =
+          continuation === recoveryContinuation && response === "ready";
+        continuation.ready = ready;
         result = {
-          kind:
-            response === "ready"
-              ? "password_recovery_ready"
-              : "password_recovery_rejected",
+          kind: ready
+            ? "password_recovery_ready"
+            : "password_recovery_rejected",
         };
       }
     } else if (request.type === "complete_password_recovery") {
@@ -628,16 +701,28 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       );
       return { kind: "invitation_rejected", reason: "expired" };
     }
+    invitationInspectionContinuations.delete(continuation.continuationReceipt);
+    return projectInvitation(
+      account,
+      invitation,
+      continuation.inspectionOperationId,
+    );
+  }
+
+  function projectInvitation(
+    account: { readonly accountId: string; readonly email: string },
+    invitation: Extract<CurrentInvitationResult, { readonly kind: "ready" }>,
+    inspectionOperationId: string,
+  ): StaffAuthBoundaryResult {
     const acceptanceReceipt = nextGeneration();
     if (invitationReceipts.has(acceptanceReceipt)) {
       throw new Error("Invitation receipt generation collided");
     }
-    invitationInspectionContinuations.delete(continuation.continuationReceipt);
     invitationReceipts.set(acceptanceReceipt, {
       accountId: account.accountId,
       email: account.email,
       expiresAt: invitation.expiresAtMilliseconds,
-      inspectionOperationId: continuation.inspectionOperationId,
+      inspectionOperationId,
       invitationId: invitation.invitationId,
       role: invitation.role,
       schoolId: invitation.schoolId,
@@ -647,7 +732,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     return {
       acceptanceReceipt,
       expiresAt: invitation.expiresAt,
-      inspectionOperationId: continuation.inspectionOperationId,
+      inspectionOperationId,
       intendedAccountId: account.accountId,
       intendedEmail: account.email,
       kind: "invitation_ready",
@@ -689,63 +774,160 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     if (acceptance === null || !isPassword(request.password)) {
       return { kind: "invitation_rejected", reason: "invalid" };
     }
-    const password = decodeStatus(
-      await dependencies.port.updatePassword(request.password),
-      ["updated", "rejected"],
+    const initiatingRevision = eventRevision;
+    const authorityHandle = await dependencies.port.capturePasswordAuthority(
+      receipt.accountId,
     );
-    if (password === null) {
-      throw new Error("Invitation password result is malformed");
-    }
-    if (password === "rejected") {
+    if (authorityHandle === null)
       return { kind: "invitation_rejected", reason: "invalid" };
-    }
-    const response = parseAcceptStaffInvitationResponse(
-      productRpcResponse(
-        exactSingleRow(await dependencies.port.acceptInvitation(acceptance)),
-        "invitation_accepted",
-      ),
-    );
-    if (response === null) {
-      throw new Error("Invitation acceptance result is malformed");
-    }
-    if (!response.ok) {
-      if (response.code === "step_up_required") {
-        invitationReceipts.delete(request.acceptanceReceipt);
-        return { kind: "step_up_required" };
+    try {
+      async function sameRecipient(): Promise<boolean> {
+        if (eventRevision !== initiatingRevision) return false;
+        try {
+          const currentSession = decodeStatus(
+            await dependencies.port.readSession(),
+            ["authenticated"],
+          );
+          const currentAccount = decodeAccount(
+            await dependencies.port.readAccount(),
+          );
+          return (
+            eventRevision === initiatingRevision &&
+            currentSession === "authenticated" &&
+            currentAccount?.emailVerified === true &&
+            currentAccount.accountId === receipt!.accountId &&
+            currentAccount.email === receipt!.email
+          );
+        } catch {
+          return false;
+        }
       }
-      if (response.code === "session_expired") {
-        invitationReceipts.delete(request.acceptanceReceipt);
-        return { kind: "session_expired" };
+      let response: ReturnType<typeof parseAcceptStaffInvitationResponse> =
+        null;
+      // The database owns acceptance. An absent response is reconciled against
+      // canonical authority, then retried once with the identical nonsecret intent.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (!(await sameRecipient())) break;
+        try {
+          response = parseAcceptStaffInvitationResponse(
+            productRpcResponse(
+              exactSingleRow(
+                await dependencies.port.acceptInvitation(
+                  acceptance,
+                  authorityHandle,
+                ),
+              ),
+              "invitation_accepted",
+            ),
+          );
+        } catch {
+          // Provider/transport diagnostics must never cross the browser boundary.
+        }
+        if (response !== null) break;
+        try {
+          const authority = await readAuthority();
+          if (matchesAcceptedInvitation(authority, receipt)) {
+            response = { ok: true, code: "invitation_accepted" };
+            break;
+          }
+        } catch {
+          // Missing reconciliation evidence is still an unknown acceptance result.
+        }
       }
-      if (response.code === "session_revoked") {
+      if (response === null) {
         invitationReceipts.delete(request.acceptanceReceipt);
-        return { kind: "session_revoked" };
+        return { kind: "invitation_acceptance_uncertain" };
       }
-      if (response.code === "authentication_required") {
+      if (!response.ok) {
+        if (response.code === "step_up_required") {
+          invitationReceipts.delete(request.acceptanceReceipt);
+          return { kind: "step_up_required" };
+        }
+        if (response.code === "session_expired") {
+          invitationReceipts.delete(request.acceptanceReceipt);
+          return { kind: "session_expired" };
+        }
+        if (response.code === "session_revoked") {
+          invitationReceipts.delete(request.acceptanceReceipt);
+          return { kind: "session_revoked" };
+        }
+        if (response.code === "authentication_required") {
+          invitationReceipts.delete(request.acceptanceReceipt);
+          return { kind: "signed_out" };
+        }
+        const reason =
+          response.code === "invitation_expired"
+            ? "expired"
+            : response.code === "invitation_not_found"
+              ? "replayed"
+              : "invalid";
         invitationReceipts.delete(request.acceptanceReceipt);
-        return { kind: "signed_out" };
+        return { kind: "invitation_rejected", reason };
       }
-      const reason =
-        response.code === "invitation_expired"
-          ? "expired"
-          : response.code === "invitation_not_found"
-            ? "replayed"
-            : "invalid";
       invitationReceipts.delete(request.acceptanceReceipt);
-      return { kind: "invitation_rejected", reason };
+      if (!(await sameRecipient())) {
+        return { kind: "invitation_accepted", passwordOutcome: "unknown" };
+      }
+      const passwordOutcome = await updatePasswordOutcome(
+        request.password,
+        authorityHandle,
+      );
+      if (passwordOutcome === "updated") {
+        try {
+          const access = await readAuthority();
+          if (matchesAcceptedInvitation(access, receipt)) return access;
+          if (
+            access.kind === "session_revoked" ||
+            access.kind === "session_expired"
+          ) {
+            return access;
+          }
+        } catch {
+          // Acceptance and password success remain true even when access cannot
+          // be revalidated. A fresh sign-in provides the next authority check.
+        }
+      }
+      if (await sameRecipient()) {
+        try {
+          await dependencies.port.signOut("local", authorityHandle);
+        } catch {
+          // The UI requires a new entry flow without claiming sign-out completed.
+        }
+      }
+      clearAuthorityState();
+      return { kind: "invitation_accepted", passwordOutcome };
+    } finally {
+      dependencies.port.releasePasswordAuthority(authorityHandle);
     }
-    invitationReceipts.delete(request.acceptanceReceipt);
-    const access = await readAuthority();
-    if (
-      access.kind !== "access_granted" ||
-      access.identity.accountId !== receipt.accountId ||
-      access.identity.email !== receipt.email ||
-      access.identity.school.id !== receipt.schoolId ||
-      access.identity.membership.role !== receipt.role
-    ) {
-      throw new Error("Invitation acceptance authority continuity failed");
+  }
+
+  function matchesAcceptedInvitation(
+    result: StaffAuthBoundaryResult,
+    receipt: InvitationReceipt,
+  ): result is StaffAuthAccessGrant {
+    return (
+      result.kind === "access_granted" &&
+      result.identity.accountId === receipt.accountId &&
+      result.identity.email === receipt.email &&
+      result.identity.school.id === receipt.schoolId &&
+      result.identity.membership.role === receipt.role
+    );
+  }
+
+  async function updatePasswordOutcome(
+    password: string,
+    authorityHandle: string,
+  ): Promise<"updated" | "rejected" | "unknown"> {
+    try {
+      return (
+        decodeStatus(
+          await dependencies.port.updatePassword(password, authorityHandle),
+          ["updated", "rejected"],
+        ) ?? "unknown"
+      );
+    } catch {
+      return "unknown";
     }
-    return access;
   }
 
   async function beginTotpEnrollment(
@@ -940,6 +1122,13 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     if (actor.kind !== "access_granted") {
       return actor;
     }
+    if (
+      actor.identityGeneration !== request.expectedIdentityGeneration ||
+      actor.sessionGeneration !== request.expectedSessionGeneration ||
+      eventRevision !== processedEventRevision
+    ) {
+      return { actor, kind: "staff_invitation_rejected" };
+    }
     const input = parseCreateStaffInvitationRequest({
       email: request.email,
       role:
@@ -960,6 +1149,19 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       return refreshed;
     }
     if (!response.ok) {
+      if (
+        response.code === "invitation_delivery_unconfirmed" ||
+        response.code === "invitation_delivery_rejected"
+      ) {
+        return {
+          actor: refreshed,
+          kind: "staff_invitation_delivery",
+          outcome:
+            response.code === "invitation_delivery_unconfirmed"
+              ? "unconfirmed"
+              : "rejected",
+        };
+      }
       const loss = boundaryFailure(response.code);
       return loss ?? { actor: refreshed, kind: "staff_invitation_rejected" };
     }
@@ -1123,54 +1325,97 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     if (!isPassword(password)) {
       return { kind: "password_recovery_rejected" };
     }
-    const begin = parseBeginStaffPasswordRecoveryRpcResult(
-      exactSingleRow(
-        await dependencies.port.beginPasswordRecovery(operationId),
-      ),
-    );
-    if (begin === null) {
-      throw new Error("Password recovery begin result is malformed");
-    }
-    if (!begin.ok) {
-      return passwordRecoveryFailure(begin);
-    }
-    if (begin.operationId !== operationId) {
-      throw new Error("Password recovery operation continuity failed");
-    }
-    if (begin.code === "recovery_sessions_revoked") {
-      const update = decodeStatus(
-        await dependencies.port.updatePassword(password),
-        ["updated", "rejected"],
-      );
-      if (update === null) {
-        throw new Error("Password update result is malformed");
+    const initiatingRevision = eventRevision;
+    const authorityHandle = await dependencies.port.capturePasswordAuthority();
+    if (authorityHandle === null) return { kind: "password_recovery_rejected" };
+    try {
+      if (eventRevision !== initiatingRevision) {
+        return {
+          kind: "password_recovery_uncertain",
+          passwordOutcome: "unknown",
+          cleanupComplete: false,
+        };
       }
-      if (update === "rejected") {
-        return { kind: "password_recovery_rejected" };
-      }
-      const finish = parseFinishStaffPasswordRecoveryRpcResult(
+      const begin = parseBeginStaffPasswordRecoveryRpcResult(
         exactSingleRow(
-          await dependencies.port.finishPasswordRecovery(operationId),
+          await dependencies.port.beginPasswordRecovery(
+            operationId,
+            authorityHandle,
+          ),
         ),
       );
-      if (finish === null) {
-        throw new Error("Password recovery finish result is malformed");
+      if (begin === null) {
+        throw new Error("Password recovery begin result is malformed");
       }
-      if (!finish.ok) {
-        return passwordRecoveryFailure(finish);
+      if (!begin.ok) {
+        return passwordRecoveryFailure(begin);
       }
+      if (eventRevision !== initiatingRevision) {
+        return {
+          kind: "password_recovery_uncertain",
+          passwordOutcome: "unknown",
+          cleanupComplete: false,
+        };
+      }
+      // begin returns the canonical nonsecret operation for this recovery session.
+      // A previous cleanup result cannot establish what happened at the provider.
+      const passwordOutcome =
+        begin.code === "recovery_sessions_revoked"
+          ? await updatePasswordOutcome(password, authorityHandle)
+          : "unknown";
+      if (eventRevision !== initiatingRevision) {
+        return {
+          kind: "password_recovery_uncertain",
+          passwordOutcome,
+          cleanupComplete: false,
+        };
+      }
+      let cleanupComplete = false;
+      try {
+        const finish = parseFinishStaffPasswordRecoveryRpcResult(
+          exactSingleRow(
+            await dependencies.port.finishPasswordRecovery(
+              begin.operationId,
+              authorityHandle,
+            ),
+          ),
+        );
+        cleanupComplete = finish?.ok === true;
+      } catch {
+        cleanupComplete = false;
+      }
+      if (eventRevision !== initiatingRevision) {
+        return {
+          kind: "password_recovery_uncertain",
+          passwordOutcome,
+          cleanupComplete: false,
+        };
+      }
+      try {
+        const signOut = decodeStatus(
+          await dependencies.port.signOut("all", authorityHandle),
+          ["signed_out"],
+        );
+        cleanupComplete = cleanupComplete && signOut === "signed_out";
+      } catch {
+        cleanupComplete = false;
+      }
+      clearAuthorityState();
+      invitationReceipts.clear();
+      if (cleanupComplete && passwordOutcome === "updated") {
+        return { kind: "password_recovery_complete", sessionScope: "all" };
+      }
+      if (cleanupComplete && passwordOutcome === "rejected") {
+        return { kind: "password_recovery_rejected" };
+      }
+      return {
+        kind: "password_recovery_uncertain",
+        passwordOutcome,
+        cleanupComplete,
+      };
+    } finally {
+      dependencies.port.releasePasswordAuthority(authorityHandle);
     }
-    const signOut = decodeStatus(await dependencies.port.signOut("all"), [
-      "signed_out",
-    ]);
-    if (signOut !== "signed_out") {
-      throw new Error("Global recovery sign-out is unavailable");
-    }
-    sessionGeneration = null;
-    identityGeneration = null;
-    identityFacts = null;
-    challengeReceipts.clear();
-    return { kind: "password_recovery_complete", sessionScope: "all" };
   }
 
   function emitEvent(event: StaffAuthAccessEvent): void {
@@ -1186,77 +1431,42 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     }
   }
 
-  function scheduleAuthorityEventRead(): void {
-    if (
-      disposed ||
-      activeMutations > 0 ||
-      eventRead !== null ||
-      eventRevision <= processedEventRevision
-    ) {
+  function waitForMutations(): Promise<void> {
+    if (activeMutations === 0) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      mutationWaiters.add(resolve);
+    });
+  }
+
+  function notifyMutationWaiters(): void {
+    if (activeMutations !== 0) {
       return;
     }
-    let targetRevision = processedEventRevision;
-    eventRead = Promise.resolve()
-      .then(async () => {
-        targetRevision = eventRevision;
-        const previousSessionGeneration = sessionGeneration;
-        const previousIdentityGeneration = identityGeneration;
-        if (
-          previousSessionGeneration === null ||
-          previousIdentityGeneration === null
-        ) {
-          return;
-        }
-        let authority: StaffAuthBoundaryResult;
-        try {
-          authority = await readAuthority({ rotateSession: true });
-        } catch {
-          if (!disposed) {
-            clearAuthorityState();
-            emitEvent({
-              identityGeneration: previousIdentityGeneration,
-              kind: "authority_unavailable",
-              sessionGeneration: previousSessionGeneration,
-            });
-          }
-          return;
-        }
-        if (disposed) {
-          clearAuthorityState();
-          return;
-        }
-        if (authority.kind === "access_granted") {
-          emitEvent({
-            access: authority,
-            kind: "access_changed",
-            previousIdentityGeneration,
-            previousSessionGeneration,
-          });
-          return;
-        }
-        if (
-          authority.kind === "membership_inactive" ||
-          authority.kind === "session_expired" ||
-          authority.kind === "session_revoked" ||
-          authority.kind === "signed_out"
-        ) {
-          emitEvent({
-            identityGeneration: previousIdentityGeneration,
-            kind: authority.kind,
-            sessionGeneration: previousSessionGeneration,
-          });
-        }
-      })
-      .finally(() => {
-        processedEventRevision = Math.max(
-          processedEventRevision,
-          targetRevision,
-        );
-        eventRead = null;
-        if (!disposed && eventRevision > processedEventRevision) {
-          scheduleAuthorityEventRead();
-        }
+    for (const resolve of mutationWaiters) {
+      resolve();
+    }
+    mutationWaiters.clear();
+  }
+
+  async function readLatestAuthority(): Promise<StaffAuthBoundaryResult> {
+    let result: StaffAuthBoundaryResult;
+    do {
+      await waitForMutations();
+      if (disposed) {
+        throw new Error("Staff authentication adapter is disposed");
+      }
+      const targetRevision = eventRevision;
+      result = await readAuthority({
+        rotateSession: targetRevision > processedEventRevision,
       });
+      processedEventRevision = Math.max(processedEventRevision, targetRevision);
+    } while (!disposed && eventRevision > processedEventRevision);
+    if (disposed) {
+      throw new Error("Staff authentication adapter is disposed");
+    }
+    return result;
   }
 
   const unsubscribeProvider = dependencies.port.onAuthStateChange(() => {
@@ -1265,8 +1475,10 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     }
     invitationInspectionContinuations.clear();
     invitationReceipts.clear();
+    pendingVerificationEmail = null;
+    clearAuthorityState(false);
     eventRevision += 1;
-    scheduleAuthorityEventRead();
+    emitEvent({ kind: "revalidation_required" });
   });
 
   return {
@@ -1274,11 +1486,12 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       if (disposed) {
         throw new Error("Staff authentication adapter is disposed");
       }
-      const result = await readAuthority();
-      if (disposed) {
-        throw new Error("Staff authentication adapter is disposed");
+      if (authorityRead === null) {
+        authorityRead = readLatestAuthority().finally(() => {
+          authorityRead = null;
+        });
       }
-      return result;
+      return authorityRead;
     },
     async perform(
       request: StaffAuthMutation,
@@ -1337,7 +1550,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
         .finally(() => {
           inFlightOperations.delete(operationId);
           activeMutations -= 1;
-          scheduleAuthorityEventRead();
+          notifyMutationWaiters();
         });
       inFlightOperations.set(operationId, {
         promise,
@@ -1360,6 +1573,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
         return;
       }
       disposed = true;
+      recoveryContinuation = null;
       eventRevision += 1;
       try {
         unsubscribeProvider();
@@ -1369,6 +1583,10 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       listeners.clear();
       completedOperations.clear();
       inFlightOperations.clear();
+      for (const resolve of mutationWaiters) {
+        resolve();
+      }
+      mutationWaiters.clear();
       challengeReceipts.clear();
       clearEnrollmentReceipts(true);
       invitationReceipts.clear();
@@ -1442,6 +1660,7 @@ type CurrentInvitationResult =
 
 interface TotpFactor {
   readonly factorId: string;
+  readonly friendlyName: string | null;
   readonly status: "unverified" | "verified";
 }
 
@@ -1610,7 +1829,7 @@ function mapManagedInvitation(
     invitationId: invitation.invitationId,
     role: invitation.role === "administrator" ? "admin" : "teacher",
     schoolId: invitation.schoolId,
-    state: "pending",
+    state: invitation.state,
   };
 }
 
@@ -1734,6 +1953,7 @@ function requiresCredentialReentry(result: StaffAuthBoundaryResult): boolean {
     result.kind === "invitation_ready" ||
     result.kind === "totp_enrollment_ready" ||
     result.kind === "staff_invitation_created" ||
+    result.kind === "staff_invitation_delivery" ||
     result.kind === "staff_invitation_rejected" ||
     result.kind === "staff_invitation_revoked" ||
     result.kind === "staff_invitation_revocation_rejected" ||
@@ -1868,12 +2088,27 @@ function decodeAccount(value: unknown): {
 }
 
 function decodeAssurance(value: unknown): {
+  readonly currentAuthenticationMethods: readonly string[];
   readonly currentLevel: "aal1" | "aal2";
   readonly nextLevel: "aal1" | "aal2";
 } | null {
-  const assurance = snapshotExactRecord(value, ["currentLevel", "nextLevel"]);
+  const assurance = snapshotExactRecord(value, [
+    "currentAuthenticationMethods",
+    "currentLevel",
+    "nextLevel",
+  ]);
+  const methods =
+    assurance === null
+      ? null
+      : snapshotArray(assurance.currentAuthenticationMethods, 32);
   if (
     assurance === null ||
+    methods === null ||
+    methods.some(
+      (method) =>
+        !validText(method, 128) ||
+        (typeof method === "string" && method !== method.trim()),
+    ) ||
     (assurance.currentLevel !== "aal1" && assurance.currentLevel !== "aal2") ||
     (assurance.nextLevel !== "aal1" && assurance.nextLevel !== "aal2") ||
     (assurance.currentLevel === "aal2" && assurance.nextLevel !== "aal2")
@@ -1881,6 +2116,7 @@ function decodeAssurance(value: unknown): {
     return null;
   }
   return {
+    currentAuthenticationMethods: methods as readonly string[],
     currentLevel: assurance.currentLevel,
     nextLevel: assurance.nextLevel,
   };
@@ -1895,19 +2131,66 @@ function decodeTotpFactors(value: unknown): TotpFactor[] | null {
   const factors: TotpFactor[] = [];
   const ids = new Set<string>();
   for (const valueRow of rows) {
-    const row = snapshotExactRecord(valueRow, ["factorId", "status"]);
+    const rowWithoutName = snapshotExactRecord(valueRow, [
+      "factorId",
+      "status",
+    ]);
+    const rowWithName = snapshotExactRecord(valueRow, [
+      "factorId",
+      "friendlyName",
+      "status",
+    ]);
+    const row = rowWithName ?? rowWithoutName;
+    const friendlyName =
+      rowWithName === null
+        ? null
+        : sanitizeFactorFriendlyName(rowWithName.friendlyName);
     if (
       row === null ||
       !isCanonicalUuid(row.factorId) ||
       (row.status !== "unverified" && row.status !== "verified") ||
+      (rowWithName !== null &&
+        rowWithName.friendlyName !== null &&
+        typeof rowWithName.friendlyName !== "string") ||
       ids.has(row.factorId)
     ) {
       return null;
     }
     ids.add(row.factorId);
-    factors.push({ factorId: row.factorId, status: row.status });
+    factors.push({ factorId: row.factorId, friendlyName, status: row.status });
   }
   return factors;
+}
+
+function sanitizeFactorFriendlyName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value
+    .normalize("NFKC")
+    .split("")
+    .map((character) =>
+      unsafeFactorLabelCharacter(character) ? " " : character,
+    )
+    .join("")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return normalized.length === 0 ? null : [...normalized].slice(0, 80).join("");
+}
+
+function unsafeFactorLabelCharacter(character: string): boolean {
+  const codePoint = character.codePointAt(0) ?? 0;
+  return (
+    codePoint <= 0x1f ||
+    (codePoint >= 0x7f && codePoint <= 0x9f) ||
+    (codePoint >= 0x202a && codePoint <= 0x202e) ||
+    (codePoint >= 0x2066 && codePoint <= 0x2069)
+  );
+}
+
+function factorChoiceLabel(friendlyName: string | null, index: number): string {
+  const ordinal = index + 1;
+  return friendlyName === null
+    ? `Authenticator ${ordinal}`
+    : `${friendlyName} (Authenticator ${ordinal})`;
 }
 
 function decodeStatus<const Status extends string>(

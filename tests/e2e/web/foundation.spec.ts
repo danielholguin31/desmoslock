@@ -30,6 +30,12 @@ test("v2 web artifact mounts the production staff sign-in surface", async ({
       new PageTransitionEvent("pagehide", { persisted: true }),
     );
   });
+  await expect(page.locator("[data-staff-auth-root]")).toBeHidden();
+  await page.evaluate(() => {
+    window.dispatchEvent(
+      new PageTransitionEvent("pageshow", { persisted: true }),
+    );
+  });
   await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
   await expect(page.locator("form")).toHaveCount(1);
   await expect(
@@ -39,9 +45,11 @@ test("v2 web artifact mounts the production staff sign-in surface", async ({
   expect(consoleErrors).toEqual([]);
 });
 
-test("invitation callbacks are scrubbed before provider completion, health, or auth rendering", async ({
+test("invitation callbacks stay inert until an explicit human confirmation", async ({
   page,
 }) => {
+  const consoleMessages: string[] = [];
+  page.on("console", (message) => consoleMessages.push(message.text()));
   let releaseProvider: (() => void) | undefined;
   let markProviderStarted: (() => void) | undefined;
   const providerStarted = new Promise<void>((resolve) => {
@@ -77,12 +85,16 @@ test("invitation callbacks are scrubbed before provider completion, health, or a
   });
 
   const tokenHash = "a".repeat(56);
-  await page.goto(`/?auth=invite&token_hash=${tokenHash}`);
-  await providerStarted;
+  await page.goto(`/?auth=invite#token_hash=${tokenHash}`);
 
   await expect(page).toHaveURL("http://127.0.0.1:43173/");
-  await expect(page.locator("[data-staff-auth-root]")).toBeHidden();
-  expect(healthRequests).toBe(0);
+  await expect(
+    page.getByRole("heading", { name: "Continue securely" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Continue securely" }),
+  ).toBeVisible();
+  expect(healthRequests).toBe(1);
   expect(staticResourceRequests.length).toBeGreaterThan(0);
   expect(staticResourceRequests.map(({ referer }) => referer)).toEqual(
     Array.from({ length: staticResourceRequests.length }, () => undefined),
@@ -93,6 +105,21 @@ test("invitation callbacks are scrubbed before provider completion, health, or a
     "no-referrer",
   );
   expect(await page.content()).not.toContain(tokenHash);
+  const browserState = await page.evaluate(() =>
+    JSON.stringify({
+      history: window.history.state,
+      localStorage: { ...window.localStorage },
+      sessionStorage: { ...window.sessionStorage },
+    }),
+  );
+  expect(browserState).not.toContain(tokenHash);
+  expect(JSON.stringify(consoleMessages)).not.toContain(tokenHash);
+
+  await page.getByRole("button", { name: "Continue securely" }).click();
+  await providerStarted;
+  await expect(
+    page.getByRole("heading", { name: "Checking invitation" }),
+  ).toBeVisible();
 
   releaseProvider?.();
   await expect(
@@ -104,6 +131,30 @@ test("invitation callbacks are scrubbed before provider completion, health, or a
     "data-backend-status",
     "ready",
   );
+});
+
+test("reloading before invitation confirmation loses the bearer without consuming it", async ({
+  page,
+}) => {
+  let authRequests = 0;
+  await page.route("**/auth/v1/**", async (route) => {
+    authRequests += 1;
+    await route.abort();
+  });
+  const tokenHash = "c".repeat(56);
+
+  await page.goto(`/?auth=invite#token_hash=${tokenHash}`);
+  await expect(
+    page.getByRole("heading", { name: "Continue securely" }),
+  ).toBeVisible();
+  await page.reload();
+
+  await expect(page).toHaveURL("http://127.0.0.1:43173/");
+  await expect(
+    page.getByRole("heading", { name: "Reopen your email" }),
+  ).toBeVisible();
+  expect(authRequests).toBe(0);
+  expect(await page.content()).not.toContain(tokenHash);
 });
 
 test("email verification round-trips the SDK-owned PKCE flow and scrubs before exchange", async ({
@@ -235,6 +286,11 @@ test("unsupported fragment credentials are synchronously scrubbed and never sent
 
   await expect(page).toHaveURL("http://127.0.0.1:43173/");
   await expect(
+    page.getByRole("heading", { name: "Continue securely" }),
+  ).toBeVisible();
+  expect(authRequests).toBe(0);
+  await page.getByRole("button", { name: "Continue securely" }).click();
+  await expect(
     page.getByRole("heading", { name: "Authentication link unavailable" }),
   ).toBeVisible();
   expect(authRequests).toBe(0);
@@ -263,7 +319,7 @@ test("a failed address-bar scrub leaves the callback surface inert and offline",
   });
   const tokenHash = "b".repeat(56);
 
-  await page.goto(`/?auth=invite&token_hash=${tokenHash}`);
+  await page.goto(`/?auth=invite#token_hash=${tokenHash}`);
 
   await expect(page.locator("[data-staff-auth-root]")).toBeHidden();
   await expect(page.locator("[data-protected-school-data]")).toBeHidden();

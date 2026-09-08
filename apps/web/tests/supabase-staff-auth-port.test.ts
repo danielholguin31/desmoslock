@@ -1,5 +1,9 @@
+import { readFileSync } from "node:fs";
+
+import { createClient } from "@supabase/supabase-js";
 import { describe, expect, it, vi } from "vitest";
 
+import { prepareStaffRecoveryCallback } from "../src/auth/staff-auth-callback.js";
 import {
   createSupabaseStaffAuthPort,
   type SupabaseStaffAuthClient,
@@ -10,7 +14,6 @@ const publishableKey = "sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc";
 const schoolId = "11000000-0000-4000-8000-000000000001";
 const profileId = "21000000-0000-4000-8000-000000000001";
 const invitationId = "41000000-0000-4000-8000-000000000001";
-const operationId = "51000000-0000-4000-8000-000000000001";
 const accountId = "a1000000-0000-4000-8000-000000000001";
 const recoveryTokenUrl = `${backendUrl}/auth/v1/token?grant_type=pkce`;
 
@@ -127,16 +130,10 @@ describe("Supabase staff auth port", () => {
     await port.readCurrentInvitations();
     await port.readManageableStaff();
     await port.readManageableInvitations();
-    await port.acceptInvitation({
-      displayName: "Taylor Teacher",
-      invitationId,
-    });
     await port.revokeInvitation({ invitationId });
     await port.revokeMembership({ profileId, schoolId });
     await port.revokeAllStaffSessions();
     await port.revokeCurrentStaffSession();
-    await port.beginPasswordRecovery(operationId);
-    await port.finishPasswordRecovery(operationId);
 
     expect(schema).toHaveBeenCalledTimes(1);
     expect(schema).toHaveBeenCalledWith("desmoslock_v2");
@@ -145,19 +142,10 @@ describe("Supabase staff auth port", () => {
       ["current_staff_invitations"],
       ["current_manageable_staff"],
       ["current_manageable_staff_invitations"],
-      [
-        "accept_staff_invitation",
-        { display_name: "Taylor Teacher", invitation_id: invitationId },
-      ],
       ["revoke_staff_invitation", { invitation_id: invitationId }],
       ["revoke_membership", { profile_id: profileId, workspace_id: schoolId }],
       ["revoke_all_current_user_staff_sessions"],
       ["revoke_current_staff_session"],
-      [
-        "begin_staff_password_recovery",
-        { requested_operation_id: operationId },
-      ],
-      ["finish_staff_password_recovery", { operation_id: operationId }],
     ]);
   });
 
@@ -442,33 +430,9 @@ describe("Supabase staff auth port", () => {
     );
   });
 
-  it("maps password updates and sign-out scopes without exposing auth failures", async () => {
-    const updateUser = vi
-      .fn<SupabaseStaffAuthClient["auth"]["updateUser"]>()
-      .mockResolvedValueOnce({ data: { user: {} }, error: null })
-      .mockResolvedValueOnce({
-        data: { user: null },
-        error: authError("weak_password"),
-      })
-      .mockResolvedValueOnce({
-        data: { user: null },
-        error: authError("unclassified_provider_failure"),
-      });
+  it("maps ordinary unbound sign-out scopes without exposing auth failures", async () => {
     const signOut = vi.fn(async () => ({ error: null }));
-    const port = createPort(fakeClient({ auth: { signOut, updateUser } }));
-
-    await expect(
-      port.updatePassword("synthetic replacement password"),
-    ).resolves.toEqual({ status: "updated" });
-    await expect(
-      port.updatePassword("synthetic replacement password"),
-    ).resolves.toEqual({ status: "rejected" });
-    await expect(
-      port.updatePassword("synthetic replacement password"),
-    ).resolves.toEqual({ status: "unavailable" });
-    expect(updateUser).toHaveBeenNthCalledWith(1, {
-      password: "synthetic replacement password",
-    });
+    const port = createPort(fakeClient({ auth: { signOut } }));
 
     await expect(port.signOut("local")).resolves.toEqual({
       status: "signed_out",
@@ -488,7 +452,9 @@ describe("Supabase staff auth port", () => {
     const challengeId = "71000000-0000-4000-8000-000000000001";
     const getAuthenticatorAssuranceLevel = vi.fn(async () => ({
       data: {
-        currentAuthenticationMethods: [{ method: "password" }],
+        currentAuthenticationMethods: [
+          { method: "password", timestamp: 1_788_300_000 },
+        ],
         currentLevel: "aal1",
         nextLevel: "aal2",
       },
@@ -567,13 +533,18 @@ describe("Supabase staff auth port", () => {
     );
 
     await expect(port.readAssurance()).resolves.toEqual({
+      currentAuthenticationMethods: ["password"],
       currentLevel: "aal1",
       nextLevel: "aal2",
     });
     await expect(port.readTotpFactors()).resolves.toEqual({
       factors: [
-        { factorId, status: "verified" },
-        { factorId: unverifiedFactorId, status: "unverified" },
+        { factorId, friendlyName: null, status: "verified" },
+        {
+          factorId: unverifiedFactorId,
+          friendlyName: null,
+          status: "unverified",
+        },
       ],
     });
     await expect(port.enrollTotp()).resolves.toEqual({
@@ -600,6 +571,71 @@ describe("Supabase staff auth port", () => {
       factorId,
     });
     expect(unenroll).toHaveBeenCalledWith({ factorId: unverifiedFactorId });
+  });
+
+  it.each([
+    {
+      currentAuthenticationMethods: ["password", "recovery"],
+      label: "string methods",
+    },
+    {
+      currentAuthenticationMethods: [
+        { method: "password", timestamp: 1_788_300_000.25 },
+        { method: "recovery", timestamp: 1_788_300_001 },
+      ],
+      label: "structured methods",
+    },
+  ])("strictly normalizes homogeneous $label", async (data) => {
+    const port = createPort(
+      fakeClient({
+        auth: {
+          mfa: {
+            getAuthenticatorAssuranceLevel: async () => ({
+              data: {
+                currentAuthenticationMethods: data.currentAuthenticationMethods,
+                currentLevel: "aal1",
+                nextLevel: "aal2",
+              },
+              error: null,
+            }),
+          },
+        },
+      }),
+    );
+
+    await expect(port.readAssurance()).resolves.toEqual({
+      currentAuthenticationMethods: ["password", "recovery"],
+      currentLevel: "aal1",
+      nextLevel: "aal2",
+    });
+  });
+
+  it.each([
+    ["mixed", ["password", { method: "recovery", timestamp: 1 }]],
+    ["missing timestamp", [{ method: "recovery" }]],
+    ["extra object key", [{ extra: true, method: "recovery", timestamp: 1 }]],
+    ["invalid timestamp", [{ method: "recovery", timestamp: -1 }]],
+    ["control text", ["recovery\n"]],
+    ["excess methods", Array.from({ length: 33 }, () => "password")],
+  ] as const)("rejects %s authentication methods", async (_label, methods) => {
+    const port = createPort(
+      fakeClient({
+        auth: {
+          mfa: {
+            getAuthenticatorAssuranceLevel: async () => ({
+              data: {
+                currentAuthenticationMethods: methods,
+                currentLevel: "aal1",
+                nextLevel: "aal2",
+              },
+              error: null,
+            }),
+          },
+        },
+      }),
+    );
+
+    await expect(port.readAssurance()).resolves.toBeNull();
   });
 
   it("maps known MFA verification failures to rejected and unknowns to unavailable", async () => {
@@ -678,12 +714,207 @@ describe("Supabase staff auth port", () => {
         },
         method: "POST",
         redirect: "error",
+        signal: expect.any(AbortSignal),
       },
     );
     expect(setSession).toHaveBeenCalledWith({
       access_token: accessToken,
       refresh_token: refreshToken,
     });
+    await port.signOut("local");
+  });
+
+  it("bounds a stalled recovery fetch and never installs a late response", async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseFetch: ((response: Response) => void) | undefined;
+      const recoveryFetch = vi.fn<typeof fetch>(
+        () =>
+          new Promise((resolve) => {
+            releaseFetch = resolve;
+          }),
+      );
+      const setSession = vi.fn(async () => ({
+        data: { session: {}, user: {} },
+        error: null,
+      }));
+      const port = createPort(
+        fakeClient({ auth: { setSession } }),
+        recoveryFetch,
+      );
+      const outcome = port.exchangeRecoveryCode({
+        authorizationCode: "synthetic-authorization-code",
+        verifier: "v".repeat(43),
+      });
+      const settled = vi.fn();
+      void outcome.then(settled);
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(settled).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(outcome).resolves.toEqual({ status: "unavailable" });
+      expect(recoveryFetch.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+      const cancel = vi.fn();
+      releaseFetch?.(
+        recoveryResponse(new ReadableStream({ cancel }), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        }),
+      );
+      await vi.runAllTimersAsync();
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(setSession).not.toHaveBeenCalled();
+      expect(recoveryFetch).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([200, 400])(
+    "shares one deadline across delayed headers and a stalled %s body",
+    async (status) => {
+      vi.useFakeTimers();
+      try {
+        const cancel = vi.fn(() => new Promise<void>(() => undefined));
+        const recoveryFetch = vi.fn<typeof fetch>(
+          () =>
+            new Promise((resolve) => {
+              setTimeout(
+                () =>
+                  resolve(
+                    recoveryResponse(
+                      new ReadableStream({
+                        start(controller) {
+                          controller.enqueue(
+                            new TextEncoder().encode('{"unfinished":'),
+                          );
+                        },
+                        cancel,
+                      }),
+                      {
+                        headers: { "content-type": "application/json" },
+                        status,
+                      },
+                    ),
+                  ),
+                4_000,
+              );
+            }),
+        );
+        const setSession = vi.fn(async () => ({
+          data: { session: {}, user: {} },
+          error: null,
+        }));
+        const port = createPort(
+          fakeClient({ auth: { setSession } }),
+          recoveryFetch,
+        );
+        const outcome = port.exchangeRecoveryCode({
+          authorizationCode: "synthetic-authorization-code",
+          verifier: "v".repeat(43),
+        });
+        await vi.advanceTimersByTimeAsync(5_000);
+        await expect(outcome).resolves.toEqual({ status: "unavailable" });
+        expect(cancel).toHaveBeenCalledOnce();
+        expect(recoveryFetch.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+        expect(setSession).not.toHaveBeenCalled();
+        expect(recoveryFetch).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([null, "synthetic-session-access-token"])(
+    "matches recovery preflight sets to installed SDK headers with access token %s",
+    async (accessToken) => {
+      const requests: Headers[] = [];
+      const client = createClient(backendUrl, publishableKey, {
+        accessToken: async () => accessToken,
+        global: {
+          fetch: async (_input, init) => {
+            requests.push(new Headers(init?.headers));
+            return Response.json({ code: "recovery_requested", ok: true });
+          },
+        },
+      });
+      await client.functions.invoke("account-recovery", {
+        body: {
+          codeChallenge: "c".repeat(43),
+          email: "synthetic@example.test",
+          flowId: "f".repeat(22),
+          state: "s".repeat(43),
+        },
+      });
+      expect(requests).toHaveLength(1);
+      expect([...requests[0]!.keys()].sort()).toEqual(
+        accessToken === null
+          ? ["apikey", "content-type", "x-client-info"]
+          : ["apikey", "authorization", "content-type", "x-client-info"],
+      );
+      expect(requests[0]!.get("authorization")).toBe(
+        accessToken === null ? null : `Bearer ${accessToken}`,
+      );
+    },
+  );
+
+  it("wires the recovery email template to an inert fragment callback accepted by the receiver", async () => {
+    const template = readFileSync(
+      new URL("../../../supabase/templates/recovery-v1.html", import.meta.url),
+      "utf8",
+    );
+    const config = readFileSync(
+      new URL("../../../supabase/config.toml", import.meta.url),
+      "utf8",
+    );
+    expect(config).toContain(
+      '[auth.email.template.recovery]\nsubject = "Reset your DesmosLock password"\ncontent_path = "./supabase/templates/recovery-v1.html"',
+    );
+    expect(template).not.toMatch(
+      /ConfirmationURL|\.Token\s|\.SiteURL|<script|<img|<form/iu,
+    );
+    const links = [...template.matchAll(/href="([^"]+)"/gu)];
+    expect(links).toHaveLength(1);
+    const flowId = "f".repeat(22);
+    const state = "s".repeat(43);
+    const tokenHash = `pkce_${"a".repeat(56)}`;
+    const redirectTo = `https://app.example.test/?auth=recovery&flow=${flowId}&state=${state}`;
+    // Substitute only the constrained template data, then decode the HTML
+    // attribute as an email client does. Hosted renderer/client QA is separate.
+    const firstHop = links[0]![1]!
+      .replace("{{ .RedirectTo }}", redirectTo.replaceAll("&", "&amp;"))
+      .replace("{{ .TokenHash }}", tokenHash)
+      .replaceAll("&amp;", "&");
+    expect(firstHop).toBe(
+      `${redirectTo}#token_hash=${tokenHash}&type=recovery`,
+    );
+    expect(new URL(firstHop).search).not.toContain(tokenHash);
+    const navigate = vi.fn();
+    const exchange = vi.fn(async () => undefined);
+    const prepared = prepareStaffRecoveryCallback(firstHop, {
+      backendOrigin: backendUrl,
+      exchange,
+      history: { replaceState: vi.fn() },
+      navigate,
+      route: { origin: "https://app.example.test", pathname: "/" },
+    });
+    expect(prepared.status).toBe("confirmation_required");
+    expect(navigate).not.toHaveBeenCalled();
+    expect(exchange).not.toHaveBeenCalled();
+    expect(JSON.stringify(prepared)).not.toContain(tokenHash);
+    if (prepared.status !== "confirmation_required")
+      throw new Error("Template callback rejected");
+    await prepared.confirm();
+    const verification = new URL(navigate.mock.calls[0]![0] as string);
+    expect(verification.origin).toBe(backendUrl);
+    expect(verification.pathname).toBe("/auth/v1/verify");
+    expect([...verification.searchParams]).toEqual([
+      ["token", tokenHash],
+      ["type", "recovery"],
+      ["redirect_to", redirectTo],
+    ]);
+    expect(exchange).not.toHaveBeenCalled();
   });
 
   it("rejects known PKCE failures and treats malformed, extra, or failed session results as unavailable", async () => {

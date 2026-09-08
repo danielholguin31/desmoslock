@@ -83,7 +83,15 @@ function access(
     identityGeneration?: string;
     manageableInvitations?: readonly StaffAuthBoundaryManagedInvitation[];
     manageableStaff?: readonly StaffAuthBoundaryManagedStaff[];
-    secondFactor?: "challenge_required" | "enrollment_required" | "satisfied";
+    factorChoices?: readonly {
+      readonly challengeReceipt: string;
+      readonly label: string;
+    }[];
+    secondFactor?:
+      | "challenge_required"
+      | "enrollment_required"
+      | "factor_selection_required"
+      | "satisfied";
     sessionGeneration?: string;
   } = {},
 ): StaffAuthAccessGrant {
@@ -104,6 +112,22 @@ function access(
     return {
       ...base,
       challengeReceipt: `challenge-${role}`,
+      secondFactor,
+    };
+  }
+  if (secondFactor === "factor_selection_required") {
+    return {
+      ...base,
+      factorChoices: options.factorChoices ?? [
+        {
+          challengeReceipt: "challenge-owner-phone",
+          label: "Phone (Authenticator 1)",
+        },
+        {
+          challengeReceipt: "challenge-owner-key",
+          label: "Security key (Authenticator 2)",
+        },
+      ],
       secondFactor,
     };
   }
@@ -310,6 +334,67 @@ describe("staff auth controller", () => {
     });
   });
 
+  it("keeps factor receipts private and requires an explicit current factor choice", async () => {
+    const perform = vi.fn<
+      (request: StaffAuthMutation) => Promise<StaffAuthAccessGrant>
+    >(async () => access("owner", { assuranceLevel: "aal2" }));
+    const controller = createController(
+      createAdapter(
+        access("owner", {
+          assuranceLevel: "aal1",
+          factorChoices: [
+            {
+              challengeReceipt: "private-receipt-one",
+              label: "Phone (Authenticator 1)",
+            },
+            {
+              challengeReceipt: "private-receipt-two",
+              label: "Security key (Authenticator 2)",
+            },
+          ],
+          secondFactor: "factor_selection_required",
+        }),
+        perform,
+      ),
+    );
+
+    await controller.dispatch({ type: "bootstrap" });
+
+    expect(controller.getSnapshot()).toMatchObject({
+      choices: [
+        { choiceId: "factor-1", label: "Phone (Authenticator 1)" },
+        { choiceId: "factor-2", label: "Security key (Authenticator 2)" },
+      ],
+      kind: "totp_factor_selection",
+      role: "owner",
+    });
+    expect(JSON.stringify(controller.getSnapshot())).not.toContain("receipt");
+
+    await controller.dispatch({
+      choiceId: "factor-stale",
+      type: "select_totp_factor",
+    });
+    expect(perform).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({
+      kind: "totp_factor_selection",
+    });
+
+    await controller.dispatch({
+      choiceId: "factor-2",
+      type: "select_totp_factor",
+    });
+    expect(perform).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({ kind: "totp_challenge" });
+
+    await controller.dispatch({ code: "123456", type: "verify_totp" });
+    expect(perform).toHaveBeenCalledOnce();
+    expect(perform.mock.calls[0]?.[0]).toMatchObject({
+      challengeReceipt: "private-receipt-two",
+      purpose: "step_up",
+      type: "verify_totp",
+    });
+  });
+
   it("keeps rejected and cancelled step-up fail-closed without clearing School data", async () => {
     const clear = vi.fn();
     const controller = createController(
@@ -437,7 +522,7 @@ describe("staff auth controller", () => {
       );
       await controller.dispatch({ type: "bootstrap" });
       await controller.dispatch({
-        callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
+        callbackUrl: `https://app.example.test/?auth=invite#token_hash=${invitationTokenHash}`,
         type: "inspect_invitation",
       });
 
@@ -471,7 +556,7 @@ describe("staff auth controller", () => {
     const controller = createController(adapter);
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
+      callbackUrl: `https://app.example.test/?auth=invite#token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
     await controller.dispatch({
@@ -510,7 +595,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
+      callbackUrl: `https://app.example.test/?auth=invite#token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
 
@@ -598,45 +683,141 @@ describe("staff auth controller", () => {
     "session_revoked",
     "membership_inactive",
     "signed_out",
-  ] as const)("clears School data on authoritative %s events", async (kind) => {
+  ] as const)("clears School data before revalidating to %s", async (kind) => {
     const clear = vi.fn();
+    const nextRead = deferred<StaffAuthBoundaryResult>();
     let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
-    const adapter: StaffAuthAdapter = {
-      async read() {
-        return access("teacher");
-      },
-      async perform() {
-        throw new Error("unexpected mutation");
-      },
-      subscribe(listener) {
-        emit = listener;
-        return () => undefined;
-      },
+    const adapter = createAdapter(access("teacher"));
+    adapter.subscribe = (listener) => {
+      emit = listener;
+      return () => undefined;
     };
     const controller = createController(adapter, { clear });
     await controller.dispatch({ type: "bootstrap" });
+    adapter.read = () => nextRead.promise;
     clear.mockClear();
 
-    emit?.({
-      identityGeneration: "identity-teacher",
-      kind,
-      sessionGeneration: "session-teacher",
-    });
+    emit?.({ kind: "revalidation_required" });
 
-    expect(controller.getSnapshot().kind).toBe(kind);
+    expect(controller.getSnapshot().kind).toBe("bootstrapping");
+    expect(clear).toHaveBeenCalledOnce();
+    nextRead.resolve({ kind });
+    await vi.waitFor(() => expect(controller.getSnapshot().kind).toBe(kind));
     expect(clear).toHaveBeenCalledOnce();
   });
 
-  it("clears School data and applies an authoritative access-change identity", async () => {
+  it("clears School data and waits for a fresh authoritative identity", async () => {
     const clear = vi.fn();
+    const nextRead = deferred<StaffAuthBoundaryResult>();
+    let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
+    const adapter = createAdapter(access("teacher"));
+    adapter.subscribe = (listener) => {
+      emit = listener;
+      return () => undefined;
+    };
+    const controller = createController(adapter, { clear });
+    await controller.dispatch({ type: "bootstrap" });
+    adapter.read = () => nextRead.promise;
+    clear.mockClear();
+
+    emit?.({ kind: "revalidation_required" });
+
+    expect(controller.getSnapshot()).toMatchObject({ kind: "bootstrapping" });
+    expect(clear).toHaveBeenCalledOnce();
+    nextRead.resolve(access("owner"));
+    await vi.waitFor(() =>
+      expect(controller.getSnapshot()).toMatchObject({
+        identity: { membership: { role: "owner" } },
+        kind: "authenticated",
+      }),
+    );
+  });
+
+  it.each([
+    ["signed out", { kind: "signed_out" }, "signed_out"],
+    [
+      "email verification",
+      { kind: "email_verification_required" },
+      "email_verification_required",
+    ],
+    ["step up", { kind: "step_up_required" }, "step_up_required"],
+    ["membership loss", { kind: "membership_inactive" }, "membership_inactive"],
+    ["session expiry", { kind: "session_expired" }, "session_expired"],
+    ["session revocation", { kind: "session_revoked" }, "session_revoked"],
+    [
+      "recovery resume",
+      { kind: "password_recovery_ready" },
+      "password_recovery_ready",
+    ],
+    [
+      "invitation resume",
+      invitationReady("bootstrap-operation"),
+      "invitation_ready",
+    ],
+    ["fresh access", access("owner"), "authenticated"],
+  ] as const)(
+    "clears before a detail-free event and reboots to %s authority",
+    async (_label, authority, expectedKind) => {
+      const order: string[] = [];
+      const nextRead = deferred<StaffAuthBoundaryResult>();
+      let reads = 0;
+      let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
+      const adapter: StaffAuthAdapter = {
+        read() {
+          reads += 1;
+          return reads === 1
+            ? Promise.resolve(access("teacher"))
+            : nextRead.promise;
+        },
+        async perform() {
+          throw new Error("unexpected mutation");
+        },
+        subscribe(listener) {
+          emit = listener;
+          return () => undefined;
+        },
+      };
+      const controller = createController(adapter, {
+        clear: () => {
+          order.push("clear");
+        },
+      });
+      await controller.dispatch({ type: "bootstrap" });
+      order.splice(0);
+      controller.subscribe((state) => {
+        order.push(`state:${state.kind}`);
+      });
+
+      emit?.({ kind: "revalidation_required" });
+
+      expect(order).toEqual(["clear", "state:bootstrapping"]);
+      expect(reads).toBe(1);
+      nextRead.resolve(authority as StaffAuthBoundaryResult);
+      await vi.waitFor(() =>
+        expect(controller.getSnapshot().kind).toBe(expectedKind),
+      );
+    },
+  );
+
+  it("invalidates a pending TOTP challenge and ignores its stale verification", async () => {
+    const verification = deferred<StaffAuthMutationResult>();
+    const nextRead = deferred<StaffAuthBoundaryResult>();
+    const clear = vi.fn();
+    let reads = 0;
     let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
     const adapter: StaffAuthAdapter = {
-      async read() {
-        return access("teacher");
+      read() {
+        reads += 1;
+        return reads === 1
+          ? Promise.resolve(
+              access("owner", {
+                assuranceLevel: "aal1",
+                secondFactor: "challenge_required",
+              }),
+            )
+          : nextRead.promise;
       },
-      async perform() {
-        throw new Error("unexpected mutation");
-      },
+      perform: () => verification.promise,
       subscribe(listener) {
         emit = listener;
         return () => undefined;
@@ -645,18 +826,118 @@ describe("staff auth controller", () => {
     const controller = createController(adapter, { clear });
     await controller.dispatch({ type: "bootstrap" });
     clear.mockClear();
-    emit?.({
-      access: access("owner"),
-      kind: "access_changed",
-      previousIdentityGeneration: "identity-teacher",
-      previousSessionGeneration: "session-teacher",
+    const pendingVerification = controller.dispatch({
+      code: "123456",
+      type: "verify_totp",
     });
 
-    expect(controller.getSnapshot()).toMatchObject({
-      identity: { membership: { role: "owner" } },
-      kind: "authenticated",
-    });
+    emit?.({ kind: "revalidation_required" });
+
     expect(clear).toHaveBeenCalledOnce();
+    expect(controller.getSnapshot()).toMatchObject({ kind: "bootstrapping" });
+    verification.resolve({
+      operationId: "operation-1",
+      result: access("owner", { assuranceLevel: "aal2" }),
+    });
+    nextRead.resolve({ kind: "session_revoked" });
+    await pendingVerification;
+    await vi.waitFor(() =>
+      expect(controller.getSnapshot()).toMatchObject({
+        kind: "session_revoked",
+      }),
+    );
+  });
+
+  it("coalesces a synchronous event burst into one fresh authority read", async () => {
+    const refreshed = deferred<StaffAuthBoundaryResult>();
+    const clear = vi.fn();
+    let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
+    const adapter = createAdapter(access("teacher"));
+    adapter.subscribe = (listener) => {
+      emit = listener;
+      return () => undefined;
+    };
+    const controller = createController(adapter, { clear });
+    await controller.dispatch({ type: "bootstrap" });
+    const read = vi.fn(() => refreshed.promise);
+    adapter.read = read;
+    clear.mockClear();
+
+    for (let index = 0; index < 5; index += 1) {
+      emit?.({ kind: "revalidation_required" });
+      expect(controller.getSnapshot()).toMatchObject({ kind: "bootstrapping" });
+    }
+
+    expect(clear).toHaveBeenCalledTimes(5);
+    expect(read).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(read).toHaveBeenCalledOnce());
+    refreshed.resolve({ kind: "session_revoked" });
+    await vi.waitFor(() =>
+      expect(controller.getSnapshot()).toMatchObject({
+        kind: "session_revoked",
+      }),
+    );
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it("discards a read invalidated by another event and serializes the latest authority read", async () => {
+    const stale = deferred<StaffAuthBoundaryResult>();
+    const current = deferred<StaffAuthBoundaryResult>();
+    let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
+    const adapter = createAdapter(access("teacher"));
+    adapter.subscribe = (listener) => {
+      emit = listener;
+      return () => undefined;
+    };
+    const controller = createController(adapter);
+    await controller.dispatch({ type: "bootstrap" });
+    const read = vi
+      .fn()
+      .mockImplementationOnce(() => stale.promise)
+      .mockImplementationOnce(() => current.promise);
+    adapter.read = read;
+    const states: string[] = [];
+    controller.subscribe((state) => states.push(state.kind));
+
+    emit?.({ kind: "revalidation_required" });
+    await vi.waitFor(() => expect(read).toHaveBeenCalledOnce());
+    emit?.({ kind: "revalidation_required" });
+    emit?.({ kind: "revalidation_required" });
+    await Promise.resolve();
+    expect(read).toHaveBeenCalledOnce();
+
+    stale.resolve(access("owner"));
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    expect(controller.getSnapshot()).toMatchObject({ kind: "bootstrapping" });
+    expect(states).not.toContain("authenticated");
+    current.resolve({ kind: "membership_inactive" });
+    await vi.waitFor(() =>
+      expect(controller.getSnapshot()).toMatchObject({
+        kind: "membership_inactive",
+      }),
+    );
+    expect(states).not.toContain("authenticated");
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels an event-triggered authority read queued before disposal", async () => {
+    let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
+    const adapter = createAdapter(access("teacher"));
+    adapter.subscribe = (listener) => {
+      emit = listener;
+      return () => undefined;
+    };
+    const controller = createController(adapter);
+    await controller.dispatch({ type: "bootstrap" });
+    const read = vi.fn(async () => access("owner"));
+    adapter.read = read;
+
+    emit?.({ kind: "revalidation_required" });
+    controller.dispose();
+    await Promise.resolve();
+
+    expect(read).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({ kind: "disposed" });
   });
 
   it("fails closed with a retryable bootstrap when provider authority refresh is unavailable", async () => {
@@ -666,6 +947,7 @@ describe("staff auth controller", () => {
     const adapter: StaffAuthAdapter = {
       async read() {
         reads += 1;
+        if (reads === 2) throw new Error("provider unavailable");
         return access("teacher");
       },
       async perform() {
@@ -680,11 +962,12 @@ describe("staff auth controller", () => {
     await controller.dispatch({ type: "bootstrap" });
     clear.mockClear();
 
-    emit?.({
-      identityGeneration: "identity-teacher",
-      kind: "authority_unavailable",
-      sessionGeneration: "session-teacher",
-    });
+    emit?.({ kind: "revalidation_required" });
+    expect(controller.getSnapshot()).toMatchObject({ kind: "bootstrapping" });
+    expect(clear).toHaveBeenCalledOnce();
+    await vi.waitFor(() =>
+      expect(controller.getSnapshot().kind).toBe("dependency_failure"),
+    );
 
     expect(controller.getSnapshot()).toMatchObject({
       code: "dependency_unavailable",
@@ -694,7 +977,7 @@ describe("staff auth controller", () => {
     });
     expect(clear).toHaveBeenCalledOnce();
     await controller.dispatch({ type: "retry" });
-    expect(reads).toBe(2);
+    expect(reads).toBe(3);
     expect(controller.getSnapshot()).toMatchObject({ kind: "authenticated" });
   });
 
@@ -861,18 +1144,20 @@ describe("staff auth controller", () => {
     const controller = createController(adapter);
     await controller.dispatch({ type: "bootstrap" });
     const pending = controller.dispatch({ type: "sign_out_local" });
-    emit?.({
-      identityGeneration: "identity-teacher",
-      kind: "session_revoked",
-      sessionGeneration: "session-teacher",
-    });
+    adapter.read = async () => ({ kind: "session_revoked" });
+    emit?.({ kind: "revalidation_required" });
+    expect(controller.getSnapshot()).toMatchObject({ kind: "bootstrapping" });
     finish.resolve({
       operationId: request?.operationId ?? "",
       result: { kind: "sign_out_complete", scope: "local" },
     });
     await pending;
 
-    expect(controller.getSnapshot()).toMatchObject({ kind: "session_revoked" });
+    await vi.waitFor(() =>
+      expect(controller.getSnapshot()).toMatchObject({
+        kind: "session_revoked",
+      }),
+    );
   });
 
   it("ignores async completions after disposal", async () => {
@@ -931,11 +1216,7 @@ describe("staff auth controller", () => {
     await controller.dispatch({ type: "bootstrap" });
     clear.mockClear();
     controller.dispose();
-    queued?.({
-      identityGeneration: "identity-teacher",
-      kind: "session_revoked",
-      sessionGeneration: "session-teacher",
-    });
+    queued?.({ kind: "revalidation_required" });
 
     expect(controller.getSnapshot()).toMatchObject({ kind: "disposed" });
     expect(clear).not.toHaveBeenCalled();
@@ -1166,7 +1447,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=recovery&code=SENTINEL-code&state=${"s".repeat(43)}&flow=${"f".repeat(22)}`,
+      callbackUrl: `https://app.example.test/?auth=recovery&flow=${"f".repeat(22)}&state=${"s".repeat(43)}&code=SENTINEL-code`,
       type: "consume_recovery_callback",
     });
 
@@ -1266,7 +1547,7 @@ describe("staff auth controller", () => {
       );
       await controller.dispatch({ type: "bootstrap" });
       await controller.dispatch({
-        callbackUrl: `https://app.example.test/?auth=recovery&code=one&state=${"s".repeat(43)}&flow=${"f".repeat(22)}`,
+        callbackUrl: `https://app.example.test/?auth=recovery&flow=${"f".repeat(22)}&state=${"s".repeat(43)}&code=one`,
         type: "consume_recovery_callback",
       });
       await controller.dispatch({
@@ -1292,7 +1573,7 @@ describe("staff auth controller", () => {
     const controller = createController(adapter);
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=recovery&code=one&state=${"s".repeat(43)}&flow=${"f".repeat(22)}`,
+      callbackUrl: `https://app.example.test/?auth=recovery&flow=${"f".repeat(22)}&state=${"s".repeat(43)}&code=one`,
       type: "consume_recovery_callback",
     });
 
@@ -1309,7 +1590,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=recovery&code=one&state=${"s".repeat(43)}&flow=${"f".repeat(22)}`,
+      callbackUrl: `https://app.example.test/?auth=recovery&flow=${"f".repeat(22)}&state=${"s".repeat(43)}&code=one`,
       type: "consume_recovery_callback",
     });
     expect(controller.getSnapshot()).toMatchObject({
@@ -1574,19 +1855,20 @@ describe("staff auth controller", () => {
       schoolId: "school-1",
       type: "review_staff_invitation_revocation",
     });
-    emit?.({
-      access: access("owner", {
+    adapter.read = async () =>
+      access("owner", {
         identityGeneration: "identity-owner-2",
         manageableInvitations: invitations,
         sessionGeneration: "session-owner-2",
-      }),
-      kind: "access_changed",
-      previousIdentityGeneration: "identity-owner",
-      previousSessionGeneration: "session-owner",
-    });
+      });
+    emit?.({ kind: "revalidation_required" });
     await controller.dispatch({ type: "confirm_staff_invitation_revocation" });
     expect(perform).not.toHaveBeenCalled();
-    expect(controller.getSnapshot()).toMatchObject({ kind: "authenticated" });
+    await vi.waitFor(() =>
+      expect(controller.getSnapshot()).toMatchObject({ kind: "authenticated" }),
+    );
+    await controller.dispatch({ type: "confirm_staff_invitation_revocation" });
+    expect(perform).not.toHaveBeenCalled();
   });
 
   it("rejects an oversized or cross-School manageable invitation list", async () => {
@@ -1897,7 +2179,7 @@ describe("staff auth controller", () => {
     await controller.dispatch({ type: "bootstrap" });
 
     const pending = controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
+      callbackUrl: `https://app.example.test/?auth=invite#token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
     expect(order).toEqual(["scrub", "inspect"]);
@@ -1929,7 +2211,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
+      callbackUrl: `https://app.example.test/?auth=invite#token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
     await controller.dispatch({
@@ -1966,7 +2248,7 @@ describe("staff auth controller", () => {
       );
       await controller.dispatch({ type: "bootstrap" });
       await controller.dispatch({
-        callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
+        callbackUrl: `https://app.example.test/?auth=invite#token_hash=${invitationTokenHash}`,
         type: "inspect_invitation",
       });
       await controller.dispatch({
@@ -1994,7 +2276,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
+      callbackUrl: `https://app.example.test/?auth=invite#token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
     await controller.dispatch({
@@ -2016,7 +2298,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
+      callbackUrl: `https://app.example.test/?auth=invite#token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
     const action = { password: "pw", type: "accept_invitation" };
@@ -2045,7 +2327,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
+      callbackUrl: `https://app.example.test/?auth=invite#token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
     await controller.dispatch({
@@ -2088,7 +2370,7 @@ describe("staff auth controller", () => {
       );
       await controller.dispatch({ type: "bootstrap" });
       await controller.dispatch({
-        callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
+        callbackUrl: `https://app.example.test/?auth=invite#token_hash=${invitationTokenHash}`,
         type: "inspect_invitation",
       });
       await controller.dispatch({
@@ -2117,7 +2399,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
+      callbackUrl: `https://app.example.test/?auth=invite#token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
     now = Date.parse("2026-09-05T12:00:00.000Z");
@@ -2219,7 +2501,7 @@ describe("staff auth controller", () => {
     },
   );
 
-  it("ignores access events from a stale prior session generation", async () => {
+  it("revalidates without trusting a forged stale-session revocation", async () => {
     const clear = vi.fn();
     let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
     const adapter = createAdapter(access("teacher"));
@@ -2235,13 +2517,19 @@ describe("staff auth controller", () => {
       identityGeneration: "old-identity",
       kind: "session_revoked",
       sessionGeneration: "old-session",
-    });
+    } as unknown as StaffAuthAccessEvent);
 
-    expect(controller.getSnapshot()).toMatchObject({ kind: "authenticated" });
-    expect(clear).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({ kind: "bootstrapping" });
+    expect(clear).toHaveBeenCalledOnce();
+    await vi.waitFor(() =>
+      expect(controller.getSnapshot()).toMatchObject({
+        identity: { membership: { role: "teacher" } },
+        kind: "authenticated",
+      }),
+    );
   });
 
-  it("publishes revocation before best-effort School-data clearing", async () => {
+  it("clears School data before publishing revalidation and fresh revocation", async () => {
     const order: string[] = [];
     let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
     const adapter = createAdapter(access("teacher"));
@@ -2256,16 +2544,20 @@ describe("staff auth controller", () => {
     order.splice(0);
     controller.subscribe((state) => order.push(`state:${state.kind}`));
 
-    emit?.({
-      identityGeneration: "identity-teacher",
-      kind: "session_revoked",
-      sessionGeneration: "session-teacher",
-    });
+    adapter.read = async () => ({ kind: "session_revoked" });
+    emit?.({ kind: "revalidation_required" });
 
-    expect(order).toEqual(["state:session_revoked", "clear"]);
+    expect(order).toEqual(["clear", "state:bootstrapping"]);
+    await vi.waitFor(() =>
+      expect(order).toEqual([
+        "clear",
+        "state:bootstrapping",
+        "state:session_revoked",
+      ]),
+    );
   });
 
-  it("stays revoked when protected-data clearing throws", async () => {
+  it("stays fail-closed without reading authority when protected-data clearing throws", async () => {
     let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
     let clears = 0;
     const adapter = createAdapter(access("teacher"));
@@ -2282,13 +2574,18 @@ describe("staff auth controller", () => {
       },
     });
     await controller.dispatch({ type: "bootstrap" });
-    emit?.({
-      identityGeneration: "identity-teacher",
-      kind: "session_revoked",
-      sessionGeneration: "session-teacher",
-    });
+    const read = vi.fn(async () => access("teacher"));
+    adapter.read = read;
+    emit?.({ kind: "revalidation_required" });
 
-    expect(controller.getSnapshot()).toMatchObject({ kind: "session_revoked" });
+    expect(controller.getSnapshot()).toMatchObject({
+      code: "dependency_unavailable",
+      kind: "dependency_failure",
+      operation: "bootstrap",
+      retryable: true,
+    });
+    await Promise.resolve();
+    expect(read).not.toHaveBeenCalled();
   });
 
   it("does not restore authenticated UI when bootstrap data clearing fails", async () => {
@@ -2315,7 +2612,7 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
+      callbackUrl: `https://app.example.test/?auth=invite#token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
 
@@ -2352,7 +2649,7 @@ describe("staff auth controller", () => {
     },
   );
 
-  it("ignores an access-change event from a stale identity generation", async () => {
+  it("ignores forged event grants and only applies fresh read authority", async () => {
     let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
     const adapter = createAdapter(access("teacher"));
     adapter.subscribe = (listener) => {
@@ -2367,15 +2664,18 @@ describe("staff auth controller", () => {
       kind: "access_changed",
       previousIdentityGeneration: "stale-identity",
       previousSessionGeneration: "session-teacher",
-    });
+    } as unknown as StaffAuthAccessEvent);
 
-    expect(controller.getSnapshot()).toMatchObject({
-      identity: { membership: { role: "teacher" } },
-      kind: "authenticated",
-    });
+    expect(controller.getSnapshot()).toMatchObject({ kind: "bootstrapping" });
+    await vi.waitFor(() =>
+      expect(controller.getSnapshot()).toMatchObject({
+        identity: { membership: { role: "teacher" } },
+        kind: "authenticated",
+      }),
+    );
   });
 
-  it("fails closed on a malformed event that names the current generations", async () => {
+  it("revalidates without trusting malformed event generation claims", async () => {
     let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
     const adapter = createAdapter(access("teacher"));
     adapter.subscribe = (listener) => {
@@ -2392,10 +2692,13 @@ describe("staff auth controller", () => {
       sessionGeneration: "session-teacher",
     } as unknown as StaffAuthAccessEvent);
 
-    expect(controller.getSnapshot()).toMatchObject({
-      code: "invalid_backend_result",
-      kind: "dependency_failure",
-    });
+    expect(controller.getSnapshot()).toMatchObject({ kind: "bootstrapping" });
+    await vi.waitFor(() =>
+      expect(controller.getSnapshot()).toMatchObject({
+        identity: { membership: { role: "teacher" } },
+        kind: "authenticated",
+      }),
+    );
   });
 
   it("rejects an accessor boundary before a validated Membership role can change", async () => {
@@ -2464,7 +2767,7 @@ describe("staff auth controller", () => {
     });
   });
 
-  it("fails closed and clears access when an event Proxy throws during its snapshot", async () => {
+  it("clears access and revalidates without inspecting an event Proxy", async () => {
     const clear = vi.fn();
     let emit: ((event: StaffAuthAccessEvent) => void) | undefined;
     const adapter = createAdapter(access("teacher"));
@@ -2475,6 +2778,9 @@ describe("staff auth controller", () => {
     const controller = createController(adapter, { clear });
     await controller.dispatch({ type: "bootstrap" });
     clear.mockClear();
+    const ownKeys = vi.fn(() => {
+      throw new Error("boundary trap");
+    });
     const event = new Proxy(
       {
         identityGeneration: "identity-teacher",
@@ -2482,19 +2788,21 @@ describe("staff auth controller", () => {
         sessionGeneration: "session-teacher",
       },
       {
-        ownKeys() {
-          throw new Error("boundary trap");
-        },
+        ownKeys,
       },
-    ) as StaffAuthAccessEvent;
+    ) as unknown as StaffAuthAccessEvent;
 
     expect(() => emit?.(event)).not.toThrow();
 
-    expect(controller.getSnapshot()).toMatchObject({
-      code: "invalid_backend_result",
-      kind: "dependency_failure",
-    });
+    expect(controller.getSnapshot()).toMatchObject({ kind: "bootstrapping" });
     expect(clear).toHaveBeenCalledOnce();
+    expect(ownKeys).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(controller.getSnapshot()).toMatchObject({
+        identity: { membership: { role: "teacher" } },
+        kind: "authenticated",
+      }),
+    );
   });
 
   it("clears the prior School before an access change enters a different account TOTP challenge", async () => {
@@ -2517,24 +2825,24 @@ describe("staff auth controller", () => {
       school: { id: "school-2", label: "Other School" },
     };
 
-    emit?.({
-      access: access("admin", {
+    adapter.read = async () =>
+      access("admin", {
         assuranceLevel: "aal1",
         identity: administrator,
         identityGeneration: "identity-admin-school-2",
         secondFactor: "challenge_required",
         sessionGeneration: "session-admin-school-2",
-      }),
-      kind: "access_changed",
-      previousIdentityGeneration: "identity-teacher",
-      previousSessionGeneration: "session-teacher",
-    });
+      });
+    emit?.({ kind: "revalidation_required" });
 
-    expect(order).toEqual([
-      "state:bootstrapping",
-      "clear",
-      "state:totp_challenge",
-    ]);
+    expect(order).toEqual(["clear", "state:bootstrapping"]);
+    await vi.waitFor(() =>
+      expect(order).toEqual([
+        "clear",
+        "state:bootstrapping",
+        "state:totp_challenge",
+      ]),
+    );
     expect(controller.getSnapshot()).toMatchObject({
       kind: "totp_challenge",
       role: "administrator",
@@ -2560,21 +2868,22 @@ describe("staff auth controller", () => {
     });
     await controller.dispatch({ type: "bootstrap" });
 
-    emit?.({
-      access: access("admin", {
+    const read = vi.fn(async () =>
+      access("admin", {
         assuranceLevel: "aal1",
         secondFactor: "challenge_required",
       }),
-      kind: "access_changed",
-      previousIdentityGeneration: "identity-teacher",
-      previousSessionGeneration: "session-teacher",
-    });
+    );
+    adapter.read = read;
+    emit?.({ kind: "revalidation_required" });
 
     expect(controller.getSnapshot()).toMatchObject({
       code: "dependency_unavailable",
       kind: "dependency_failure",
       operation: "bootstrap",
     });
+    await Promise.resolve();
+    expect(read).not.toHaveBeenCalled();
   });
 
   it("scrubs and inspects an invitation while the cold bootstrap read is pending", async () => {
@@ -2600,7 +2909,7 @@ describe("staff auth controller", () => {
     const bootstrap = controller.dispatch({ type: "bootstrap" });
 
     const invitation = controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
+      callbackUrl: `https://app.example.test/?auth=invite#token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
     expect(history).toHaveBeenCalledWith("/");
@@ -2633,7 +2942,7 @@ describe("staff auth controller", () => {
     controller.subscribe((state) => order.push(`state:${state.kind}`));
 
     await controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=recovery&code=code&state=${"s".repeat(43)}&flow=${"f".repeat(22)}`,
+      callbackUrl: `https://app.example.test/?auth=recovery&flow=${"f".repeat(22)}&state=${"s".repeat(43)}&code=code`,
       type: "consume_recovery_callback",
     });
 
@@ -2659,7 +2968,7 @@ describe("staff auth controller", () => {
     });
 
     await controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=recovery&code=code&state=${"s".repeat(43)}&flow=${"f".repeat(22)}`,
+      callbackUrl: `https://app.example.test/?auth=recovery&flow=${"f".repeat(22)}&state=${"s".repeat(43)}&code=code`,
       type: "consume_recovery_callback",
     });
 
@@ -2683,7 +2992,7 @@ describe("staff auth controller", () => {
     });
 
     await controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
+      callbackUrl: `https://app.example.test/?auth=invite#token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
 
@@ -2711,12 +3020,12 @@ describe("staff auth controller", () => {
     );
     await controller.dispatch({ type: "bootstrap" });
     await controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${invitationTokenHash}`,
+      callbackUrl: `https://app.example.test/?auth=invite#token_hash=${invitationTokenHash}`,
       type: "inspect_invitation",
     });
 
     await controller.dispatch({
-      callbackUrl: `https://app.example.test/?auth=invite&token_hash=${alternateInvitationTokenHash}`,
+      callbackUrl: `https://app.example.test/?auth=invite#token_hash=${alternateInvitationTokenHash}`,
       type: "inspect_invitation",
     });
 
@@ -2729,4 +3038,74 @@ describe("staff auth controller", () => {
       operation: "invitation",
     });
   });
+});
+
+describe("composed authentication outcome separation", () => {
+  it.each(["updated", "rejected", "unknown"] as const)(
+    "keeps accepted Membership distinct from password %s and permits a fresh sign in",
+    async (passwordOutcome) => {
+      const controller = createController(
+        createAdapter({ kind: "signed_out" }, async (request) => {
+          if (request.type === "inspect_invitation")
+            return invitationReady(request.operationId);
+          if (request.type === "reset_to_sign_in")
+            return { kind: "sign_out_complete", scope: "local" };
+          return { kind: "invitation_accepted", passwordOutcome };
+        }),
+      );
+      await controller.dispatch({ type: "bootstrap" });
+      await controller.dispatch({
+        type: "inspect_invitation",
+        callbackUrl: `https://app.example.test/?auth=invite#token_hash=${invitationTokenHash}`,
+      });
+      await controller.dispatch({
+        type: "accept_invitation",
+        displayName: "Invited Teacher",
+        password: "private-new-password",
+      });
+      expect(controller.getSnapshot()).toMatchObject({
+        kind: "invitation_accepted",
+        passwordOutcome,
+      });
+      expect(JSON.stringify(controller.getSnapshot())).not.toContain(
+        "private-new-password",
+      );
+      await controller.dispatch({ type: "back_to_sign_in" });
+      expect(controller.getSnapshot()).toMatchObject({ kind: "signed_out" });
+      controller.dispose();
+    },
+  );
+
+  it.each([true, false])(
+    "retains unknown password outcome when cleanupComplete=%s",
+    async (cleanupComplete) => {
+      const controller = createController(
+        createAdapter({ kind: "password_recovery_ready" }, async (request) => {
+          if (request.type === "reset_to_sign_in")
+            return { kind: "sign_out_complete", scope: "local" };
+          return {
+            kind: "password_recovery_uncertain",
+            passwordOutcome: "unknown",
+            cleanupComplete,
+          };
+        }),
+      );
+      await controller.dispatch({ type: "bootstrap" });
+      await controller.dispatch({
+        type: "complete_password_recovery",
+        password: "private-new-password",
+      });
+      expect(controller.getSnapshot()).toMatchObject({
+        kind: "password_recovery_uncertain",
+        passwordOutcome: "unknown",
+        cleanupComplete,
+      });
+      expect(JSON.stringify(controller.getSnapshot())).not.toContain(
+        "private-new-password",
+      );
+      await controller.dispatch({ type: "back_to_sign_in" });
+      expect(controller.getSnapshot()).toMatchObject({ kind: "signed_out" });
+      controller.dispose();
+    },
+  );
 });

@@ -73,7 +73,7 @@ export interface ManageableStaffInvitation {
   readonly invitationId: string;
   readonly role: InvitableStaffRole;
   readonly schoolId: string;
-  readonly state: "pending";
+  readonly state: "pending" | "delivery_unconfirmed";
 }
 
 export const staffAuthWireSuccessCodes = [
@@ -717,7 +717,7 @@ function parseManageableInvitationItems(
       invitationId === null ||
       schoolId === null ||
       (row.role !== "administrator" && row.role !== "teacher") ||
-      row.state !== "pending"
+      (row.state !== "pending" && row.state !== "delivery_unconfirmed")
     ) {
       return null;
     }
@@ -737,7 +737,7 @@ function parseManageableInvitationItems(
       invitationId,
       role: row.role,
       schoolId,
-      state: "pending",
+      state: row.state,
     });
   }
 
@@ -911,7 +911,10 @@ export function mapCurrentManageableStaffInvitationsRpcRows(
       invitationId,
       role,
       schoolId,
-      state: "pending",
+      state:
+        row.invitation_status === "pending_acceptance"
+          ? "pending"
+          : "delivery_unconfirmed",
     });
   }
 

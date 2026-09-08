@@ -4,7 +4,78 @@
     <meta name="referrer" content="no-referrer" />
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link rel="stylesheet" href="./styles.css" />
+    <script data-staff-auth-bootstrap>
+      (() => {
+        "use strict";
+
+        const sensitiveCallbackParameter =
+          /(?:^|[?&#])(?:access_token|auth|code|error(?:_code|_description)?|flow|refresh_token|sb_flow_id|state|token(?:_hash)?|type)(?:=|&|$)/iu;
+        let callbackUrl = null;
+        let callbackWasScrubbed = false;
+
+        const containsSensitiveCallbackParameter = (value) => {
+          if (sensitiveCallbackParameter.test(value)) return true;
+          try {
+            return sensitiveCallbackParameter.test(decodeURIComponent(value));
+          } catch {
+            return false;
+          }
+        };
+        const failClosed = () => {
+          callbackUrl = null;
+          document.documentElement.hidden = true;
+          try {
+            window.stop();
+          } catch {
+            // Keeping the document hidden remains fail-closed if stop fails.
+          }
+        };
+
+        try {
+          const callbackMaterialPresent =
+            containsSensitiveCallbackParameter(window.location.search) ||
+            containsSensitiveCallbackParameter(window.location.hash);
+          if (callbackMaterialPresent) {
+            callbackUrl = window.location.href;
+            window.history.replaceState(
+              Object.freeze({
+                desmoslockStaffAuthCallback: "pending-v1",
+              }),
+              "",
+              "/",
+            );
+            callbackWasScrubbed = true;
+          }
+        } catch {
+          failClosed();
+          return;
+        }
+
+        try {
+          // Creating the link here also prevents speculative stylesheet
+          // loading from discovering a resource before callback scrubbing.
+          const stylesheet = document.createElement("link");
+          stylesheet.rel = "stylesheet";
+          stylesheet.href = "./styles.css";
+          document.head.append(stylesheet);
+
+          // The callback remains private while the module loads. Nothing on
+          // window or document can claim it, even before the module is ready.
+          import("./main.js")
+            .then((applicationModule) => {
+              const bootstrap = Object.freeze({
+                callbackUrl,
+                callbackWasScrubbed,
+              });
+              callbackUrl = null;
+              applicationModule.bootWebApplication(bootstrap);
+            })
+            .catch(failClosed);
+        } catch {
+          failClosed();
+        }
+      })();
+    </script>
     <title>DesmosLock v2 Internal</title>
   </head>
   <body>
@@ -31,6 +102,5 @@
       ></section>
       <section data-protected-school-data hidden></section>
     </main>
-    <script type="module" src="./main.js"></script>
   </body>
 </html>

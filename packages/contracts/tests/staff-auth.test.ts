@@ -673,7 +673,7 @@ describe("Owner management-list contracts", () => {
     expect(parseManageableStaffListResponse(mapped)).toEqual(mapped);
   });
 
-  it("normalizes every revocable DB invitation state to product pending", () => {
+  it("preserves unconfirmed delivery separately from provider-acknowledged pending invitations", () => {
     const mapped = mapCurrentManageableStaffInvitationsRpcRows([
       manageableInvitationRpcRow({
         invitation_status: "pending_delivery",
@@ -703,7 +703,7 @@ describe("Owner management-list contracts", () => {
           invitationId,
           role: "teacher",
           schoolId: alphaSchoolId,
-          state: "pending",
+          state: "delivery_unconfirmed",
         },
         {
           email: "administrator@example.invalid",
@@ -711,7 +711,7 @@ describe("Owner management-list contracts", () => {
           invitationId: secondInvitationId,
           role: "administrator",
           schoolId: alphaSchoolId,
-          state: "pending",
+          state: "delivery_unconfirmed",
         },
         {
           email: "other@example.invalid",

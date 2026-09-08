@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { consumeStaffRecoveryCallback } from "../src/auth/staff-auth-callback.js";
+
 import {
   createStaffRecoveryFlowStore,
   type StaffRecoveryFlowStorage,
@@ -174,5 +176,135 @@ describe("staff recovery flow store", () => {
       storage: memoryStorage(),
     });
     await expect(invalidClock.create()).rejects.toThrow();
+  });
+});
+
+describe("recovery across browser tabs", () => {
+  function originLock() {
+    let tail: Promise<unknown> = Promise.resolve();
+    return {
+      request<T>(_name: string, callback: () => Promise<T> | T): Promise<T> {
+        const next = tail.then(callback, callback);
+        tail = next.catch(() => undefined);
+        return next;
+      },
+    };
+  }
+
+  it("shares a bounded flow across independent tabs and consumes it exactly once", async () => {
+    const storage = memoryStorage();
+    const lock = originLock();
+    const dependencies = {
+      clock: { now: () => 1_000 },
+      crypto: deterministicCrypto().crypto,
+      lock,
+      storage,
+    };
+    const requestingTab = createStaffRecoveryFlowStore(dependencies);
+    const callbackTab = createStaffRecoveryFlowStore(dependencies);
+    const anotherTab = createStaffRecoveryFlowStore(dependencies);
+    const flow = await requestingTab.create();
+    const exchange = vi.fn(async () => undefined);
+    const url = `https://app.example.test/?auth=recovery&flow=${flow.flowId}&state=${flow.state}&code=provider-code`;
+    const options = {
+      clock: dependencies.clock,
+      exchange,
+      history: { replaceState: vi.fn() },
+      route: { origin: "https://app.example.test", pathname: "/" as const },
+    };
+    const results = await Promise.all([
+      consumeStaffRecoveryCallback(url, { ...options, flows: callbackTab }),
+      consumeStaffRecoveryCallback(url, { ...options, flows: anotherTab }),
+    ]);
+    expect(results.map((result) => result.code).sort()).toEqual([
+      "accepted",
+      "recovery_flow_replayed",
+    ]);
+    expect(exchange).toHaveBeenCalledOnce();
+    expect(storage.read()).not.toContain(flow.state);
+    expect(storage.read()).not.toContain('"verifier"');
+  });
+
+  it("does not navigate a first-hop credential in another browser or after expiry", async () => {
+    let now = 1_000;
+    const storage = memoryStorage();
+    const dependencies = {
+      clock: { now: () => now },
+      crypto: deterministicCrypto().crypto,
+      lock: originLock(),
+      storage,
+    };
+    const requestingTab = createStaffRecoveryFlowStore(dependencies);
+    const flow = await requestingTab.create();
+    const navigate = vi.fn();
+    const exchange = vi.fn(async () => undefined);
+    const url = `https://app.example.test/?auth=recovery&flow=${flow.flowId}&state=${flow.state}#token_hash=pkce_${"a".repeat(56)}&type=recovery`;
+    const options = {
+      backendOrigin: "https://project.supabase.co",
+      clock: dependencies.clock,
+      exchange,
+      history: { replaceState: vi.fn() },
+      navigate,
+      route: { origin: "https://app.example.test", pathname: "/" as const },
+    };
+    const differentBrowser = createStaffRecoveryFlowStore({
+      ...dependencies,
+      storage: memoryStorage(),
+    });
+    await expect(
+      consumeStaffRecoveryCallback(url, {
+        ...options,
+        flows: differentBrowser,
+      }),
+    ).resolves.toMatchObject({ code: "recovery_flow_invalid" });
+    expect(navigate).not.toHaveBeenCalled();
+    await expect(
+      consumeStaffRecoveryCallback(url, { ...options, flows: requestingTab }),
+    ).resolves.toMatchObject({ status: "redirecting" });
+    expect(navigate).toHaveBeenCalledOnce();
+    now = 301_000;
+    await expect(
+      consumeStaffRecoveryCallback(url, { ...options, flows: requestingTab }),
+    ).resolves.toMatchObject({ code: "recovery_flow_invalid" });
+    expect(navigate).toHaveBeenCalledOnce();
+    expect(exchange).not.toHaveBeenCalled();
+    expect(storage.read()).not.toContain(flow.state);
+  });
+
+  it("rejects an expired or mismatched callback before provider exchange", async () => {
+    for (const mode of ["expired", "mismatched"] as const) {
+      let now = 1_000;
+      const storage = memoryStorage();
+      const dependencies = {
+        clock: { now: () => now },
+        crypto: deterministicCrypto().crypto,
+        lock: originLock(),
+        storage,
+      };
+      const flows = createStaffRecoveryFlowStore(dependencies);
+      const flow = await flows.create();
+      if (mode === "expired") now = 301_000;
+      const exchange = vi.fn(async () => undefined);
+      const state = mode === "mismatched" ? "x".repeat(43) : flow.state;
+      const result = await consumeStaffRecoveryCallback(
+        `https://app.example.test/?auth=recovery&flow=${flow.flowId}&state=${state}&code=provider-code`,
+        {
+          clock: dependencies.clock,
+          exchange,
+          flows,
+          history: { replaceState: vi.fn() },
+          route: { origin: "https://app.example.test", pathname: "/" },
+        },
+      );
+      expect(result).toMatchObject({
+        code:
+          mode === "expired"
+            ? "recovery_flow_expired"
+            : "recovery_state_mismatch",
+      });
+      expect(exchange).not.toHaveBeenCalled();
+      expect(storage.read()).not.toContain(flow.state);
+      expect(storage.read()).not.toContain('"verifier"');
+    }
   });
 });

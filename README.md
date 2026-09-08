@@ -89,11 +89,16 @@ npm run db:stop
 ```
 
 CI owns startup and unconditional shutdown for that lane. The command verifies
-database schema/RPC lifecycle contracts, credential-free local
-Auth/PostgREST/health prerequisites, Edge handler behavior, and unit tests. It
-does not establish operational staff-auth readiness: delivered email,
-callback completion, and multi-browser revocation remain separate acceptance
-gates.
+database schema/RPC lifecycle contracts, local Auth/PostgREST/health prerequisites,
+Edge handler behavior, unit tests, then real-provider invitation, recovery and
+revocation journeys. The final composed suite requires a freshly reset stack;
+its append-only audit fixtures remain until the disposable stack is stopped or
+reset. CLI startup output is sanitized so generated local keys are not printed.
+This source candidate has not executed those database/provider journeys locally.
+Delivered email, actual browser journeys and hosted configuration remain separate
+acceptance gates. See
+[`auth-integration-evidence.md`](docs/product-completion/auth-integration-evidence.md)
+for the selected contract, evidence limits and in-place rollout prerequisite.
 
 See
 [`docs/product-completion/reproducible-supabase.md`](docs/product-completion/reproducible-supabase.md)

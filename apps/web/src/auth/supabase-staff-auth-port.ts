@@ -142,6 +142,55 @@ function isNonArrayObject(value: unknown): value is object {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function snapshotBoundedArray(
+  value: unknown,
+  maximumLength: number,
+): readonly unknown[] | null {
+  try {
+    if (!Array.isArray(value)) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value) as Record<
+      string,
+      PropertyDescriptor
+    >;
+    const names = Reflect.ownKeys(descriptors);
+    const lengthDescriptor = descriptors.length;
+    const length = lengthDescriptor?.value;
+    if (
+      lengthDescriptor === undefined ||
+      !("value" in lengthDescriptor) ||
+      typeof length !== "number" ||
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > maximumLength ||
+      names.length !== length + 1
+    ) {
+      return null;
+    }
+    const snapshot: unknown[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = descriptors[String(index)];
+      if (
+        descriptor === undefined ||
+        !("value" in descriptor) ||
+        !descriptor.enumerable
+      ) {
+        return null;
+      }
+      snapshot.push(descriptor.value);
+    }
+    return names.some(
+      (name) =>
+        typeof name !== "string" ||
+        (name !== "length" &&
+          (!/^(?:0|[1-9][0-9]*)$/u.test(name) || Number(name) >= length)),
+    )
+      ? null
+      : snapshot;
+  } catch {
+    return null;
+  }
+}
+
 function snapshotExactRecord(
   value: unknown,
   requiredKeys: readonly string[],
@@ -179,6 +228,69 @@ function snapshotExactRecord(
   } catch {
     return null;
   }
+}
+
+function hasUnsafeText(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return (
+      codePoint <= 0x1f ||
+      (codePoint >= 0x7f && codePoint <= 0x9f) ||
+      (codePoint >= 0x202a && codePoint <= 0x202e) ||
+      (codePoint >= 0x2066 && codePoint <= 0x2069)
+    );
+  });
+}
+
+function validAuthenticationMethod(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value === value.trim() &&
+    new TextEncoder().encode(value).byteLength <= 128 &&
+    !hasUnsafeText(value)
+  );
+}
+
+function decodeAuthenticationMethods(value: unknown): readonly string[] | null {
+  const methods = snapshotBoundedArray(value, 32);
+  if (methods === null) return null;
+  if (methods.length === 0) return [];
+  if (methods.every(validAuthenticationMethod)) {
+    return methods as readonly string[];
+  }
+  if (methods.some((method) => typeof method === "string")) {
+    return null;
+  }
+  const decoded: string[] = [];
+  for (const method of methods) {
+    const entry = snapshotExactRecord(method, ["method", "timestamp"]);
+    if (
+      entry === null ||
+      !validAuthenticationMethod(entry.method) ||
+      typeof entry.timestamp !== "number" ||
+      !Number.isFinite(entry.timestamp) ||
+      entry.timestamp < 0
+    ) {
+      return null;
+    }
+    decoded.push(entry.method);
+  }
+  return decoded;
+}
+
+function sanitizeFactorFriendlyName(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") return null;
+  const normalized = value
+    .normalize("NFKC")
+    .split("")
+    .map((character) => (hasUnsafeText(character) ? " " : character))
+    .join("")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (normalized.length === 0) return null;
+  return [...normalized].slice(0, 80).join("");
 }
 
 function isOpaqueToken(value: unknown): value is string {
@@ -227,6 +339,7 @@ function decodeDirectPkceTokens(value: unknown): {
 async function readBoundedJson(
   response: Response,
   maximumBytes: number,
+  signal: AbortSignal,
 ): Promise<unknown | null> {
   const contentType = response.headers
     .get("content-type")
@@ -245,21 +358,32 @@ async function readBoundedJson(
   }
   const reader = response.body?.getReader();
   if (reader === undefined) return null;
+  const cancel = () => {
+    // A broken stream's cancellation must not hold up the deadline.
+    void reader.cancel().catch(() => undefined);
+  };
+  signal.addEventListener("abort", cancel, { once: true });
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
-  while (true) {
-    const chunk = await reader.read();
-    if (chunk.done) break;
-    totalBytes += chunk.value.byteLength;
-    if (totalBytes > maximumBytes) {
-      try {
-        await reader.cancel();
-      } catch {
-        // The response is already rejected; cancellation is best-effort.
-      }
+  try {
+    if (signal.aborted) {
+      cancel();
       return null;
     }
-    chunks.push(chunk.value);
+    while (true) {
+      const chunk = await reader.read();
+      if (signal.aborted) return null;
+      if (chunk.done) break;
+      totalBytes += chunk.value.byteLength;
+      if (totalBytes > maximumBytes) {
+        cancel();
+        return null;
+      }
+      chunks.push(chunk.value);
+    }
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    reader.releaseLock();
   }
   const body = new Uint8Array(totalBytes);
   let offset = 0;
@@ -411,6 +535,123 @@ export function createSupabaseStaffAuthPort(
   dependencies: SupabaseStaffAuthPortDependencies,
 ): SupabaseStaffAuthPort {
   const database = dependencies.client.schema("desmoslock_v2");
+  let recoveryAuthority: {
+    readonly accessToken: string;
+    readonly expiresAt: number;
+    readonly timeout: ReturnType<typeof setTimeout>;
+  } | null = null;
+
+  function clearRecoveryAuthority(): void {
+    if (recoveryAuthority !== null) clearTimeout(recoveryAuthority.timeout);
+    recoveryAuthority = null;
+  }
+
+  const passwordAuthorities = new Map<
+    string,
+    {
+      readonly accessToken: string;
+      readonly accountId: string;
+      readonly expiresAt: number;
+      readonly timeout: ReturnType<typeof setTimeout>;
+      passwordAttempted: boolean;
+    }
+  >();
+
+  function releasePasswordAuthority(handle: string): void {
+    const authority = passwordAuthorities.get(handle);
+    if (authority === undefined) return;
+    clearTimeout(authority.timeout);
+    passwordAuthorities.delete(handle);
+  }
+
+  function passwordAuthority(handle: string) {
+    const authority = passwordAuthorities.get(handle);
+    if (authority === undefined) return null;
+    if (Date.now() >= authority.expiresAt) {
+      releasePasswordAuthority(handle);
+      return null;
+    }
+    return authority;
+  }
+
+  async function directAuthorityRequest(
+    accessToken: string,
+    path: string,
+    method: "GET" | "POST" | "PUT",
+    body?: unknown,
+  ): Promise<{ readonly status: number; readonly body: unknown } | null> {
+    const abort = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const url = new URL(path, dependencies.url).toString();
+      const request = async () => {
+        const response = await dependencies.fetch(url, {
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          credentials: "omit",
+          headers: {
+            apikey: dependencies.publishableKey,
+            authorization: `Bearer ${accessToken}`,
+            "content-type": "application/json",
+            ...(path.startsWith("/rest/v1/")
+              ? { "content-profile": "desmoslock_v2" }
+              : { "x-supabase-api-version": "2024-01-01" }),
+          },
+          method,
+          redirect: "error",
+          referrerPolicy: "no-referrer",
+          signal: abort.signal,
+        });
+        if (abort.signal.aborted || !isExpectedDirectResponse(response, url)) {
+          void response.body?.cancel().catch(() => undefined);
+          return null;
+        }
+        if (
+          response.status === 204 ||
+          (path.startsWith("/auth/v1/logout?") && response.ok)
+        ) {
+          return { body: null, status: response.status };
+        }
+        const result = await readBoundedJson(
+          response,
+          response.ok ? 65_536 : 4_096,
+          abort.signal,
+        );
+        return abort.signal.aborted
+          ? null
+          : { body: result, status: response.status };
+      };
+      return await Promise.race([
+        request(),
+        new Promise<null>((resolve) => {
+          timeout = setTimeout(() => {
+            resolve(null);
+            abort.abort();
+          }, 5_000);
+        }),
+      ]);
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timeout);
+      abort.abort();
+    }
+  }
+
+  async function authorityRpc(
+    handle: string,
+    name: string,
+    args: Readonly<Record<string, unknown>>,
+  ): Promise<unknown> {
+    const authority = passwordAuthority(handle);
+    if (authority === null) return null;
+    const result = await directAuthorityRequest(
+      authority.accessToken,
+      `/rest/v1/rpc/${name}`,
+      "POST",
+      args,
+    );
+    return result?.status === 200 ? result.body : null;
+  }
 
   async function rpc(
     name: string,
@@ -453,14 +694,94 @@ export function createSupabaseStaffAuthPort(
   }
 
   return {
-    acceptInvitation(request: AcceptStaffInvitationRequest) {
-      return rpc("accept_staff_invitation", {
+    async capturePasswordAuthority(expectedAccountId?: string) {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const recovery =
+          expectedAccountId === undefined ? recoveryAuthority : null;
+        if (
+          expectedAccountId === undefined &&
+          (recovery === null || Date.now() >= recovery.expiresAt)
+        ) {
+          clearRecoveryAuthority();
+          return null;
+        }
+        // Snapshot once. No later SDK mutation may select the account for this
+        // operation from storage, which another tab can replace at any await.
+        const sessionResult = await Promise.race([
+          Promise.resolve(dependencies.client.auth.getSession()),
+          new Promise<null>((resolve) => {
+            timeout = setTimeout(() => resolve(null), 5_000);
+          }),
+        ]);
+        clearTimeout(timeout);
+        const snapshot = externalResult(sessionResult);
+        if (snapshot?.error !== null) return null;
+        const session = objectProperty(snapshot.data, "session");
+        const accessToken = objectProperty(session, "access_token");
+        if (!isOpaqueToken(accessToken)) return null;
+        if (
+          recovery !== null &&
+          (recovery !== recoveryAuthority ||
+            Date.now() >= recovery.expiresAt ||
+            accessToken !== recovery.accessToken)
+        ) {
+          return null;
+        }
+        // Even auth.getUser(token) can remove the *current* SDK session when a
+        // stale token returns session_not_found. Verify directly to stay inert.
+        const verified = await directAuthorityRequest(
+          accessToken,
+          "/auth/v1/user",
+          "GET",
+        );
+        if (verified?.status !== 200) return null;
+        if (
+          recovery !== null &&
+          (recovery !== recoveryAuthority || Date.now() >= recovery.expiresAt)
+        ) {
+          return null;
+        }
+        const user = objectProperty(verified.body, "user") ?? verified.body;
+        const accountId = objectProperty(user, "id");
+        if (
+          typeof accountId !== "string" ||
+          accountId.length === 0 ||
+          (expectedAccountId !== undefined && accountId !== expectedAccountId)
+        ) {
+          return null;
+        }
+        if (passwordAuthorities.size >= 16) return null;
+        const handle = crypto.randomUUID();
+        passwordAuthorities.set(handle, {
+          accessToken,
+          accountId,
+          expiresAt: Date.now() + 60_000,
+          passwordAttempted: false,
+          timeout: setTimeout(() => releasePasswordAuthority(handle), 60_000),
+        });
+        return handle;
+      } catch {
+        return null;
+      } finally {
+        clearTimeout(timeout);
+      }
+    },
+    releasePasswordAuthority,
+    acceptInvitation(
+      request: AcceptStaffInvitationRequest,
+      authorityHandle: string,
+    ) {
+      return authorityRpc(authorityHandle, "accept_staff_invitation", {
         display_name: request.displayName,
         invitation_id: request.invitationId,
       });
     },
-    beginPasswordRecovery(requestedOperationId: string) {
-      return rpc("begin_staff_password_recovery", {
+    beginPasswordRecovery(
+      requestedOperationId: string,
+      authorityHandle: string,
+    ) {
+      return authorityRpc(authorityHandle, "begin_staff_password_recovery", {
         requested_operation_id: requestedOperationId,
       });
     },
@@ -554,47 +875,91 @@ export function createSupabaseStaffAuthPort(
       readonly authorizationCode: string;
       readonly verifier: string;
     }) {
+      clearRecoveryAuthority();
+      const abort = new AbortController();
+      let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
         const tokenUrl = new URL(
           "/auth/v1/token?grant_type=pkce",
           dependencies.url,
         ).toString();
-        const response = await dependencies.fetch(tokenUrl, {
-          body: JSON.stringify({
-            auth_code: input.authorizationCode,
-            code_verifier: input.verifier,
-          }),
-          headers: {
-            apikey: dependencies.publishableKey,
-            "content-type": "application/json",
-          },
-          method: "POST",
-          redirect: "error",
-        });
-        if (!isExpectedDirectResponse(response, tokenUrl)) {
-          return { status: "unavailable" };
-        }
-        if (!response.ok) {
-          const code = decodeDirectPkceFailureCode(
-            await readBoundedJson(response, 4_096),
+        const readResponse = async (): Promise<
+          | {
+              readonly status: "decoded";
+              readonly tokens: NonNullable<
+                ReturnType<typeof decodeDirectPkceTokens>
+              >;
+            }
+          | { readonly status: "rejected" | "unavailable" }
+        > => {
+          const response = await dependencies.fetch(tokenUrl, {
+            body: JSON.stringify({
+              auth_code: input.authorizationCode,
+              code_verifier: input.verifier,
+            }),
+            headers: {
+              apikey: dependencies.publishableKey,
+              "content-type": "application/json",
+            },
+            method: "POST",
+            redirect: "error",
+            signal: abort.signal,
+          });
+          if (abort.signal.aborted) {
+            void response.body?.cancel().catch(() => undefined);
+            return { status: "unavailable" };
+          }
+          if (!isExpectedDirectResponse(response, tokenUrl)) {
+            return { status: "unavailable" };
+          }
+          if (!response.ok) {
+            const code = decodeDirectPkceFailureCode(
+              await readBoundedJson(response, 4_096, abort.signal),
+            );
+            return {
+              status: isRejectedDirectPkceCode(code)
+                ? "rejected"
+                : "unavailable",
+            };
+          }
+          if (response.status !== 200) {
+            return { status: "unavailable" };
+          }
+          const tokens = decodeDirectPkceTokens(
+            await readBoundedJson(response, 65_536, abort.signal),
           );
-          return {
-            status: isRejectedDirectPkceCode(code) ? "rejected" : "unavailable",
-          };
-        }
-        if (response.status !== 200) {
-          return { status: "unavailable" };
-        }
-        const tokens = decodeDirectPkceTokens(
-          await readBoundedJson(response, 65_536),
-        );
-        if (tokens === null) return { status: "unavailable" };
+          return tokens === null
+            ? { status: "unavailable" }
+            : { status: "decoded", tokens };
+        };
+        // One deadline covers both headers and the complete bounded body.
+        // Racing also settles callers whose fetch/stream ignores abort. Session
+        // installation happens only after the race, so late tokens stay inert.
+        const result = await Promise.race([
+          readResponse(),
+          new Promise<{ readonly status: "unavailable" }>((resolve) => {
+            timeout = setTimeout(() => {
+              resolve({ status: "unavailable" });
+              abort.abort();
+            }, 5_000);
+          }),
+        ]);
+        clearTimeout(timeout);
+        if (result.status !== "decoded") return { status: result.status };
         const installed = decodeSetSessionResult(
           await dependencies.client.auth.setSession({
-            access_token: tokens.accessToken,
-            refresh_token: tokens.refreshToken,
+            access_token: result.tokens.accessToken,
+            refresh_token: result.tokens.refreshToken,
           }),
         );
+        if (installed === "ready") {
+          clearRecoveryAuthority();
+          recoveryAuthority = {
+            accessToken: result.tokens.accessToken,
+            expiresAt: Date.now() + 300_000,
+            timeout: setTimeout(clearRecoveryAuthority, 300_000),
+          };
+        }
         return { status: installed };
       } catch (error: unknown) {
         return {
@@ -602,10 +967,13 @@ export function createSupabaseStaffAuthPort(
             ? "rejected"
             : "unavailable",
         };
+      } finally {
+        clearTimeout(timeout);
+        abort.abort();
       }
     },
-    finishPasswordRecovery(operationId: string) {
-      return rpc("finish_staff_password_recovery", {
+    finishPasswordRecovery(operationId: string, authorityHandle: string) {
+      return authorityRpc(authorityHandle, "finish_staff_password_recovery", {
         operation_id: operationId,
       });
     },
@@ -672,13 +1040,17 @@ export function createSupabaseStaffAuthPort(
         if (result === null || result.error !== null) return null;
         const currentLevel = objectProperty(result.data, "currentLevel");
         const nextLevel = objectProperty(result.data, "nextLevel");
+        const currentAuthenticationMethods = decodeAuthenticationMethods(
+          objectProperty(result.data, "currentAuthenticationMethods"),
+        );
         if (
           (currentLevel !== "aal1" && currentLevel !== "aal2") ||
-          (nextLevel !== "aal1" && nextLevel !== "aal2")
+          (nextLevel !== "aal1" && nextLevel !== "aal2") ||
+          currentAuthenticationMethods === null
         ) {
           return null;
         }
-        return { currentLevel, nextLevel };
+        return { currentAuthenticationMethods, currentLevel, nextLevel };
       } catch {
         return null;
       }
@@ -731,12 +1103,16 @@ export function createSupabaseStaffAuthPort(
         if (!Array.isArray(all)) return null;
         const factors: Array<{
           readonly factorId: string;
+          readonly friendlyName: string | null;
           readonly status: "unverified" | "verified";
         }> = [];
         for (const factor of all) {
           if (!isNonArrayObject(factor)) return null;
           if (objectProperty(factor, "factor_type") !== "totp") continue;
           const factorId = objectProperty(factor, "id");
+          const friendlyName = sanitizeFactorFriendlyName(
+            objectProperty(factor, "friendly_name"),
+          );
           const status = objectProperty(factor, "status");
           if (
             typeof factorId !== "string" ||
@@ -744,7 +1120,7 @@ export function createSupabaseStaffAuthPort(
           ) {
             return null;
           }
-          factors.push({ factorId, status });
+          factors.push({ factorId, friendlyName, status });
         }
         return { factors };
       } catch {
@@ -845,7 +1221,33 @@ export function createSupabaseStaffAuthPort(
         };
       }
     },
-    async signOut(scope: "all" | "local") {
+    async signOut(scope: "all" | "local", authorityHandle?: string) {
+      if (authorityHandle !== undefined) {
+        const authority = passwordAuthority(authorityHandle);
+        if (authority === null) return { status: "unavailable" };
+        const result = await directAuthorityRequest(
+          authority.accessToken,
+          `/auth/v1/logout?scope=${scope === "all" ? "global" : "local"}`,
+          "POST",
+        );
+        if (
+          result !== null &&
+          result.status >= 200 &&
+          result.status < 300 &&
+          recoveryAuthority?.accessToken === authority.accessToken
+        ) {
+          clearRecoveryAuthority();
+        }
+        // Do not call SDK signOut: it can revoke or erase another account that
+        // became active after this password operation captured its authority.
+        return {
+          status:
+            result !== null && result.status >= 200 && result.status < 300
+              ? "signed_out"
+              : "unavailable",
+        };
+      }
+      clearRecoveryAuthority();
       try {
         const result = await dependencies.client.auth.signOut({
           scope: scope === "all" ? "global" : "local",
@@ -863,31 +1265,38 @@ export function createSupabaseStaffAuthPort(
       }
       return { status: "unavailable" };
     },
-    async updatePassword(password: string) {
-      try {
-        const result = externalResult(
-          await dependencies.client.auth.updateUser({ password }),
-        );
-        if (result === null) return { status: "unavailable" };
-        if (result.error !== null) {
-          return {
-            status: isRejectedPasswordError(authErrorCode(result.error))
-              ? "rejected"
+    async updatePassword(password: string, authorityHandle: string) {
+      const authority = passwordAuthority(authorityHandle);
+      if (authority === null || authority.passwordAttempted) {
+        return { status: "unavailable" };
+      }
+      authority.passwordAttempted = true;
+      const result = await directAuthorityRequest(
+        authority.accessToken,
+        "/auth/v1/user",
+        "PUT",
+        { password },
+      );
+      if (result?.status === 200) {
+        return {
+          status:
+            objectProperty(
+              objectProperty(result.body, "user") ?? result.body,
+              "id",
+            ) === authority.accountId
+              ? "updated"
               : "unavailable",
-          };
-        }
-        return {
-          status: isNonArrayObject(objectProperty(result.data, "user"))
-            ? "updated"
-            : "unavailable",
-        };
-      } catch (error: unknown) {
-        return {
-          status: isRejectedPasswordError(authErrorCode(error))
-            ? "rejected"
-            : "unavailable",
         };
       }
+      return {
+        status:
+          result !== null &&
+          result.status >= 400 &&
+          result.status < 500 &&
+          isRejectedPasswordError(authErrorCode(result.body))
+            ? "rejected"
+            : "unavailable",
+      };
     },
     async verifyInvitationToken(tokenHash: string) {
       try {

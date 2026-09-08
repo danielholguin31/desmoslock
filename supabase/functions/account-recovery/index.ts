@@ -97,8 +97,9 @@ export function createAccountRecoveryDependencies(
     allowedOrigin,
     waitUntil,
     async requestRecovery(input) {
-      // Supabase's standard recovery template must retain `{{ .ConfirmationURL }}`:
-      // the provider verifies that URL, then redirects this S256 flow with an auth code.
+      // recovery-v1.html uses RedirectTo plus the untouched PKCE TokenHash in
+      // a fragment. Only an explicit application click may navigate to the
+      // provider GET /verify route, which returns this S256 flow's auth code.
       const recoveryCallback = new URL(callback);
       recoveryCallback.searchParams.append("auth", "recovery");
       recoveryCallback.searchParams.append("flow", input.flowId);
@@ -172,8 +173,19 @@ export async function handleRequest(
   } catch {
     return codeResponse("service_unavailable", 503);
   }
+  const requestsAuthorization =
+    request.headers
+      .get("access-control-request-headers")
+      ?.split(",")
+      .some((header) => header.trim().toLowerCase() === "authorization") ??
+    false;
   const corsPolicy = {
-    allowedHeaders: ["apikey", "content-type", "x-client-info"],
+    // The SDK omits Authorization for a signed-out new-format key and adds it
+    // for a signed-in session. Both exact sets still use strict preflight
+    // validation; no other header becomes optional on this or other routes.
+    allowedHeaders: requestsAuthorization
+      ? ["apikey", "authorization", "content-type", "x-client-info"]
+      : ["apikey", "content-type", "x-client-info"],
     allowedOrigin: dependencies.allowedOrigin,
   } as const;
   if (request.method === "OPTIONS") {

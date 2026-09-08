@@ -3,7 +3,7 @@ begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path = extensions, public, pg_catalog;
 
-select plan(238);
+select no_plan();
 
 select has_column(
   'desmoslock_v2',
@@ -58,7 +58,7 @@ select has_table(
 select has_table(
   'desmoslock_v2',
   'application_session_revocation_cutoffs',
-  'completed recovery has an account-wide session-creation cutoff'
+  'recovery begin installs an account-wide session-creation cutoff'
 );
 
 select ok(
@@ -902,6 +902,47 @@ create temporary table staff_auth_test_results (
 grant select, insert, update, delete on table staff_auth_test_results
   to authenticated, service_role;
 
+create temporary table staff_auth_test_snapshots (
+  label text primary key,
+  state jsonb not null
+) on commit drop;
+
+-- Include tuple locations to detect writes even when every logical value is
+-- unchanged. Only the test owner reads protected rows through this helper.
+create function pg_temp.staff_acceptance_snapshot(invitation_id uuid)
+returns jsonb
+language sql
+set search_path = ''
+as $$
+  select jsonb_build_object(
+    'invitation', to_jsonb(invitation) ||
+      jsonb_build_object('tuple', invitation.ctid::text),
+    'profile', (
+      select to_jsonb(profile) || jsonb_build_object('tuple', profile.ctid::text)
+      from desmoslock_v2.profiles as profile
+      where profile.id = invitation.accepted_profile_id
+    ),
+    'memberships', (
+      select jsonb_agg(
+        to_jsonb(membership) || jsonb_build_object('tuple', membership.ctid::text)
+        order by membership.workspace_id
+      )
+      from desmoslock_v2.memberships as membership
+      where membership.profile_id = invitation.accepted_profile_id
+    ),
+    'audit', (
+      select jsonb_agg(
+        to_jsonb(event) || jsonb_build_object('tuple', event.ctid::text)
+        order by event.id
+      )
+      from desmoslock_v2.staff_audit_events as event
+      where event.invitation_id = invitation.id
+    )
+  )
+  from desmoslock_v2.staff_invitations as invitation
+  where invitation.id = $1;
+$$;
+
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000001',
   'c1000000-0000-4000-8000-000000000001',
@@ -1233,6 +1274,14 @@ select is(
   'the Beta Owner can create a separate same-School management-list fixture'
 );
 
+update pg_temp.staff_auth_test_results
+set expires_at = (
+  select invitation.delivery_lease_expires_at
+  from desmoslock_v2.staff_invitations as invitation
+  where invitation.id = staff_auth_test_results.invitation_id
+)
+where label = 'acceptance';
+
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000001',
   'c1000000-0000-4000-8000-000000000001',
@@ -1254,18 +1303,14 @@ select results_eq(
   $$
     select
       'ok'::text,
-      invitation.id,
-      invitation.workspace_id,
-      invitation.invited_email_normalized,
-      invitation.role,
-      invitation.status,
-      invitation.delivery_lease_expires_at
-    from desmoslock_v2.staff_invitations as invitation
-    where invitation.id = (
-      select invitation_id
-      from pg_temp.staff_auth_test_results
-      where label = 'acceptance'
-    )
+      invitation_id,
+      '10000000-0000-4000-8000-000000000001'::uuid,
+      'invitee@staff.invalid'::text,
+      'admin'::text,
+      'pending_delivery'::text,
+      expires_at
+    from pg_temp.staff_auth_test_results
+    where label = 'acceptance'
   $$,
   'an AAL2 Owner can select the exact live pending-delivery invitation without request-key leakage'
 );
@@ -1409,7 +1454,7 @@ reset role;
 select is(
   (select code from pg_temp.staff_auth_test_results where label = 'acceptance-prepare'),
   'invitation_delivery_ready',
-  'preparation binds the intended recipient without making the invitation consumable'
+  'preparation binds the intended recipient and makes the invitation redeemable'
 );
 select is(
   (
@@ -1422,7 +1467,7 @@ select is(
     )
   ),
   'delivery_ready',
-  'recipient binding persists in a non-consumable delivery-ready state'
+  'recipient binding persists in a redeemable delivery-ready state'
 );
 
 select pg_temp.set_staff_claims(
@@ -1446,20 +1491,16 @@ select results_eq(
   $$
     select
       'ok'::text,
-      invitation.id,
-      invitation.workspace_id,
-      invitation.invited_email_normalized,
-      invitation.role,
-      invitation.status,
-      invitation.expires_at
-    from desmoslock_v2.staff_invitations as invitation
-    where invitation.id = (
-      select invitation_id
-      from pg_temp.staff_auth_test_results
-      where label = 'acceptance'
-    )
+      invitation_id,
+      '10000000-0000-4000-8000-000000000001'::uuid,
+      'invitee@staff.invalid'::text,
+      'admin'::text,
+      'delivery_ready'::text,
+      expires_at
+    from pg_temp.staff_auth_test_results
+    where label = 'acceptance'
   $$,
-  'the Owner projection exposes a live delivery-ready invitation without making it consumable'
+  'the Owner projection exposes a live redeemable delivery-ready invitation'
 );
 reset role;
 
@@ -1490,50 +1531,19 @@ select pg_temp.set_staff_claims(
   'aal2'
 );
 set local role authenticated;
-select is(
-  (select code from desmoslock_v2.current_staff_invitations()),
-  'invitation_not_found',
-  'a prepared recipient cannot discover an invitation before delivery acknowledgment'
-);
-select is(
-  (
-    select code
-    from desmoslock_v2.accept_staff_invitation(
-      (
-        select invitation_id
-        from pg_temp.staff_auth_test_results
-        where label = 'acceptance'
-      ),
-      'Premature Recipient'
-    )
-  ),
-  'invitation_not_found',
-  'a prepared recipient cannot consume an invitation before delivery acknowledgment'
+select results_eq(
+  $$
+    select code, invitation_id
+    from desmoslock_v2.current_staff_invitations()
+  $$,
+  $$
+    select 'ok'::text, invitation_id
+    from pg_temp.staff_auth_test_results
+    where label = 'acceptance'
+  $$,
+  'the bound recipient can discover a prepared invitation before delivery acknowledgment'
 );
 reset role;
-
-select is(
-  (
-    select count(*)
-    from desmoslock_v2.profiles
-    where auth_user_id = 'a1000000-0000-4000-8000-000000000002'
-  ),
-  0::bigint,
-  'premature acceptance creates no profile'
-);
-select is(
-  (
-    select status
-    from desmoslock_v2.staff_invitations
-    where id = (
-      select invitation_id
-      from pg_temp.staff_auth_test_results
-      where label = 'acceptance'
-    )
-  ),
-  'delivery_ready',
-  'premature acceptance leaves the delivery-ready state unchanged'
-);
 
 set local role service_role;
 insert into pg_temp.staff_auth_test_results (label, code)
@@ -1613,7 +1623,7 @@ reset role;
 select is(
   (select code from pg_temp.staff_auth_test_results where label = 'acceptance-publish'),
   'invitation_usable',
-  'delivery acknowledgment is the only transition that makes an invitation usable'
+  'delivery acknowledgment records confirmed delivery for the already redeemable invitation'
 );
 select is(
   (
@@ -1665,18 +1675,14 @@ select results_eq(
   $$
     select
       'ok'::text,
-      invitation.id,
-      invitation.workspace_id,
-      invitation.invited_email_normalized,
-      invitation.role,
-      invitation.status,
-      invitation.expires_at
-    from desmoslock_v2.staff_invitations as invitation
-    where invitation.id = (
-      select invitation_id
-      from pg_temp.staff_auth_test_results
-      where label = 'acceptance'
-    )
+      invitation_id,
+      '10000000-0000-4000-8000-000000000001'::uuid,
+      'invitee@staff.invalid'::text,
+      'admin'::text,
+      'pending_acceptance'::text,
+      expires_at
+    from pg_temp.staff_auth_test_results
+    where label = 'acceptance'
   $$,
   'the Owner projection exposes the exact published invitation needed for revocation selection'
 );
@@ -1713,7 +1719,7 @@ select results_eq(
     from pg_temp.staff_auth_test_results
     where label = 'acceptance'
   $$,
-  'only the bound and delivery-acknowledged recipient can discover the usable invitation'
+  'only the bound recipient can discover the published invitation'
 );
 reset role;
 
@@ -1914,12 +1920,12 @@ select results_eq(
     select
       'ok'::text,
       '10000000-0000-4000-8000-000000000001'::text,
-      profile.id,
+      profile_id,
       'Synthetic Accepted Administrator'::text,
       'invitee@staff.invalid'::text,
       'admin'::text
-    from desmoslock_v2.profiles as profile
-    where profile.auth_user_id = 'a1000000-0000-4000-8000-000000000002'
+    from pg_temp.staff_auth_test_results
+    where label = 'accepted'
   $$,
   'an AAL2 Owner receives only the bounded human-readable active staff row for its School'
 );
@@ -2009,6 +2015,10 @@ select is(
 );
 reset role;
 
+insert into pg_temp.staff_auth_test_snapshots (label, state)
+select 'accepted-replay', pg_temp.staff_acceptance_snapshot(invitation_id)
+from pg_temp.staff_auth_test_results where label = 'acceptance';
+
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000002',
   'c1000000-0000-4000-8000-000000000002',
@@ -2027,10 +2037,22 @@ select is(
       'Replay Attempt'
     )
   ),
-  'invitation_consumed',
-  'a terminal row-lock/CAS invitation rejects replay and concurrent losers'
+  'invitation_accepted',
+  'the exact accepted identity reconciles its earlier acceptance on replay'
 );
 reset role;
+
+select is(
+  (
+    select pg_temp.staff_acceptance_snapshot(invitation_id)
+    from pg_temp.staff_auth_test_results where label = 'acceptance'
+  ),
+  (
+    select state from pg_temp.staff_auth_test_snapshots
+    where label = 'accepted-replay'
+  ),
+  'accepted replay writes no invitation, profile, membership, or audit row and preserves the original name'
+);
 
 select is(
   (
@@ -2093,7 +2115,7 @@ select is(
     )
   ),
   'invitation_delivery_ready',
-  'the rollback fixture is prepared without becoming usable'
+  'the rollback fixture is recipient-bound and redeemable before publication'
 );
 select is(
   (
@@ -2107,7 +2129,7 @@ select is(
     )
   ),
   'invitation_usable',
-  'the rollback fixture becomes usable only after delivery acknowledgment'
+  'the rollback fixture records delivery acknowledgment before its acceptance rollback check'
 );
 reset role;
 
@@ -2364,7 +2386,7 @@ select is(
     )
   ),
   'invitation_delivery_ready',
-  'the reissue fixture first becomes recipient-bound but non-consumable'
+  'the reissue fixture first becomes recipient-bound and redeemable'
 );
 reset role;
 
@@ -2387,15 +2409,7 @@ select is(
         where label = 'elapsed'
       ),
       'a1000000-0000-4000-8000-000000000003',
-      (
-        select invitation.expires_at
-        from desmoslock_v2.staff_invitations as invitation
-        where invitation.id = (
-          select invitation_id
-          from pg_temp.staff_auth_test_results
-          where label = 'elapsed'
-        )
-      )
+      now() - interval '1 minute'
     )
   ),
   'invitation_expired',
@@ -2714,86 +2728,166 @@ from desmoslock_v2.begin_staff_invitation(
   gen_random_uuid()
 ) as result;
 reset role;
+update pg_temp.staff_auth_test_results
+set expires_at = clock_timestamp() + interval '1 hour'
+where label = 'delivery-failure';
+
 set local role service_role;
 select is(
   (
     select code
     from desmoslock_v2.internal_prepare_staff_invitation(
       (
-        select invitation_id
-        from pg_temp.staff_auth_test_results
+        select invitation_id from pg_temp.staff_auth_test_results
         where label = 'delivery-failure'
       ),
       'a1000000-0000-4000-8000-000000000003',
-      now() + interval '1 hour'
-    )
-  ),
-  'invitation_delivery_ready',
-  'the ambiguous-response fixture remains non-consumable after preparation'
-);
-select is(
-  (
-    select code
-    from desmoslock_v2.internal_fail_staff_invitation(
       (
-        select invitation_id
-        from pg_temp.staff_auth_test_results
-        where label = 'delivery-failure'
-      ),
-      'dependency_unavailable'
-    )
-  ),
-  'invitation_delivery_failed',
-  'failure cleanup closes an invitation even if preparation already committed'
-);
-select is(
-  (
-    select code
-    from desmoslock_v2.internal_fail_staff_invitation(
-      (
-        select invitation_id
-        from pg_temp.staff_auth_test_results
-        where label = 'delivery-failure'
-      ),
-      'dependency_unavailable'
-    )
-  ),
-  'invitation_delivery_failed',
-  'delivery failure cleanup is idempotent and reveals no prior completion state'
-);
-select is(
-  (
-    select code
-    from desmoslock_v2.internal_publish_staff_invitation(
-      (
-        select invitation_id
-        from pg_temp.staff_auth_test_results
+        select expires_at from pg_temp.staff_auth_test_results
         where label = 'delivery-failure'
       )
     )
   ),
-  'invitation_consumed',
-  'a publish race cannot revive an invitation after delivery failure wins'
+  'invitation_delivery_ready',
+  'the ambiguous-response fixture is redeemable after recipient preparation'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_fail_staff_invitation(
+      (
+        select invitation_id from pg_temp.staff_auth_test_results
+        where label = 'delivery-failure'
+      ),
+      'dependency_unavailable'
+    )
+  ),
+  'invitation_delivery_ready',
+  'a lost delivery response preserves the prepared invitation'
 );
 reset role;
-
 select results_eq(
   $$
     select status, invited_user_id, expires_at, failure_reason_code
     from desmoslock_v2.staff_invitations
     where id = (
-      select invitation_id
-      from pg_temp.staff_auth_test_results
+      select invitation_id from pg_temp.staff_auth_test_results
       where label = 'delivery-failure'
     )
   $$,
-  $$values (
-    'delivery_failed'::text,
-    null::uuid,
-    null::timestamp with time zone,
-    'dependency_unavailable'::text
-  )$$,
-  'ambiguous preparation cleanup removes the non-consumable recipient binding'
+  $$
+    select 'delivery_ready'::text,
+      'a1000000-0000-4000-8000-000000000003'::uuid,
+      expires_at, 'delivery_unconfirmed'::text
+    from pg_temp.staff_auth_test_results
+    where label = 'delivery-failure'
+  $$,
+  'ambiguous delivery preserves the exact recipient and expiry with a bounded reason'
+);
+insert into pg_temp.staff_auth_test_snapshots (label, state)
+select 'delivery-failure-retry', pg_temp.staff_acceptance_snapshot(invitation_id)
+from pg_temp.staff_auth_test_results where label = 'delivery-failure';
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_fail_staff_invitation(
+      (
+        select invitation_id from pg_temp.staff_auth_test_results
+        where label = 'delivery-failure'
+      ),
+      'delivery_unconfirmed'
+    )
+  ),
+  'invitation_delivery_ready',
+  'an equivalent bounded failure retry returns the same prepared state'
+);
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_fail_staff_invitation(
+      (
+        select invitation_id from pg_temp.staff_auth_test_results
+        where label = 'delivery-failure'
+      ),
+      'synthetic-provider-error-text'
+    )
+  ),
+  'invalid_request',
+  'arbitrary provider failure text cannot enter durable invitation state'
+);
+reset role;
+select is(
+  (
+    select pg_temp.staff_acceptance_snapshot(invitation_id)
+    from pg_temp.staff_auth_test_results where label = 'delivery-failure'
+  ),
+  (
+    select state from pg_temp.staff_auth_test_snapshots
+    where label = 'delivery-failure-retry'
+  ),
+  'equivalent failure retry and invalid reason perform no invitation or audit writes'
+);
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_fail_staff_invitation(
+      (
+        select invitation_id from pg_temp.staff_auth_test_results
+        where label = 'delivery-failure'
+      ),
+      'delivery_rejected'
+    )
+  ),
+  'invitation_delivery_ready',
+  'even a rejected delivery acknowledgment preserves a prepared recipient binding'
+);
+reset role;
+select results_eq(
+  $$
+    select status, invited_user_id, expires_at, failure_reason_code
+    from desmoslock_v2.staff_invitations
+    where id = (
+      select invitation_id from pg_temp.staff_auth_test_results
+      where label = 'delivery-failure'
+    )
+  $$,
+  $$
+    select 'delivery_ready'::text,
+      'a1000000-0000-4000-8000-000000000003'::uuid,
+      expires_at, 'delivery_rejected'::text
+    from pg_temp.staff_auth_test_results
+    where label = 'delivery-failure'
+  $$,
+  'rejected delivery keeps the exact binding and expiry with only the bounded classification'
+);
+set local role service_role;
+select is(
+  (
+    select code
+    from desmoslock_v2.internal_publish_staff_invitation(
+      (
+        select invitation_id from pg_temp.staff_auth_test_results
+        where label = 'delivery-failure'
+      )
+    )
+  ),
+  'invitation_usable',
+  'a later delivery acknowledgment can publish the preserved invitation'
+);
+reset role;
+select results_eq(
+  $$
+    select status, failure_reason_code
+    from desmoslock_v2.staff_invitations
+    where id = (
+      select invitation_id from pg_temp.staff_auth_test_results
+      where label = 'delivery-failure'
+    )
+  $$,
+  $$values ('pending_acceptance'::text, null::text)$$,
+  'confirmed delivery clears the earlier bounded failure classification'
 );
 select ok(
   not exists (
@@ -2808,6 +2902,25 @@ select ok(
   ),
   'service preparation, publication, and cleanup never impersonate the requesting Owner'
 );
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code from desmoslock_v2.revoke_staff_invitation(
+      (
+        select invitation_id from pg_temp.staff_auth_test_results
+        where label = 'delivery-failure'
+      )
+    )
+  ),
+  'invitation_revoked',
+  'the Owner explicitly retires the preserved delivery fixture before a replacement attempt'
+);
+reset role;
 
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000001',
@@ -2840,7 +2953,7 @@ select is(
     )
   ),
   'invitation_delivery_ready',
-  'the unavailable-failure fixture is prepared but remains non-consumable'
+  'the unavailable-failure fixture is prepared and redeemable'
 );
 reset role;
 
@@ -2881,8 +2994,8 @@ select is(
       'Unavailable Failure Recipient'
     )
   ),
-  'invitation_not_found',
-  'failure-path unavailability never makes a prepared invitation consumable'
+  'invitation_accepted',
+  'the exact recipient can accept a prepared invitation while failure acknowledgment is unavailable'
 );
 reset role;
 select is(
@@ -2895,8 +3008,8 @@ select is(
       where label = 'failure-unavailable'
     )
   ),
-  'delivery_ready',
-  'failure-path unavailability leaves the durable non-consumable state intact'
+  'accepted',
+  'prepared acceptance becomes terminal independently of delivery acknowledgment'
 );
 
 grant execute on function desmoslock_v2.internal_fail_staff_invitation(uuid, text)
@@ -2914,8 +3027,35 @@ select is(
       'dependency_unavailable'
     )
   ),
-  'invitation_delivery_failed',
-  'restored cleanup can terminalize the same delivery-ready invitation'
+  'invitation_consumed',
+  'restored failure acknowledgment cannot retract an accepted invitation'
+);
+reset role;
+
+update pg_temp.staff_auth_test_results
+set profile_id = (
+  select id from desmoslock_v2.profiles
+  where auth_user_id = 'a1000000-0000-4000-8000-000000000004'
+)
+where label = 'failure-unavailable';
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code from desmoslock_v2.revoke_membership(
+      '10000000-0000-4000-8000-000000000001',
+      (
+        select profile_id from pg_temp.staff_auth_test_results
+        where label = 'failure-unavailable'
+      )
+    )
+  ),
+  'membership_revoked',
+  'the Owner retires the prepared-acceptance fixture membership after its acceptance checks'
 );
 reset role;
 
@@ -3232,11 +3372,11 @@ select results_eq(
   $$
     select
       '10000000-0000-4000-8000-000000000001'::text,
-      profile.id,
+      profile_id,
       'invitee@staff.invalid'::text,
       'admin'::text
-    from desmoslock_v2.profiles as profile
-    where profile.auth_user_id = 'a1000000-0000-4000-8000-000000000002'
+    from pg_temp.staff_auth_test_results
+    where label = 'accepted'
   $$,
   'an Alpha Owner cannot see the same profile membership that belongs to Beta'
 );
@@ -3284,6 +3424,41 @@ select is(
   'School membership revocation does not globally revoke Auth application sessions'
 );
 
+insert into pg_temp.staff_auth_test_snapshots (label, state)
+select 'revoked-membership-replay', pg_temp.staff_acceptance_snapshot(invitation_id)
+from pg_temp.staff_auth_test_results where label = 'acceptance';
+select pg_temp.set_staff_claims(
+  'a1000000-0000-4000-8000-000000000002',
+  'c1000000-0000-4000-8000-000000000002',
+  'aal2'
+);
+set local role authenticated;
+select is(
+  (
+    select code from desmoslock_v2.accept_staff_invitation(
+      (
+        select invitation_id from pg_temp.staff_auth_test_results
+        where label = 'acceptance'
+      ),
+      'Revoked Membership Replay'
+    )
+  ),
+  'invitation_accepted',
+  'accepted replay confirms the earlier result even after School membership revocation'
+);
+reset role;
+select is(
+  (
+    select pg_temp.staff_acceptance_snapshot(invitation_id)
+    from pg_temp.staff_auth_test_results where label = 'acceptance'
+  ),
+  (
+    select state from pg_temp.staff_auth_test_snapshots
+    where label = 'revoked-membership-replay'
+  ),
+  'accepted replay leaves the revoked Alpha and active Beta memberships unchanged without any writes'
+);
+
 select pg_temp.set_staff_claims(
   'a1000000-0000-4000-8000-000000000001',
   'c1000000-0000-4000-8000-000000000001',
@@ -3310,11 +3485,11 @@ select results_eq(
   $$
     select
       '10000000-0000-4000-8000-000000000002'::text,
-      profile.id,
+      profile_id,
       'invitee@staff.invalid'::text,
       'teacher'::text
-    from desmoslock_v2.profiles as profile
-    where profile.auth_user_id = 'a1000000-0000-4000-8000-000000000002'
+    from pg_temp.staff_auth_test_results
+    where label = 'accepted'
   $$,
   'the Beta Owner sees only the remaining live Beta Teacher membership'
 );
@@ -3330,17 +3505,13 @@ select results_eq(
   $$,
   $$
     select
-      invitation.id,
-      invitation.workspace_id::text,
-      invitation.invited_email_normalized,
-      invitation.role,
-      invitation.status
-    from desmoslock_v2.staff_invitations as invitation
-    where invitation.id = (
-      select invitation_id
-      from pg_temp.staff_auth_test_results
-      where label = 'beta-management-invitation'
-    )
+      invitation_id,
+      '10000000-0000-4000-8000-000000000002'::text,
+      'beta-pending@staff.invalid'::text,
+      'teacher'::text,
+      'pending_delivery'::text
+    from pg_temp.staff_auth_test_results
+    where label = 'beta-management-invitation'
   $$,
   'the Beta Owner sees its pending invitation without any Alpha invitation leakage'
 );
@@ -3781,6 +3952,35 @@ select results_eq(
   )$$,
   'recovery state is bound only to the exact caller, provider session, and staff profile'
 );
+
+select results_eq(
+  $$
+    select cutoff.last_recovery_operation_id::text,
+      cutoff.invalid_before = operation.started_at,
+      cutoff.invalid_before >= (
+        select max(auth_session.created_at)
+        from auth.sessions as auth_session
+        where auth_session.user_id = cutoff.user_id
+      )
+    from desmoslock_v2.application_session_revocation_cutoffs as cutoff
+    join desmoslock_v2.staff_password_recovery_operations as operation
+      on operation.id = cutoff.last_recovery_operation_id
+    where cutoff.user_id = 'a1000000-0000-4000-8000-000000000001'
+  $$,
+  $$values ('f1000000-0000-4000-8000-000000000012'::text, true, true)$$,
+  'begin installs its cutoff immediately at the serialized operation start for all existing sessions'
+);
+insert into pg_temp.staff_auth_test_snapshots (label, state)
+select 'recovery-begin-replay', jsonb_build_object(
+  'operation', to_jsonb(operation) ||
+    jsonb_build_object('tuple', operation.ctid::text),
+  'cutoff', to_jsonb(cutoff) ||
+    jsonb_build_object('tuple', cutoff.ctid::text)
+)
+from desmoslock_v2.staff_password_recovery_operations as operation
+join desmoslock_v2.application_session_revocation_cutoffs as cutoff
+  on cutoff.user_id = operation.auth_user_id
+where operation.id = 'f1000000-0000-4000-8000-000000000012';
 select results_eq(
   $$
     select count(*), bool_and(workspace_id is null)
@@ -3841,8 +4041,12 @@ select results_eq(
       'f1000000-0000-4000-8000-000000000099'
     )
   $$,
-  $$values ('conflict'::text, null::uuid, null::timestamp with time zone)$$,
-  'one provider recovery session cannot own two operation identities'
+  $$
+    select code, operation_id, expires_at
+    from pg_temp.staff_auth_test_results
+    where label = 'password-recovery'
+  $$,
+  'a different local recovery key adopts the canonical operation for the exact user and provider session'
 );
 select is(
   (
@@ -3866,6 +4070,34 @@ select is(
   'recovery-begin retry does not duplicate its audit event'
 );
 
+select is(
+  (
+    select jsonb_build_object(
+      'operation', to_jsonb(operation) ||
+        jsonb_build_object('tuple', operation.ctid::text),
+      'cutoff', to_jsonb(cutoff) ||
+        jsonb_build_object('tuple', cutoff.ctid::text)
+    )
+    from desmoslock_v2.staff_password_recovery_operations as operation
+    join desmoslock_v2.application_session_revocation_cutoffs as cutoff
+      on cutoff.user_id = operation.auth_user_id
+    where operation.id = 'f1000000-0000-4000-8000-000000000012'
+  ),
+  (
+    select state from pg_temp.staff_auth_test_snapshots
+    where label = 'recovery-begin-replay'
+  ),
+  'exact and adopted recovery-begin retries preserve operation expiry and cutoff without writes'
+);
+select is(
+  (
+    select count(*) from desmoslock_v2.staff_password_recovery_operations
+    where id = 'f1000000-0000-4000-8000-000000000099'
+  ),
+  0::bigint,
+  'adopting the canonical operation does not create the replacement local identity'
+);
+
 insert into auth.sessions (
   id,
   user_id,
@@ -3878,11 +4110,11 @@ insert into auth.sessions (
 values (
   'c1000000-0000-4000-8000-000000000013',
   'a1000000-0000-4000-8000-000000000001',
-  now(),
-  now(),
+  clock_timestamp(),
+  clock_timestamp(),
   null,
   'aal1',
-  now() + interval '2 hours'
+  clock_timestamp() + interval '2 hours'
 );
 insert into auth.mfa_amr_claims (
   id,
@@ -3961,10 +4193,17 @@ select pg_temp.set_staff_claims(
   'aal1'
 );
 set local role authenticated;
-select is(
-  (select code from desmoslock_v2.current_staff_context()),
-  'session_revoked',
-  'an ordinary session created during active recovery is blacked out before completion'
+select results_eq(
+  $$
+    select code, school_id::text
+    from desmoslock_v2.current_staff_context()
+    order by school_id
+  $$,
+  $$values
+    ('ok'::text, '10000000-0000-4000-8000-000000000001'::text),
+    ('ok'::text, '10000000-0000-4000-8000-000000000002'::text)
+  $$,
+  'a fresh normal session can enter both Schools while recovery remains unfinished'
 );
 reset role;
 
@@ -3998,7 +4237,7 @@ select results_eq(
   $$
     select code, operation_id, expires_at
     from desmoslock_v2.begin_staff_password_recovery(
-      'f1000000-0000-4000-8000-000000000012'
+      'f1000000-0000-4000-8000-000000000099'
     )
   $$,
   $$
@@ -4009,7 +4248,7 @@ select results_eq(
     from pg_temp.staff_auth_test_results
     where label = 'password-recovery'
   $$,
-  'begin replay reconciles an already-completed recovery operation'
+  'begin with a replacement local key reconciles the canonical completed recovery operation'
 );
 reset role;
 select is(

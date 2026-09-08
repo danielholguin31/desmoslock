@@ -40,6 +40,8 @@ export const staffAuthErrorCodes = [
   "existing_confirmed_user_unsupported",
   "invalid_request",
   "invitation_expired",
+  "invitation_delivery_unconfirmed",
+  "invitation_delivery_rejected",
   "invitation_not_found",
   "rate_limited",
   "service_unavailable",

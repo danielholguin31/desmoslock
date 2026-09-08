@@ -15,6 +15,7 @@ const targetProfileId = "21000000-0000-4000-8000-000000000002";
 const invitationId = "41000000-0000-4000-8000-000000000001";
 const factorId = "51000000-0000-4000-8000-000000000001";
 const challengeId = "61000000-0000-4000-8000-000000000001";
+const passwordAuthority = "synthetic-password-authority-handle";
 
 function port(
   overrides: Partial<SupabaseStaffAuthPort> = {},
@@ -25,6 +26,7 @@ function port(
   return {
     acceptInvitation: unavailable,
     beginPasswordRecovery: unavailable,
+    capturePasswordAuthority: async () => passwordAuthority,
     challengeTotp: unavailable,
     enrollTotp: unavailable,
     exchangeEmailVerificationCode: unavailable,
@@ -42,6 +44,7 @@ function port(
     readSession: async () => ({ status: "signed_out" }),
     readTotpFactors: unavailable,
     removeTotpFactor: unavailable,
+    releasePasswordAuthority: () => undefined,
     resendEmailVerification: unavailable,
     revokeAllStaffSessions: unavailable,
     revokeCurrentStaffSession: unavailable,
@@ -66,6 +69,7 @@ function ownerPort(
       emailVerified: true,
     }),
     readAssurance: async () => ({
+      currentAuthenticationMethods: ["password"],
       currentLevel: "aal2",
       nextLevel: "aal2",
     }),
@@ -101,6 +105,118 @@ function operationIdSource(start = 1): { next(): string } {
 
 function encodedQr(svg = '<svg xmlns="http://www.w3.org/2000/svg"></svg>') {
   return `data:image/svg+xml;utf-8,${encodeURIComponent(svg)}`;
+}
+
+function inactiveContext() {
+  return [
+    {
+      code: "membership_inactive",
+      display_name: null,
+      membership_role: null,
+      profile_id: profileId,
+      role_revision: null,
+      school_id: null,
+      school_name: null,
+      school_slug: null,
+    },
+  ];
+}
+
+function acceptedInvitationContext() {
+  return [
+    {
+      code: "ok",
+      display_name: "Taylor Teacher",
+      membership_role: "teacher",
+      profile_id: profileId,
+      role_revision: 1,
+      school_id: schoolId,
+      school_name: "Example School",
+      school_slug: "example-school",
+    },
+  ];
+}
+
+function invitationHarness(overrides: Partial<SupabaseStaffAuthPort> = {}) {
+  const state = { accepted: false };
+  const capturePasswordAuthority = vi.fn(async () => passwordAuthority);
+  const releasePasswordAuthority = vi.fn();
+  const updatePassword = vi.fn(async () => ({ status: "updated" }));
+  const signOut = vi.fn(async () => ({ status: "signed_out" }));
+  const verifyInvitationToken = vi.fn(async () => ({
+    accountId,
+    email: "invitee@example.test",
+    status: "verified",
+  }));
+  const adapter = createSupabaseStaffAuthAdapter({
+    clock: { now: () => Date.parse("2026-09-03T20:00:00.000Z") },
+    createBlobUrl: () => {
+      throw new Error("not used");
+    },
+    operationIds: operationIdSource(10),
+    port: port({
+      acceptInvitation: async () => {
+        state.accepted = true;
+        return [{ code: "invitation_accepted" }];
+      },
+      capturePasswordAuthority,
+      releasePasswordAuthority,
+      readAccount: async () => ({
+        accountId,
+        email: "invitee@example.test",
+        emailVerified: true,
+      }),
+      readAssurance: async () => ({
+        currentAuthenticationMethods: ["password"],
+        currentLevel: "aal1",
+        nextLevel: "aal1",
+      }),
+      readCurrentContext: async () =>
+        state.accepted ? acceptedInvitationContext() : inactiveContext(),
+      readCurrentInvitations: async () => [
+        {
+          code: "ok",
+          expires_at: "2026-09-04T12:00:00+00:00",
+          invitation_id: invitationId,
+          invited_role: "teacher",
+          school_id: schoolId,
+          school_name: "Example School",
+        },
+      ],
+      readSession: async () => ({ status: "authenticated" }),
+      signOut,
+      updatePassword,
+      verifyInvitationToken,
+      ...overrides,
+    }),
+    revokeBlobUrl: () => undefined,
+  });
+  return {
+    adapter,
+    capturePasswordAuthority,
+    releasePasswordAuthority,
+    signOut,
+    state,
+    updatePassword,
+    verifyInvitationToken,
+    async accept() {
+      const inspection = await adapter.perform({
+        operationId: firstOperationId,
+        tokenHash: "a".repeat(56),
+        type: "inspect_invitation",
+      });
+      if (inspection.result.kind !== "invitation_ready")
+        throw new Error("expected invitation");
+      return adapter.perform({
+        acceptanceReceipt: inspection.result.acceptanceReceipt,
+        displayName: "Taylor Teacher",
+        inspectionOperationId: inspection.result.inspectionOperationId,
+        operationId: secondOperationId,
+        password: "new-invited-password",
+        type: "accept_invitation",
+      });
+    },
+  };
 }
 
 describe("Supabase staff auth adapter", () => {
@@ -142,6 +258,16 @@ describe("Supabase staff auth adapter", () => {
             school_id: null,
             school_name: null,
             school_slug: null,
+          },
+        ],
+        readCurrentInvitations: async () => [
+          {
+            code: "invitation_not_found",
+            expires_at: null,
+            invitation_id: null,
+            invited_role: null,
+            school_id: null,
+            school_name: null,
           },
         ],
         readSession: async () => ({ status: "authenticated" }),
@@ -195,6 +321,59 @@ describe("Supabase staff auth adapter", () => {
     },
   );
 
+  it("returns sanitized opaque choices for multiple verified factors without challenging either", async () => {
+    const challengeTotp = vi.fn();
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => {
+        throw new Error("not used");
+      },
+      operationIds: operationIdSource(),
+      port: ownerPort({
+        challengeTotp,
+        readAssurance: async () => ({
+          currentAuthenticationMethods: ["password"],
+          currentLevel: "aal1",
+          nextLevel: "aal2",
+        }),
+        readTotpFactors: async () => ({
+          factors: [
+            {
+              factorId,
+              friendlyName: "  Phone\u202e\n ",
+              status: "verified",
+            },
+            {
+              factorId: "51000000-0000-4000-8000-000000000002",
+              friendlyName: "Security key",
+              status: "verified",
+            },
+          ],
+        }),
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+
+    const result = await adapter.read();
+
+    expect(result).toMatchObject({
+      factorChoices: [
+        {
+          challengeReceipt: "10000000-0000-4000-8000-000000000003",
+          label: "Phone (Authenticator 1)",
+        },
+        {
+          challengeReceipt: "10000000-0000-4000-8000-000000000004",
+          label: "Security key (Authenticator 2)",
+        },
+      ],
+      secondFactor: "factor_selection_required",
+    });
+    expect(JSON.stringify(result)).not.toContain(factorId);
+    expect(challengeTotp).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+
   it("builds Teacher access only from a verified account and exact live DB context", async () => {
     const identifiers = [firstOperationId, secondOperationId];
     const adapter = createSupabaseStaffAuthAdapter({
@@ -212,6 +391,7 @@ describe("Supabase staff auth adapter", () => {
           emailVerified: true,
         }),
         readAssurance: async () => ({
+          currentAuthenticationMethods: ["password"],
           currentLevel: "aal1",
           nextLevel: "aal1",
         }),
@@ -273,6 +453,7 @@ describe("Supabase staff auth adapter", () => {
           emailVerified: true,
         }),
         readAssurance: async () => ({
+          currentAuthenticationMethods: ["password", "totp"],
           currentLevel: "aal2",
           nextLevel: "aal2",
         }),
@@ -306,6 +487,15 @@ describe("Supabase staff auth adapter", () => {
             invited_email: "other@example.test",
             invited_role: "teacher",
             school_id: otherSchoolId,
+          },
+          {
+            code: "ok",
+            expires_at: "2026-09-04T13:00:00+00:00",
+            invitation_id: "41000000-0000-4000-8000-000000000003",
+            invitation_status: "delivery_ready",
+            invited_email: "uncertain@example.test",
+            invited_role: "teacher",
+            school_id: schoolId,
           },
         ],
         readManageableStaff: async () => [
@@ -342,6 +532,13 @@ describe("Supabase staff auth adapter", () => {
           role: "admin",
           schoolId,
           state: "pending",
+        },
+        {
+          email: "uncertain@example.test",
+          invitationId: "41000000-0000-4000-8000-000000000003",
+          role: "teacher",
+          schoolId,
+          state: "delivery_unconfirmed",
         },
       ],
       manageableStaff: [
@@ -407,6 +604,7 @@ describe("Supabase staff auth adapter", () => {
             emailVerified: true,
           }),
           readAssurance: async () => ({
+            currentAuthenticationMethods: ["password"],
             currentLevel: "aal1",
             nextLevel,
           }),
@@ -519,6 +717,7 @@ describe("Supabase staff auth adapter", () => {
           emailVerified: true,
         }),
         readAssurance: async () => ({
+          currentAuthenticationMethods: ["password"],
           currentLevel: "aal1",
           nextLevel: "aal1",
         }),
@@ -630,6 +829,161 @@ describe("Supabase staff auth adapter", () => {
     adapter.dispose();
   });
 
+  it("revalidates the original recovery binding after provider notifications without reading school context", async () => {
+    let notify: () => void = () => undefined;
+    const capture = vi.fn(async () => passwordAuthority);
+    const release = vi.fn();
+    const readCurrentContext = vi.fn(async () => [{ code: "forbidden" }]);
+    const readSession = vi.fn(async () => ({ status: "authenticated" }));
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => "unused",
+      operationIds: operationIdSource(),
+      port: port({
+        capturePasswordAuthority: capture,
+        releasePasswordAuthority: release,
+        exchangeRecoveryCode: async () => {
+          notify();
+          return { status: "ready" };
+        },
+        onAuthStateChange: (listener) => {
+          notify = listener;
+          return () => undefined;
+        },
+        readSession,
+        readCurrentContext,
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+    await adapter.perform({
+      authorizationCode: "synthetic-recovery-code",
+      operationId: firstOperationId,
+      type: "exchange_recovery_code",
+      verifier: "v".repeat(43),
+    });
+    notify();
+    expect(await adapter.read()).toEqual({ kind: "password_recovery_ready" });
+    expect(capture).toHaveBeenCalledWith();
+    expect(release).toHaveBeenCalledWith(passwordAuthority);
+    expect(readSession).not.toHaveBeenCalled();
+    expect(readCurrentContext).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+
+  it("keeps a safe recovery restart after a lost binding and repeated provider notifications", async () => {
+    let notify: () => void = () => undefined;
+    const capture = vi.fn(async (): Promise<string | null> => null);
+    const readCurrentContext = vi.fn(async () => [{ code: "forbidden" }]);
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => "unused",
+      operationIds: operationIdSource(),
+      port: port({
+        capturePasswordAuthority: capture,
+        exchangeRecoveryCode: async () => ({ status: "ready" }),
+        onAuthStateChange: (listener) => {
+          notify = listener;
+          return () => undefined;
+        },
+        readCurrentContext,
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+    await adapter.perform({
+      authorizationCode: "synthetic-recovery-code",
+      operationId: firstOperationId,
+      type: "exchange_recovery_code",
+      verifier: "v".repeat(43),
+    });
+    notify();
+    expect(await adapter.read()).toEqual({
+      kind: "password_recovery_rejected",
+    });
+    notify();
+    expect(await adapter.read()).toEqual({
+      kind: "password_recovery_rejected",
+    });
+    expect(readCurrentContext).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+
+  it("releases a stale recovery probe after reset without restoring the password form", async () => {
+    let finishProbe: (value: string) => void = () => undefined;
+    const capture = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          finishProbe = resolve;
+        }),
+    );
+    const release = vi.fn();
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => "unused",
+      operationIds: operationIdSource(),
+      port: port({
+        capturePasswordAuthority: capture,
+        exchangeRecoveryCode: async () => ({ status: "ready" }),
+        releasePasswordAuthority: release,
+        signOut: async () => ({ status: "signed_out" }),
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+    await adapter.perform({
+      authorizationCode: "synthetic-recovery-code",
+      operationId: firstOperationId,
+      type: "exchange_recovery_code",
+      verifier: "v".repeat(43),
+    });
+    const pendingRead = adapter.read();
+    await vi.waitFor(() => expect(capture).toHaveBeenCalledOnce());
+    await adapter.perform({
+      operationId: secondOperationId,
+      type: "reset_to_sign_in",
+    });
+    finishProbe(passwordAuthority);
+    expect(await pendingRead).toEqual({ kind: "password_recovery_rejected" });
+    expect(release).toHaveBeenCalledWith(passwordAuthority);
+    expect(await adapter.read()).toEqual({ kind: "signed_out" });
+    adapter.dispose();
+  });
+
+  it("does not restore recovery route intent when a late exchange finishes after reset", async () => {
+    let finishExchange: (value: { status: string }) => void = () => undefined;
+    const exchange = vi.fn(
+      () =>
+        new Promise<{ status: string }>((resolve) => {
+          finishExchange = resolve;
+        }),
+    );
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => "unused",
+      operationIds: operationIdSource(),
+      port: port({
+        exchangeRecoveryCode: exchange,
+        signOut: async () => ({ status: "signed_out" }),
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+    const pendingExchange = adapter.perform({
+      authorizationCode: "synthetic-recovery-code",
+      operationId: firstOperationId,
+      type: "exchange_recovery_code",
+      verifier: "v".repeat(43),
+    });
+    await vi.waitFor(() => expect(exchange).toHaveBeenCalledOnce());
+    await adapter.perform({
+      operationId: secondOperationId,
+      type: "reset_to_sign_in",
+    });
+    finishExchange({ status: "ready" });
+    expect((await pendingExchange).result).toEqual({
+      kind: "password_recovery_rejected",
+    });
+    expect(await adapter.read()).toEqual({ kind: "signed_out" });
+    adapter.dispose();
+  });
+
   it("completes DB begin, user-scoped password update, DB finish, then global sign-out", async () => {
     const calls: string[] = [];
     const adapter = createSupabaseStaffAuthAdapter({
@@ -684,6 +1038,405 @@ describe("Supabase staff auth adapter", () => {
     adapter.dispose();
   });
 
+  it("holds one private recovery authority through canonical cleanup and releases it before returning", async () => {
+    const calls: unknown[] = [];
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => Date.parse("2026-09-03T20:00:00.000Z") },
+      createBlobUrl: () => {
+        throw new Error("not used");
+      },
+      operationIds: operationIdSource(),
+      port: port({
+        capturePasswordAuthority: async (expectedAccountId) => {
+          calls.push(["capture", expectedAccountId]);
+          return passwordAuthority;
+        },
+        beginPasswordRecovery: async (operationId, authority) => {
+          calls.push(["begin", operationId, authority]);
+          return [
+            {
+              code: "recovery_sessions_revoked",
+              expires_at: "2026-09-03T23:00:00+00:00",
+              operation_id: secondOperationId,
+            },
+          ];
+        },
+        updatePassword: async (password, authority) => {
+          calls.push(["password", password, authority]);
+          return { status: "updated" };
+        },
+        finishPasswordRecovery: async (operationId, authority) => {
+          calls.push(["finish", operationId, authority]);
+          return [{ code: "recovery_completed" }];
+        },
+        signOut: async (scope, authority) => {
+          calls.push(["signout", scope, authority]);
+          return { status: "signed_out" };
+        },
+        releasePasswordAuthority: (authority) => {
+          calls.push(["release", authority]);
+        },
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+    const result = await adapter.perform({
+      operationId: firstOperationId,
+      password: "fresh-password",
+      type: "complete_password_recovery",
+    });
+    expect(result).toEqual({
+      operationId: firstOperationId,
+      result: { kind: "password_recovery_complete", sessionScope: "all" },
+    });
+    expect(calls).toEqual([
+      ["capture", undefined],
+      ["begin", firstOperationId, passwordAuthority],
+      ["password", "fresh-password", passwordAuthority],
+      ["finish", secondOperationId, passwordAuthority],
+      ["signout", "all", passwordAuthority],
+      ["release", passwordAuthority],
+    ]);
+    expect(JSON.stringify(result)).not.toContain(passwordAuthority);
+    expect(JSON.stringify(adapter)).not.toContain(passwordAuthority);
+    adapter.dispose();
+  });
+
+  it("never starts recovery mutations when no password authority can be captured", async () => {
+    const capturePasswordAuthority = vi.fn(async () => null);
+    const releasePasswordAuthority = vi.fn();
+    const beginPasswordRecovery = vi.fn();
+    const updatePassword = vi.fn();
+    const finishPasswordRecovery = vi.fn();
+    const signOut = vi.fn();
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => Date.parse("2026-09-03T20:00:00.000Z") },
+      createBlobUrl: () => {
+        throw new Error("not used");
+      },
+      operationIds: operationIdSource(),
+      port: port({
+        capturePasswordAuthority,
+        releasePasswordAuthority,
+        beginPasswordRecovery,
+        updatePassword,
+        finishPasswordRecovery,
+        signOut,
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+    await adapter.perform({
+      operationId: firstOperationId,
+      password: "fresh-password",
+      type: "complete_password_recovery",
+    });
+    expect(capturePasswordAuthority).toHaveBeenCalledOnce();
+    expect(beginPasswordRecovery).not.toHaveBeenCalled();
+    expect(updatePassword).not.toHaveBeenCalled();
+    expect(finishPasswordRecovery).not.toHaveBeenCalled();
+    expect(signOut).not.toHaveBeenCalled();
+    expect(releasePasswordAuthority).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+
+  it("releases a late recovery authority without starting mutations after auth invalidation during capture", async () => {
+    let notify: () => void = () => undefined;
+    let finishCapture: ((authority: string) => void) | undefined;
+    const capturePasswordAuthority = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          finishCapture = resolve;
+        }),
+    );
+    const releasePasswordAuthority = vi.fn();
+    const beginPasswordRecovery = vi.fn();
+    const updatePassword = vi.fn();
+    const finishPasswordRecovery = vi.fn();
+    const signOut = vi.fn();
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => Date.parse("2026-09-03T20:00:00.000Z") },
+      createBlobUrl: () => {
+        throw new Error("not used");
+      },
+      operationIds: operationIdSource(),
+      port: port({
+        capturePasswordAuthority,
+        releasePasswordAuthority,
+        beginPasswordRecovery,
+        updatePassword,
+        finishPasswordRecovery,
+        signOut,
+        onAuthStateChange: (listener) => {
+          notify = listener;
+          return () => undefined;
+        },
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+    const result = adapter.perform({
+      operationId: firstOperationId,
+      password: "fresh-password",
+      type: "complete_password_recovery",
+    });
+    await vi.waitFor(() =>
+      expect(capturePasswordAuthority).toHaveBeenCalledOnce(),
+    );
+    notify();
+    finishCapture?.(passwordAuthority);
+    await result;
+    expect(beginPasswordRecovery).not.toHaveBeenCalled();
+    expect(updatePassword).not.toHaveBeenCalled();
+    expect(finishPasswordRecovery).not.toHaveBeenCalled();
+    expect(signOut).not.toHaveBeenCalled();
+    expect(releasePasswordAuthority).toHaveBeenCalledExactlyOnceWith(
+      passwordAuthority,
+    );
+    adapter.dispose();
+  });
+
+  it.each(["throws", "malformed"] as const)(
+    "releases captured recovery authority when begin %s before any password mutation",
+    async (failure) => {
+      const releasePasswordAuthority = vi.fn();
+      const updatePassword = vi.fn();
+      const finishPasswordRecovery = vi.fn();
+      const signOut = vi.fn();
+      const adapter = createSupabaseStaffAuthAdapter({
+        clock: { now: () => Date.parse("2026-09-03T20:00:00.000Z") },
+        createBlobUrl: () => {
+          throw new Error("not used");
+        },
+        operationIds: operationIdSource(),
+        port: port({
+          beginPasswordRecovery: async () => {
+            if (failure === "throws")
+              throw new Error("lost recovery begin response");
+            return [{ unexpected: true }];
+          },
+          releasePasswordAuthority,
+          updatePassword,
+          finishPasswordRecovery,
+          signOut,
+        }),
+        revokeBlobUrl: () => undefined,
+      });
+      await expect(
+        adapter.perform({
+          operationId: firstOperationId,
+          password: "fresh-password",
+          type: "complete_password_recovery",
+        }),
+      ).rejects.toThrow();
+      expect(releasePasswordAuthority).toHaveBeenCalledExactlyOnceWith(
+        passwordAuthority,
+      );
+      expect(updatePassword).not.toHaveBeenCalled();
+      expect(finishPasswordRecovery).not.toHaveBeenCalled();
+      expect(signOut).not.toHaveBeenCalled();
+      adapter.dispose();
+    },
+  );
+
+  it.each(["updated", "rejected", "throws", "malformed"] as const)(
+    "finishes the canonical recovery operation and signs out globally after provider %s",
+    async (providerResult) => {
+      const calls: string[] = [];
+      const adapter = createSupabaseStaffAuthAdapter({
+        clock: { now: () => Date.parse("2026-09-03T20:00:00.000Z") },
+        createBlobUrl: () => {
+          throw new Error("not used");
+        },
+        operationIds: operationIdSource(),
+        port: port({
+          beginPasswordRecovery: async (operationId) => {
+            calls.push(`begin:${operationId}`);
+            return [
+              {
+                code: "recovery_sessions_revoked",
+                expires_at: "2026-09-03T23:00:00+00:00",
+                operation_id: secondOperationId,
+              },
+            ];
+          },
+          updatePassword: async () => {
+            calls.push("password");
+            if (providerResult === "throws")
+              throw new Error("lost provider response");
+            return providerResult === "malformed"
+              ? { unexpected: true }
+              : { status: providerResult };
+          },
+          finishPasswordRecovery: async (operationId) => {
+            calls.push(`finish:${operationId}`);
+            return [{ code: "recovery_completed" }];
+          },
+          signOut: async (scope) => {
+            calls.push(`signout:${scope}`);
+            return { status: "signed_out" };
+          },
+        }),
+        revokeBlobUrl: () => undefined,
+      });
+      const outcome =
+        providerResult === "updated"
+          ? { kind: "password_recovery_complete", sessionScope: "all" }
+          : providerResult === "rejected"
+            ? { kind: "password_recovery_rejected" }
+            : {
+                kind: "password_recovery_uncertain",
+                passwordOutcome: "unknown",
+                cleanupComplete: true,
+              };
+
+      await expect(
+        adapter.perform({
+          operationId: firstOperationId,
+          password: "fresh-password",
+          type: "complete_password_recovery",
+        }),
+      ).resolves.toEqual({ operationId: firstOperationId, result: outcome });
+      expect(calls).toEqual([
+        `begin:${firstOperationId}`,
+        "password",
+        `finish:${secondOperationId}`,
+        "signout:all",
+      ]);
+      adapter.dispose();
+    },
+  );
+
+  it.each([
+    ["updated", "finish throws"],
+    ["rejected", "finish rejects"],
+    ["unknown", "finish malformed"],
+    ["updated", "signout throws"],
+    ["rejected", "signout malformed"],
+    ["unknown", "signout throws"],
+  ] as const)(
+    "preserves the %s password outcome when %s and still attempts global sign-out",
+    async (passwordOutcome, failure) => {
+      const releasePasswordAuthority = vi.fn();
+      const updatePassword = vi.fn(async () => {
+        if (passwordOutcome === "unknown")
+          throw new Error("lost password response");
+        return { status: passwordOutcome };
+      });
+      const finishPasswordRecovery = vi.fn(async () => {
+        if (failure === "finish throws")
+          throw new Error("lost finish response");
+        if (failure === "finish rejects") return [{ code: "session_expired" }];
+        return failure === "finish malformed"
+          ? [{ unexpected: true }]
+          : [{ code: "recovery_completed" }];
+      });
+      const signOut = vi.fn(async () => {
+        if (failure === "signout throws")
+          throw new Error("lost signout response");
+        return failure === "signout malformed"
+          ? { unexpected: true }
+          : { status: "signed_out" };
+      });
+      const adapter = createSupabaseStaffAuthAdapter({
+        clock: { now: () => Date.parse("2026-09-03T20:00:00.000Z") },
+        createBlobUrl: () => {
+          throw new Error("not used");
+        },
+        operationIds: operationIdSource(),
+        port: port({
+          beginPasswordRecovery: async () => [
+            {
+              code: "recovery_sessions_revoked",
+              expires_at: "2026-09-03T23:00:00+00:00",
+              operation_id: secondOperationId,
+            },
+          ],
+          updatePassword,
+          finishPasswordRecovery,
+          releasePasswordAuthority,
+          signOut,
+        }),
+        revokeBlobUrl: () => undefined,
+      });
+
+      await expect(
+        adapter.perform({
+          operationId: firstOperationId,
+          password: "fresh-password",
+          type: "complete_password_recovery",
+        }),
+      ).resolves.toEqual({
+        operationId: firstOperationId,
+        result: {
+          kind: "password_recovery_uncertain",
+          passwordOutcome,
+          cleanupComplete: false,
+        },
+      });
+      expect(updatePassword).toHaveBeenCalledExactlyOnceWith(
+        "fresh-password",
+        passwordAuthority,
+      );
+      expect(finishPasswordRecovery).toHaveBeenCalledExactlyOnceWith(
+        secondOperationId,
+        passwordAuthority,
+      );
+      expect(signOut).toHaveBeenCalledExactlyOnceWith("all", passwordAuthority);
+      expect(releasePasswordAuthority).toHaveBeenCalledExactlyOnceWith(
+        passwordAuthority,
+      );
+      adapter.dispose();
+    },
+  );
+
+  it("does not report password success from a previously completed recovery ledger entry", async () => {
+    const updatePassword = vi.fn();
+    const finishPasswordRecovery = vi.fn(async () => [
+      { code: "recovery_completed" },
+    ]);
+    const signOut = vi.fn(async () => ({ status: "signed_out" }));
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => Date.parse("2026-09-03T20:00:00.000Z") },
+      createBlobUrl: () => {
+        throw new Error("not used");
+      },
+      operationIds: operationIdSource(),
+      port: port({
+        beginPasswordRecovery: async () => [
+          {
+            code: "recovery_completed",
+            expires_at: "2026-09-03T23:00:00+00:00",
+            operation_id: secondOperationId,
+          },
+        ],
+        updatePassword,
+        finishPasswordRecovery,
+        signOut,
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+
+    await expect(
+      adapter.perform({
+        operationId: firstOperationId,
+        password: "fresh-password",
+        type: "complete_password_recovery",
+      }),
+    ).resolves.toEqual({
+      operationId: firstOperationId,
+      result: {
+        kind: "password_recovery_uncertain",
+        passwordOutcome: "unknown",
+        cleanupComplete: true,
+      },
+    });
+    expect(updatePassword).not.toHaveBeenCalled();
+    expect(finishPasswordRecovery).toHaveBeenCalledExactlyOnceWith(
+      secondOperationId,
+      passwordAuthority,
+    );
+    expect(signOut).toHaveBeenCalledExactlyOnceWith("all", passwordAuthority);
+    adapter.dispose();
+  });
+
   it("binds invitation acceptance to a private receipt and the same verified account", async () => {
     const invitationId = "41000000-0000-4000-8000-000000000001";
     const acceptanceReceipt = "10000000-0000-4000-8000-000000000006";
@@ -719,6 +1472,7 @@ describe("Supabase staff auth adapter", () => {
           emailVerified: true,
         }),
         readAssurance: async () => ({
+          currentAuthenticationMethods: ["password"],
           currentLevel: "aal1",
           nextLevel: "aal1",
         }),
@@ -814,6 +1568,378 @@ describe("Supabase staff auth adapter", () => {
     });
     expect(JSON.stringify(adapter)).not.toContain("new-invited-password");
     adapter.dispose();
+  });
+
+  it("never mutates invitation or password state when recipient authority capture fails", async () => {
+    const capturePasswordAuthority = vi.fn(async () => null);
+    const acceptInvitation = vi.fn();
+    const fixture = invitationHarness({
+      capturePasswordAuthority,
+      acceptInvitation,
+    });
+    const result = await fixture.accept();
+    expect(capturePasswordAuthority).toHaveBeenCalledExactlyOnceWith(accountId);
+    expect(acceptInvitation).not.toHaveBeenCalled();
+    expect(fixture.updatePassword).not.toHaveBeenCalled();
+    expect(fixture.signOut).not.toHaveBeenCalled();
+    expect(fixture.releasePasswordAuthority).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain(passwordAuthority);
+    fixture.adapter.dispose();
+  });
+
+  it("holds the same recipient authority across an invitation retry, password failure, and local cleanup", async () => {
+    const calls: unknown[] = [];
+    let attempts = 0;
+    const fixture = invitationHarness({
+      acceptInvitation: async (request, authority) => {
+        calls.push(["accept", request, authority]);
+        attempts += 1;
+        if (attempts === 1) throw new Error("lost acceptance response");
+        fixture.state.accepted = true;
+        return [{ code: "invitation_accepted" }];
+      },
+      updatePassword: async (password, authority) => {
+        calls.push(["password", password, authority]);
+        return { status: "rejected" };
+      },
+      signOut: async (scope, authority) => {
+        calls.push(["signout", scope, authority]);
+        throw new Error("lost local cleanup response");
+      },
+      releasePasswordAuthority: (authority) => {
+        calls.push(["release", authority]);
+      },
+    });
+    const result = await fixture.accept();
+    expect(result).toEqual({
+      operationId: secondOperationId,
+      result: { kind: "invitation_accepted", passwordOutcome: "rejected" },
+    });
+    expect(fixture.capturePasswordAuthority).toHaveBeenCalledExactlyOnceWith(
+      accountId,
+    );
+    expect(calls).toEqual([
+      [
+        "accept",
+        { displayName: "Taylor Teacher", invitationId },
+        passwordAuthority,
+      ],
+      [
+        "accept",
+        { displayName: "Taylor Teacher", invitationId },
+        passwordAuthority,
+      ],
+      ["password", "new-invited-password", passwordAuthority],
+      ["signout", "local", passwordAuthority],
+      ["release", passwordAuthority],
+    ]);
+    expect(JSON.stringify(result)).not.toContain(passwordAuthority);
+    expect(JSON.stringify(fixture.adapter)).not.toContain(passwordAuthority);
+    fixture.adapter.dispose();
+  });
+
+  it("releases a late invitation authority without mutation after auth invalidation during capture", async () => {
+    let notify: () => void = () => undefined;
+    let finishCapture: ((authority: string) => void) | undefined;
+    const capturePasswordAuthority = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          finishCapture = resolve;
+        }),
+    );
+    const acceptInvitation = vi.fn();
+    const fixture = invitationHarness({
+      acceptInvitation,
+      capturePasswordAuthority,
+      onAuthStateChange: (listener) => {
+        notify = listener;
+        return () => undefined;
+      },
+    });
+    const result = fixture.accept();
+    await vi.waitFor(() =>
+      expect(capturePasswordAuthority).toHaveBeenCalledOnce(),
+    );
+    notify();
+    finishCapture?.(passwordAuthority);
+    await result;
+    expect(acceptInvitation).not.toHaveBeenCalled();
+    expect(fixture.updatePassword).not.toHaveBeenCalled();
+    expect(fixture.signOut).not.toHaveBeenCalled();
+    expect(fixture.releasePasswordAuthority).toHaveBeenCalledExactlyOnceWith(
+      passwordAuthority,
+    );
+    fixture.adapter.dispose();
+  });
+
+  it("accepts the database invitation before sending the password to the provider", async () => {
+    const calls: string[] = [];
+    const fixture = invitationHarness({
+      acceptInvitation: async () => {
+        calls.push("accept");
+        fixture.state.accepted = true;
+        return [{ code: "invitation_accepted" }];
+      },
+      updatePassword: async () => {
+        calls.push("password");
+        expect(fixture.state.accepted).toBe(true);
+        return { status: "updated" };
+      },
+    });
+    await expect(fixture.accept()).resolves.toMatchObject({
+      result: { kind: "access_granted" },
+    });
+    expect(calls).toEqual(["accept", "password"]);
+    fixture.adapter.dispose();
+  });
+
+  it.each(["rejected", "throws", "malformed"] as const)(
+    "preserves committed invitation acceptance and attempts local sign-out after password %s",
+    async (providerResult) => {
+      const revokeMembership = vi.fn();
+      const updatePassword = vi.fn(async () => {
+        if (providerResult === "throws")
+          throw new Error("SENTINEL-password-provider-response");
+        return providerResult === "malformed"
+          ? { unexpected: true }
+          : { status: "rejected" };
+      });
+      const fixture = invitationHarness({
+        revokeMembership,
+        updatePassword,
+      });
+      const result = await fixture.accept();
+      expect(result).toEqual({
+        operationId: secondOperationId,
+        result: {
+          kind: "invitation_accepted",
+          passwordOutcome:
+            providerResult === "rejected" ? "rejected" : "unknown",
+        },
+      });
+      expect(fixture.state.accepted).toBe(true);
+      expect(updatePassword).toHaveBeenCalledExactlyOnceWith(
+        "new-invited-password",
+        passwordAuthority,
+      );
+      expect(fixture.signOut).toHaveBeenCalledExactlyOnceWith(
+        "local",
+        passwordAuthority,
+      );
+      expect(revokeMembership).not.toHaveBeenCalled();
+      expect(JSON.stringify(result)).not.toContain("SENTINEL");
+      fixture.adapter.dispose();
+    },
+  );
+
+  it("keeps invitation acceptance committed when best-effort local sign-out also fails", async () => {
+    const signOut = vi.fn(async () => {
+      throw new Error("lost sign-out response");
+    });
+    const fixture = invitationHarness({
+      signOut,
+      updatePassword: async () => ({ status: "rejected" }),
+    });
+    await expect(fixture.accept()).resolves.toMatchObject({
+      result: { kind: "invitation_accepted", passwordOutcome: "rejected" },
+    });
+    expect(signOut).toHaveBeenCalledExactlyOnceWith("local", passwordAuthority);
+    expect(fixture.state.accepted).toBe(true);
+    fixture.adapter.dispose();
+  });
+
+  it.each(["throws", "malformed"] as const)(
+    "reconciles a committed invitation after its acceptance response %s without repeating the RPC",
+    async (response) => {
+      const acceptInvitation = vi.fn(async () => {
+        fixture.state.accepted = true;
+        if (response === "throws") throw new Error("lost commit response");
+        return [{ unexpected: true }];
+      });
+      const fixture = invitationHarness({ acceptInvitation });
+      await expect(fixture.accept()).resolves.toMatchObject({
+        result: { kind: "access_granted" },
+      });
+      expect(acceptInvitation).toHaveBeenCalledExactlyOnceWith(
+        {
+          displayName: "Taylor Teacher",
+          invitationId,
+        },
+        passwordAuthority,
+      );
+      expect(fixture.updatePassword).toHaveBeenCalledExactlyOnceWith(
+        "new-invited-password",
+        passwordAuthority,
+      );
+      fixture.adapter.dispose();
+    },
+  );
+
+  it("retries the same invitation UUID and display name once when no committed authority is visible", async () => {
+    const acceptInvitation = vi.fn(async () => {
+      if (acceptInvitation.mock.calls.length === 1)
+        throw new Error("first acceptance response lost");
+      fixture.state.accepted = true;
+      return [{ code: "invitation_accepted" }];
+    });
+    const fixture = invitationHarness({ acceptInvitation });
+    await expect(fixture.accept()).resolves.toMatchObject({
+      result: { kind: "access_granted" },
+    });
+    expect(acceptInvitation.mock.calls).toEqual([
+      [{ displayName: "Taylor Teacher", invitationId }, passwordAuthority],
+      [{ displayName: "Taylor Teacher", invitationId }, passwordAuthority],
+    ]);
+    expect(fixture.updatePassword).toHaveBeenCalledExactlyOnceWith(
+      "new-invited-password",
+      passwordAuthority,
+    );
+    fixture.adapter.dispose();
+  });
+
+  it.each(["throws", "malformed"] as const)(
+    "reports uncertainty without password egress after two unresolved invitation responses that %s",
+    async (response) => {
+      const acceptInvitation = vi.fn(async () => {
+        if (response === "throws")
+          throw new Error("SENTINEL-lost-acceptance-response");
+        return [{ unexpected: true }];
+      });
+      const fixture = invitationHarness({ acceptInvitation });
+      const result = await fixture.accept();
+      expect(result).toEqual({
+        operationId: secondOperationId,
+        result: { kind: "invitation_acceptance_uncertain" },
+      });
+      expect(acceptInvitation).toHaveBeenCalledTimes(2);
+      expect(acceptInvitation.mock.calls[0]).toEqual(
+        acceptInvitation.mock.calls[1],
+      );
+      expect(fixture.updatePassword).not.toHaveBeenCalled();
+      expect(JSON.stringify(result)).not.toContain("SENTINEL");
+      fixture.adapter.dispose();
+    },
+  );
+
+  it("does not retry invitation acceptance or send a password after reconciliation finds another account", async () => {
+    let currentAccountId = accountId;
+    const acceptInvitation = vi.fn(async () => {
+      currentAccountId = "a1000000-0000-4000-8000-000000000002";
+      throw new Error("lost acceptance response during account switch");
+    });
+    const fixture = invitationHarness({
+      acceptInvitation,
+      readAccount: async () => ({
+        accountId: currentAccountId,
+        email: "invitee@example.test",
+        emailVerified: true,
+      }),
+    });
+    await expect(fixture.accept()).resolves.toMatchObject({
+      result: { kind: "invitation_acceptance_uncertain" },
+    });
+    expect(acceptInvitation).toHaveBeenCalledOnce();
+    expect(fixture.updatePassword).not.toHaveBeenCalled();
+    fixture.adapter.dispose();
+  });
+
+  it("never updates a password or retries a definitively rejected database invitation", async () => {
+    const acceptInvitation = vi.fn(async () => [
+      { code: "invitation_expired" },
+    ]);
+    const fixture = invitationHarness({ acceptInvitation });
+    await expect(fixture.accept()).resolves.toEqual({
+      operationId: secondOperationId,
+      result: { kind: "invitation_rejected", reason: "expired" },
+    });
+    expect(acceptInvitation).toHaveBeenCalledOnce();
+    expect(fixture.updatePassword).not.toHaveBeenCalled();
+    fixture.adapter.dispose();
+  });
+
+  it.each(["account", "session"] as const)(
+    "does not send a password or sign out a changed %s after database acceptance commits",
+    async (change) => {
+      let currentAccountId = accountId;
+      let notify: () => void = () => undefined;
+      const fixture = invitationHarness({
+        acceptInvitation: async () => {
+          fixture.state.accepted = true;
+          if (change === "account")
+            currentAccountId = "a1000000-0000-4000-8000-000000000002";
+          else notify();
+          return [{ code: "invitation_accepted" }];
+        },
+        onAuthStateChange: (listener) => {
+          notify = listener;
+          return () => undefined;
+        },
+        readAccount: async () => ({
+          accountId: currentAccountId,
+          email: "invitee@example.test",
+          emailVerified: true,
+        }),
+      });
+      await expect(fixture.accept()).resolves.toMatchObject({
+        result: { kind: "invitation_accepted", passwordOutcome: "unknown" },
+      });
+      expect(fixture.state.accepted).toBe(true);
+      expect(fixture.updatePassword).not.toHaveBeenCalled();
+      expect(fixture.signOut).not.toHaveBeenCalled();
+      fixture.adapter.dispose();
+    },
+  );
+
+  it("does not sign out another account when it changes during an uncertain invitation password update", async () => {
+    let currentAccountId = accountId;
+    const updatePassword = vi.fn(async () => {
+      currentAccountId = "a1000000-0000-4000-8000-000000000002";
+      throw new Error("password response lost while switching account");
+    });
+    const fixture = invitationHarness({
+      readAccount: async () => ({
+        accountId: currentAccountId,
+        email: "invitee@example.test",
+        emailVerified: true,
+      }),
+      updatePassword,
+    });
+    await expect(fixture.accept()).resolves.toMatchObject({
+      result: { kind: "invitation_accepted", passwordOutcome: "unknown" },
+    });
+    expect(updatePassword).toHaveBeenCalledExactlyOnceWith(
+      "new-invited-password",
+      passwordAuthority,
+    );
+    expect(fixture.signOut).not.toHaveBeenCalled();
+    fixture.adapter.dispose();
+  });
+
+  it("reconstructs a pending invitation after reload without reusing its consumed verification token", async () => {
+    const fixture = invitationHarness();
+    const restored = await fixture.adapter.read();
+    expect(restored).toMatchObject({
+      kind: "invitation_ready",
+      intendedAccountId: accountId,
+      intendedEmail: "invitee@example.test",
+      role: "teacher",
+      school: { id: schoolId, label: "Example School" },
+    });
+    expect(fixture.verifyInvitationToken).not.toHaveBeenCalled();
+    if (restored.kind !== "invitation_ready")
+      throw new Error("expected restored invitation");
+    await expect(
+      fixture.adapter.perform({
+        acceptanceReceipt: restored.acceptanceReceipt,
+        displayName: "Taylor Teacher",
+        inspectionOperationId: restored.inspectionOperationId,
+        operationId: secondOperationId,
+        password: "new-invited-password",
+        type: "accept_invitation",
+      }),
+    ).resolves.toMatchObject({ result: { kind: "access_granted" } });
+    expect(fixture.verifyInvitationToken).not.toHaveBeenCalled();
+    fixture.adapter.dispose();
   });
 
   it("resumes a transient invitation lookup without verifying the one-shot token twice", async () => {
@@ -1083,11 +2209,15 @@ describe("Supabase staff auth adapter", () => {
       }),
       revokeBlobUrl: () => undefined,
     });
-    await adapter.read();
+    const actor = await adapter.read();
+    if (actor.kind !== "access_granted")
+      throw new Error("expected owner authority");
 
     await expect(
       adapter.perform({
         email: "new-admin@example.test",
+        expectedIdentityGeneration: actor.identityGeneration,
+        expectedSessionGeneration: actor.sessionGeneration,
         operationId: "90000000-0000-4000-8000-000000000001",
         schoolId,
         targetRole: "admin",
@@ -1128,11 +2258,15 @@ describe("Supabase staff auth adapter", () => {
       }),
       revokeBlobUrl: () => undefined,
     });
-    await adapter.read();
+    const actor = await adapter.read();
+    if (actor.kind !== "access_granted")
+      throw new Error("expected owner authority");
 
     await expect(
       adapter.perform({
         email: "staff@example.test",
+        expectedIdentityGeneration: actor.identityGeneration,
+        expectedSessionGeneration: actor.sessionGeneration,
         operationId: "90000000-0000-4000-8000-000000000002",
         schoolId: "11000000-0000-4000-8000-000000000002",
         targetRole: "teacher",
@@ -1142,6 +2276,74 @@ describe("Supabase staff auth adapter", () => {
     expect(called).toBe(false);
     adapter.dispose();
   });
+
+  it.each(["account", "session", "session during authority refresh"] as const)(
+    "blocks invitation egress when %s changes after the Owner command was prepared",
+    async (change) => {
+      let notify: () => void = () => undefined;
+      let currentAccountId = accountId;
+      let assuranceReads = 0;
+      const invokeInvitation = vi.fn(async () => ({
+        code: "invitation_created",
+        ok: true,
+      }));
+      const adapter = createSupabaseStaffAuthAdapter({
+        clock: { now: () => 1_788_300_000_000 },
+        createBlobUrl: () => {
+          throw new Error("not used");
+        },
+        operationIds: operationIdSource(),
+        port: ownerPort({
+          invokeInvitation,
+          onAuthStateChange: (listener) => {
+            notify = listener;
+            return () => undefined;
+          },
+          readAccount: async () => ({
+            accountId: currentAccountId,
+            email: "owner@example.test",
+            emailVerified: true,
+          }),
+          readAssurance: async () => {
+            assuranceReads += 1;
+            if (
+              change === "session during authority refresh" &&
+              assuranceReads === 2
+            )
+              notify();
+            return {
+              currentAuthenticationMethods: ["password"],
+              currentLevel: "aal2",
+              nextLevel: "aal2",
+            };
+          },
+        }),
+        revokeBlobUrl: () => undefined,
+      });
+      const actor = await adapter.read();
+      if (actor.kind !== "access_granted")
+        throw new Error("expected owner authority");
+      if (change === "account")
+        currentAccountId = "a1000000-0000-4000-8000-000000000002";
+      if (change === "session") notify();
+
+      await expect(
+        adapter.perform({
+          email: "new-admin@example.test",
+          expectedIdentityGeneration: actor.identityGeneration,
+          expectedSessionGeneration: actor.sessionGeneration,
+          operationId: "90000000-0000-4000-8000-000000000004",
+          schoolId,
+          targetRole: "admin",
+          type: "create_staff_invitation",
+        }),
+      ).resolves.toMatchObject({
+        result: { kind: "staff_invitation_rejected" },
+      });
+      expect(invokeInvitation).not.toHaveBeenCalled();
+      adapter.dispose();
+    },
+  );
 
   it("fails closed when management authority changes after the provider mutation", async () => {
     let contextReads = 0;
@@ -1172,11 +2374,15 @@ describe("Supabase staff auth adapter", () => {
       }),
       revokeBlobUrl: () => undefined,
     });
-    await adapter.read();
+    const actor = await adapter.read();
+    if (actor.kind !== "access_granted")
+      throw new Error("expected owner authority");
 
     await expect(
       adapter.perform({
         email: "staff@example.test",
+        expectedIdentityGeneration: actor.identityGeneration,
+        expectedSessionGeneration: actor.sessionGeneration,
         operationId: "90000000-0000-4000-8000-000000000003",
         schoolId,
         targetRole: "teacher",
@@ -1444,6 +2650,7 @@ describe("Supabase staff auth adapter", () => {
           status: "enrolled",
         }),
         readAssurance: async () => ({
+          currentAuthenticationMethods: ["password"],
           currentLevel: assurance,
           nextLevel: "aal2",
         }),
@@ -1514,6 +2721,7 @@ describe("Supabase staff auth adapter", () => {
           status: "enrolled",
         }),
         readAssurance: async () => ({
+          currentAuthenticationMethods: ["password"],
           currentLevel: "aal1",
           nextLevel: "aal2",
         }),
@@ -1547,6 +2755,7 @@ describe("Supabase staff auth adapter", () => {
       port: ownerPort({
         challengeTotp: async () => ({ challengeId, status: "challenged" }),
         readAssurance: async () => ({
+          currentAuthenticationMethods: ["password"],
           currentLevel: assurance,
           nextLevel: "aal2",
         }),
@@ -1594,11 +2803,62 @@ describe("Supabase staff auth adapter", () => {
     adapter.dispose();
   });
 
-  it("coalesces auth notifications into fresh authoritative generation events", async () => {
+  it("emits a synchronous detail-free invalidation and defers reads behind mutations", async () => {
+    let notify: () => void = () => undefined;
+    let finishRevocation: ((value: unknown) => void) | undefined;
+    const readSession = vi.fn(async () => ({ status: "signed_out" }));
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: () => 1_788_300_000_000 },
+      createBlobUrl: () => "blob:not-used",
+      operationIds: operationIdSource(),
+      port: port({
+        onAuthStateChange: (listener) => {
+          notify = listener;
+          return () => undefined;
+        },
+        readSession,
+        revokeCurrentStaffSession: () =>
+          new Promise((resolve) => {
+            finishRevocation = resolve;
+          }),
+        signOut: async () => ({ status: "signed_out" }),
+      }),
+      revokeBlobUrl: () => undefined,
+    });
+    const eventOrder: string[] = [];
+    adapter.subscribe((event) => {
+      eventOrder.push(`event:${JSON.stringify(event)}`);
+    });
+    const mutation = adapter.perform({
+      operationId: firstOperationId,
+      scope: "local",
+      type: "sign_out",
+    });
+
+    eventOrder.push("before");
+    notify();
+    eventOrder.push("after");
+    const read = adapter.read();
+
+    expect(eventOrder).toEqual([
+      "before",
+      'event:{"kind":"revalidation_required"}',
+      "after",
+    ]);
+    expect(readSession).not.toHaveBeenCalled();
+    finishRevocation?.([{ code: "ok" }]);
+    await mutation;
+    await expect(read).resolves.toEqual({ kind: "signed_out" });
+    expect(readSession).toHaveBeenCalledOnce();
+    adapter.dispose();
+  });
+
+  it("emits every auth invalidation synchronously and reads fresh authority only on request", async () => {
     let notify: () => void = () => undefined;
     let school = schoolId;
     let contextReads = 0;
-    const events: unknown[] = [];
+    const readSession = vi.fn(async () => ({ status: "authenticated" }));
+    const events: StaffAuthAccessEvent[] = [];
     const adapter = createSupabaseStaffAuthAdapter({
       clock: { now: () => 1_788_300_000_000 },
       createBlobUrl: () => "blob:not-used",
@@ -1614,6 +2874,7 @@ describe("Supabase staff auth adapter", () => {
           emailVerified: true,
         }),
         readAssurance: async () => ({
+          currentAuthenticationMethods: ["password"],
           currentLevel: "aal1",
           nextLevel: "aal1",
         }),
@@ -1634,32 +2895,42 @@ describe("Supabase staff auth adapter", () => {
             },
           ];
         },
-        readSession: async () => ({ status: "authenticated" }),
+        readSession,
       }),
       revokeBlobUrl: () => undefined,
     });
-    await adapter.read();
+    const initial = await adapter.read();
+    expect(initial).toMatchObject({
+      identityGeneration: "10000000-0000-4000-8000-000000000002",
+      sessionGeneration: "10000000-0000-4000-8000-000000000001",
+    });
     adapter.subscribe((event) => events.push(event));
     school = "11000000-0000-4000-8000-000000000002";
     notify();
+    expect(events).toEqual([{ kind: "revalidation_required" }]);
     notify();
+    expect(events).toEqual([
+      { kind: "revalidation_required" },
+      { kind: "revalidation_required" },
+    ]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(readSession).toHaveBeenCalledOnce();
+    expect(contextReads).toBe(1);
 
-    await vi.waitFor(() => expect(events).toHaveLength(1));
-    expect(events[0]).toMatchObject({
-      access: {
-        identity: { school: { id: school } },
-        identityGeneration: "10000000-0000-4000-8000-000000000004",
-        sessionGeneration: "10000000-0000-4000-8000-000000000003",
-      },
-      kind: "access_changed",
-      previousIdentityGeneration: "10000000-0000-4000-8000-000000000002",
-      previousSessionGeneration: "10000000-0000-4000-8000-000000000001",
+    await expect(adapter.read()).resolves.toMatchObject({
+      identity: { school: { id: school } },
+      identityGeneration: "10000000-0000-4000-8000-000000000004",
+      kind: "access_granted",
+      sessionGeneration: "10000000-0000-4000-8000-000000000003",
     });
+    expect(readSession).toHaveBeenCalledTimes(2);
     expect(contextReads).toBe(2);
+    expect(events).toHaveLength(2);
     adapter.dispose();
   });
 
-  it("invalidates authority once when the sole auth-event refresh fails", async () => {
+  it("keeps invalidation detail-free when a subsequent requested authority read fails", async () => {
     let notify: () => void = () => undefined;
     let contextReads = 0;
     const events: StaffAuthAccessEvent[] = [];
@@ -1678,6 +2949,7 @@ describe("Supabase staff auth adapter", () => {
           emailVerified: true,
         }),
         readAssurance: async () => ({
+          currentAuthenticationMethods: ["password"],
           currentLevel: "aal1",
           nextLevel: "aal1",
         }),
@@ -1711,27 +2983,26 @@ describe("Supabase staff auth adapter", () => {
 
     notify();
 
-    await vi.waitFor(() => expect(events).toHaveLength(1));
-    expect(events).toEqual([
-      {
-        identityGeneration: initial.identityGeneration,
-        kind: "authority_unavailable",
-        sessionGeneration: initial.sessionGeneration,
-      },
-    ]);
+    expect(events).toEqual([{ kind: "revalidation_required" }]);
     await Promise.resolve();
     await Promise.resolve();
+    expect(contextReads).toBe(1);
+
+    await expect(adapter.read()).rejects.toThrow(
+      "SENTINEL-authority-read-failure",
+    );
     expect(contextReads).toBe(2);
+    expect(events).toEqual([{ kind: "revalidation_required" }]);
     expect(JSON.stringify(events)).not.toContain("SENTINEL");
     adapter.dispose();
   });
 
-  it("unsubscribes and ignores a queued authority read after disposal", async () => {
+  it("unsubscribes, ignores notifications, and rejects an in-flight read after disposal", async () => {
     let notify: () => void = () => undefined;
     const contextDeferred: { resolve?: (value: unknown) => void } = {};
     let contextReads = 0;
-    let unsubscribed = false;
-    const events: unknown[] = [];
+    const unsubscribeProvider = vi.fn();
+    const events: StaffAuthAccessEvent[] = [];
     const adapter = createSupabaseStaffAuthAdapter({
       clock: { now: () => 1_788_300_000_000 },
       createBlobUrl: () => "blob:not-used",
@@ -1739,9 +3010,7 @@ describe("Supabase staff auth adapter", () => {
       port: port({
         onAuthStateChange: (listener) => {
           notify = listener;
-          return () => {
-            unsubscribed = true;
-          };
+          return unsubscribeProvider;
         },
         readAccount: async () => ({
           accountId,
@@ -1749,6 +3018,7 @@ describe("Supabase staff auth adapter", () => {
           emailVerified: true,
         }),
         readAssurance: async () => ({
+          currentAuthenticationMethods: ["password"],
           currentLevel: "aal1",
           nextLevel: "aal1",
         }),
@@ -1779,10 +3049,16 @@ describe("Supabase staff auth adapter", () => {
     await adapter.read();
     adapter.subscribe((event) => events.push(event));
     notify();
+    expect(events).toEqual([{ kind: "revalidation_required" }]);
+    expect(contextReads).toBe(1);
+    const read = adapter.read();
+    const readRejection = expect(read).rejects.toThrow("disposed");
     await vi.waitFor(() =>
       expect(contextDeferred.resolve).toBeTypeOf("function"),
     );
     adapter.dispose();
+    adapter.dispose();
+    notify();
     contextDeferred.resolve?.([
       {
         code: "session_revoked",
@@ -1795,11 +3071,11 @@ describe("Supabase staff auth adapter", () => {
         school_slug: null,
       },
     ]);
-    await Promise.resolve();
-    await Promise.resolve();
+    await readRejection;
 
-    expect(unsubscribed).toBe(true);
-    expect(events).toEqual([]);
+    expect(unsubscribeProvider).toHaveBeenCalledOnce();
+    expect(contextReads).toBe(2);
+    expect(events).toEqual([{ kind: "revalidation_required" }]);
     await expect(adapter.read()).rejects.toThrow("disposed");
   });
 
@@ -1950,4 +3226,39 @@ describe("Supabase staff auth adapter", () => {
     });
     adapter.dispose();
   });
+});
+
+describe("delivery result composition", () => {
+  it.each(["unconfirmed", "rejected"] as const)(
+    "keeps the Owner's %s dispatch outcome distinct from invitation denial",
+    async (outcome) => {
+      const invokeInvitation = vi.fn(async () => ({
+        ok: false,
+        code: `invitation_delivery_${outcome}`,
+      }));
+      const adapter = createSupabaseStaffAuthAdapter({
+        clock: { now: () => Date.parse("2026-09-03T20:00:00.000Z") },
+        createBlobUrl: () => "unused",
+        operationIds: operationIdSource(),
+        port: ownerPort({ invokeInvitation }),
+        revokeBlobUrl: () => undefined,
+      });
+      const actor = await adapter.read();
+      if (actor.kind !== "access_granted") throw new Error("expected Owner");
+      const result = await adapter.perform({
+        type: "create_staff_invitation",
+        operationId: firstOperationId,
+        email: "invited@example.test",
+        schoolId,
+        targetRole: "teacher",
+        expectedIdentityGeneration: actor.identityGeneration,
+        expectedSessionGeneration: actor.sessionGeneration,
+      });
+      expect(result).toMatchObject({
+        result: { kind: "staff_invitation_delivery", outcome },
+      });
+      expect(invokeInvitation).toHaveBeenCalledOnce();
+      adapter.dispose();
+    },
+  );
 });

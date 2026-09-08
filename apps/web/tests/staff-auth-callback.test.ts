@@ -3,45 +3,21 @@ import { describe, expect, it, vi } from "vitest";
 import {
   consumeStaffEmailVerificationCallback,
   consumeStaffInvitationCallback,
-  consumeStaffRecoveryCallback,
-  type StaffRecoveryFlowConsumeResult,
-  type StaffRecoveryFlowStore,
+  prepareStaffRecoveryCallback,
 } from "../src/auth/staff-auth-callback.js";
 
 const origin = "https://app.example.test";
 const route = { origin, pathname: "/" } as const;
 const flowId = "f".repeat(22);
 const state = "s".repeat(43);
-const verifier = "v".repeat(43);
 const tokenHash = "a".repeat(56);
 const sdkFlowId = "0123456789abcdef0123456789abcdef";
+const backendOrigin = "https://project.supabase.co";
 
 function history(order: string[] = []) {
   return {
     replaceState(_data: null, _unused: string, url: string) {
       order.push(`scrub:${url}`);
-    },
-  };
-}
-
-function flowStore(
-  result: StaffRecoveryFlowConsumeResult = {
-    expiresAt: 301_000,
-    state,
-    status: "accepted",
-    verifier,
-  },
-): StaffRecoveryFlowStore {
-  return {
-    async consume() {
-      return result;
-    },
-    async create() {
-      return {
-        codeChallenge: "c".repeat(43),
-        flowId,
-        state,
-      };
     },
   };
 }
@@ -54,7 +30,7 @@ describe("staff invitation callback", () => {
       release = resolve;
     });
     const work = consumeStaffInvitationCallback(
-      `${origin}/?token_hash=${tokenHash}&auth=invite`,
+      `${origin}/?auth=invite#token_hash=${tokenHash}`,
       {
         history: history(order),
         async inspect(received) {
@@ -77,6 +53,19 @@ describe("staff invitation callback", () => {
   });
 
   it.each([
+    ["query token", `${origin}/?auth=invite&token_hash=${tokenHash}`],
+    [
+      "mixed query and fragment",
+      `${origin}/?auth=invite&token_hash=${tokenHash}#token_hash=${tokenHash}`,
+    ],
+    [
+      "encoded fragment key",
+      `${origin}/?auth=invite#token%5fhash=${tokenHash}`,
+    ],
+    [
+      "encoded hash",
+      `${origin}/?auth=invite#token_hash=%61${tokenHash.slice(1)}`,
+    ],
     ["legacy token", `${origin}/?auth=invite&token=${tokenHash}`],
     [
       "legacy provider verify",
@@ -85,35 +74,35 @@ describe("staff invitation callback", () => {
     ["wrong kind", `${origin}/?auth=recovery&token_hash=${tokenHash}`],
     [
       "duplicate auth",
-      `${origin}/?auth=invite&auth=invite&token_hash=${tokenHash}`,
+      `${origin}/?auth=invite&auth=invite#token_hash=${tokenHash}`,
     ],
     [
       "duplicate hash",
-      `${origin}/?auth=invite&token_hash=${tokenHash}&token_hash=${tokenHash}`,
+      `${origin}/?auth=invite#token_hash=${tokenHash}&token_hash=${tokenHash}`,
     ],
     [
       "extra key",
-      `${origin}/?auth=invite&token_hash=${tokenHash}&next=/school`,
+      `${origin}/?auth=invite#token_hash=${tokenHash}&next=/school`,
     ],
-    ["mixed recovery", `${origin}/?auth=invite&token_hash=${tokenHash}&code=x`],
+    ["mixed recovery", `${origin}/?auth=invite#token_hash=${tokenHash}&code=x`],
     ["missing hash", `${origin}/?auth=invite`],
-    ["blank hash", `${origin}/?auth=invite&token_hash=`],
-    ["short hash", `${origin}/?auth=invite&token_hash=${"a".repeat(55)}`],
-    ["long hash", `${origin}/?auth=invite&token_hash=${"a".repeat(57)}`],
-    ["uppercase hash", `${origin}/?auth=invite&token_hash=${"A".repeat(56)}`],
-    ["non-hex hash", `${origin}/?auth=invite&token_hash=${"g".repeat(56)}`],
-    ["whitespace hash", `${origin}/?auth=invite&token_hash=%20${tokenHash}`],
-    ["control hash", `${origin}/?auth=invite&token_hash=%00${tokenHash}`],
+    ["blank hash", `${origin}/?auth=invite#token_hash=`],
+    ["short hash", `${origin}/?auth=invite#token_hash=${"a".repeat(55)}`],
+    ["long hash", `${origin}/?auth=invite#token_hash=${"a".repeat(57)}`],
+    ["uppercase hash", `${origin}/?auth=invite#token_hash=${"A".repeat(56)}`],
+    ["non-hex hash", `${origin}/?auth=invite#token_hash=${"g".repeat(56)}`],
+    ["whitespace hash", `${origin}/?auth=invite#token_hash=%20${tokenHash}`],
+    ["control hash", `${origin}/?auth=invite#token_hash=%00${tokenHash}`],
     [
       "wrong path",
-      `${origin}/auth/invitation?auth=invite&token_hash=${tokenHash}`,
+      `${origin}/auth/invitation?auth=invite#token_hash=${tokenHash}`,
     ],
     [
       "wrong origin",
-      `https://evil.example/?auth=invite&token_hash=${tokenHash}`,
+      `https://evil.example/?auth=invite#token_hash=${tokenHash}`,
     ],
-    ["fragment", `${origin}/?auth=invite&token_hash=${tokenHash}#secret`],
-    ["oversize hash", `${origin}/?auth=invite&token_hash=${"a".repeat(4097)}`],
+    ["fragment", `${origin}/?auth=invite#token_hash=${tokenHash}#secret`],
+    ["oversize hash", `${origin}/?auth=invite#token_hash=${"a".repeat(4097)}`],
   ])(
     "scrubs and rejects %s without inspection",
     async (_label, callbackUrl) => {
@@ -133,7 +122,7 @@ describe("staff invitation callback", () => {
   it("sanitizes inspection and history failures", async () => {
     await expect(
       consumeStaffInvitationCallback(
-        `${origin}/?auth=invite&token_hash=${tokenHash}`,
+        `${origin}/?auth=invite#token_hash=${tokenHash}`,
         {
           history: history(),
           inspect: async () => {
@@ -150,7 +139,7 @@ describe("staff invitation callback", () => {
     const inspect = vi.fn(async () => undefined);
     await expect(
       consumeStaffInvitationCallback(
-        `${origin}/?auth=invite&token_hash=${tokenHash}`,
+        `${origin}/?auth=invite#token_hash=${tokenHash}`,
         {
           history: {
             replaceState() {
@@ -280,173 +269,511 @@ describe("staff email-verification callback", () => {
 });
 
 describe("staff recovery callback", () => {
-  const callbackUrl = `${origin}/?state=${state}&auth=recovery&code=provider-code&flow=${flowId}`;
+  const recoveryToken = `pkce_${tokenHash}`;
+  const firstHop = `${origin}/?auth=recovery&flow=${flowId}&state=${state}#token_hash=${recoveryToken}&type=recovery`;
 
-  it("scrubs before atomically consuming the flow and exchanges transient credentials", async () => {
+  it("prepares an inert first hop whose one explicit command navigates to the exact provider verification URL", async () => {
     const order: string[] = [];
-    const flows = flowStore();
-    const consume = vi
-      .spyOn(flows, "consume")
-      .mockImplementation(async (received) => {
-        order.push(`consume:${received}`);
-        return { expiresAt: 301_000, state, status: "accepted", verifier };
-      });
-    const exchange = vi.fn(
-      async ({ authorizationCode, verifier: received }) => {
-        order.push(`exchange:${authorizationCode}:${received}`);
-      },
-    );
+    const navigate = vi.fn((url: string) => {
+      order.push(`navigate:${url}`);
+    });
+    const exchange = vi.fn(async () => undefined);
 
-    const receipt = await consumeStaffRecoveryCallback(callbackUrl, {
-      clock: { now: () => 1_000 },
+    const prepared = prepareStaffRecoveryCallback(firstHop, {
+      backendOrigin,
       exchange,
-      flows,
       history: history(order),
+      navigate,
       route,
     });
 
+    expect(order).toEqual(["scrub:/"]);
+    expect(prepared.status).toBe("confirmation_required");
+    expect(JSON.stringify(prepared)).not.toContain(recoveryToken);
+    expect(JSON.stringify(prepared)).not.toContain(flowId);
+    expect(JSON.stringify(prepared)).not.toContain(state);
+    expect(exchange).not.toHaveBeenCalled();
+
+    if (prepared.status !== "confirmation_required") {
+      throw new Error("expected an inert recovery first hop");
+    }
+    await expect(prepared.confirm()).resolves.toEqual({
+      code: "recovery_verification_started",
+      status: "redirecting",
+    });
+    expect(navigate).toHaveBeenCalledWith(
+      `${backendOrigin}/auth/v1/verify?token=${recoveryToken}&type=recovery&redirect_to=https%3A%2F%2Fapp.example.test%2F%3Fauth%3Drecovery%26flow%3D${flowId}%26state%3D${state}`,
+    );
+  });
+
+  it("prepares the scrubbed provider return as a one-shot Edge exchange", async () => {
+    const authorizationCode = "synthetic-provider-authorization-code";
+    const order: string[] = [];
+    let release: () => void = () => undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const exchange = vi.fn(async (input) => {
+      order.push(
+        `exchange:${input.authorizationCode}:${input.flowId}:${input.state}`,
+      );
+      await blocked;
+    });
+    const prepared = prepareStaffRecoveryCallback(
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}&code=${authorizationCode}`,
+      {
+        backendOrigin,
+        exchange,
+        history: history(order),
+        navigate: vi.fn(),
+        route,
+      },
+    );
+
+    expect(order).toEqual(["scrub:/"]);
+    expect(prepared.status).toBe("exchange_required");
+    expect(JSON.stringify(prepared)).not.toContain(authorizationCode);
+    expect(JSON.stringify(prepared)).not.toContain(flowId);
+    expect(JSON.stringify(prepared)).not.toContain(state);
+    expect(exchange).not.toHaveBeenCalled();
+    if (prepared.status !== "exchange_required") {
+      throw new Error("expected a recovery exchange command");
+    }
+
+    const first = prepared.exchange();
+    await expect(prepared.exchange()).resolves.toEqual({
+      code: "callback_already_used",
+      status: "rejected",
+    });
     expect(order).toEqual([
       "scrub:/",
-      `consume:${flowId}`,
-      `exchange:provider-code:${verifier}`,
+      `exchange:${authorizationCode}:${flowId}:${state}`,
     ]);
-    expect(consume).toHaveBeenCalledOnce();
-    expect(receipt).toEqual({
+    expect(exchange).toHaveBeenCalledOnce();
+    release();
+    await expect(first).resolves.toEqual({
       code: "accepted",
       kind: "recovery",
       status: "accepted",
     });
-    expect(JSON.stringify(receipt)).not.toContain("provider-code");
-    expect(JSON.stringify(receipt)).not.toContain(verifier);
+  });
+
+  it.each([
+    [
+      "empty fragment delimiter",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}&code=provider-code#`,
+    ],
+    [
+      "trailing query separator",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}&code=provider-code&`,
+    ],
+  ])("rejects a provider return with a normalized-away %s", (_label, url) => {
+    const exchange = vi.fn(async () => undefined);
+    const prepared = prepareStaffRecoveryCallback(url, {
+      backendOrigin,
+      exchange,
+      history: history(),
+      navigate: vi.fn(),
+      route,
+    });
+
+    expect(prepared).toEqual({
+      code: "malformed_callback",
+      status: "rejected",
+    });
+    expect(exchange).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "missing fragment",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}`,
+    ],
+    [
+      "missing token hash",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}#type=recovery`,
+    ],
+    [
+      "missing recovery type",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}#token_hash=${recoveryToken}`,
+    ],
+    [
+      "reordered query",
+      `${origin}/?flow=${flowId}&auth=recovery&state=${state}#token_hash=${recoveryToken}&type=recovery`,
+    ],
+    [
+      "reordered fragment",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}#type=recovery&token_hash=${recoveryToken}`,
+    ],
+    [
+      "duplicate auth",
+      `${origin}/?auth=recovery&auth=recovery&flow=${flowId}&state=${state}#token_hash=${recoveryToken}&type=recovery`,
+    ],
+    [
+      "duplicate flow",
+      `${origin}/?auth=recovery&flow=${flowId}&flow=${flowId}&state=${state}#token_hash=${recoveryToken}&type=recovery`,
+    ],
+    [
+      "duplicate state",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}&state=${state}#token_hash=${recoveryToken}&type=recovery`,
+    ],
+    [
+      "duplicate token hash",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}#token_hash=${recoveryToken}&token_hash=${recoveryToken}&type=recovery`,
+    ],
+    [
+      "duplicate recovery type",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}#token_hash=${recoveryToken}&type=recovery&type=recovery`,
+    ],
+    [
+      "extra query field",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}&next=/#token_hash=${recoveryToken}&type=recovery`,
+    ],
+    [
+      "extra fragment field",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}#token_hash=${recoveryToken}&type=recovery&next=/`,
+    ],
+    [
+      "provider return mixed into first hop",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}&code=provider-code#token_hash=${recoveryToken}&type=recovery`,
+    ],
+    [
+      "wrong auth kind",
+      `${origin}/?auth=invite&flow=${flowId}&state=${state}#token_hash=${recoveryToken}&type=recovery`,
+    ],
+    [
+      "wrong fragment type",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}#token_hash=${recoveryToken}&type=signup`,
+    ],
+    [
+      "short flow ID",
+      `${origin}/?auth=recovery&flow=${"f".repeat(21)}&state=${state}#token_hash=${recoveryToken}&type=recovery`,
+    ],
+    [
+      "non-base64url flow ID",
+      `${origin}/?auth=recovery&flow=${"!".repeat(22)}&state=${state}#token_hash=${recoveryToken}&type=recovery`,
+    ],
+    [
+      "short state",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${"s".repeat(42)}#token_hash=${recoveryToken}&type=recovery`,
+    ],
+    [
+      "non-base64url state",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${"!".repeat(43)}#token_hash=${recoveryToken}&type=recovery`,
+    ],
+    [
+      "short token hash",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}#token_hash=pkce_${"a".repeat(55)}&type=recovery`,
+    ],
+    [
+      "uppercase token hash",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}#token_hash=pkce_${"A".repeat(56)}&type=recovery`,
+    ],
+    [
+      "non-hex token hash",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}#token_hash=pkce_${"g".repeat(56)}&type=recovery`,
+    ],
+    [
+      "unprefixed token hash",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}#token_hash=${tokenHash}&type=recovery`,
+    ],
+    [
+      "encoded field name",
+      `${origin}/?%61uth=recovery&flow=${flowId}&state=${state}#token_hash=${recoveryToken}&type=recovery`,
+    ],
+    [
+      "wrong path",
+      `${origin}/auth/callback?auth=recovery&flow=${flowId}&state=${state}#token_hash=${recoveryToken}&type=recovery`,
+    ],
+    [
+      "wrong origin",
+      `https://elsewhere.example.test/?auth=recovery&flow=${flowId}&state=${state}#token_hash=${recoveryToken}&type=recovery`,
+    ],
+    [
+      "userinfo",
+      `https://user@app.example.test/?auth=recovery&flow=${flowId}&state=${state}#token_hash=${recoveryToken}&type=recovery`,
+    ],
+  ])("scrubs and rejects a malformed first hop: %s", (_label, url) => {
+    const order: string[] = [];
+    const navigate = vi.fn();
+    const exchange = vi.fn(async () => undefined);
+    const prepared = prepareStaffRecoveryCallback(url, {
+      backendOrigin,
+      exchange,
+      history: history(order),
+      navigate,
+      route,
+    });
+
+    expect(order).toEqual(["scrub:/"]);
+    expect(prepared.status).toBe("rejected");
+    expect(navigate).not.toHaveBeenCalled();
+    expect(exchange).not.toHaveBeenCalled();
   });
 
   it.each([
     ["missing code", `${origin}/?auth=recovery&flow=${flowId}&state=${state}`],
-    ["missing state", `${origin}/?auth=recovery&code=x&flow=${flowId}`],
     [
-      "duplicate state",
-      `${origin}/?auth=recovery&code=x&flow=${flowId}&state=${state}&state=${state}`,
+      "blank code",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}&code=`,
+    ],
+    [
+      "encoded flow key alias",
+      `${origin}/?auth=recovery&code=provider-code&fl%6fw=${flowId}&state=${state}`,
+    ],
+    [
+      "duplicate auth",
+      `${origin}/?auth=recovery&auth=recovery&flow=${flowId}&state=${state}&code=provider-code`,
     ],
     [
       "duplicate flow",
-      `${origin}/?auth=recovery&code=x&flow=${flowId}&flow=${flowId}&state=${state}`,
+      `${origin}/?auth=recovery&flow=${flowId}&flow=${flowId}&state=${state}&code=provider-code`,
     ],
     [
-      "extra key",
-      `${origin}/?auth=recovery&code=x&flow=${flowId}&state=${state}&next=/`,
-    ],
-    ["legacy PKCE", `${origin}/?code=x&flow=password_recovery&state=${state}`],
-    [
-      "mixed token hash",
-      `${origin}/?auth=recovery&token_hash=${tokenHash}&code=x&flow=${flowId}&state=${state}`,
+      "duplicate state",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}&state=${state}&code=provider-code`,
     ],
     [
-      "invite mix",
-      `${origin}/?auth=invite&code=x&flow=${flowId}&state=${state}`,
+      "duplicate code",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}&code=provider-code&code=provider-code`,
     ],
     [
-      "wrong path",
-      `${origin}/auth/callback?auth=recovery&code=x&flow=${flowId}&state=${state}`,
+      "extra field",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}&code=provider-code&next=/`,
     ],
-    ["short flow", `${origin}/?auth=recovery&code=x&flow=short&state=${state}`],
+    [
+      "wrong auth kind",
+      `${origin}/?auth=invite&flow=${flowId}&state=${state}&code=provider-code`,
+    ],
+    [
+      "short flow ID",
+      `${origin}/?auth=recovery&flow=${"f".repeat(21)}&state=${state}&code=provider-code`,
+    ],
     [
       "short state",
-      `${origin}/?auth=recovery&code=x&flow=${flowId}&state=short`,
+      `${origin}/?auth=recovery&flow=${flowId}&state=${"s".repeat(42)}&code=provider-code`,
+    ],
+    [
+      "leading whitespace in code",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}&code=%20provider-code`,
+    ],
+    [
+      "control text in code",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}&code=provider%00code`,
     ],
     [
       "oversize code",
-      `${origin}/?auth=recovery&code=${"x".repeat(2049)}&flow=${flowId}&state=${state}`,
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}&code=${"x".repeat(2049)}`,
     ],
-  ])("scrubs and rejects %s before flow consumption", async (_label, url) => {
-    const scrubs: string[] = [];
-    const flows = flowStore();
-    const consume = vi.spyOn(flows, "consume");
+    [
+      "nonempty fragment",
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}&code=provider-code#unexpected`,
+    ],
+    [
+      "wrong path",
+      `${origin}/auth/callback?auth=recovery&flow=${flowId}&state=${state}&code=provider-code`,
+    ],
+    [
+      "wrong origin",
+      `https://elsewhere.example.test/?auth=recovery&flow=${flowId}&state=${state}&code=provider-code`,
+    ],
+  ])("scrubs and rejects a malformed provider return: %s", (_label, url) => {
+    const order: string[] = [];
+    const navigate = vi.fn();
     const exchange = vi.fn(async () => undefined);
-    const receipt = await consumeStaffRecoveryCallback(url, {
-      clock: { now: () => 1_000 },
+    const prepared = prepareStaffRecoveryCallback(url, {
+      backendOrigin,
       exchange,
-      flows,
-      history: history(scrubs),
+      history: history(order),
+      navigate,
       route,
     });
-    expect(scrubs).toEqual(["scrub:/"]);
-    expect(receipt.status).toBe("rejected");
-    expect(consume).not.toHaveBeenCalled();
+
+    expect(order).toEqual(["scrub:/"]);
+    expect(prepared.status).toBe("rejected");
+    expect(navigate).not.toHaveBeenCalled();
     expect(exchange).not.toHaveBeenCalled();
   });
 
   it.each([
-    ["invalid", { status: "invalid" } as const, "recovery_flow_invalid"],
-    ["replayed", { status: "replayed" } as const, "recovery_flow_replayed"],
-    [
-      "expired",
-      { expiresAt: 1_000, state, status: "accepted", verifier } as const,
-      "recovery_flow_expired",
-    ],
-    [
-      "too-long lifetime",
-      { expiresAt: 301_001, state, status: "accepted", verifier } as const,
-      "recovery_flow_expired",
-    ],
-    [
-      "cross-flow state",
-      {
-        expiresAt: 301_000,
-        state: "x".repeat(43),
-        status: "accepted",
-        verifier,
-      } as const,
-      "recovery_state_mismatch",
-    ],
-  ])("rejects a %s one-time flow", async (_label, result, code) => {
-    const exchange = vi.fn(async () => undefined);
-    const receipt = await consumeStaffRecoveryCallback(callbackUrl, {
-      clock: { now: () => 1_000 },
-      exchange,
-      flows: flowStore(result),
+    ["insecure remote origin", "http://project.supabase.co"],
+    ["path", `${backendOrigin}/auth/v1`],
+    ["trailing slash", `${backendOrigin}/`],
+    ["query", `${backendOrigin}?project=other`],
+    ["fragment", `${backendOrigin}#other`],
+    ["userinfo", "https://user@project.supabase.co"],
+    ["non-HTTP scheme", "javascript:alert(1)"],
+  ])("rejects a noncanonical backend origin: %s", (_label, invalidOrigin) => {
+    const navigate = vi.fn();
+    const prepared = prepareStaffRecoveryCallback(firstHop, {
+      backendOrigin: invalidOrigin,
+      exchange: vi.fn(async () => undefined),
       history: history(),
+      navigate,
       route,
     });
-    expect(receipt).toEqual({ code, status: "rejected" });
-    expect(exchange).not.toHaveBeenCalled();
+
+    expect(prepared).toEqual({
+      code: "invalid_callback",
+      status: "rejected",
+    });
+    expect(navigate).not.toHaveBeenCalled();
   });
 
-  it("fails closed on inaccessible flow records and sanitized exchange errors", async () => {
-    const proxy = new Proxy(
-      {},
-      {
-        ownKeys() {
-          throw new Error("trap");
-        },
-      },
-    );
-    const proxyStore = flowStore();
-    vi.spyOn(proxyStore, "consume").mockResolvedValue(
-      proxy as StaffRecoveryFlowConsumeResult,
-    );
-    await expect(
-      consumeStaffRecoveryCallback(callbackUrl, {
-        clock: { now: () => 1_000 },
-        exchange: async () => undefined,
-        flows: proxyStore,
-        history: history(),
-        route,
-      }),
-    ).resolves.toEqual({ code: "recovery_flow_invalid", status: "rejected" });
-
-    const receipt = await consumeStaffRecoveryCallback(callbackUrl, {
-      clock: { now: () => 1_000 },
-      exchange: async () => {
-        throw new Error(`provider leaked ${verifier}`);
-      },
-      flows: flowStore(),
+  it("allows an exact loopback backend origin for local source verification", async () => {
+    const navigate = vi.fn();
+    const prepared = prepareStaffRecoveryCallback(firstHop, {
+      backendOrigin: "http://127.0.0.1:54321",
+      exchange: vi.fn(async () => undefined),
       history: history(),
+      navigate,
       route,
     });
+    if (prepared.status !== "confirmation_required") {
+      throw new Error("expected an inert recovery first hop");
+    }
+
+    await prepared.confirm();
+    expect(navigate).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /^http:\/\/127\.0\.0\.1:54321\/auth\/v1\/verify\?/u,
+      ),
+    );
+  });
+
+  it("pins the validated app origin before the explicit command", async () => {
+    const mutableRoute: { origin: string; pathname: "/" } = {
+      origin,
+      pathname: "/",
+    };
+    const navigate = vi.fn();
+    const prepared = prepareStaffRecoveryCallback(firstHop, {
+      backendOrigin,
+      exchange: vi.fn(async () => undefined),
+      history: history(),
+      navigate,
+      route: mutableRoute,
+    });
+    mutableRoute.origin = "https://elsewhere.example.test";
+    if (prepared.status !== "confirmation_required") {
+      throw new Error("expected an inert recovery first hop");
+    }
+
+    await prepared.confirm();
+    const destination = new URL(String(navigate.mock.calls[0]?.[0]));
+    expect(destination.searchParams.get("redirect_to")).toBe(
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}`,
+    );
+  });
+
+  it("burns the first-hop command before navigation and sanitizes failures", async () => {
+    const navigate = vi.fn(() => {
+      throw new Error(`navigation leaked ${recoveryToken}`);
+    });
+    const prepared = prepareStaffRecoveryCallback(firstHop, {
+      backendOrigin,
+      exchange: vi.fn(async () => undefined),
+      history: history(),
+      navigate,
+      route,
+    });
+    if (prepared.status !== "confirmation_required") {
+      throw new Error("expected an inert recovery first hop");
+    }
+
+    const receipt = await prepared.confirm();
     expect(receipt).toEqual({
       code: "token_consumption_unavailable",
       status: "rejected",
     });
-    expect(JSON.stringify(receipt)).not.toContain(verifier);
+    expect(JSON.stringify(receipt)).not.toContain(recoveryToken);
+    await expect(prepared.confirm()).resolves.toEqual({
+      code: "callback_already_used",
+      status: "rejected",
+    });
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it("burns the provider-return command before exchange and sanitizes failures", async () => {
+    const authorizationCode = "synthetic-provider-authorization-code";
+    const exchange = vi.fn(async () => {
+      throw new Error(
+        `exchange leaked ${authorizationCode} ${flowId} ${state}`,
+      );
+    });
+    const prepared = prepareStaffRecoveryCallback(
+      `${origin}/?auth=recovery&flow=${flowId}&state=${state}&code=${authorizationCode}`,
+      {
+        backendOrigin,
+        exchange,
+        history: history(),
+        navigate: vi.fn(),
+        route,
+      },
+    );
+    if (prepared.status !== "exchange_required") {
+      throw new Error("expected a recovery exchange command");
+    }
+
+    const receipt = await prepared.exchange();
+    expect(receipt).toEqual({
+      code: "token_consumption_unavailable",
+      status: "rejected",
+    });
+    expect(JSON.stringify(receipt)).not.toContain(authorizationCode);
+    expect(JSON.stringify(receipt)).not.toContain(flowId);
+    expect(JSON.stringify(receipt)).not.toContain(state);
+    await expect(prepared.exchange()).resolves.toEqual({
+      code: "callback_already_used",
+      status: "rejected",
+    });
+    expect(exchange).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed if the defense-in-depth history scrub fails", () => {
+    const navigate = vi.fn();
+    const exchange = vi.fn(async () => undefined);
+    const prepared = prepareStaffRecoveryCallback(firstHop, {
+      backendOrigin,
+      exchange,
+      history: {
+        replaceState() {
+          throw new Error(`history leaked ${recoveryToken}`);
+        },
+      },
+      navigate,
+      route,
+    });
+
+    expect(prepared).toEqual({
+      code: "invalid_callback",
+      status: "rejected",
+    });
+    expect(navigate).not.toHaveBeenCalled();
+    expect(exchange).not.toHaveBeenCalled();
+  });
+});
+
+describe("provider recovery query serialization", () => {
+  it("accepts GoTrue's sorted callback keys without weakening credential scrubbing", async () => {
+    const order: string[] = [];
+    const exchange = vi.fn(async () => undefined);
+    const navigate = vi.fn();
+    const prepared = prepareStaffRecoveryCallback(
+      `${origin}/?auth=recovery&code=provider-code&flow=${flowId}&state=${state}`,
+      { backendOrigin, exchange, history: history(order), navigate, route },
+    );
+    expect(order).toEqual(["scrub:/"]);
+    expect(exchange).not.toHaveBeenCalled();
+    expect(prepared.status).toBe("exchange_required");
+    if (prepared.status !== "exchange_required")
+      throw new Error("expected exchange");
+    await prepared.exchange();
+    expect(exchange).toHaveBeenCalledExactlyOnceWith({
+      authorizationCode: "provider-code",
+      flowId,
+      state,
+    });
+    expect(navigate).not.toHaveBeenCalled();
   });
 });

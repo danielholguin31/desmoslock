@@ -11,6 +11,7 @@ export type StaffAuthViewActionId =
   | "begin_totp_enrollment"
   | "cancel_totp"
   | "complete_password_recovery"
+  | "confirm_callback"
   | "continue_authenticated"
   | "create_administrator_invitation"
   | "create_teacher_invitation"
@@ -26,6 +27,7 @@ export type StaffAuthViewActionId =
   | "revoke_all_sessions"
   | "sign_in"
   | "sign_out_local"
+  | "select_totp_factor"
   | "verify_totp";
 
 export interface StaffAuthViewAction {
@@ -50,6 +52,16 @@ export interface StaffAuthViewField {
 }
 
 export type StaffAuthViewSelect =
+  | {
+      readonly group: "primary";
+      readonly id: "totp_factor";
+      readonly label: string;
+      readonly options: readonly {
+        readonly choiceId: string;
+        readonly label: string;
+        readonly value: string;
+      }[];
+    }
   | {
       readonly group: "membership";
       readonly id: "staff_membership";
@@ -103,11 +115,13 @@ export type StaffAuthViewIntent =
       readonly type: "accept_invitation";
     }
   | { readonly type: "begin_totp_enrollment" }
+  | { readonly choiceId: string; readonly type: "select_totp_factor" }
   | { readonly code: string; readonly type: "verify_totp" }
   | { readonly type: "cancel_totp" }
   | { readonly type: "sign_out_local" }
   | { readonly type: "revoke_all_sessions" }
   | { readonly type: "retry" }
+  | { readonly type: "confirm_callback" }
   | { readonly type: "bootstrap" }
   | { readonly type: "back_to_sign_in" }
   | { readonly password: string; readonly type: "complete_password_recovery" }
@@ -178,6 +192,30 @@ const targetEmailField: StaffAuthViewField = {
 export function createStaffAuthViewModel(
   snapshot: StaffAuthSnapshot,
 ): StaffAuthViewModel {
+  if (snapshot.kind === "callback_confirmation_required") {
+    return {
+      actions: [{ id: "confirm_callback", label: "Continue securely" }],
+      fields: [],
+      heading: "Continue securely",
+      message:
+        "Confirm that you opened this page before continuing with authentication.",
+      status: snapshot.kind,
+      tone: "info",
+    };
+  }
+
+  if (snapshot.kind === "callback_link_lost") {
+    return {
+      actions: [{ id: "back_to_sign_in", label: "Back to sign in" }],
+      fields: [],
+      heading: "Reopen your email",
+      message:
+        "This page was reloaded before authentication finished. Reopen the authentication link in your email.",
+      status: snapshot.kind,
+      tone: "warning",
+    };
+  }
+
   if (snapshot.kind === "signed_out") {
     return {
       actions: [
@@ -308,6 +346,55 @@ export function createStaffAuthViewModel(
     };
   }
 
+  if (snapshot.kind === "invitation_accepted") {
+    const detail =
+      snapshot.passwordOutcome === "updated"
+        ? "Your password was updated. Sign in again to verify access."
+        : snapshot.passwordOutcome === "rejected"
+          ? "Your password was not set. Request a password recovery link from sign in."
+          : "We could not confirm whether your password was set. Try signing in with the new password, or request a password recovery link.";
+    return {
+      actions: [{ id: "back_to_sign_in", label: "Back to sign in" }],
+      fields: [],
+      heading: "Invitation accepted",
+      message: `Your school membership was accepted. ${detail}`,
+      status: snapshot.kind,
+      tone: "info",
+    };
+  }
+
+  if (snapshot.kind === "invitation_acceptance_uncertain") {
+    return {
+      actions: [{ id: "back_to_sign_in", label: "Back to sign in" }],
+      fields: [],
+      heading: "Invitation result unconfirmed",
+      message:
+        "We could not confirm whether your school membership was accepted. Sign in again to check, or request a password recovery link if you have not set a password.",
+      status: snapshot.kind,
+      tone: "info",
+    };
+  }
+
+  if (snapshot.kind === "password_recovery_uncertain") {
+    const detail =
+      snapshot.passwordOutcome === "updated"
+        ? "Your password was updated."
+        : snapshot.passwordOutcome === "rejected"
+          ? "Your password was not updated."
+          : "We could not confirm whether your password was updated.";
+    return {
+      actions: [{ id: "back_to_sign_in", label: "Back to sign in" }],
+      fields: [],
+      heading:
+        snapshot.passwordOutcome === "updated"
+          ? "Password updated; sign in again"
+          : "Check your password by signing in",
+      message: `${detail} ${snapshot.cleanupComplete ? "Recovery session cleanup completed." : "We could not confirm that all session cleanup completed."} Try signing in with the new password, or request a new recovery link.`,
+      status: snapshot.kind,
+      tone: "info",
+    };
+  }
+
   if (snapshot.kind === "password_recovery_complete") {
     return {
       actions: [{ id: "back_to_sign_in", label: "Back to sign in" }],
@@ -367,6 +454,29 @@ export function createStaffAuthViewModel(
     };
   }
 
+  if (snapshot.kind === "totp_factor_selection") {
+    return {
+      actions: [{ id: "select_totp_factor", label: "Continue" }],
+      fields: [],
+      heading: "Choose an authenticator",
+      message: "Choose the authenticator you can use to continue.",
+      selects: [
+        {
+          group: "primary",
+          id: "totp_factor",
+          label: "Authenticator",
+          options: snapshot.choices.map((choice) => ({
+            choiceId: choice.choiceId,
+            label: choice.label,
+            value: choice.choiceId,
+          })),
+        },
+      ],
+      status: snapshot.kind,
+      tone: "warning",
+    };
+  }
+
   if (snapshot.kind === "totp_challenge") {
     const message =
       snapshot.feedback === "rejected"
@@ -384,6 +494,18 @@ export function createStaffAuthViewModel(
       message,
       status: snapshot.kind,
       tone: snapshot.feedback === "rejected" ? "danger" : "warning",
+    };
+  }
+
+  if (snapshot.kind === "step_up_required") {
+    return {
+      actions: [{ id: "back_to_sign_in", label: "Back to sign in" }],
+      fields: [],
+      heading: "Additional verification required",
+      message:
+        "Your current session cannot continue this protected action. Sign in again to restart it.",
+      status: snapshot.kind,
+      tone: "warning",
     };
   }
 
@@ -446,7 +568,7 @@ export function createStaffAuthViewModel(
                 label: "Pending Administrator or Teacher invitation",
                 options: snapshot.manageableInvitations.map((entry) => ({
                   invitationId: entry.invitationId,
-                  label: `${entry.email} — ${roleLabel(entry.role)} — expires ${entry.expiresAt}`,
+                  label: `${entry.email} — ${roleLabel(entry.role)} — ${entry.state === "delivery_unconfirmed" ? "email dispatch unconfirmed" : "email provider accepted dispatch"} — expires ${entry.expiresAt}`,
                   schoolId: entry.schoolId,
                   value: entry.invitationId,
                 })),
@@ -521,12 +643,29 @@ export function createStaffAuthViewModel(
           ? "Invitation revoked"
           : "Membership revoked",
       message: created
-        ? `${roleLabel(snapshot.targetRole)} invitation created for ${snapshot.schoolLabel}.`
+        ? `${roleLabel(snapshot.targetRole)} invitation created for ${snapshot.schoolLabel}. The email provider accepted dispatch; mailbox delivery is not confirmed.`
         : revokedInvitation
           ? `${roleLabel(snapshot.targetRole)} invitation revoked for ${snapshot.schoolLabel}.`
           : `${roleLabel(snapshot.targetRole)} membership revoked for ${snapshot.schoolLabel}.`,
       status: snapshot.kind,
       tone: "success",
+    };
+  }
+
+  if (snapshot.kind === "staff_invitation_delivery") {
+    return {
+      actions: [{ id: "continue_authenticated", label: "Continue" }],
+      fields: [],
+      heading:
+        snapshot.outcome === "unconfirmed"
+          ? "Email dispatch unconfirmed"
+          : "Email provider rejected dispatch",
+      message:
+        snapshot.outcome === "unconfirmed"
+          ? "The invitation is saved and any email already sent remains usable. Check pending invitations before trying again; automatic resend is unavailable."
+          : "The invitation is saved, but the email provider did not accept this dispatch. Check pending invitations before trying again; automatic resend is unavailable.",
+      status: snapshot.kind,
+      tone: "warning",
     };
   }
 
@@ -731,13 +870,18 @@ export function renderStaffAuthView(
     const intent = createIntent(action, inputs, selects, view, snapshot);
     if (intent === null) {
       const pendingInvitation = action === "review_staff_invitation_revocation";
+      const pendingFactor = action === "select_totp_factor";
       message.setAttribute("aria-live", "assertive");
-      message.textContent = pendingInvitation
-        ? "Select a pending Administrator or Teacher invitation to continue."
-        : "Select an Administrator or Teacher to continue.";
-      (pendingInvitation
-        ? selects.staff_invitation
-        : selects.staff_membership
+      message.textContent = pendingFactor
+        ? "Select an authenticator to continue."
+        : pendingInvitation
+          ? "Select a pending Administrator or Teacher invitation to continue."
+          : "Select an Administrator or Teacher to continue.";
+      (pendingFactor
+        ? selects.totp_factor
+        : pendingInvitation
+          ? selects.staff_invitation
+          : selects.staff_membership
       )?.focus();
       return;
     }
@@ -819,7 +963,9 @@ export function renderStaffAuthView(
       placeholder.textContent =
         field.id === "staff_invitation"
           ? "Select pending invitation"
-          : "Select staff member";
+          : field.id === "totp_factor"
+            ? "Select authenticator"
+            : "Select staff member";
       placeholder.value = "";
       select.append(placeholder);
       for (const optionModel of field.options) {
@@ -899,6 +1045,15 @@ function createIntent(
       };
     case "begin_totp_enrollment":
       return { type: "begin_totp_enrollment" };
+    case "select_totp_factor": {
+      const selectedValue = selects.totp_factor?.value ?? "";
+      const selected = view.selects
+        ?.find((model) => model.id === "totp_factor")
+        ?.options.find((option) => option.value === selectedValue);
+      return selected === undefined
+        ? null
+        : { choiceId: selected.choiceId, type: "select_totp_factor" };
+    }
     case "verify_totp":
       return { code: inputs.totp?.value ?? "", type: "verify_totp" };
     case "cancel_totp":
@@ -909,6 +1064,8 @@ function createIntent(
       return { type: "revoke_all_sessions" };
     case "retry":
       return { type: "retry" };
+    case "confirm_callback":
+      return { type: "confirm_callback" };
     case "back_to_sign_in":
       return { type: "back_to_sign_in" };
     case "continue_authenticated":

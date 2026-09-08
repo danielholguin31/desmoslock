@@ -22,6 +22,12 @@ import {
   type SupabaseHttpClient,
 } from "../_shared/supabase-http.ts";
 
+import {
+  createResendInvitationTransport,
+  type ResendInvitationRuntime,
+} from "../_shared/resend-invitation-transport.ts";
+
+const DELIVERY_ATTEMPTS = 2;
 const MAXIMUM_INVITATION_LIFETIME_SECONDS = 86_400;
 const MINIMUM_INVITATION_LIFETIME_SECONDS = 60;
 const BEGIN_ATTEMPTS = 2;
@@ -36,6 +42,8 @@ type PublicInvitationErrorCode =
   | "authorization_denied"
   | "existing_confirmed_user_unsupported"
   | "invalid_request"
+  | "invitation_delivery_rejected"
+  | "invitation_delivery_unconfirmed"
   | "invitation_expired"
   | "invitation_not_found"
   | "rate_limited"
@@ -75,12 +83,17 @@ export interface GeneratedInvitationResult {
 }
 
 export interface InvitationDeliveryMessage {
+  readonly attemptId: string;
+  readonly attemptStartedAt: string;
+  readonly invitationId: string;
   readonly callbackUrl: string;
   readonly expiresAt: string;
   readonly recipientEmail: string;
 }
 
-export type InvitationDeliveryResult = "delivered" | "dependency_unavailable";
+// "delivered" means the provider acknowledged acceptance, not inbox receipt.
+export type InvitationDeliveryResult =
+  "delivered" | "provider_rejected" | "dependency_unavailable";
 
 export interface StaffInvitationDeliveryTransport {
   deliver(
@@ -336,7 +349,7 @@ function validateGeneratedActionLink(
 function createInviteCallback(callback: string, tokenHash: string): string {
   const callbackUrl = new URL(callback);
   callbackUrl.searchParams.append("auth", "invite");
-  callbackUrl.searchParams.append("token_hash", tokenHash);
+  callbackUrl.hash = `token_hash=${tokenHash}`;
   return callbackUrl.href;
 }
 
@@ -353,18 +366,14 @@ function parseInviteCallback(
   } catch {
     return null;
   }
-  const queryKeys = [...callback.searchParams.keys()];
   return callback.origin === expectedOrigin &&
     callback.username === "" &&
     callback.password === "" &&
     callback.pathname === "/" &&
-    callback.hash === "" &&
     callback.href === value &&
-    queryKeys.length === 2 &&
-    new Set(queryKeys).size === queryKeys.length &&
-    queryKeys.every((key) => key === "auth" || key === "token_hash") &&
-    callback.searchParams.get("auth") === "invite" &&
-    parseProviderTokenHash(callback.searchParams.get("token_hash")) !== null
+    callback.search === "?auth=invite" &&
+    /^#token_hash=[0-9a-f]{56}$/u.test(callback.hash) &&
+    value === `${expectedOrigin}/?auth=invite${callback.hash}`
     ? callback.href
     : null;
 }
@@ -428,6 +437,7 @@ export function createStaffInvitationDependencies(
   serviceFetch: ServiceFetch = globalThis.fetch,
   now: () => number = Date.now,
   deliveryTransport?: StaffInvitationDeliveryTransport,
+  deliveryRuntime?: ResendInvitationRuntime,
 ): StaffInvitationDependencies {
   if (
     !isExactRecord(configuration, [
@@ -436,6 +446,9 @@ export function createStaffInvitationDependencies(
       "DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN",
       "DESMOSLOCK_STAFF_INVITATION_CALLBACK",
       "DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS",
+      "DESMOSLOCK_STAFF_INVITATION_FROM",
+      "DESMOSLOCK_STAFF_INVITATION_REPLY_TO",
+      "RESEND_API_KEY",
       "SUPABASE_ANON_KEY",
       "SUPABASE_SERVICE_ROLE_KEY",
       "SUPABASE_URL",
@@ -489,6 +502,27 @@ export function createStaffInvitationDependencies(
     throw new Error("Staff invitation configuration is invalid");
   }
   const serviceAuthorization = `Bearer ${serviceRoleKey}`;
+  const resendTransport =
+    deliveryTransport === undefined
+      ? createResendInvitationTransport(
+          {
+            apiKey: configuration.RESEND_API_KEY,
+            callbackOrigin: allowedOrigin,
+            from: configuration.DESMOSLOCK_STAFF_INVITATION_FROM,
+            replyTo: configuration.DESMOSLOCK_STAFF_INVITATION_REPLY_TO,
+          },
+          deliveryRuntime ?? {
+            clearTimeout: (handle) =>
+              globalThis.clearTimeout(
+                handle as ReturnType<typeof globalThis.setTimeout>,
+              ),
+            fetch: serviceFetch,
+            now,
+            setTimeout: (callback, milliseconds) =>
+              globalThis.setTimeout(callback, milliseconds),
+          },
+        )
+      : null;
 
   return {
     allowedOrigin,
@@ -541,10 +575,21 @@ export function createStaffInvitationDependencies(
       return result.code;
     },
     async deliverInvitation(message) {
-      if (deliveryTransport === undefined) {
-        return "dependency_unavailable";
+      if (deliveryTransport !== undefined) {
+        return await deliveryTransport.deliver(message);
       }
-      return await deliveryTransport.deliver(message);
+      const prepared = resendTransport?.prepare(message);
+      if (prepared === null || prepared === undefined)
+        return "provider_rejected";
+      // Freeze confidential bytes once, in memory for this invocation only.
+      // Every retry has the identical provider body and idempotency key.
+      for (let attempt = 0; attempt < DELIVERY_ATTEMPTS; attempt += 1) {
+        const result = await resendTransport!.deliver(prepared);
+        if (result.kind === "provider_accepted") return "delivered";
+        if (result.kind === "provider_rejected")
+          return attempt === 0 ? "provider_rejected" : "dependency_unavailable";
+      }
+      return "dependency_unavailable";
     },
     async failInvitation(invitationId, reasonCode) {
       const result = await callRpc(
@@ -591,8 +636,7 @@ export function createStaffInvitationDependencies(
 }
 
 function runtimeDependencies(): StaffInvitationDependencies {
-  // Delivery is deliberately unavailable until an approved server-only
-  // transport is wired; runtime configuration must never imply a vendor.
+  // Server-only configuration is read only at the deployed runtime boundary.
   return createStaffInvitationDependencies({
     DESMOSLOCK_ALLOWED_WEB_ORIGIN: Deno.env.get(
       "DESMOSLOCK_ALLOWED_WEB_ORIGIN",
@@ -609,6 +653,13 @@ function runtimeDependencies(): StaffInvitationDependencies {
     DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS: Deno.env.get(
       "DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS",
     ),
+    DESMOSLOCK_STAFF_INVITATION_FROM: Deno.env.get(
+      "DESMOSLOCK_STAFF_INVITATION_FROM",
+    ),
+    DESMOSLOCK_STAFF_INVITATION_REPLY_TO: Deno.env.get(
+      "DESMOSLOCK_STAFF_INVITATION_REPLY_TO",
+    ),
+    RESEND_API_KEY: Deno.env.get("RESEND_API_KEY"),
     SUPABASE_ANON_KEY: Deno.env.get("SUPABASE_ANON_KEY"),
     SUPABASE_SERVICE_ROLE_KEY: Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"),
     SUPABASE_URL: Deno.env.get("SUPABASE_URL"),
@@ -623,7 +674,10 @@ async function recordFailedDelivery(
   for (let attempt = 0; attempt < FAILURE_ATTEMPTS; attempt += 1) {
     try {
       const code = await dependencies.failInvitation(invitationId, reasonCode);
-      if (code === "invitation_delivery_failed") {
+      if (
+        code === "invitation_delivery_failed" ||
+        code === "invitation_delivery_ready"
+      ) {
         return true;
       }
       if (code !== "conflict" && code !== "dependency_unavailable") {
@@ -631,7 +685,7 @@ async function recordFailedDelivery(
       }
     } catch {
       // The failure transition is idempotent. Retry the same tuple after an
-      // ambiguous response so a committed terminal state can be reconciled.
+      // ambiguous response so the committed state can be reconciled.
     }
   }
   return false;
@@ -697,22 +751,22 @@ async function confirmInvitationDeliveryReady(
 async function confirmInvitationPublished(
   dependencies: StaffInvitationDependencies,
   invitationId: string,
-): Promise<boolean> {
+): Promise<"published" | "unconfirmed" | "failed"> {
   for (let attempt = 0; attempt < PUBLISH_ATTEMPTS; attempt += 1) {
     try {
       const code = await dependencies.publishInvitation(invitationId);
       if (code === "invitation_usable") {
-        return true;
+        return "published";
       }
       if (code !== "dependency_unavailable") {
-        return false;
+        return "failed";
       }
     } catch {
-      // SMTP has already reported exact delivery. Reconcile only by repeating
+      // The mail provider has acknowledged acceptance. Reconcile only by repeating
       // the idempotent publish transition; never retry the delivery itself.
     }
   }
-  return false;
+  return "unconfirmed";
 }
 
 function invitationExpiration(
@@ -874,28 +928,47 @@ export async function handleRequest(
   let delivery: InvitationDeliveryResult = "dependency_unavailable";
   try {
     delivery = await dependencies.deliverInvitation({
+      attemptId: requestKey,
+      attemptStartedAt: new Date(
+        Date.parse(expiresAt) - dependencies.inviteLifetimeSeconds * 1_000,
+      ).toISOString(),
       callbackUrl,
       expiresAt,
+      invitationId,
       recipientEmail: input.email,
     });
   } catch {
-    // A sent-then-failed SMTP outcome is ambiguous. The delivery-ready state is
-    // non-consumable, so safety does not depend on the failure write succeeding.
+    // An unknown provider outcome may have delivered usable mail. Retain the
+    // prepared recipient binding and expiry even when diagnostics cannot save.
   }
   if (delivery !== "delivered") {
     await recordFailedDelivery(
       dependencies,
       invitationId,
-      "dependency_unavailable",
+      delivery === "provider_rejected"
+        ? "delivery_rejected"
+        : "delivery_unconfirmed",
     );
-    return codeResponse("service_unavailable", 503, dependencies.allowedOrigin);
+    return codeResponse(
+      delivery === "provider_rejected"
+        ? "invitation_delivery_rejected"
+        : "invitation_delivery_unconfirmed",
+      503,
+      dependencies.allowedOrigin,
+    );
   }
   const published = await confirmInvitationPublished(
     dependencies,
     invitationId,
   );
-  if (!published) {
-    return codeResponse("service_unavailable", 503, dependencies.allowedOrigin);
+  if (published !== "published") {
+    return codeResponse(
+      published === "unconfirmed"
+        ? "invitation_delivery_unconfirmed"
+        : "service_unavailable",
+      503,
+      dependencies.allowedOrigin,
+    );
   }
   return codeResponse("invitation_created", 201, dependencies.allowedOrigin);
 }

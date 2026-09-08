@@ -45,12 +45,12 @@ function readCiJobSection(job, sectionName) {
 export function assertStaffAuthCiWorkflow(ciWorkflow) {
   const lifecycleJob = readCiJob(ciWorkflow, "staff-auth-lifecycle");
   if (
-    !/^ {4}name: Staff Auth schema and prerequisite checks$/mu.test(
+    !/^ {4}name: Staff Auth schema and composed local journeys$/mu.test(
       lifecycleJob,
     )
   ) {
     fail(
-      "Required staff Auth CI must identify itself as schema and prerequisite verification",
+      "Required staff Auth CI must identify itself as schema and composed local journey verification",
     );
   }
   if (
@@ -59,7 +59,7 @@ export function assertStaffAuthCiWorkflow(ciWorkflow) {
     )
   ) {
     fail(
-      "Required staff Auth schema and prerequisite CI must reset and test a full disposable local stack with unconditional cleanup",
+      "Required staff Auth schema and composed journey CI must reset and test a full disposable local stack with unconditional cleanup",
     );
   }
 
@@ -125,17 +125,24 @@ export function verifyCiContract(repositoryRoot) {
   );
   if (
     rootPackage.scripts?.["test:staff-auth"] !==
-      "npm run test:db && npm run test:staff-auth:stack && npm run test:edge && npm run test:unit" ||
+      "npm run test:db && npm run test:staff-auth:stack && npm run test:edge && npm run test:unit && npm run test:staff-auth:composed" ||
+    rootPackage.scripts?.["test:staff-auth:composed"] !==
+      "node --test tests/acceptance/staff-auth-composed.test.mjs" ||
+    rootPackage.scripts?.["db:start:full"] !==
+      "node scripts/run-local-supabase.mjs start-full" ||
     rootPackage.scripts?.["test:staff-auth:stack"] !==
       "node --test tests/acceptance/staff-auth-stack.test.mjs" ||
     rootPackage.scripts?.["test:edge"] !==
       "deno lint supabase/functions && deno test supabase/functions && deno check supabase/functions/health/index.ts supabase/functions/account-recovery/index.ts supabase/functions/staff-invitations/index.ts"
   ) {
     fail(
-      "Root package does not expose the exact staff Auth schema and prerequisite lane",
+      "Root package does not expose the exact staff Auth schema and composed acceptance lane",
     );
   }
   readText(repositoryRoot, "tests/acceptance/staff-auth-stack.test.mjs");
+  readText(repositoryRoot, "tests/acceptance/staff-auth-composed.test.mjs");
+  readText(repositoryRoot, "tests/acceptance/staff-auth-loopback.mjs");
+  readText(repositoryRoot, "scripts/run-local-supabase.mjs");
   for (const command of [
     "npm ci",
     "npm run format:check",

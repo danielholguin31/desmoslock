@@ -9,11 +9,13 @@ export const expectedMigrationFiles = Object.freeze([
   "20260828000100_internal_release_backend.sql",
   "20260903000100_staff_auth_lifecycle.sql",
   "20260903000200_staff_auth_generation_4.sql",
+  "20260907000100_staff_auth_callback_completion.sql",
 ]);
 export const expectedMigrationSetSha256 =
-  "ce79427901195258897e0b75c80acfb7b50699eb223af5289cf5d5d59958f2b7";
+  "1b499b73aca1ff812cbc244f9eb9908e8dad839ecc6befbcb1a496865a2d5f52";
 
-const currentAttestationFile = "20260903000200_staff_auth_generation_4.sql";
+const currentAttestationFile =
+  "20260907000100_staff_auth_callback_completion.sql";
 export const expectedMigrationAttestations = Object.freeze({
   "20260828000100_internal_release_backend.sql": Object.freeze({
     migrationSetSha256:
@@ -21,10 +23,16 @@ export const expectedMigrationAttestations = Object.freeze({
     rawSha256:
       "1a60d2fb308a8e2cfad102f9c218c319bacd95c33a40801d5b0b731119434f2f",
   }),
+  "20260903000200_staff_auth_generation_4.sql": Object.freeze({
+    migrationSetSha256:
+      "ce79427901195258897e0b75c80acfb7b50699eb223af5289cf5d5d59958f2b7",
+    rawSha256:
+      "4e7321c8d9d6d3e4c27e07ab38d75252a8922868842c40c0723c349c251cac44",
+  }),
   [currentAttestationFile]: Object.freeze({
     migrationSetSha256: expectedMigrationSetSha256,
     rawSha256:
-      "4e7321c8d9d6d3e4c27e07ab38d75252a8922868842c40c0723c349c251cac44",
+      "79ab31e822b4f04f4148c50bb98446210a37d975a646119b42d78fe1349a8862",
   }),
 });
 const attestedMigrationFiles = Object.freeze(

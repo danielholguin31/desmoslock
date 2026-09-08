@@ -125,6 +125,56 @@ function authenticatedSnapshot(role: "administrator" | "owner" | "teacher") {
 }
 
 describe("staff auth view", () => {
+  it("renders a neutral callback confirmation and emits only an explicit continue intent", () => {
+    const snapshot = {
+      kind: "callback_confirmation_required",
+      revision: 1,
+    } as const;
+    const view = createStaffAuthViewModel(snapshot);
+
+    expect(view).toEqual({
+      actions: [{ id: "confirm_callback", label: "Continue securely" }],
+      fields: [],
+      heading: "Continue securely",
+      message:
+        "Confirm that you opened this page before continuing with authentication.",
+      status: "callback_confirmation_required",
+      tone: "info",
+    });
+    expect(JSON.stringify(view)).not.toMatch(
+      /invite|recovery|verification|token|code/i,
+    );
+
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    const intents: StaffAuthViewIntent[] = [];
+    renderStaffAuthView(root as unknown as HTMLElement, snapshot, (intent) => {
+      intents.push(intent);
+    });
+    const form = descendants(root).find(({ tagName }) => tagName === "form");
+    form?.listeners.get("submit")?.({ preventDefault() {} } as Event);
+
+    expect(intents).toEqual([{ type: "confirm_callback" }]);
+  });
+
+  it("renders generic reopen-email guidance after an unconfirmed callback reload", () => {
+    const view = createStaffAuthViewModel({
+      kind: "callback_link_lost",
+      revision: 1,
+    });
+
+    expect(view).toEqual({
+      actions: [{ id: "back_to_sign_in", label: "Back to sign in" }],
+      fields: [],
+      heading: "Reopen your email",
+      message:
+        "This page was reloaded before authentication finished. Reopen the authentication link in your email.",
+      status: "callback_link_lost",
+      tone: "warning",
+    });
+    expect(JSON.stringify(view)).not.toMatch(/token|code|hash|flow|state/i);
+  });
+
   it("renders a signed-out staff login without self-signup or account-link actions", () => {
     const view = createStaffAuthViewModel({
       kind: "signed_out",
@@ -152,6 +202,56 @@ describe("staff auth view", () => {
     expect(view.actions.map(({ id }) => id)).not.toContain("sign_up");
     expect(view.actions.map(({ id }) => id)).not.toContain("link_account");
     expect(view.actions.map(({ id }) => id)).not.toContain("invite_owner");
+  });
+
+  it("renders only local factor choices and emits the explicit selection", () => {
+    const snapshot = {
+      choices: [
+        { choiceId: "factor-1", label: "Phone (Authenticator 1)" },
+        { choiceId: "factor-2", label: "Security key (Authenticator 2)" },
+      ],
+      kind: "totp_factor_selection",
+      revision: 1,
+      role: "owner",
+    } as const;
+    const view = createStaffAuthViewModel(snapshot);
+    expect(view).toMatchObject({
+      actions: [{ id: "select_totp_factor", label: "Continue" }],
+      heading: "Choose an authenticator",
+      selects: [
+        {
+          id: "totp_factor",
+          options: [
+            { label: "Phone (Authenticator 1)", value: "factor-1" },
+            { label: "Security key (Authenticator 2)", value: "factor-2" },
+          ],
+        },
+      ],
+    });
+    expect(JSON.stringify(view)).not.toMatch(/receipt|51000000/i);
+
+    const document = new FakeDocument();
+    const root = new FakeElement(document, "main");
+    const intents: StaffAuthViewIntent[] = [];
+    renderStaffAuthView(root as unknown as HTMLElement, snapshot, (intent) => {
+      intents.push(intent);
+    });
+    const nodes = descendants(root);
+    const factor = nodes.find(({ name }) => name === "totp_factor");
+    const form = nodes.find(
+      (node) =>
+        node.tagName === "form" &&
+        descendants(node).some(({ name }) => name === "totp_factor"),
+    );
+    if (factor === undefined || form === undefined) {
+      throw new Error("expected factor-selection controls");
+    }
+    factor.value = "factor-2";
+    form.listeners.get("submit")?.({ preventDefault() {} } as Event);
+
+    expect(intents).toEqual([
+      { choiceId: "factor-2", type: "select_totp_factor" },
+    ]);
   });
 
   it.each([
@@ -696,7 +796,7 @@ describe("staff auth view", () => {
         targetRole: "administrator",
       } as const,
       "Invitation created",
-      "Administrator invitation created for Synthetic High School.",
+      "Administrator invitation created for Synthetic High School. The email provider accepted dispatch; mailbox delivery is not confirmed.",
     ],
     [
       { kind: "staff_invitation_revocation_rejected", revision: 1 } as const,
@@ -1054,4 +1154,52 @@ describe("staff auth view", () => {
     expect(text).toContain("Authentication temporarily unavailable");
     expect(text).not.toContain("SENTINEL");
   });
+});
+
+describe("auth outcome honesty", () => {
+  it("does not portray unknown password update as failure or successful completion", () => {
+    const view = createStaffAuthViewModel({
+      kind: "password_recovery_uncertain",
+      passwordOutcome: "unknown",
+      cleanupComplete: false,
+      revision: 1,
+    });
+    expect(view.message).toContain(
+      "could not confirm whether your password was updated",
+    );
+    expect(view.message).toContain(
+      "could not confirm that all session cleanup completed",
+    );
+    expect(view.actions).toEqual([
+      { id: "back_to_sign_in", label: "Back to sign in" },
+    ]);
+    expect(view.fields).toEqual([]);
+  });
+  it("explains accepted Membership and unknown password separately", () => {
+    const view = createStaffAuthViewModel({
+      kind: "invitation_accepted",
+      passwordOutcome: "unknown",
+      revision: 1,
+    });
+    expect(view.heading).toBe("Invitation accepted");
+    expect(view.message).toContain("school membership was accepted");
+    expect(view.message).toContain(
+      "could not confirm whether your password was set",
+    );
+    expect(view.fields).toEqual([]);
+  });
+  it.each(["unconfirmed", "rejected"] as const)(
+    "keeps %s delivery usable without an automatic resend action",
+    (outcome) => {
+      const view = createStaffAuthViewModel({
+        kind: "staff_invitation_delivery",
+        outcome,
+        revision: 1,
+      });
+      expect(view.message).toContain("invitation is saved");
+      expect(view.actions).toEqual([
+        { id: "continue_authenticated", label: "Continue" },
+      ]);
+    },
+  );
 });
