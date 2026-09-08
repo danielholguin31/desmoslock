@@ -2,7 +2,14 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { _electron as electron, expect, test } from "@playwright/test";
+import {
+  _electron as electron,
+  expect,
+  test,
+  type Page,
+} from "@playwright/test";
+
+import type { TrustedDesktopBridge } from "../../../apps/desktop/src/trusted-bridge.js";
 
 import { createElectronLaunchProfile } from "../../../scripts/electron-launch-profile.mjs";
 import {
@@ -12,7 +19,7 @@ import {
   trackElectronApplicationForCooperativeCleanup,
 } from "../../../scripts/production-desktop-resource-safety.mjs";
 
-test("production Electron shell configures renderer boundaries and resets assessment state for a reopened window", async () => {
+test("production Electron shell preserves Student isolation and denies protection for a reopened window", async () => {
   const userDataDirectory = await fs.mkdtemp(
     path.join(os.tmpdir(), "desmoslock-foundation-e2e-"),
   );
@@ -65,33 +72,80 @@ test("production Electron shell configures renderer boundaries and resets assess
     await expect(
       window.getByRole("heading", { exact: true, name: "DesmosLock" }),
     ).toBeVisible();
-    await expect(window.locator("[data-v2-status]")).toHaveText(
-      "Synthetic backend ready",
-    );
-    await expect(window.locator("[data-v2-status]")).toHaveAttribute(
-      "data-backend-status",
-      "ready",
-    );
-    await expect(
-      window.evaluate(() => ({
-        bridge: Object.keys(
-          (
-            window as typeof window & {
-              desmoslockDesktop?: Record<string, unknown>;
-            }
-          ).desmoslockDesktop ?? {},
-        ).sort(),
-        process: typeof globalThis.process,
-        require: typeof globalThis.require,
-      })),
-    ).resolves.toEqual({
-      bridge: ["requestAssessmentLock", "version"],
-      process: "undefined",
-      require: "undefined",
-    });
-    await expect(
-      window.getByRole("button", { name: /lock intent/i }),
-    ).toHaveCount(0);
+    const expectedPhase =
+      process.platform === "darwin" ? "entry" : "unavailable";
+    const assertStudentBoundary = async (page: Page) => {
+      await expect(page.locator(".student-session")).toHaveAttribute(
+        "data-phase",
+        expectedPhase,
+      );
+      await expect(
+        page.getByRole("heading", {
+          exact: true,
+          name: "Assessment protection unavailable",
+        }),
+      ).toBeVisible();
+      const boundary = await page.evaluate(async () => {
+        const bridge = (
+          globalThis as typeof globalThis & {
+            desmoslockDesktop?: TrustedDesktopBridge;
+          }
+        ).desmoslockDesktop;
+        return {
+          bridge: Object.keys(bridge ?? {}).sort(),
+          version: bridge?.version,
+          process: typeof globalThis.process,
+          require: typeof globalThis.require,
+          studentView: await bridge?.readStudentSessionView(),
+          lockRequestResult: await bridge?.requestAssessmentLock(),
+        };
+      });
+      expect(boundary.bridge).toEqual([
+        "beginTargetedReadmission",
+        "forfeitStudentSession",
+        "joinTest",
+        "onStudentSessionViewChanged",
+        "readStudentSessionView",
+        "refreshStudentSession",
+        "requestAssessmentLock",
+        "retryStudentSession",
+        "version",
+      ]);
+      expect(boundary.version).toBe("2.0.0");
+      expect(boundary.process).toBe("undefined");
+      expect(boundary.require).toBe("undefined");
+      expect(boundary.lockRequestResult).toEqual({
+        ok: false,
+        reason: "native-protection-unavailable",
+      });
+      expect(boundary.studentView).toEqual({
+        revision: expect.any(Number),
+        phase: expectedPhase,
+        session: null,
+        protection: "unavailable",
+        calculatorEligible: false,
+        pendingOperation: null,
+      });
+      expect(Number.isSafeInteger(boundary.studentView?.revision)).toBe(true);
+      expect(boundary.studentView?.revision).toBeGreaterThanOrEqual(1);
+      await expect(
+        page.getByRole("button", { name: /lock intent/i }),
+      ).toHaveCount(0);
+      expect(
+        await application.evaluate(({ BrowserWindow, webContents }) => ({
+          calculators: webContents
+            .getAllWebContents()
+            .filter(
+              (contents) =>
+                contents.getURL() === "desmoslock-calculator://host/index.html",
+            ).length,
+          attachedViews: BrowserWindow.getAllWindows().map(
+            (window) => window.contentView.children.length,
+          ),
+        })),
+      ).toEqual({ calculators: 0, attachedViews: [0] });
+    };
+    await assertStudentBoundary(window);
 
     const preferences = await application.evaluate(({ BrowserWindow }) => {
       const [window] = BrowserWindow.getAllWindows();
@@ -179,18 +233,6 @@ test("production Electron shell configures renderer boundaries and resets assess
       )
       .toEqual({ count: 1, deniedByProductionPolicy: true });
 
-    await expect(
-      window.evaluate(() =>
-        (
-          globalThis as typeof globalThis & {
-            desmoslockDesktop?: {
-              requestAssessmentLock(): Promise<unknown>;
-            };
-          }
-        ).desmoslockDesktop?.requestAssessmentLock(),
-      ),
-    ).resolves.toEqual({ ok: true });
-
     await expect
       .poll(() =>
         application.evaluate(({ app }) => app.listenerCount("activate")),
@@ -236,17 +278,7 @@ test("production Electron shell configures renderer boundaries and resets assess
         name: "DesmosLock",
       }),
     ).toBeVisible();
-    await expect(
-      reopenedWindow.evaluate(() =>
-        (
-          globalThis as typeof globalThis & {
-            desmoslockDesktop?: {
-              requestAssessmentLock(): Promise<unknown>;
-            };
-          }
-        ).desmoslockDesktop?.requestAssessmentLock(),
-      ),
-    ).resolves.toEqual({ ok: true });
+    await assertStudentBoundary(reopenedWindow);
   } finally {
     await runIndependentCleanupTasks([
       () => closeElectronApplicationCooperatively(application),
