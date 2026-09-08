@@ -15,6 +15,8 @@ import {
 import {
   parseClientBuildInputs,
   canonicalClientBuildInputs,
+  parseClientUniversalBuildInputs,
+  canonicalClientUniversalBuildInputs,
 } from "../packages/contracts/dist/build-identity.js";
 
 const scriptPath = fileURLToPath(import.meta.url);
@@ -162,10 +164,37 @@ export function createAppBrowserDefine(appName, configuration) {
 
 /** Pure provenance serialization; the collector verifies source and tools. */
 export function createDesktopBuildContext(inputs, configuration) {
+  return buildContext(
+    inputs,
+    configuration,
+    parseClientBuildInputs,
+    canonicalClientBuildInputs,
+    "",
+  );
+}
+
+export function createUniversalDesktopBuildContext(inputs, configuration) {
+  if (inputs === null) throw new Error("Candidate build inputs are invalid");
+  return buildContext(
+    inputs,
+    configuration,
+    parseClientUniversalBuildInputs,
+    canonicalClientUniversalBuildInputs,
+    "desmoslock:universal-build:v1\0",
+  );
+}
+
+function buildContext(
+  inputs,
+  configuration,
+  parseInputs,
+  canonicalInputs,
+  domain,
+) {
   const browserDefine = createAppBrowserDefine("desktop", configuration);
   let identity = null;
   if (inputs !== null) {
-    const parsed = parseClientBuildInputs(inputs);
+    const parsed = parseInputs(inputs);
     const backend = {
       environment: JSON.parse(
         browserDefine.__DESMOSLOCK_PUBLIC_BACKEND_ENVIRONMENT__,
@@ -188,7 +217,8 @@ export function createDesktopBuildContext(inputs, configuration) {
       sourceTree: parsed.sourceTree,
       packageLockSha256: parsed.packageLockSha256,
       buildId: createHash("sha256")
-        .update(canonicalClientBuildInputs(parsed))
+        .update(domain)
+        .update(canonicalInputs(parsed))
         .digest("hex"),
     });
   }
@@ -201,6 +231,220 @@ export function createDesktopBuildContext(inputs, configuration) {
       __DESMOSLOCK_CLIENT_BUILD_IDENTITY__: identityJson,
     }),
   });
+}
+
+/** A single common JavaScript build, shared byte-for-byte by both target slices. */
+export async function buildDesktopCommon(options) {
+  const row = snapshotExactConfiguration(options, [
+    "outputRoot",
+    "productionMode",
+    "publicBackend",
+    "buildInputs",
+  ]);
+  if (
+    row === null ||
+    typeof row.outputRoot !== "string" ||
+    !path.isAbsolute(row.outputRoot) ||
+    path.normalize(row.outputRoot) !== row.outputRoot ||
+    typeof row.productionMode !== "boolean"
+  )
+    throw new Error("Common build options are invalid");
+  const relative = path.relative(repositoryRoot, row.outputRoot);
+  if (
+    !/^artifacts\/universal-artifact-runs\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/common$/u.test(
+      relative,
+    )
+  )
+    throw new Error("Common build output must use the owned run path");
+  const universal = parseClientUniversalBuildInputs(row.buildInputs);
+  if (universal !== null && row.productionMode !== true)
+    throw new Error("Universal common builds require production mode");
+  const context =
+    universal !== null
+      ? createUniversalDesktopBuildContext(universal, row.publicBackend)
+      : createDesktopBuildContext(row.buildInputs, row.publicBackend);
+  const browserDefine = createAppBrowserDefine("desktop", row.publicBackend);
+  let current = repositoryRoot;
+  const ancestors = [];
+  const emittedEntries = new Map();
+  for (const part of ["", ...relative.split(path.sep)]) {
+    current = path.join(current, part);
+    const stat = await fs.lstat(current);
+    if (
+      !stat.isDirectory() ||
+      stat.isSymbolicLink() ||
+      stat.uid !== process.geteuid() ||
+      (stat.mode & 0o022) !== 0 ||
+      (current === row.outputRoot && (stat.mode & 0o077) !== 0) ||
+      (await fs.realpath(current)) !== current
+    )
+      throw new Error("Common build output ancestor is invalid");
+    ancestors.push({ filename: current, dev: stat.dev, ino: stat.ino });
+  }
+  const verifyOwnership = async () => {
+    for (const ancestor of ancestors) {
+      const stat = await fs.lstat(ancestor.filename);
+      if (
+        !stat.isDirectory() ||
+        stat.isSymbolicLink() ||
+        stat.dev !== ancestor.dev ||
+        stat.ino !== ancestor.ino ||
+        stat.uid !== process.geteuid() ||
+        (stat.mode & 0o022) !== 0 ||
+        (ancestor.filename === row.outputRoot && (stat.mode & 0o077) !== 0) ||
+        (await fs.realpath(ancestor.filename)) !== ancestor.filename
+      )
+        throw new Error("Common build output ownership changed");
+    }
+    const allowed = new Set([
+      "main.js",
+      "main.js.map",
+      "preload.cjs",
+      "preload.cjs.map",
+      "renderer.js",
+      "renderer.js.map",
+      "index.html",
+      "styles.css",
+      "build-identity.json",
+      "calculator",
+      "calculator/host.js",
+      "calculator/host.js.map",
+      "calculator/index.html",
+      "calculator/styles.css",
+    ]);
+    const found = new Set();
+    const inspect = async (relative) => {
+      for (const name of await fs.readdir(
+        path.join(row.outputRoot, relative),
+      )) {
+        const entry = relative === "" ? name : `${relative}/${name}`;
+        if (!allowed.has(entry))
+          throw new Error("Common build output ownership changed");
+        const filename = path.join(row.outputRoot, entry);
+        const stat = await fs.lstat(filename);
+        const previous = emittedEntries.get(entry);
+        if (
+          stat.isSymbolicLink() ||
+          stat.uid !== process.geteuid() ||
+          (stat.mode & 0o022) !== 0 ||
+          (entry === "calculator"
+            ? !stat.isDirectory()
+            : !stat.isFile() || stat.nlink !== 1) ||
+          (await fs.realpath(filename)) !== filename ||
+          (previous !== undefined &&
+            (previous.dev !== stat.dev || previous.ino !== stat.ino))
+        )
+          throw new Error("Common build output ownership changed");
+        found.add(entry);
+        if (previous === undefined)
+          emittedEntries.set(entry, { dev: stat.dev, ino: stat.ino });
+        if (entry === "calculator") await inspect(entry);
+      }
+    };
+    await inspect("");
+    for (const entry of emittedEntries.keys())
+      if (!found.has(entry))
+        throw new Error("Common build output ownership changed");
+  };
+  if ((await fs.readdir(row.outputRoot)).length !== 0)
+    throw new Error("Common build output must be empty");
+  await emitDesktopCommon(
+    row.outputRoot,
+    row.productionMode,
+    context,
+    browserDefine,
+    verifyOwnership,
+  );
+  return Object.freeze({
+    outputRoot: row.outputRoot,
+    identity: context.identity,
+  });
+}
+
+async function emitDesktopCommon(
+  outputRoot,
+  productionMode,
+  desktopContext,
+  browserDefine,
+  verifyOwnership = async () => {},
+) {
+  const phase = async (operation) => {
+    await verifyOwnership();
+    await operation();
+    await verifyOwnership();
+  };
+  const sourceRoot = path.join(repositoryRoot, "apps", "desktop", "src");
+  await phase(() =>
+    build({
+      bundle: true,
+      define: desktopContext.mainDefine,
+      entryPoints: [path.join(sourceRoot, "main.ts")],
+      external: ["electron"],
+      format: "esm",
+      outdir: outputRoot,
+      platform: "node",
+      sourcemap: !productionMode,
+      target: "node24",
+    }),
+  );
+  await phase(() =>
+    build({
+      bundle: true,
+      define: browserDefine,
+      entryPoints: [path.join(sourceRoot, "preload.ts")],
+      external: ["electron"],
+      format: "cjs",
+      outfile: path.join(outputRoot, "preload.cjs"),
+      platform: "node",
+      sourcemap: !productionMode,
+      target: "node24",
+    }),
+  );
+  await phase(() =>
+    build({
+      bundle: true,
+      define: browserDefine,
+      entryPoints: {
+        "calculator/host": path.join(sourceRoot, "calculator", "host.ts"),
+        renderer: path.join(sourceRoot, "renderer.ts"),
+      },
+      format: "esm",
+      outdir: outputRoot,
+      platform: "browser",
+      sourcemap: !productionMode,
+      target: "chrome136",
+    }),
+  );
+  await phase(() =>
+    Promise.all(
+      ["index.html", "styles.css"].map((filename) =>
+        fs.copyFile(
+          path.join(sourceRoot, filename),
+          path.join(outputRoot, filename),
+        ),
+      ),
+    ),
+  );
+  await phase(() =>
+    fs.mkdir(path.join(outputRoot, "calculator"), { recursive: true }),
+  );
+  await phase(() =>
+    fs.writeFile(
+      path.join(outputRoot, "build-identity.json"),
+      `${desktopContext.identityJson}\n`,
+      { flag: "wx" },
+    ),
+  );
+  await phase(() =>
+    Promise.all(
+      ["index.html", "styles.css"].map((filename) =>
+        fs.copyFile(
+          path.join(sourceRoot, "calculator", filename),
+          path.join(outputRoot, "calculator", filename),
+        ),
+      ),
+    ),
+  );
 }
 
 async function readCandidateInputs(argument) {
@@ -298,62 +542,11 @@ async function runCommandLine() {
   if (appName === "desktop") {
     await buildDesktopDurableRecord();
     await buildDesktopAACProtection();
-    await build({
-      bundle: true,
-      define: desktopContext.mainDefine,
-      entryPoints: [path.join(sourceRoot, "main.ts")],
-      external: ["electron"],
-      format: "esm",
-      outdir: outputRoot,
-      platform: "node",
-      sourcemap: !productionMode,
-      target: "node24",
-    });
-    await build({
-      bundle: true,
-      define: browserDefine,
-      entryPoints: [path.join(sourceRoot, "preload.ts")],
-      external: ["electron"],
-      format: "cjs",
-      outfile: path.join(outputRoot, "preload.cjs"),
-      platform: "node",
-      sourcemap: !productionMode,
-      target: "node24",
-    });
-    await build({
-      bundle: true,
-      define: browserDefine,
-      entryPoints: {
-        "calculator/host": path.join(sourceRoot, "calculator", "host.ts"),
-        renderer: path.join(sourceRoot, "renderer.ts"),
-      },
-      format: "esm",
-      outdir: outputRoot,
-      platform: "browser",
-      sourcemap: !productionMode,
-      target: "chrome136",
-    });
-    await Promise.all(
-      ["index.html", "styles.css"].map((filename) =>
-        fs.copyFile(
-          path.join(sourceRoot, filename),
-          path.join(outputRoot, filename),
-        ),
-      ),
-    );
-    await fs.mkdir(path.join(outputRoot, "calculator"), { recursive: true });
-    await fs.writeFile(
-      path.join(outputRoot, "build-identity.json"),
-      `${desktopContext.identityJson}\n`,
-      { flag: "wx" },
-    );
-    await Promise.all(
-      ["index.html", "styles.css"].map((filename) =>
-        fs.copyFile(
-          path.join(sourceRoot, "calculator", filename),
-          path.join(outputRoot, "calculator", filename),
-        ),
-      ),
+    await emitDesktopCommon(
+      outputRoot,
+      productionMode,
+      desktopContext,
+      browserDefine,
     );
   } else {
     await build({

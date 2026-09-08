@@ -6,7 +6,8 @@ import { registerHooks } from "node:module";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { defaultSanitizePackageJson } from "@electron/packager";
+// Load only the pinned pure sanitizer, avoiding the packager barrel's native ZIP loader.
+import { defaultSanitizePackageJson } from "../../node_modules/@electron/packager/dist/sanitize-package-json.js";
 
 const helperUrl = new URL("../../scripts/desktop-artifact.mjs", import.meta.url)
   .href;
@@ -48,6 +49,9 @@ globalThis[stateKey] = {
     return typeof value === "function" ? value() : value;
   },
   uncache() {},
+  getRawHeader() {
+    throw new Error("Universal ASAR reader must not run in native controls");
+  },
   packager() {
     packageCalls += 1;
     throw new Error("Actual packager is forbidden in source tests");
@@ -69,7 +73,13 @@ const hooks = registerHooks({
         return nextResolve(identitySource, context);
       const exports =
         specifier === "@electron/asar"
-          ? ["extractFile", "listPackage", "statFile", "uncache"]
+          ? [
+              "extractFile",
+              "getRawHeader",
+              "listPackage",
+              "statFile",
+              "uncache",
+            ]
           : specifier === "@electron/packager"
             ? ["packager"]
             : specifier === "./electron-fuse-policy.mjs"

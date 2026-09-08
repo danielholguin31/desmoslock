@@ -18,10 +18,13 @@ export {
   parseClientBuildInputs,
   canonicalClientBuildIdentity,
   canonicalClientBuildInputs,
+  parseClientUniversalBuildInputs,
+  canonicalClientUniversalBuildInputs,
 } from "./build-identity.js";
 export type {
   ClientBuildIdentity,
   ClientBuildInputs,
+  ClientUniversalBuildInputs,
 } from "./build-identity.js";
 export {
   parseNativeProtectionCategories,

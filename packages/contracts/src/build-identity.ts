@@ -40,6 +40,45 @@ export interface ClientBuildInputs {
   };
 }
 
+/** One common build and two compilation targets; this does not claim execution. */
+export interface ClientUniversalBuildInputs {
+  readonly schemaVersion: 1;
+  readonly kind: "desktop-universal";
+  readonly sourceRepository: ClientBuildIdentity["sourceRepository"];
+  readonly sourceCommit: string;
+  readonly sourceTree: string;
+  readonly packageLockSha256: string;
+  readonly packageVersion: string;
+  readonly platform: "darwin";
+  readonly hostArchitecture: "arm64" | "x64";
+  readonly backendConfigurationSha256: string;
+  readonly graphingProfile: "internal-graphing-v1";
+  readonly tools: Omit<ClientBuildInputs["tools"], "electron"> & {
+    readonly electron: { readonly version: string };
+    readonly universal: { readonly version: string };
+    readonly lipo: { readonly sha256: string };
+    readonly codesign: { readonly sha256: string };
+  };
+  readonly slices: {
+    readonly arm64: {
+      readonly architecture: "arm64";
+      readonly electronArchiveSha256: string;
+      readonly deploymentTarget: "13.0";
+      readonly napiVersion: 8;
+    };
+    readonly x64: {
+      readonly architecture: "x64";
+      readonly electronArchiveSha256: string;
+      readonly deploymentTarget: "13.0";
+      readonly napiVersion: 8;
+    };
+  };
+  readonly composition: {
+    readonly mergeASARs: true;
+    readonly nativeLayout: "fixed-addons-v1";
+  };
+}
+
 function digest(value: unknown, length: 40 | 64): value is string {
   return (
     typeof value === "string" &&
@@ -214,6 +253,160 @@ function canonical(value: unknown): string {
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`)
     .join(",")}}`;
+}
+
+function universalSlice(value: unknown, architecture: "arm64" | "x64") {
+  const row = parseExactRecord(value, [
+    "architecture",
+    "electronArchiveSha256",
+    "deploymentTarget",
+    "napiVersion",
+  ]);
+  if (
+    row === null ||
+    row.architecture !== architecture ||
+    !digest(row.electronArchiveSha256, 64) ||
+    row.deploymentTarget !== "13.0" ||
+    row.napiVersion !== 8
+  )
+    return null;
+  return Object.freeze({
+    architecture,
+    electronArchiveSha256: row.electronArchiveSha256,
+    deploymentTarget: "13.0" as const,
+    napiVersion: 8 as const,
+  });
+}
+
+function hashedTool(value: unknown) {
+  const row = parseExactRecord(value, ["sha256"]);
+  return row !== null && digest(row.sha256, 64)
+    ? Object.freeze({ sha256: row.sha256 })
+    : null;
+}
+
+export function parseClientUniversalBuildInputs(
+  value: unknown,
+): ClientUniversalBuildInputs | null {
+  const row = parseExactRecord(value, [
+    "schemaVersion",
+    "kind",
+    "sourceRepository",
+    "sourceCommit",
+    "sourceTree",
+    "packageLockSha256",
+    "packageVersion",
+    "platform",
+    "hostArchitecture",
+    "backendConfigurationSha256",
+    "graphingProfile",
+    "tools",
+    "slices",
+    "composition",
+  ]);
+  if (row === null || row.kind !== "desktop-universal") return null;
+  const tools = parseExactRecord(row.tools, [
+    "node",
+    "npm",
+    "electron",
+    "packager",
+    "fuses",
+    "compiler",
+    "sdk",
+    "nodeHeadersSha256",
+    "universal",
+    "lipo",
+    "codesign",
+  ]);
+  const slices = parseExactRecord(row.slices, ["arm64", "x64"]);
+  const composition = parseExactRecord(row.composition, [
+    "mergeASARs",
+    "nativeLayout",
+  ]);
+  if (
+    tools === null ||
+    slices === null ||
+    composition === null ||
+    composition.mergeASARs !== true ||
+    composition.nativeLayout !== "fixed-addons-v1"
+  )
+    return null;
+  const arm64 = universalSlice(slices.arm64, "arm64");
+  const x64 = universalSlice(slices.x64, "x64");
+  const electron = versioned(tools.electron);
+  const universal = versioned(tools.universal);
+  const lipo = hashedTool(tools.lipo);
+  const codesign = hashedTool(tools.codesign);
+  if (
+    arm64 === null ||
+    x64 === null ||
+    electron === null ||
+    universal === null ||
+    lipo === null ||
+    codesign === null
+  )
+    return null;
+  // Reuse the unchanged native grammar for the common source/tool fields.
+  // This is validation only: it creates no native identity or native run.
+  const common = parseClientBuildInputs({
+    schemaVersion: row.schemaVersion,
+    sourceRepository: row.sourceRepository,
+    sourceCommit: row.sourceCommit,
+    sourceTree: row.sourceTree,
+    packageLockSha256: row.packageLockSha256,
+    packageVersion: row.packageVersion,
+    platform: row.platform,
+    architecture: row.hostArchitecture,
+    backendConfigurationSha256: row.backendConfigurationSha256,
+    graphingProfile: row.graphingProfile,
+    tools: {
+      node: tools.node,
+      npm: tools.npm,
+      electron: {
+        version: electron.version,
+        archiveSha256: arm64.electronArchiveSha256,
+      },
+      packager: tools.packager,
+      fuses: tools.fuses,
+      compiler: tools.compiler,
+      sdk: tools.sdk,
+      nodeHeadersSha256: tools.nodeHeadersSha256,
+    },
+  });
+  if (common === null) return null;
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: "desktop-universal",
+    sourceRepository: common.sourceRepository,
+    sourceCommit: common.sourceCommit,
+    sourceTree: common.sourceTree,
+    packageLockSha256: common.packageLockSha256,
+    packageVersion: common.packageVersion,
+    platform: "darwin",
+    hostArchitecture: common.architecture,
+    backendConfigurationSha256: common.backendConfigurationSha256,
+    graphingProfile: common.graphingProfile,
+    tools: Object.freeze({
+      ...common.tools,
+      electron,
+      universal,
+      lipo,
+      codesign,
+    }),
+    slices: Object.freeze({ arm64, x64 }),
+    composition: Object.freeze({
+      mergeASARs: true,
+      nativeLayout: "fixed-addons-v1",
+    }),
+  }) as ClientUniversalBuildInputs;
+}
+
+/** Compact universal inputs only; hashing adds the selected domain prefix. */
+export function canonicalClientUniversalBuildInputs(
+  value: unknown,
+): string | null {
+  const parsed = parseClientUniversalBuildInputs(value);
+  return parsed === null ? null : canonical(parsed);
 }
 
 /** Compact JSON, recursively ASCII-key sorted, UTF-8 when encoded; no newline. */

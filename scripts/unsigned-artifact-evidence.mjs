@@ -51,6 +51,16 @@ const uuid =
 const digest = /^(?!0{64}$)[0-9a-f]{64}$/;
 const require = createRequire(import.meta.url);
 let processOwner = null;
+const nativeEvidence = Object.freeze({
+  checkpointKind: "desmoslock-unsigned-artifact-evidence",
+  candidateKind: "unsigned-native-app",
+  runDirectory: "unsigned-artifact-runs",
+});
+const universalEvidence = Object.freeze({
+  checkpointKind: "desmoslock-unsigned-universal-artifact-evidence",
+  candidateKind: "unsigned-universal-app",
+  runDirectory: "universal-artifact-runs",
+});
 
 export class UnsignedArtifactEvidenceError extends Error {
   constructor(code) {
@@ -129,21 +139,21 @@ function references(value) {
   if (new Set(rows.map((row) => row.sha256)).size !== rows.length) fail();
   return rows;
 }
-function candidate(value) {
+function candidate(value, expectedKind) {
   const row = exact(value, ["kind", "treeSha256", "inventory"]);
   if (
-    row.kind !== "unsigned-native-app" ||
+    row.kind !== expectedKind ||
     typeof row.treeSha256 !== "string" ||
     !digest.test(row.treeSha256)
   )
     fail();
   return {
-    kind: "unsigned-native-app",
+    kind: expectedKind,
     treeSha256: row.treeSha256,
     inventory: reference(row.inventory),
   };
 }
-function parseCheckpoint(bytes, expected) {
+function parseCheckpoint(bytes, expected, policy) {
   if (
     !Buffer.isBuffer(bytes) ||
     bytes.length > unsignedEvidenceLimits.checkpointBytes
@@ -164,7 +174,7 @@ function parseCheckpoint(bytes, expected) {
   );
   if (
     row.schemaVersion !== 1 ||
-    row.kind !== "desmoslock-unsigned-artifact-evidence" ||
+    row.kind !== policy.checkpointKind ||
     row.runId !== expected.runId ||
     !Number.isSafeInteger(row.revision) ||
     row.revision < 1 ||
@@ -176,7 +186,9 @@ function parseCheckpoint(bytes, expected) {
   )
     fail("INVALID_CHECKPOINT");
   const boundCandidate =
-    row.candidate === null ? null : candidate(row.candidate);
+    row.candidate === null
+      ? null
+      : candidate(row.candidate, policy.candidateKind);
   let established = null;
   const attempts = dense(row.attempts, unsignedEvidenceLimits.attempts).map(
     (value, index) => {
@@ -241,7 +253,7 @@ function parseCheckpoint(bytes, expected) {
     fail("INVALID_CHECKPOINT");
   return frozen({
     schemaVersion: 1,
-    kind: "desmoslock-unsigned-artifact-evidence",
+    kind: policy.checkpointKind,
     runId: row.runId,
     revision: row.revision,
     identity: expected.identity,
@@ -398,15 +410,28 @@ async function loadNative(selected) {
 
 /** CLI-owned only. Loads the separately pinned storage addon, never AAC or a product codec. */
 export function openUnsignedArtifactEvidence(options) {
-  return openOwner(options, loadNative);
+  return openOwner(options, loadNative, nativeEvidence);
 }
 
 /** Explicit synthetic seam; these adapters do not establish native durability evidence. */
 export function openUnsignedArtifactEvidenceForTesting(options, native) {
-  return openOwner(options, async () => binding(native));
+  return openOwner(options, async () => binding(native), nativeEvidence);
 }
 
-async function openOwner(input, loader) {
+/** Universal CLI-owned entry point; shares the same fixed helper and process owner. */
+export function openUnsignedUniversalArtifactEvidence(options) {
+  return openOwner(options, loadNative, universalEvidence);
+}
+
+/** Explicit synthetic seam; no universal packaging or native durability is implied. */
+export function openUnsignedUniversalArtifactEvidenceForTesting(
+  options,
+  native,
+) {
+  return openOwner(options, async () => binding(native), universalEvidence);
+}
+
+async function openOwner(input, loader, policy) {
   if (processOwner !== null) fail("BUSY");
   const token = {};
   processOwner = token;
@@ -471,7 +496,7 @@ async function openOwner(input, loader) {
   }
   async function commit(value) {
     const bytes = encode(value);
-    const parsed = parseCheckpoint(bytes, options);
+    const parsed = parseCheckpoint(bytes, options, policy);
     uncertainTarget = bytes;
     try {
       await checkDirectories();
@@ -487,7 +512,7 @@ async function openOwner(input, loader) {
   }
   async function loadedRecovery() {
     await checkDirectories();
-    const loaded = parseCheckpoint(await store.load(), options);
+    const loaded = parseCheckpoint(await store.load(), options, policy);
     const baseline = recoveryReadback ?? checkpoint;
     if (baseline !== undefined) {
       if (
@@ -495,7 +520,7 @@ async function openOwner(input, loader) {
         (loaded.revision === baseline.revision && !same(loaded, baseline)) ||
         (loaded.revision > baseline.revision &&
           (uncertainTarget === null ||
-            !same(loaded, parseCheckpoint(uncertainTarget, options))))
+            !same(loaded, parseCheckpoint(uncertainTarget, options, policy))))
       )
         fail("INVALID_CHECKPOINT");
       if (
@@ -713,7 +738,7 @@ async function openOwner(input, loader) {
       typeof row.runId !== "string" ||
       !uuid.test(row.runId) ||
       path.basename(runRoot) !== row.runId ||
-      path.basename(path.dirname(runRoot)) !== "unsigned-artifact-runs" ||
+      path.basename(path.dirname(runRoot)) !== policy.runDirectory ||
       !["create", "resume"].includes(row.mode)
     )
       fail();
@@ -747,7 +772,7 @@ async function openOwner(input, loader) {
       if ((await store.load()) !== null) fail("INVALID_CHECKPOINT");
       await commit({
         schemaVersion: 1,
-        kind: "desmoslock-unsigned-artifact-evidence",
+        kind: policy.checkpointKind,
         runId: options.runId,
         revision: 1,
         identity: options.identity,
@@ -872,7 +897,10 @@ async function openOwner(input, loader) {
               fail();
             if (row.caseId === "packaged-inventory") {
               if (value.state === "observed-pass") {
-                const selected = candidate(value.candidate);
+                const selected = candidate(
+                  value.candidate,
+                  policy.candidateKind,
+                );
                 if (
                   !refs.some((ref) => same(ref, selected.inventory)) ||
                   (boundCandidate !== null && !same(selected, boundCandidate))

@@ -15,7 +15,7 @@ const requiredDisabledFuses = Object.freeze([
 export function createElectronFusePolicy(platform, architecture) {
   return {
     version: FuseVersion.V1,
-    ...(platform === "darwin" && architecture === "arm64"
+    ...(platform === "darwin" && ["arm64", "universal"].includes(architecture)
       ? { resetAdHocDarwinSignature: true }
       : {}),
     [FuseV1Options.RunAsNode]: false,

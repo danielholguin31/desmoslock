@@ -28,4 +28,10 @@ describe("packaged Electron fuse policy", () => {
       "resetAdHocDarwinSignature",
     );
   });
+
+  it("requests local ad-hoc repair for both slices of a universal app", () => {
+    expect(createElectronFusePolicy("darwin", "universal")).toEqual(
+      createElectronFusePolicy("darwin", "arm64"),
+    );
+  });
 });
