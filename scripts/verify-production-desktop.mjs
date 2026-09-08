@@ -548,15 +548,14 @@ async function launchSyntheticCalculatorBuild(userDataDirectory, fixturePath) {
 async function inspectProductionShell(application, expectedPhase) {
   const shell = await application.firstWindow();
   await shell.waitForFunction(
-    () =>
-      globalThis.document.querySelector("[data-v2-status]")?.dataset
-        .backendStatus === "ready",
+    (phase) =>
+      globalThis.document.querySelector(".student-session")?.dataset.phase ===
+      phase,
+    expectedPhase,
   );
   const shellBoundary = await shell.evaluate(async () => {
     const bridge = globalThis.desmoslockDesktop;
-    const status = globalThis.document.querySelector("[data-v2-status]");
     return {
-      backendStatus: status?.dataset.backendStatus,
       bridgeKeys: bridge === undefined ? [] : Object.keys(bridge).sort(),
       bridgeVersion: bridge?.version,
       lockRequestResult: await bridge?.requestAssessmentLock(),
@@ -570,7 +569,6 @@ async function inspectProductionShell(application, expectedPhase) {
         globalThis.document.querySelector(".student-session")?.dataset.phase,
     };
   });
-  assert.equal(shellBoundary.backendStatus, "ready");
   assert.deepEqual(shellBoundary.bridgeKeys, studentBridgeKeys);
   assert.equal(shellBoundary.bridgeVersion, "2.0.0");
   assert.deepEqual(shellBoundary.lockRequestResult, {

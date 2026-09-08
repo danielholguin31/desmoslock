@@ -160,7 +160,11 @@ select results_eq(
     ('previous_role'), ('new_role'), ('previous_role_revision'), ('new_role_revision'),
     ('previous_settings_revision'), ('new_settings_revision'),
     ('test_id'), ('previous_test_revision'), ('new_test_revision'),
-    ('previous_test_lifecycle'), ('new_test_lifecycle')
+    ('previous_test_lifecycle'), ('new_test_lifecycle'),
+    ('student_session_id'), ('actor_device_session_id'),
+    ('previous_student_revision'), ('new_student_revision'),
+    ('previous_student_epoch'), ('new_student_epoch'),
+    ('previous_student_state'), ('new_student_state')
   ) as expected(column_name) order by 1$$,
   'the exact audit schema contains no old or new School names or arbitrary payload'
 );
