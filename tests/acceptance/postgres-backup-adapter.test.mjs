@@ -104,9 +104,9 @@ COPY desmoslock_v2.tests (id, workspace_id, created_by_profile_id, title, seed_k
 30000000-0000-4000-8000-000000000001\t10000000-0000-4000-8000-000000000001\t20000000-0000-4000-8000-000000000003\tSynthetic Alpha Algebra Test\ttest.alpha.algebra
 30000000-0000-4000-8000-000000000002\t10000000-0000-4000-8000-000000000002\t20000000-0000-4000-8000-000000000013\tSynthetic Beta Algebra Test\ttest.beta.algebra
 \\.
-COPY desmoslock_v2.workspaces (id, kind, slug, display_name, seed_key) FROM stdin;
-10000000-0000-4000-8000-000000000001\tschool\tsynthetic-alpha\tSynthetic Alpha School\tschool.alpha
-10000000-0000-4000-8000-000000000002\tschool\tsynthetic-beta\tSynthetic Beta School\tschool.beta
+COPY desmoslock_v2.workspaces (id, kind, slug, display_name, seed_key, settings_revision) FROM stdin;
+10000000-0000-4000-8000-000000000001\tschool\tsynthetic-alpha\tSynthetic Alpha School\tschool.alpha\t1
+10000000-0000-4000-8000-000000000002\tschool\tsynthetic-beta\tSynthetic Beta School\tschool.beta\t1
 \\.
 `);
 }
@@ -700,6 +700,10 @@ test("Postgres adapter rejects hostile archive contents before any database conn
     "COPY desmoslock_v2.profiles (id, display_name, seed_key, auth_user_id) FROM stdin;";
   const profileRow =
     "20000000-0000-4000-8000-000000000001\tSynthetic Alpha Owner\tprofile.alpha.owner\t\\N";
+  const workspaceHeader =
+    "COPY desmoslock_v2.workspaces (id, kind, slug, display_name, seed_key, settings_revision) FROM stdin;";
+  const workspaceRow =
+    "10000000-0000-4000-8000-000000000001\tschool\tsynthetic-alpha\tSynthetic Alpha School\tschool.alpha\t1";
   const hostileArchives = {
     "altered foundation marker": validSql.replace(
       "desmoslock-v2-foundation",
@@ -729,6 +733,43 @@ test("Postgres adapter rejects hostile archive contents before any database conn
     "malformed COPY block": validSql.replace(
       "COPY desmoslock_v2.workspaces",
       "COPY public.workspaces",
+    ),
+    "stale workspace COPY layout": validSql
+      .replace(
+        workspaceHeader,
+        workspaceHeader.replace(", settings_revision", ""),
+      )
+      .replace("school.alpha\t1\n", "school.alpha\n")
+      .replace("school.beta\t1\n", "school.beta\n"),
+    "extra workspace COPY column": validSql.replace(
+      workspaceHeader,
+      workspaceHeader.replace(
+        "settings_revision)",
+        "settings_revision, unexpected)",
+      ),
+    ),
+    "reordered workspace COPY columns": validSql.replace(
+      workspaceHeader,
+      workspaceHeader.replace(
+        "seed_key, settings_revision",
+        "settings_revision, seed_key",
+      ),
+    ),
+    "missing workspace revision value": validSql.replace(
+      workspaceRow,
+      workspaceRow.slice(0, -2),
+    ),
+    "extra workspace row value": validSql.replace(
+      workspaceRow,
+      `${workspaceRow}\t1`,
+    ),
+    ...Object.fromEntries(
+      ["\\N", "NULL", "", "0", "2", "01", "1.0", "+1", "1e0", " "].map(
+        (value, index) => [
+          `noncanonical workspace revision ${index + 1}`,
+          archiveWithRowValue(validSql, workspaceRow, 5, value),
+        ],
+      ),
     ),
     "stale membership COPY layout": validSql.replace(
       membershipHeader,

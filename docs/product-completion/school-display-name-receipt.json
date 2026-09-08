@@ -1,6 +1,6 @@
 {
   "date": "2026-09-08",
-  "status": "source_and_rendered_acceptance_frozen_awaiting_root_publication_and_exact_commit_nine_migration_ci",
+  "status": "reviewed_ci_compatibility_repair_frozen_awaiting_root_publication_and_exact_commit_ci",
   "base_commit": "73d8b8ade195db445bbd5e0d5877b00ede9a2683",
   "branch": "codex/desmoslock-school-settings",
   "supersedes": "Changed source hashes supersede corresponding prior Membership/auth receipts; earlier CI and rendered evidence do not attest this School candidate.",
@@ -38,12 +38,15 @@
     "scripts/build-app.mjs": "8741f58290f31b00ba6cd2ef2105ff177e4ddf46f5094722d2c6de768891da3e",
     "scripts/repository-contract/supabase-contract.mjs": "6ceb646dc1d24de9d4a4af62592eeac162924d4193a4dc1f22efb702d4c1a4f3",
     "scripts/synthetic-backup/operator.mjs": "5d9349f4b7a7d9d7f89df120171224994078068ea1cbb968f4753bfd49acc21c",
+    "scripts/synthetic-backup/postgres-adapter.mjs": "dbd373aaab71a637b41ce7099f0ea1cf72781bdc4bbee1fc957cfe943f49a83e",
     "supabase/functions/health/index.test.ts": "eeed43ab99222f19a6d143b9ab103076b09ed39ca92376d5e9f93dff5245ae4d",
     "supabase/functions/health/index.ts": "3b1b06a245e3b3273abff71af217896f7fc21ef201770b73a8861fb3cffcf995",
     "supabase/migrations/20260908000100_school_display_name.sql": "96febd78bbec6859771cb26ae095458553e19ddd75dbc438e99b54ee86549e18",
+    "supabase/tests/database/internal_release_backend.test.sql": "5b684f8faadef0ba7f51b9ffd6aa6962c76dc250acdce949566b4f8387204807",
     "supabase/tests/database/school_display_name.test.sql": "da3359910d14c4ad60325629f7f21218886311248746025a6be6a5bf43d19f25",
     "supabase/tests/database/staff_auth_lifecycle.test.sql": "d4652085b3517911d23a8a52117afadb9b4217e155bf615759a134e5a8edcddc",
     "tests/acceptance/clean-build.test.mjs": "774c645203f516cac72c8e28d2ca2d437f8b8be8845f6c64dd3adbca31773755",
+    "tests/acceptance/postgres-backup-adapter.test.mjs": "53e25826a240d0d1bbe40f7757448510bc10a667b5c7f576e88a07aae201e7a7",
     "tests/acceptance/revoke-membership-lock.test.mjs": "76dea9de7cdae33d9bd50f0808ca43c59e6b25aa05fe34bada568fa80dc0341c",
     "tests/acceptance/staff-auth-composed.test.mjs": "e0b7925161cb62fd28ef84d3c02dfb22e629a169b39f0faac93c43b4cd34e33e",
     "tests/acceptance/staff-auth-loopback.mjs": "c965daa09eb9ee3909278212c62abec7683b086253e733f0b2ce943e0aaa641d",
@@ -86,12 +89,15 @@
     "scripts/build-app.mjs",
     "scripts/repository-contract/supabase-contract.mjs",
     "scripts/synthetic-backup/operator.mjs",
+    "scripts/synthetic-backup/postgres-adapter.mjs",
     "supabase/functions/health/index.test.ts",
     "supabase/functions/health/index.ts",
     "supabase/migrations/20260908000100_school_display_name.sql",
+    "supabase/tests/database/internal_release_backend.test.sql",
     "supabase/tests/database/school_display_name.test.sql",
     "supabase/tests/database/staff_auth_lifecycle.test.sql",
     "tests/acceptance/clean-build.test.mjs",
+    "tests/acceptance/postgres-backup-adapter.test.mjs",
     "tests/acceptance/revoke-membership-lock.test.mjs",
     "tests/acceptance/staff-auth-composed.test.mjs",
     "tests/acceptance/staff-auth-loopback.mjs",
@@ -99,9 +105,9 @@
     "tests/acceptance/synthetic-backup.test.mjs",
     "tests/repository-contract.test.mjs"
   ],
-  "candidate_source_file_count": 45,
-  "candidate_total_path_count": 46,
-  "precommit_tracked_diff_sha256": "0c8ef6a1a9953612e1551cdff3e114d3be833675f123705d52f71ead6ff6dd22",
+  "candidate_source_file_count": 48,
+  "candidate_total_path_count": 49,
+  "precommit_tracked_diff_sha256": "7be3a50e1e44a2d330daf1e8c429d7cfd82c35c777fb4fbb51be3dc5be1b6396",
   "wire": {
     "packet": "state/execution-packets/desmoslock-astra-2026-09-04/school-settings-wire-proposal.md",
     "sha256": "e840c04ba8581f9510282ba446feeddbb7073fd6c6afec8fcd954e3ba6049474"
@@ -218,7 +224,8 @@
     ],
     "composition_fixed_byte_review": "Atlas clean at app bb0c50afe937aaa9b3f2c517b48190130a02c09a18d4c88e98f716c26cd7280b and app test57427275a4048e0c522b14fcacf9a5cdde655441150790ba21e3af4d239f82d7",
     "root_cumulative_review": "passed; root committed reviewed School source and merged verified restore normally",
-    "post_restore_assets": "root approved narrow School CSS copy and existing clean-build artifact assertion; duplicate helper tuple removed, original already-correct helper bytes restored"
+    "post_restore_assets": "root approved narrow School CSS copy and existing clean-build artifact assertion; duplicate helper tuple removed, original already-correct helper bytes restored",
+    "backup_ci_compatibility": "Atlas clean: exact six-column archive layout, pristine revision guard, unchanged framing/digest, 15 adversarial variants and two current SQL pins."
   },
   "ui_source_handoff": {
     "packet_relative": "qa/school-settings-preview/implementation-check.json",
@@ -233,9 +240,9 @@
     "provider_config_dependencies_root_package_ci": "School did not change provider configuration/dependencies/root package/CI; root normal merge imported reviewed restore package/CI hooks"
   },
   "pending_gates": [
-    "Root final exact-scope receipt gate and reviewed Git publication.",
-    "Exact-commit nine-migration CI, including90 new SQL assertions,21 observed-lock scenarios,11 real-provider journeys,actual-entrypoint School browser and restored-target acceptance; none executed locally.",
-    "Root merge gate after required CI passes.",
+    "Root final four-file repair/receipt review and explicit Git publication.",
+    "Exact corrected-commit nine-migration SQL and complete restored-target staff acceptance, including 21 observed-lock scenarios, 11 composed groups and actual-entrypoint School browser. Failed prior CI did not reach these later groups.",
+    "Root merge gate after all required CI passes.",
     "Hosted inventory, schema application and deployment remain separate authority and evidence."
   ],
   "preintegration_source_gate": {
@@ -306,5 +313,46 @@
       "Browser no-op checks establish disabled unchanged Save; acknowledged backend no-op/max revision/audit remain controller/SQL gates.",
       "The eight-migration restored-target success is historical evidence; the nine-migration School runtime and actual-backend browser still require exact-commit CI."
     ]
+  },
+  "ci_compatibility_repair": {
+    "source_base_commit": "4df3e649ca178ca203620da54c4816790bdfeca0",
+    "failed_verification": "https://github.com/danielholguin31/desmoslock/actions/runs/34193658469",
+    "security": "https://github.com/danielholguin31/desmoslock/actions/runs/34193658450",
+    "observed_fresh_database": {
+      "files": 9,
+      "tests": 599,
+      "failed_assertions": [11, 19],
+      "failed_file": "internal_release_backend.test.sql",
+      "cause": "Both native have/want diagnostics compared the current nine-migration digest with stale eight-migration test expectations."
+    },
+    "observed_restored_target": {
+      "failure_code": "OPERATOR_WORKER_EXPORT",
+      "full_staff_suite_reached": false,
+      "later_lock_provider_school_browser_evidence": "Not reached; no runtime acceptance claimed."
+    },
+    "changed_paths": [
+      "scripts/synthetic-backup/postgres-adapter.mjs",
+      "supabase/tests/database/internal_release_backend.test.sql",
+      "tests/acceptance/postgres-backup-adapter.test.mjs"
+    ],
+    "repair": "Only the two current SQL test pins now match 9264f3b4; the archive parser accepts exactly the six-column workspaces layout and requires settings_revision to be the exact string 1. The canonical fixture framing and digest remain unchanged; legacy layouts and noncanonical revision values are rejected.",
+    "local_reproduction": "The current six-column synthetic archive fixture failed the original real parser with POSTGRES_ARCHIVE_CONTENT_INVALID before the parser correction.",
+    "local_verification": {
+      "focused_operator_adapter_runtime_helper_repository": {
+        "passed": 151,
+        "failed": 0,
+        "skipped": 0
+      },
+      "added_hostile_workspace_variants": 15,
+      "repository_verifier_exit": 0,
+      "scoped_eslint_exit": 0,
+      "scoped_secretlint_exit": 0,
+      "prettier_exit": 0,
+      "diff_check_exit": 0,
+      "boundary": "Source/parser/subprocess-fixture tests; no local database, services, provider or browser execution."
+    },
+    "unchanged_web_evidence": "All original 45 source hashes, web manifest and 128 selected rendered QA observations are unchanged; no duplicate browser QA.",
+    "review": "Atlas independent scoped source review clean at the three repaired source hashes; no high or medium findings.",
+    "runtime_status": "Corrected source awaits normal PR synchronization CI."
   }
 }
