@@ -3,8 +3,9 @@
 ## Scope and safety boundary
 
 This is the generation-4 internal-release backend for local development and
-approved synthetic staging. Its nine versioned migrations include the staff
-authentication lifecycle, Membership administration, and School display-name settings.
+approved synthetic staging. Its ten versioned migrations include the staff
+authentication lifecycle, Membership administration, School display-name settings,
+and the draft/open/ended Test workspace.
 Student Session capabilities and calculator isolation remain later work.
 
 Generation 4 preserves the synthetic fixture across these follow-on migrations.
@@ -55,6 +56,7 @@ health function, and operator modules in this repository are the authority.
 - `supabase/migrations/20260907000300_membership_revocation_authority.sql`
 - `supabase/migrations/20260907000400_membership_administration.sql`
 - `supabase/migrations/20260908000100_school_display_name.sql`
+- `supabase/migrations/20260908000200_test_workspace.sql`
 - `supabase/seed.sql`
 - `supabase/config.toml`
 - `supabase/functions/deno.json`
@@ -71,7 +73,7 @@ The fixture contract is generation `4`, version `internal-baseline-v2`, with
 SHA-256
 `f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201`.
 The exact discovered migration file set has normalized SHA-256
-`9264f3b4933e4f1bb207d5a1a130ab0b3edafea787ac37fb25268b09afba2538`.
+`5cf17174bf44e491a6bd78fe540326d8bdee169518d75c8082e5bd9b833f3f62`.
 The published generation-3 migration retains its contemporaneous digest
 `06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49`;
 the original generation-4 migration likewise retains
@@ -92,12 +94,15 @@ The Membership administration migration retains its eight-file digest
 `7c3e7403b61d5c66123b15d2fe4de28ee2259d71a304ce8695d16630f5353a56`
 and raw SHA-256
 `078a886cc923b0d9349eca992ebf1d74b06e4bbd302ee165828b4003ca3326a5`.
-Only the School display-name migration records the current aggregate.
-Its raw SHA-256 is
+The School display-name migration retains its nine-file digest
+`9264f3b4933e4f1bb207d5a1a130ab0b3edafea787ac37fb25268b09afba2538`
+and raw SHA-256
 `96febd78bbec6859771cb26ae095458553e19ddd75dbc438e99b54ee86549e18`.
+Only the Test workspace migration records the current aggregate. Its raw SHA-256 is
+`233123dd9038740ef724432715cc17e32a5adc2be68160466fa11f5b2dfb865c`.
 The repository contract pins each attested migration's raw SHA-256 and literal
-independently, then zeroes only those seven delimited self-references when deriving
-the nine-file aggregate. The follow-on migration updates the existing singleton
+independently, then zeroes only those eight delimited self-references when deriving
+the ten-file aggregate. The follow-on migration updates the existing singleton
 attestation without changing schema generation `4` or the seven-table fixture;
 the upgrade path does not depend on rewriting or replaying historical migrations.
 The seed takes a transaction advisory lock, refuses altered or partial targets,
@@ -106,6 +111,14 @@ insertion. The fixture digest length-frames every seeded identity and content
 field plus the new profile Auth binding and Membership lifecycle fields. A
 replay is accepted only when the existing fixture is already exact; runtime
 rows with null seed keys do not change health attestation.
+
+The new synthetic-only Test CHECK and seed metadata preserve that digest's
+framing: the two pinned Tests remain draft/revision one, with fixed UTC creation
+metadata `2000-01-01T00:00:00.000000Z` and null opened/ended/create-key fields.
+The backup adapter independently validates the exact eleven-column current Test
+COPY layout and every pristine metadata value, as it does the six-column School
+layout. Export uses a process-local UTC setting; the real roundtrip tests
+distinct source/target session timezones without changing global settings.
 
 ## Local bootstrap and verification
 
@@ -389,8 +402,12 @@ must not target an existing local or hosted database. The eight-migration
 baseline passed actual restore and the full restored-target staff suite on
 [source `5b5722b`](https://github.com/danielholguin31/desmoslock/actions/runs/34189874469)
 and [merged main `73d8b8a`](https://github.com/danielholguin31/desmoslock/actions/runs/34190379428).
-The current nine-migration School settings extension remains runtime-pending;
-those earlier runs do not attest its new schema or journeys. See
+The nine-migration School settings extension passed its actual roundtrip, full
+restored-target staff suite and 599 fresh SQL assertions on
+[source `6939c59`](https://github.com/danielholguin31/desmoslock/actions/runs/34194857958),
+then merged as [`d8fadca`](https://github.com/danielholguin31/desmoslock/commit/d8fadcafe8aa5fbc7ef6ca6717d61899677b49fc).
+The current ten-migration Test extension remains runtime-pending; those earlier
+runs do not attest its new schema, archive metadata or journeys. See
 [source, operation and evidence boundaries](synthetic-restore-acceptance.md)
 for the exact receipts, TLS prerequisites and cleanup contract.
 
@@ -424,7 +441,7 @@ agent can perform.
 The existing approved target is `adlhhdbglpamaftcbmce`. Its last recorded public
 health response was generation 3, which is evidence of a version gap, not proof
 that the target is empty or ready for these migrations. Recheck its current
-inventory and identity before planning an upgrade; the local nine-migration
+inventory and identity before planning an upgrade; the local ten-migration
 foundation does not establish hosted state or require a replacement project.
 
 1. Verify and reuse an approved empty synthetic-only staging target when one is

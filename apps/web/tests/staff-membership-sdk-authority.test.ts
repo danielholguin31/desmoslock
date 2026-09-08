@@ -19,6 +19,12 @@ const accounts = {
   B: "a1000000-0000-4000-8000-000000000002",
 } as const;
 type Account = keyof typeof accounts;
+const providerSessionIds: Record<Account, string> = {
+  A: "b1000000-0000-4000-8000-000000000001",
+  B: "b1000000-0000-4000-8000-000000000002",
+};
+const replacementSessionId = "b1000000-0000-4000-8000-000000000003";
+type SessionVariant = Account | "A2" | "AR";
 const commandTypes = [
   "create_staff_invitation",
   "revoke_staff_invitation",
@@ -41,7 +47,11 @@ function deferred() {
   return { promise, resolve };
 }
 
-function session(account: Account) {
+function session(
+  account: Account,
+  providerSessionId = providerSessionIds[account],
+  tokenVersion = 0,
+) {
   const now = Math.floor(Date.now() / 1_000);
   const user = {
     id: accounts[account],
@@ -72,7 +82,8 @@ function session(account: Account) {
       exp: now + 3_600,
       iat: now,
       role: "authenticated",
-      session_id: `b1000000-0000-4000-8000-00000000000${account === "A" ? "1" : "2"}`,
+      session_id: providerSessionId,
+      jti: String(tokenVersion),
       sub: user.id,
     },
     "synthetic-signature",
@@ -92,7 +103,12 @@ function session(account: Account) {
 // The installed SDK, real adapter and real port run together. Every HTTP request
 // terminates in these synthetic responders; this suite is not database proof.
 async function harness() {
-  const sessions = { A: session("A"), B: session("B") };
+  const sessions = {
+    A: session("A"),
+    B: session("B"),
+    A2: session("A", replacementSessionId),
+    AR: session("A", providerSessionIds.A, 1),
+  };
   const storage = new Map([[storageKey, JSON.stringify(sessions.A)]]);
   const removals: string[] = [];
   const requests: Array<{
@@ -100,6 +116,11 @@ async function harness() {
     path: string;
     method: string;
     body: string;
+  }> = [];
+  const sessionRequests: Array<{
+    variant: SessionVariant | undefined;
+    method: string;
+    path: string;
   }> = [];
   const ended = new Set<Account>();
   let roleOutcome: "acknowledged" | "lost" | "malformed" = "acknowledged";
@@ -115,12 +136,16 @@ async function harness() {
     const request = new Request(input, init);
     const url = new URL(request.url);
     const authorization = request.headers.get("authorization");
+    const variant = (Object.keys(sessions) as SessionVariant[]).find(
+      (key) => authorization === `Bearer ${sessions[key].access_token}`,
+    );
     const account =
-      authorization === `Bearer ${sessions.A.access_token}`
-        ? "A"
-        : authorization === `Bearer ${sessions.B.access_token}`
-          ? "B"
-          : "unknown";
+      variant === undefined ? "unknown" : variant === "B" ? "B" : "A";
+    sessionRequests.push({
+      variant,
+      method: request.method,
+      path: url.pathname,
+    });
     if (url.origin !== backend || account === "unknown")
       throw new Error("Unexpected synthetic SDK request");
     requests.push({
@@ -255,6 +280,7 @@ async function harness() {
   const expectedIdentityGeneration = actor.identityGeneration;
   const expectedSessionGeneration = actor.sessionGeneration;
   requests.length = 0;
+  sessionRequests.length = 0;
   removals.length = 0;
   function command(type: ManagementCommand): StaffAuthMutation {
     const common = {
@@ -291,6 +317,14 @@ async function harness() {
     }
   }
   return {
+    sessions,
+    sessionRequests,
+    replaceSession(variant: SessionVariant) {
+      storage.set(storageKey, JSON.stringify(sessions[variant]));
+    },
+    sessionUnchanged: (variant: SessionVariant) =>
+      storage.get(storageKey) === JSON.stringify(sessions[variant]),
+    initialAuthority: actor,
     adapter,
     command,
     ended,
@@ -320,6 +354,123 @@ async function harness() {
 }
 
 describe("installed SDK staff management authority", () => {
+  it.each(commandTypes)(
+    "%s refuses same-account S2 replacing S1 before capture without waiting for an auth event",
+    async (type) => {
+      const test = await harness();
+      let events = 0;
+      const unsubscribe = test.adapter.subscribe(() => {
+        events += 1;
+      });
+      try {
+        test.replaceSession("A2");
+        await expect(test.adapter.perform(test.command(type))).rejects.toThrow(
+          "authority",
+        );
+        expect(events).toBe(0);
+        expect(test.mutations()).toEqual([]);
+        expect(test.sessionRequests).toEqual([
+          { variant: "A2", method: "GET", path: "/auth/v1/user" },
+        ]);
+        expect(test.sessionUnchanged("A2")).toBe(true);
+        expect(test.removals).toEqual([]);
+      } finally {
+        unsubscribe();
+        test.dispose();
+      }
+    },
+  );
+
+  it.each(["A2", "AR"] as const)(
+    "a later verified %s read updates only the generation required by provider session continuity",
+    async (variant) => {
+      const test = await harness();
+      let events = 0;
+      const unsubscribe = test.adapter.subscribe(() => {
+        events += 1;
+      });
+      try {
+        const initial = test.initialAuthority;
+        expect(initial.providerSessionId).toBe(providerSessionIds.A);
+        test.replaceSession(variant);
+        const fresh = await test.adapter.read();
+        expect(fresh.kind).toBe("access_granted");
+        if (fresh.kind !== "access_granted")
+          throw new Error("Expected fresh grant");
+        expect(fresh.identityGeneration).toBe(initial.identityGeneration);
+        expect(fresh.providerSessionId).toBe(
+          variant === "A2" ? replacementSessionId : providerSessionIds.A,
+        );
+        if (variant === "A2")
+          expect(fresh.sessionGeneration).not.toBe(initial.sessionGeneration);
+        else expect(fresh.sessionGeneration).toBe(initial.sessionGeneration);
+        const repeated = await test.adapter.read();
+        expect(repeated).toMatchObject({
+          kind: "access_granted",
+          identityGeneration: fresh.identityGeneration,
+          sessionGeneration: fresh.sessionGeneration,
+          providerSessionId: fresh.providerSessionId,
+        });
+        expect(events).toBe(0);
+        expect(test.mutations()).toEqual([]);
+        expect(test.sessionUnchanged(variant)).toBe(true);
+      } finally {
+        unsubscribe();
+        test.dispose();
+      }
+    },
+  );
+
+  it.each(commandTypes)(
+    "%s accepts a renewed token in S1 using the existing visible grant",
+    async (type) => {
+      const test = await harness();
+      try {
+        test.replaceSession("AR");
+        await test.adapter.perform(test.command(type));
+        expect(test.mutations()).toHaveLength(1);
+        expect(
+          test.sessionRequests.every(({ variant }) => variant === "AR"),
+        ).toBe(true);
+        const fresh = await test.adapter.read();
+        expect(fresh).toMatchObject({
+          kind: "access_granted",
+          providerSessionId: providerSessionIds.A,
+          identityGeneration: test.initialAuthority.identityGeneration,
+          sessionGeneration: test.initialAuthority.sessionGeneration,
+        });
+        expect(test.sessionUnchanged("AR")).toBe(true);
+      } finally {
+        test.dispose();
+      }
+    },
+  );
+
+  it.each(commandTypes)(
+    "%s sends only captured S1 when S2 replaces storage before mutation",
+    async (type) => {
+      const test = await harness();
+      const gate = test.hold("/rest/v1/rpc/current_manageable_staff");
+      try {
+        const pending = test.adapter.perform(test.command(type));
+        await gate.entered.promise;
+        test.replaceSession("A2");
+        gate.released.resolve();
+        await expect(pending).rejects.toThrow("continuity");
+        const mutations = test.sessionRequests.filter(({ path }) =>
+          mutationPaths.includes(path),
+        );
+        expect(mutations).toHaveLength(1);
+        expect(mutations[0]?.variant).toBe("A");
+        expect(test.sessionUnchanged("A2")).toBe(true);
+        expect(test.removals).toEqual([]);
+      } finally {
+        gate.released.resolve();
+        test.dispose();
+      }
+    },
+  );
+
   it.each(commandTypes)(
     "%s refuses replacement B before capture and cannot recapture it by replay",
     async (type) => {

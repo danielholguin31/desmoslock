@@ -23,6 +23,10 @@ import type {
   SchoolSettingsController,
   SchoolSettingsPort,
 } from "../src/school-settings/school-settings-controller.js";
+import type {
+  TestWorkspaceController,
+  TestWorkspacePort,
+} from "../src/test-workspace/test-workspace-controller.js";
 import {
   createSupabaseStaffAuthAdapter,
   type SupabaseStaffAuthPort,
@@ -57,6 +61,7 @@ function syntheticAccess(
       },
     },
     identityGeneration: "identity-owner",
+    providerSessionId: "81000000-0000-4000-8000-000000000001",
     kind: "access_granted",
     manageableInvitations: [],
     manageableStaff: [],
@@ -91,20 +96,41 @@ interface FakeDomElement {
   inert: boolean;
   label?: string;
   options?: FakeDomElement[];
-  querySelectorAll: ReturnType<typeof vi.fn>;
+  querySelectorAll: ReturnType<typeof vi.fn<() => FakeDomElement[]>>;
   removeAttribute: ReturnType<typeof vi.fn>;
-  replaceChildren: ReturnType<typeof vi.fn>;
+  replaceChildren: ReturnType<
+    typeof vi.fn<(...children: FakeDomElement[]) => void>
+  >;
   selected?: boolean;
   selectedIndex?: number;
   src?: string;
   tagName: string;
   textContent: string;
   value?: string;
+  dataset: Record<string, string>;
+  ownerDocument: FakeDocument;
+  querySelector: ReturnType<typeof vi.fn>;
+  append: ReturnType<typeof vi.fn<(...children: FakeDomElement[]) => void>>;
+  focus: ReturnType<typeof vi.fn<() => void>>;
+}
+
+interface FakeDocument {
+  activeElement: FakeDomElement | null;
+  createElement(tagName: string): FakeDomElement;
+}
+
+function createFakeDocument(): FakeDocument {
+  const document: FakeDocument = {
+    activeElement: null,
+    createElement: (tagName) => createFakeDomElement(tagName, {}, document),
+  };
+  return document;
 }
 
 function createFakeDomElement(
   tagName: string,
   properties: Partial<FakeDomElement> = {},
+  document = createFakeDocument(),
 ): FakeDomElement {
   const element = {
     children: [],
@@ -112,6 +138,8 @@ function createFakeDomElement(
     inert: false,
     tagName: tagName.toUpperCase(),
     textContent: "",
+    dataset: {},
+    ownerDocument: document,
     ...properties,
   } as FakeDomElement;
   element.querySelectorAll = vi.fn(() => {
@@ -134,6 +162,24 @@ function createFakeDomElement(
     element.children = children;
     element.textContent = "";
   });
+  element.append = vi.fn((...children: FakeDomElement[]) => {
+    element.children.push(...children);
+  });
+  element.focus = vi.fn(() => {
+    document.activeElement = element;
+  });
+  element.querySelector = vi.fn((selector: string) => {
+    const nodes = element.querySelectorAll() as FakeDomElement[];
+    return (
+      nodes.find((node) => {
+        if (selector === "[data-test-workspace-heading]")
+          return "testWorkspaceHeading" in node.dataset;
+        return selector
+          .split(",")
+          .some((tag) => node.tagName === tag.trim().toUpperCase());
+      }) ?? null
+    );
+  });
   return element;
 }
 
@@ -141,15 +187,18 @@ function createElements(): StaffAuthApplicationElements & {
   readonly authRoot: HTMLElement & { hidden: boolean };
   readonly protectedSchoolDataRoot: HTMLElement & { hidden: boolean };
 } {
+  const document = createFakeDocument();
   return {
-    authRoot: {
-      hidden: true,
-      replaceChildren: vi.fn(),
-    } as unknown as HTMLElement & { hidden: boolean },
-    protectedSchoolDataRoot: {
-      hidden: false,
-      replaceChildren: vi.fn(),
-    } as unknown as HTMLElement & { hidden: boolean },
+    authRoot: createFakeDomElement(
+      "section",
+      { hidden: true },
+      document,
+    ) as unknown as HTMLElement & { hidden: boolean },
+    protectedSchoolDataRoot: createFakeDomElement(
+      "section",
+      {},
+      document,
+    ) as unknown as HTMLElement & { hidden: boolean },
     status: {
       dataset: {},
       textContent: "Loading status…",
@@ -209,6 +258,11 @@ function createHarness(
       controller: SchoolSettingsController,
     ) => () => void;
     readonly schoolSettingsPort?: SchoolSettingsPort;
+    readonly testWorkspacePort?: TestWorkspacePort;
+    readonly bindTestWorkspaceView?: (
+      root: HTMLElement,
+      controller: TestWorkspaceController,
+    ) => () => void;
     readonly callbackHistoryMarkerPresent?: boolean;
     readonly callbackUrl?: string;
     readonly callbackWasScrubbed?: boolean;
@@ -223,10 +277,15 @@ function createHarness(
   } = {},
 ) {
   const elements = options.elements ?? createElements();
-  const bindView = vi.fn(options.bindView ?? (() => vi.fn()));
-  const bindSchoolSettingsView = vi.fn(
-    options.bindSchoolSettingsView ?? (() => vi.fn()),
+  const bindView = vi.fn<NonNullable<typeof options.bindView>>(
+    options.bindView ?? (() => vi.fn()),
   );
+  const bindSchoolSettingsView = vi.fn<
+    NonNullable<typeof options.bindSchoolSettingsView>
+  >(options.bindSchoolSettingsView ?? (() => vi.fn()));
+  const bindTestWorkspaceView = vi.fn<
+    NonNullable<typeof options.bindTestWorkspaceView>
+  >(options.bindTestWorkspaceView ?? (() => vi.fn()));
   let adapterIndex = 0;
   const createAdapterFactory = vi.fn<
     (
@@ -281,6 +340,7 @@ function createHarness(
     {
       bindView,
       bindSchoolSettingsView,
+      bindTestWorkspaceView,
       createStaffServices: (configuration, operationIds) => ({
         adapter: createAdapterFactory(configuration, operationIds),
         schoolSettingsPort: options.schoolSettingsPort ?? {
@@ -290,6 +350,7 @@ function createHarness(
           updateSchoolDisplayName: async () => null,
           releaseSchoolSettingsAuthority() {},
         },
+        testWorkspacePort: options.testWorkspacePort ?? unavailableTestPort(),
       }),
       observeHealth,
     },
@@ -298,11 +359,25 @@ function createHarness(
     application,
     bindView,
     bindSchoolSettingsView,
+    bindTestWorkspaceView,
     createAdapterFactory,
     elements,
     lifecycleListeners,
     observeHealth,
     unregisterLifecycle,
+  };
+}
+
+function unavailableTestPort(): TestWorkspacePort {
+  return {
+    captureTestWorkspaceAuthority: async () => ({ status: "unavailable" }),
+    releaseTestWorkspaceAuthority() {},
+    readSchoolTests: async () => null,
+    readSchoolTest: async () => null,
+    createSchoolTest: async () => null,
+    updateTestTitle: async () => null,
+    openTest: async () => null,
+    endTest: async () => null,
   };
 }
 
@@ -338,6 +413,7 @@ function createRecoveryNotificationHarness() {
     },
     operationIds: { next: () => operationId },
     port: {
+      ...unavailableTestPort(),
       captureSchoolSettingsAuthority: unavailable,
       updateSchoolDisplayName: unavailable,
       releaseSchoolSettingsAuthority() {},
@@ -368,6 +444,7 @@ function createRecoveryNotificationHarness() {
       },
       readAccount: async () => ({
         accountId: "a1000000-0000-4000-8000-000000000001",
+        providerSessionId: "81000000-0000-4000-8000-000000000001",
         email: "teacher@example.test",
         emailVerified: true,
       }),
@@ -1610,11 +1687,12 @@ describe("School settings through the actual auth application lifecycle", () => 
     );
     expect(port.captureSchoolSettingsAuthority).toHaveBeenCalledExactlyOnceWith(
       "account-owner",
+      "81000000-0000-4000-8000-000000000001",
     );
     expect(port.releaseSchoolSettingsAuthority).toHaveBeenCalledExactlyOnceWith(
       "synthetic-school-handle",
     );
-    expect(read).toHaveBeenCalledTimes(3);
+    expect(read).toHaveBeenCalledTimes(4); // Includes initial Test authority refresh.
     expect(h.bindSchoolSettingsView).toHaveBeenCalledOnce();
     const afterAuthority = auth.getProductAccess();
     if (beforeAuthority.kind !== "ready" || afterAuthority.kind !== "ready")
@@ -1764,7 +1842,7 @@ it("resumes a School draft after an obsolete pre-save read and a later unchanged
     type: "save",
     snapshotRevision: product.getSnapshot().revision,
   });
-  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(3));
   await auth.dispatch({
     type: "review_staff_membership_role_change",
     profileId: "profile-target",
@@ -1786,7 +1864,7 @@ it("resumes a School draft after an obsolete pre-save read and a later unchanged
   expect(first).toBe(second);
   await first;
   expect(publications).toHaveBeenCalledTimes(count);
-  expect(read).toHaveBeenCalledTimes(3);
+  expect(read).toHaveBeenCalledTimes(4);
   expect(product.getSnapshot()).toMatchObject({
     kind: "editing",
     draft: "Retained draft",
@@ -1839,7 +1917,7 @@ it.each(["suspend", "dispose"] as const)(
     await saving;
     expect(product.getSnapshot()).toBe(closed);
     expect(h.bindSchoolSettingsView).toHaveBeenCalledOnce();
-    expect(read).toHaveBeenCalledTimes(2);
+    expect(read).toHaveBeenCalledTimes(3);
     if (exit === "suspend") {
       await h.application.resume();
       const fresh = h.bindSchoolSettingsView.mock.calls[1]?.[1];
@@ -1852,3 +1930,343 @@ it.each(["suspend", "dispose"] as const)(
     }
   },
 );
+
+function testWorkspacePort() {
+  const row = {
+    code: "ok",
+    test_id: "71000000-0000-4000-8000-000000000001",
+    school_id: settingsAccess().identity.school.id,
+    created_by_profile_id: "72000000-0000-4000-8000-000000000001",
+    title: "Original Test",
+    lifecycle: "draft",
+    test_revision: 1,
+    created_at: "2026-09-08T00:00:00.123456Z",
+    opened_at: null,
+    ended_at: null,
+  };
+  return {
+    row,
+    port: {
+      captureTestWorkspaceAuthority: vi.fn(async () => ({
+        status: "ready",
+        authorityHandle: "synthetic-test-handle",
+      })),
+      releaseTestWorkspaceAuthority: vi.fn(),
+      readSchoolTests: vi.fn(async (): Promise<unknown> => [{ ...row }]),
+      readSchoolTest: vi.fn(async (): Promise<unknown> => [{ ...row }]),
+      createSchoolTest: vi.fn(async (): Promise<unknown> => null),
+      updateTestTitle: vi.fn(async (): Promise<unknown> => null),
+      openTest: vi.fn(async (): Promise<unknown> => null),
+      endTest: vi.fn(async (): Promise<unknown> => null),
+    } satisfies TestWorkspacePort,
+  };
+}
+
+function managementGrant() {
+  const grant = settingsAccess();
+  return {
+    ...grant,
+    manageableStaff: [
+      {
+        profile: {
+          id: "profile-target",
+          email: "target@example.test",
+          displayName: "Target Teacher",
+        },
+        schoolId: grant.identity.school.id,
+        role: "teacher" as const,
+        roleRevision: 1,
+      },
+    ],
+  };
+}
+
+describe("Test workspace composed with the single auth lifecycle", () => {
+  it("coalesces one visible cycle and preserves both product drafts and Membership review on rename", async () => {
+    let grant = managementGrant();
+    const read = vi.fn(async () => grant);
+    const { port, row } = testWorkspacePort();
+    const h = createHarness({
+      adapter: createAdapter({ read }).adapter,
+      testWorkspacePort: port,
+    });
+    await h.application.ready;
+    expect(read).toHaveBeenCalledTimes(2); // Bootstrap then the explicit fresh Test leaf.
+    expect(port.readSchoolTests).toHaveBeenCalledOnce();
+    const tests = h.bindTestWorkspaceView.mock.calls[0]![1];
+    const settings = h.bindSchoolSettingsView.mock.calls[0]![1];
+    const auth = h.bindView.mock.calls[0]![1];
+    const protectedRoot = h.elements
+      .protectedSchoolDataRoot as unknown as FakeDomElement;
+    const children = [...protectedRoot.children];
+    expect(children.map((child) => Object.keys(child.dataset))).toEqual([
+      ["testWorkspaceRoot"],
+      ["schoolSettingsRoot"],
+    ]);
+    expect(h.bindTestWorkspaceView.mock.calls[0]![0]).toBe(children[0]);
+    expect(h.bindSchoolSettingsView.mock.calls[0]![0]).toBe(children[1]);
+    await tests.dispatch({ type: "select_test", testId: row.test_id });
+    await tests.dispatch({
+      type: "edit_create_title",
+      value: "Separate creation draft",
+    });
+    await tests.dispatch({ type: "edit_title", value: "Retained title draft" });
+    await settings.dispatch({
+      type: "edit_name",
+      value: "Retained School draft",
+    });
+    await auth.dispatch({
+      type: "review_staff_membership_role_change",
+      profileId: "profile-target",
+      schoolId: grant.identity.school.id,
+    });
+    grant = {
+      ...grant,
+      identity: {
+        ...grant.identity,
+        school: {
+          ...grant.identity.school,
+          label: "Verified new School",
+          settingsRevision: 2,
+        },
+      },
+    };
+    const before = read.mock.calls.length;
+    const beforeTests = port.readSchoolTests.mock.calls.length;
+    const first = h.application.refreshMembership();
+    expect(h.application.refreshMembership()).toBe(first);
+    await first;
+    expect(read).toHaveBeenCalledTimes(before + 1);
+    expect(port.readSchoolTests).toHaveBeenCalledTimes(beforeTests + 1);
+    expect(tests.getSnapshot()).toMatchObject({
+      kind: "ready",
+      data: {
+        createDraft: "Separate creation draft",
+        titleDraft: "Retained title draft",
+        school: { displayName: "Verified new School" },
+      },
+    });
+    expect(settings.getSnapshot()).toMatchObject({
+      kind: "conflict",
+      draft: "Retained School draft",
+    });
+    expect(auth.getSnapshot().kind).toBe(
+      "confirming_staff_membership_role_change",
+    );
+    expect(protectedRoot.children).toEqual(children);
+    expect(h.bindTestWorkspaceView).toHaveBeenCalledOnce();
+    expect(h.bindSchoolSettingsView).toHaveBeenCalledOnce();
+    expect(port.createSchoolTest).not.toHaveBeenCalled();
+    h.application.dispose();
+  });
+
+  it("rejects a superseded initial leaf before any Test capture and recovers on an unchanged fresh read", async () => {
+    const grant = managementGrant();
+    const pending = deferred<StaffAuthAccessGrant>();
+    const read = vi
+      .fn<StaffAuthAdapter["read"]>()
+      .mockResolvedValue(grant)
+      .mockResolvedValueOnce(grant)
+      .mockImplementationOnce(() => pending.promise);
+    const { port } = testWorkspacePort();
+    const h = createHarness({
+      adapter: createAdapter({ read }).adapter,
+      testWorkspacePort: port,
+    });
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    const auth = h.bindView.mock.calls[0]![1];
+    const tests = h.bindTestWorkspaceView.mock.calls[0]![1];
+    await auth.dispatch({
+      type: "review_staff_membership_role_change",
+      profileId: "profile-target",
+      schoolId: grant.identity.school.id,
+    });
+    pending.resolve(grant);
+    await h.application.ready;
+    expect(port.captureTestWorkspaceAuthority).not.toHaveBeenCalled();
+    expect(port.readSchoolTests).not.toHaveBeenCalled();
+    expect(port.createSchoolTest).not.toHaveBeenCalled();
+    const publications = vi.fn();
+    const unsubscribe = auth.subscribe(publications);
+    const initial = publications.mock.calls.length;
+    await h.application.refreshMembership();
+    expect(publications).toHaveBeenCalledTimes(initial);
+    expect(port.readSchoolTests).toHaveBeenCalledOnce();
+    expect(tests.getSnapshot().kind).toBe("ready");
+    expect(auth.getSnapshot().kind).toBe(
+      "confirming_staff_membership_role_change",
+    );
+    unsubscribe();
+    h.application.dispose();
+  });
+
+  it("does not strand a queued auth read behind Test read recovery", async () => {
+    const read = vi.fn(async () => settingsAccess());
+    const { port } = testWorkspacePort();
+    const h = createHarness({
+      adapter: createAdapter({ read }).adapter,
+      testWorkspacePort: port,
+    });
+    await h.application.ready;
+    const before = read.mock.calls.length;
+    port.readSchoolTests.mockResolvedValueOnce(null);
+    await h.application.refreshMembership();
+    expect(read).toHaveBeenCalledTimes(before + 2); // Visible leaf and failed-Test authority reconciliation.
+    expect(h.bindTestWorkspaceView.mock.calls[0]![1].getSnapshot().kind).toBe(
+      "read_unavailable",
+    );
+    await h.application.refreshMembership();
+    expect(h.bindTestWorkspaceView.mock.calls[0]![1].getSnapshot().kind).toBe(
+      "ready",
+    );
+    h.application.dispose();
+  });
+
+  it.each([false, true])(
+    "hands initial focus to Tests without waiting for data; user-moved=%s",
+    async (userMoved) => {
+      const { port } = testWorkspacePort();
+      const pending = deferred<unknown>();
+      port.readSchoolTests.mockImplementationOnce(() => pending.promise);
+      let authInput: FakeDomElement;
+      let userTarget: FakeDomElement;
+      let testHeading: FakeDomElement;
+      const h = createHarness({
+        adapter: createAdapter({ read: async () => settingsAccess() }).adapter,
+        testWorkspacePort: port,
+        bindView(root) {
+          const element = root as unknown as FakeDomElement;
+          authInput = element.ownerDocument.createElement("input");
+          userTarget = element.ownerDocument.createElement("button");
+          element.replaceChildren(authInput, userTarget);
+          authInput.focus();
+          if (userMoved) queueMicrotask(() => userTarget.focus());
+          return () => undefined;
+        },
+        bindTestWorkspaceView(root) {
+          const element = root as unknown as FakeDomElement;
+          testHeading = element.ownerDocument.createElement("h2");
+          testHeading.dataset.testWorkspaceHeading = "";
+          element.replaceChildren(testHeading);
+          return () => undefined;
+        },
+      });
+      await vi.waitFor(() =>
+        expect(port.readSchoolTests).toHaveBeenCalledOnce(),
+      );
+      const document = (h.elements.authRoot as unknown as FakeDomElement)
+        .ownerDocument;
+      expect(document.activeElement).toBe(
+        userMoved ? userTarget! : testHeading!,
+      );
+      expect(testHeading!.focus).toHaveBeenCalledTimes(userMoved ? 0 : 1);
+      userTarget!.focus();
+      pending.resolve([]);
+      await h.application.ready;
+      await h.application.refreshMembership();
+      expect(document.activeElement).toBe(userTarget!);
+      expect(testHeading!.focus).toHaveBeenCalledTimes(userMoved ? 0 : 1);
+      h.application.dispose();
+    },
+  );
+
+  it.each(["suspend", "dispose"] as const)(
+    "invalidates both products on %s despite a throwing Test disposer and late read",
+    async (exit) => {
+      const { port } = testWorkspacePort();
+      const h = createHarness({
+        adapter: createAdapter({ read: async () => settingsAccess() }).adapter,
+        testWorkspacePort: port,
+        bindTestWorkspaceView: () => () => {
+          throw new Error("Synthetic Test view cleanup");
+        },
+      });
+      await h.application.ready;
+      const tests = h.bindTestWorkspaceView.mock.calls[0]![1];
+      const settings = h.bindSchoolSettingsView.mock.calls[0]![1];
+      await tests.dispatch({
+        type: "edit_create_title",
+        value: "Private draft",
+      });
+      await settings.dispatch({
+        type: "edit_name",
+        value: "Private School draft",
+      });
+      const pending = deferred<unknown>();
+      port.readSchoolTests.mockImplementationOnce(() => pending.promise);
+      const refresh = h.application.refreshMembership();
+      await vi.waitFor(() =>
+        expect(port.readSchoolTests).toHaveBeenCalledTimes(2),
+      );
+      h.application[exit]();
+      expect(tests.getSnapshot().kind).toBe("unavailable");
+      expect(settings.getSnapshot().kind).toBe("unavailable");
+      expect(h.elements.protectedSchoolDataRoot.hidden).toBe(true);
+      const final = tests.getSnapshot();
+      pending.resolve([]);
+      await refresh;
+      expect(tests.getSnapshot()).toBe(final);
+      expect(port.releaseTestWorkspaceAuthority).toHaveBeenCalledTimes(2);
+      if (exit === "suspend") {
+        await h.application.resume();
+        expect(h.bindTestWorkspaceView.mock.calls[1]![1]).not.toBe(tests);
+        expect(h.bindSchoolSettingsView.mock.calls[1]![1]).not.toBe(settings);
+        h.application.dispose();
+      }
+    },
+  );
+});
+
+it("keeps Test creation busy through its own synchronous auth publication and independent visible refresh", async () => {
+  let grant = settingsAccess();
+  const read = vi.fn(async () => grant);
+  const { port, row } = testWorkspacePort();
+  const pending = deferred<unknown>();
+  port.createSchoolTest.mockImplementation(async () => {
+    row.test_id = "71000000-0000-4000-8000-000000000002";
+    row.title = "Created title";
+    grant = settingsAccess("Renamed during Test save", 2);
+    port.readSchoolTests.mockImplementationOnce(() => pending.promise);
+    return [{ code: "test_created", test_id: row.test_id }];
+  });
+  const h = createHarness({
+    adapter: createAdapter({ read }).adapter,
+    testWorkspacePort: port,
+  });
+  await h.application.ready;
+  const tests = h.bindTestWorkspaceView.mock.calls[0]![1];
+  const school = h.bindSchoolSettingsView.mock.calls[0]![1];
+  await tests.dispatch({ type: "edit_create_title", value: "Created title" });
+  const saving = tests.dispatch({
+    type: "create_test",
+    snapshotRevision: tests.getSnapshot().revision,
+  });
+  await vi.waitFor(() => expect(port.readSchoolTests).toHaveBeenCalledTimes(2));
+  expect(tests.getSnapshot()).toMatchObject({
+    kind: "busy",
+    operation: "create",
+    phase: "refreshing",
+    data: { school: { displayName: "Renamed during Test save" } },
+  });
+  expect(school.getSnapshot()).toMatchObject({
+    kind: "editing",
+    draft: "Renamed during Test save",
+  });
+  const busy = tests.getSnapshot();
+  await tests.dispatch({
+    type: "create_test",
+    snapshotRevision: busy.revision,
+  });
+  await h.application.refreshMembership();
+  expect(port.createSchoolTest).toHaveBeenCalledOnce();
+  expect(port.readSchoolTests).toHaveBeenCalledTimes(2);
+  expect(tests.getSnapshot().kind).toBe("busy");
+  pending.resolve([{ ...row }]);
+  await saving;
+  expect(tests.getSnapshot()).toMatchObject({
+    kind: "ready",
+    notice: { kind: "confirmed", code: "test_created", testId: row.test_id },
+    data: { selected: { title: "Created title" }, createDraft: "" },
+  });
+  h.application.dispose();
+});

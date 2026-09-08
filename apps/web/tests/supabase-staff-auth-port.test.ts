@@ -15,6 +15,16 @@ const schoolId = "11000000-0000-4000-8000-000000000001";
 const profileId = "21000000-0000-4000-8000-000000000001";
 const invitationId = "41000000-0000-4000-8000-000000000001";
 const accountId = "a1000000-0000-4000-8000-000000000001";
+const providerSessionId = "b1000000-0000-4000-8000-000000000001";
+function syntheticJwt(claims: unknown): string {
+  return [{ alg: "HS256", typ: "JWT" }, claims, "synthetic-signature"]
+    .map((value) => Buffer.from(JSON.stringify(value)).toString("base64url"))
+    .join(".");
+}
+const accountAccessToken = syntheticJwt({
+  sub: accountId,
+  session_id: providerSessionId,
+});
 const recoveryTokenUrl = `${backendUrl}/auth/v1/token?grant_type=pkce`;
 
 function recoveryResponse(
@@ -114,7 +124,10 @@ function createPort(
 }
 
 async function captureSignOutHandle(port: ReturnType<typeof createPort>) {
-  const authority = await port.captureSignOutAuthority(accountId);
+  const authority = await port.captureSignOutAuthority(
+    accountId,
+    providerSessionId,
+  );
   expect(authority).toEqual({
     authorityHandle: expect.any(String),
     status: "ready",
@@ -131,7 +144,10 @@ async function captureSignOutHandle(port: ReturnType<typeof createPort>) {
 }
 
 async function captureManagementHandle(port: ReturnType<typeof createPort>) {
-  const authority = await port.captureStaffManagementAuthority(accountId);
+  const authority = await port.captureStaffManagementAuthority(
+    accountId,
+    providerSessionId,
+  );
   expect(authority).toEqual({
     authorityHandle: expect.any(String),
     status: "ready",
@@ -150,7 +166,10 @@ async function captureManagementHandle(port: ReturnType<typeof createPort>) {
 async function captureSchoolSettingsHandle(
   port: ReturnType<typeof createPort>,
 ) {
-  const authority = await port.captureSchoolSettingsAuthority(accountId);
+  const authority = await port.captureSchoolSettingsAuthority(
+    accountId,
+    providerSessionId,
+  );
   expect(authority).toEqual({
     authorityHandle: expect.any(String),
     status: "ready",
@@ -162,6 +181,26 @@ async function captureSchoolSettingsHandle(
     typeof authority.authorityHandle !== "string"
   ) {
     throw new Error("Missing captured School settings authority");
+  }
+  return authority.authorityHandle;
+}
+
+async function captureTestWorkspaceHandle(port: ReturnType<typeof createPort>) {
+  const authority = await port.captureTestWorkspaceAuthority(
+    accountId,
+    providerSessionId,
+  );
+  expect(authority).toEqual({
+    authorityHandle: expect.any(String),
+    status: "ready",
+  });
+  if (
+    typeof authority !== "object" ||
+    authority === null ||
+    !("authorityHandle" in authority) ||
+    typeof authority.authorityHandle !== "string"
+  ) {
+    throw new Error("Missing captured Test workspace authority");
   }
   return authority.authorityHandle;
 }
@@ -182,7 +221,7 @@ function accountSession() {
   return {
     data: {
       session: {
-        access_token: "synthetic-account-a-token",
+        access_token: accountAccessToken,
         user: { id: accountId },
       },
     },
@@ -257,6 +296,401 @@ function authorityReadClient(
 
 describe("Supabase staff auth port", () => {
   it.each([
+    { name: "missing session ID", claims: { sub: accountId } },
+    { name: "null session ID", claims: { sub: accountId, session_id: null } },
+    {
+      name: "noncanonical session ID",
+      claims: { sub: accountId, session_id: "session-1" },
+    },
+    {
+      name: "uppercase session ID",
+      claims: { sub: accountId, session_id: providerSessionId.toUpperCase() },
+    },
+    { name: "missing subject", claims: { session_id: providerSessionId } },
+    {
+      name: "mismatched subject",
+      claims: {
+        sub: "a1000000-0000-4000-8000-000000000002",
+        session_id: providerSessionId,
+      },
+    },
+    { name: "non-object claims", claims: [] },
+  ])(
+    "rejects verified token with $name from account projection and capture",
+    async ({ claims }) => {
+      const snapshot = accountSession();
+      snapshot.data.session.access_token = syntheticJwt(claims);
+      const providerFetch = vi.fn<typeof fetch>(async (input) =>
+        recoveryResponse(
+          JSON.stringify({
+            id: accountId,
+            email: "teacher@example.test",
+            email_confirmed_at: "2026-09-03T12:00:00Z",
+          }),
+          { headers: { "content-type": "application/json" }, status: 200 },
+          { url: String(input) },
+        ),
+      );
+      const port = createPort(
+        fakeClient({ auth: { getSession: async () => snapshot } }),
+        providerFetch,
+      );
+      await expect(port.readAccount()).resolves.toBeNull();
+      await expect(
+        port.captureTestWorkspaceAuthority(accountId, providerSessionId),
+      ).resolves.toEqual({ status: "unavailable" });
+      expect(providerFetch).toHaveBeenCalledTimes(2);
+      expect(
+        providerFetch.mock.calls.every(([url]) =>
+          String(url).endsWith("/auth/v1/user"),
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it.each(["opaque-token", "a.b.c", "e30.eyJzdWIiOiI=.c", "e30._w.c"])(
+    "rejects malformed verified token encoding %s without returning session authority",
+    async (accessToken) => {
+      const snapshot = accountSession();
+      snapshot.data.session.access_token = accessToken;
+      const providerFetch = vi.fn<typeof fetch>(async (input) =>
+        recoveryResponse(
+          JSON.stringify({
+            id: accountId,
+            email: "teacher@example.test",
+            email_confirmed_at: "2026-09-03T12:00:00Z",
+          }),
+          { headers: { "content-type": "application/json" }, status: 200 },
+          { url: String(input) },
+        ),
+      );
+      const port = createPort(
+        fakeClient({ auth: { getSession: async () => snapshot } }),
+        providerFetch,
+      );
+      await expect(port.readAccount()).resolves.toBeNull();
+      await expect(
+        port.captureTestWorkspaceAuthority(accountId, providerSessionId),
+      ).resolves.toEqual({ status: "unavailable" });
+    },
+  );
+
+  it("projects the SID from the exact verified snapshot, never a later SDK session", async () => {
+    const initial = accountSession();
+    const replacement = accountSession();
+    const replacementSessionId = "b1000000-0000-4000-8000-000000000002";
+    replacement.data.session.access_token = syntheticJwt({
+      sub: accountId,
+      session_id: replacementSessionId,
+    });
+    let current = initial;
+    const getSession = vi.fn(async () => current);
+    const entered = Promise.withResolvers<void>();
+    const released = Promise.withResolvers<void>();
+    const providerFetch = vi.fn<typeof fetch>(async (input, init) => {
+      entered.resolve();
+      await released.promise;
+      expect(new Headers(init?.headers).get("authorization")).toBe(
+        `Bearer ${initial.data.session.access_token}`,
+      );
+      return recoveryResponse(
+        JSON.stringify({
+          id: accountId,
+          email: "teacher@example.test",
+          email_confirmed_at: "2026-09-03T12:00:00Z",
+        }),
+        { headers: { "content-type": "application/json" }, status: 200 },
+        { url: String(input) },
+      );
+    });
+    const port = createPort(
+      fakeClient({ auth: { getSession } }),
+      providerFetch,
+    );
+    const pending = port.readAccount();
+    await entered.promise;
+    current = replacement;
+    released.resolve();
+    await expect(pending).resolves.toEqual({
+      accountId,
+      email: "teacher@example.test",
+      emailVerified: true,
+      providerSessionId,
+    });
+    expect(getSession).toHaveBeenCalledOnce();
+    expect(current).toBe(replacement);
+  });
+
+  it.each([
+    "captureTestWorkspaceAuthority",
+    "captureSchoolSettingsAuthority",
+    "captureStaffManagementAuthority",
+    "captureSignOutAuthority",
+    "capturePasswordAuthority",
+  ] as const)(
+    "%s requires both account and initiating session, while allowing same-session token renewal",
+    async (method) => {
+      let token = syntheticJwt({
+        sub: accountId,
+        session_id: "b1000000-0000-4000-8000-000000000002",
+      });
+      const getSession = vi.fn(async () => ({
+        data: { session: { access_token: token, user: { id: accountId } } },
+        error: null,
+      }));
+      const providerFetch = vi.fn<typeof fetch>(async (input) =>
+        recoveryResponse(
+          JSON.stringify({ id: accountId }),
+          { headers: { "content-type": "application/json" }, status: 200 },
+          { url: String(input) },
+        ),
+      );
+      const port = createPort(
+        fakeClient({ auth: { getSession } }),
+        providerFetch,
+      );
+      try {
+        const failed =
+          method === "capturePasswordAuthority"
+            ? null
+            : { status: "unavailable" };
+        await expect(
+          Reflect.apply(port[method], port, [accountId]),
+        ).resolves.toEqual(failed);
+        expect(getSession).not.toHaveBeenCalled();
+        expect(providerFetch).not.toHaveBeenCalled();
+        await expect(
+          port[method](accountId, providerSessionId),
+        ).resolves.toEqual(
+          method === "capturePasswordAuthority"
+            ? null
+            : {
+                status:
+                  method === "captureTestWorkspaceAuthority"
+                    ? "unavailable"
+                    : "rejected",
+              },
+        );
+        token = syntheticJwt({
+          sub: accountId,
+          session_id: providerSessionId,
+          refreshed: true,
+        });
+        const ready = await port[method](accountId, providerSessionId);
+        expect(ready).toEqual(
+          method === "capturePasswordAuthority"
+            ? expect.any(String)
+            : { status: "ready", authorityHandle: expect.any(String) },
+        );
+        expect(getSession).toHaveBeenCalledTimes(2);
+        expect(providerFetch).toHaveBeenCalledTimes(2);
+        expect(
+          new Headers(providerFetch.mock.calls[1]?.[1]?.headers).get(
+            "authorization",
+          ),
+        ).toBe(`Bearer ${token}`);
+      } finally {
+        port.clearPrivateAuthContinuations();
+      }
+    },
+  );
+
+  it("isolates Test workspace handles from other operations and their release methods", async () => {
+    const getSession = vi.fn(async () => accountSession());
+    const rpc = vi.fn(async () => externalFailure());
+    const invoke = vi.fn(async () => externalFailure());
+    const providerFetch = vi.fn<typeof fetch>(async (input) =>
+      recoveryResponse(
+        JSON.stringify(
+          String(input).endsWith("/user") ? { id: accountId } : [],
+        ),
+        { headers: { "content-type": "application/json" }, status: 200 },
+        { url: String(input) },
+      ),
+    );
+    const port = createPort(
+      fakeClient({
+        auth: { getSession },
+        functions: { invoke },
+        schema: () => ({ rpc }),
+      }),
+      providerFetch,
+    );
+    const handle = await captureTestWorkspaceHandle(port);
+    try {
+      await expect(
+        port.acceptInvitation({ displayName: "Teacher", invitationId }, handle),
+      ).resolves.toBeNull();
+      await expect(
+        port.beginPasswordRecovery("operation-1", handle),
+      ).resolves.toBeNull();
+      await expect(
+        port.finishPasswordRecovery("operation-1", handle),
+      ).resolves.toBeNull();
+      await expect(
+        port.updatePassword("synthetic-password", handle),
+      ).resolves.toEqual({ status: "unavailable" });
+      await expect(port.signOut("all", handle)).resolves.toEqual({
+        status: "unavailable",
+      });
+      await expect(port.revokeAllStaffSessions(handle)).resolves.toBeNull();
+      await expect(port.revokeCurrentStaffSession(handle)).resolves.toBeNull();
+      await expect(
+        port.invokeInvitation(invitationRequest, handle),
+      ).resolves.toEqual({
+        code: "service_unavailable",
+        ok: false,
+      });
+      await expect(
+        port.revokeInvitation({ invitationId }, handle),
+      ).resolves.toBeNull();
+      await expect(
+        port.revokeMembership(membershipRequest, handle),
+      ).resolves.toBeNull();
+      await expect(
+        port.changeMembershipRole(
+          { ...membershipRequest, role: "teacher" },
+          handle,
+        ),
+      ).resolves.toBeNull();
+      await expect(
+        port.updateSchoolDisplayName(schoolSettingsRequest, handle),
+      ).resolves.toBeNull();
+      expect(providerFetch).toHaveBeenCalledOnce();
+      port.releasePasswordAuthority(handle);
+      port.releaseStaffManagementAuthority(handle);
+      port.releaseSchoolSettingsAuthority(handle);
+      await expect(
+        port.readSchoolTests({ schoolId, before: null }, handle),
+      ).resolves.toEqual([]);
+      expect(providerFetch).toHaveBeenCalledTimes(2);
+      expect(getSession).toHaveBeenCalledOnce();
+      expect(rpc).not.toHaveBeenCalled();
+      expect(invoke).not.toHaveBeenCalled();
+    } finally {
+      port.releaseTestWorkspaceAuthority(handle);
+    }
+  });
+
+  it.each(["password", "staff_management", "school_settings"] as const)(
+    "does not release a %s handle through the Test workspace release method",
+    async (purpose) => {
+      const providerFetch = vi.fn<typeof fetch>(async (input) =>
+        recoveryResponse(
+          JSON.stringify(
+            String(input).endsWith("/user")
+              ? { id: accountId }
+              : [{ code: "ok" }],
+          ),
+          { headers: { "content-type": "application/json" }, status: 200 },
+          { url: String(input) },
+        ),
+      );
+      const port = createPort(
+        fakeClient({ auth: { getSession: async () => accountSession() } }),
+        providerFetch,
+      );
+      const handle =
+        purpose === "password"
+          ? await port.capturePasswordAuthority(accountId, providerSessionId)
+          : purpose === "staff_management"
+            ? await captureManagementHandle(port)
+            : await captureSchoolSettingsHandle(port);
+      if (handle === null) throw new Error("Missing fixture authority");
+      try {
+        port.releaseTestWorkspaceAuthority(handle);
+        await expect(
+          purpose === "password"
+            ? port.revokeCurrentStaffSession(handle)
+            : purpose === "staff_management"
+              ? port.revokeMembership(membershipRequest, handle)
+              : port.updateSchoolDisplayName(schoolSettingsRequest, handle),
+        ).resolves.toEqual([{ code: "ok" }]);
+        expect(providerFetch).toHaveBeenCalledTimes(2);
+      } finally {
+        port.clearPrivateAuthContinuations();
+      }
+    },
+  );
+
+  it.each([
+    {
+      name: "ended session",
+      snapshot: { data: { session: null }, error: null },
+    },
+    { name: "unavailable session", snapshot: externalFailure() },
+    { name: "malformed session", snapshot: { data: {}, error: null } },
+    {
+      name: "replacement account",
+      snapshot: {
+        data: {
+          session: {
+            access_token: "synthetic-b-token",
+            user: { id: "account-b" },
+          },
+        },
+        error: null,
+      },
+    },
+  ])(
+    "returns exact Test unavailable for $name without a verification request",
+    async ({ snapshot }) => {
+      const providerFetch = vi.fn<typeof fetch>();
+      const port = createPort(
+        fakeClient({ auth: { getSession: async () => snapshot } }),
+        providerFetch,
+      );
+      await expect(
+        port.captureTestWorkspaceAuthority(accountId, providerSessionId),
+      ).resolves.toEqual({ status: "unavailable" });
+      expect(providerFetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("bounds Test authority session capture and discards a late SDK session result", async () => {
+    vi.useFakeTimers();
+    const session = Promise.withResolvers<ReturnType<typeof accountSession>>();
+    const getSession = vi
+      .fn(async () => accountSession())
+      .mockImplementationOnce(() => session.promise);
+    const providerFetch = vi.fn<typeof fetch>(async (input) =>
+      recoveryResponse(
+        JSON.stringify({ id: accountId }),
+        { headers: { "content-type": "application/json" }, status: 200 },
+        { url: String(input) },
+      ),
+    );
+    const port = createPort(
+      fakeClient({ auth: { getSession } }),
+      providerFetch,
+    );
+    try {
+      const published = vi.fn();
+      const capture = port
+        .captureTestWorkspaceAuthority(accountId, providerSessionId)
+        .then(published);
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(published).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await capture;
+      expect(published).toHaveBeenCalledExactlyOnceWith({
+        status: "unavailable",
+      });
+      session.resolve(accountSession());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(providerFetch).not.toHaveBeenCalled();
+      const handle = await captureTestWorkspaceHandle(port);
+      port.releaseTestWorkspaceAuthority(handle);
+      expect(providerFetch).toHaveBeenCalledOnce();
+      expect(getSession).toHaveBeenCalledTimes(2);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      port.clearPrivateAuthContinuations();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
     "missing",
     "unknown",
     "released",
@@ -265,6 +699,7 @@ describe("Supabase staff auth port", () => {
     "password",
     "logout",
     "staff_management",
+    "test_workspace",
   ] as const)(
     "rejects %s School settings authority without SDK or direct mutation fallback",
     async (kind) => {
@@ -291,12 +726,14 @@ describe("Supabase staff auth port", () => {
         );
         const handle =
           kind === "password"
-            ? await port.capturePasswordAuthority(accountId)
+            ? await port.capturePasswordAuthority(accountId, providerSessionId)
             : kind === "logout"
               ? await captureSignOutHandle(port)
               : kind === "staff_management"
                 ? await captureManagementHandle(port)
-                : await captureSchoolSettingsHandle(port);
+                : kind === "test_workspace"
+                  ? await captureTestWorkspaceHandle(port)
+                  : await captureSchoolSettingsHandle(port);
         if (handle === null) throw new Error("Missing fixture authority");
         if (kind === "released") port.releaseSchoolSettingsAuthority(handle);
         if (kind === "cleared") port.clearPrivateAuthContinuations();
@@ -388,7 +825,7 @@ describe("Supabase staff auth port", () => {
     }
   });
 
-  it.each(["password", "staff_management"] as const)(
+  it.each(["password", "staff_management", "test_workspace"] as const)(
     "does not release a %s handle through the School settings release method",
     async (purpose) => {
       const providerFetch = vi.fn<typeof fetch>(async (input) =>
@@ -408,15 +845,19 @@ describe("Supabase staff auth port", () => {
       );
       const handle =
         purpose === "password"
-          ? await port.capturePasswordAuthority(accountId)
-          : await captureManagementHandle(port);
+          ? await port.capturePasswordAuthority(accountId, providerSessionId)
+          : purpose === "staff_management"
+            ? await captureManagementHandle(port)
+            : await captureTestWorkspaceHandle(port);
       if (handle === null) throw new Error("Missing fixture authority");
       try {
         port.releaseSchoolSettingsAuthority(handle);
         await expect(
           purpose === "password"
             ? port.revokeCurrentStaffSession(handle)
-            : port.revokeMembership(membershipRequest, handle),
+            : purpose === "staff_management"
+              ? port.revokeMembership(membershipRequest, handle)
+              : port.readSchoolTests({ schoolId, before: null }, handle),
         ).resolves.toEqual([{ code: "ok" }]);
         expect(providerFetch).toHaveBeenCalledTimes(2);
       } finally {
@@ -651,7 +1092,7 @@ describe("Supabase staff auth port", () => {
       token_type: "bearer",
       user: { id },
     });
-    const first = session(accountId, "synthetic-management-a-token");
+    const first = session(accountId, accountAccessToken);
     const replacement = session("account-b", "synthetic-management-b-token");
     const storage = new Map([[storageKey, JSON.stringify(first)]]);
     let finishVerification: (() => void) | undefined;
@@ -829,7 +1270,7 @@ describe("Supabase staff auth port", () => {
         );
         const handle =
           kind === "password"
-            ? await port.capturePasswordAuthority(accountId)
+            ? await port.capturePasswordAuthority(accountId, providerSessionId)
             : kind === "logout"
               ? await captureSignOutHandle(port)
               : await captureManagementHandle(port);
@@ -973,7 +1414,13 @@ describe("Supabase staff auth port", () => {
   );
 
   it.each([
-    ["snapshot mismatch", "account-b", 200, { id: accountId }, "rejected"],
+    [
+      "snapshot mismatch",
+      "a1000000-0000-4000-8000-000000000002",
+      200,
+      { id: accountId },
+      "rejected",
+    ],
     ["provider mismatch", accountId, 200, { id: "account-b" }, "rejected"],
     [
       "ended session",
@@ -1015,7 +1462,10 @@ describe("Supabase staff auth port", () => {
         providerFetch,
       );
       await expect(
-        port.captureStaffManagementAuthority(expectedAccountId),
+        port.captureStaffManagementAuthority(
+          expectedAccountId,
+          providerSessionId,
+        ),
       ).resolves.toEqual({ status: expectedStatus });
       expect(providerFetch).toHaveBeenCalledTimes(
         expectedAccountId === accountId ? 1 : 0,
@@ -1043,7 +1493,10 @@ describe("Supabase staff auth port", () => {
       fakeClient({ auth: { getSession: async () => accountSession() } }),
       providerFetch,
     );
-    const capture = port.captureStaffManagementAuthority(accountId);
+    const capture = port.captureStaffManagementAuthority(
+      accountId,
+      providerSessionId,
+    );
     await vi.waitFor(() => expect(finishVerification).toBeTypeOf("function"));
     port.clearPrivateAuthContinuations();
     finishVerification?.();
@@ -1098,7 +1551,7 @@ describe("Supabase staff auth port", () => {
 
   it("normalizes session and trusted account reads without returning SDK objects", async () => {
     const sdkSession = {
-      access_token: "synthetic-session-token",
+      access_token: accountAccessToken,
       user: { id: accountId },
     };
     const sdkUser = {
@@ -1137,6 +1590,7 @@ describe("Supabase staff auth port", () => {
       accountId,
       email: "teacher@example.test",
       emailVerified: true,
+      providerSessionId,
     });
     expect(getSession).toHaveBeenCalledWith();
     expect(getUser).not.toHaveBeenCalled();
@@ -1144,7 +1598,7 @@ describe("Supabase staff auth port", () => {
       new Headers(providerFetch.mock.calls[0]?.[1]?.headers).get(
         "authorization",
       ),
-    ).toBe("Bearer synthetic-session-token");
+    ).toBe(`Bearer ${accountAccessToken}`);
   });
 
   it("maps absent and expired sessions to signed out and unknown failures to unavailable", async () => {
@@ -1315,7 +1769,7 @@ describe("Supabase staff auth port", () => {
     "binds %s database revocation and logout to the account captured before an SDK switch",
     async (scope) => {
       const firstSession = {
-        access_token: "synthetic-account-a-token",
+        access_token: accountAccessToken,
         user: { id: accountId },
       };
       const nextSession = {
@@ -1356,7 +1810,10 @@ describe("Supabase staff auth port", () => {
         }),
         providerFetch,
       );
-      const capture = port.captureSignOutAuthority(accountId);
+      const capture = port.captureSignOutAuthority(
+        accountId,
+        providerSessionId,
+      );
       await vi.waitFor(() =>
         expect(releaseVerification).toBeTypeOf("function"),
       );
@@ -1440,7 +1897,7 @@ describe("Supabase staff auth port", () => {
     [
       "missing account",
       {
-        data: { session: { access_token: "synthetic-account-a-token" } },
+        data: { session: { access_token: accountAccessToken } },
         error: null,
       },
       "unavailable",
@@ -1465,7 +1922,9 @@ describe("Supabase staff auth port", () => {
         }),
         providerFetch,
       );
-      await expect(port.captureSignOutAuthority(accountId)).resolves.toEqual({
+      await expect(
+        port.captureSignOutAuthority(accountId, providerSessionId),
+      ).resolves.toEqual({
         status,
       });
       await expect(port.readAccount()).resolves.toEqual(
@@ -1478,7 +1937,7 @@ describe("Supabase staff auth port", () => {
   );
 
   it("does not evaluate malformed session accessors or inherited identities", async () => {
-    const getter = vi.fn(() => "synthetic-account-a-token");
+    const getter = vi.fn(() => accountAccessToken);
     const inheritedUser = Object.create({ id: accountId }) as object;
     const getSession = vi
       .fn<SupabaseStaffAuthClient["auth"]["getSession"]>()
@@ -1495,7 +1954,7 @@ describe("Supabase staff auth port", () => {
       .mockResolvedValueOnce({
         data: {
           session: {
-            access_token: "synthetic-account-a-token",
+            access_token: accountAccessToken,
             user: inheritedUser,
           },
         },
@@ -1506,7 +1965,9 @@ describe("Supabase staff auth port", () => {
       fakeClient({ auth: { getSession } }),
       providerFetch,
     );
-    await expect(port.captureSignOutAuthority(accountId)).resolves.toEqual({
+    await expect(
+      port.captureSignOutAuthority(accountId, providerSessionId),
+    ).resolves.toEqual({
       status: "unavailable",
     });
     await expect(port.readAccount()).resolves.toBeNull();
@@ -1530,10 +1991,15 @@ describe("Supabase staff auth port", () => {
       providerFetch,
     );
     await expect(
-      port.captureSignOutAuthority("other-account"),
+      port.captureSignOutAuthority(
+        "a1000000-0000-4000-8000-000000000002",
+        providerSessionId,
+      ),
     ).resolves.toEqual({ status: "rejected" });
     expect(providerFetch).not.toHaveBeenCalled();
-    await expect(port.captureSignOutAuthority(accountId)).resolves.toEqual({
+    await expect(
+      port.captureSignOutAuthority(accountId, providerSessionId),
+    ).resolves.toEqual({
       status: "rejected",
     });
     await expect(port.readAccount()).resolves.toBeNull();
@@ -1642,7 +2108,9 @@ describe("Supabase staff auth port", () => {
         }),
         providerFetch,
       );
-      await expect(port.captureSignOutAuthority(accountId)).resolves.toEqual({
+      await expect(
+        port.captureSignOutAuthority(accountId, providerSessionId),
+      ).resolves.toEqual({
         status: ended ? "ended" : "unavailable",
       });
       await expect(port.readAccount()).resolves.toEqual(
@@ -1671,7 +2139,9 @@ describe("Supabase staff auth port", () => {
             { url: `${backendUrl}/auth/v1/user`, ...options },
           ),
       );
-      await expect(port.captureSignOutAuthority(accountId)).resolves.toEqual({
+      await expect(
+        port.captureSignOutAuthority(accountId, providerSessionId),
+      ).resolves.toEqual({
         status: "unavailable",
       });
       await expect(port.readAccount()).resolves.toBeNull();
@@ -1717,7 +2187,9 @@ describe("Supabase staff auth port", () => {
     expect(currentSession).toBe(nextSession);
     currentSession = accountSession().data.session;
     status = 0;
-    await expect(port.captureSignOutAuthority(accountId)).resolves.toEqual({
+    await expect(
+      port.captureSignOutAuthority(accountId, providerSessionId),
+    ).resolves.toEqual({
       status: "unavailable",
     });
     expect(currentSession).toBe(nextSession);
@@ -1725,7 +2197,7 @@ describe("Supabase staff auth port", () => {
       providerFetch.mock.calls.every(
         ([, init]) =>
           new Headers(init?.headers).get("authorization") ===
-          "Bearer synthetic-account-a-token",
+          `Bearer ${accountAccessToken}`,
       ),
     ).toBe(true);
     expect(getUser).not.toHaveBeenCalled();
@@ -1752,7 +2224,7 @@ describe("Supabase staff auth port", () => {
         );
         const outcome =
           operation === "capture"
-            ? port.captureSignOutAuthority(accountId)
+            ? port.captureSignOutAuthority(accountId, providerSessionId)
             : port.readAccount();
         await vi.advanceTimersByTimeAsync(5_000);
         await expect(outcome).resolves.toEqual(
@@ -1811,7 +2283,7 @@ describe("Supabase staff auth port", () => {
         );
         const outcome =
           operation === "capture"
-            ? port.captureSignOutAuthority(accountId)
+            ? port.captureSignOutAuthority(accountId, providerSessionId)
             : port.readAccount();
         await vi.advanceTimersByTimeAsync(5_000);
         await expect(outcome).resolves.toEqual(

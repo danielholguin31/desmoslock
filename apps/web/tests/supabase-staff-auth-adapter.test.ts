@@ -9,6 +9,7 @@ import type { StaffAuthAccessEvent } from "../src/auth/staff-auth-controller.js"
 const firstOperationId = "10000000-0000-4000-8000-000000000001";
 const secondOperationId = "10000000-0000-4000-8000-000000000002";
 const accountId = "a1000000-0000-4000-8000-000000000001";
+const providerSessionId = "b1000000-0000-4000-8000-000000000001";
 const profileId = "21000000-0000-4000-8000-000000000001";
 const schoolId = "11000000-0000-4000-8000-000000000001";
 const targetProfileId = "21000000-0000-4000-8000-000000000002";
@@ -25,6 +26,14 @@ function port(
   };
   return {
     acceptInvitation: unavailable,
+    captureTestWorkspaceAuthority: unavailable,
+    releaseTestWorkspaceAuthority: () => undefined,
+    readSchoolTests: unavailable,
+    readSchoolTest: unavailable,
+    createSchoolTest: unavailable,
+    updateTestTitle: unavailable,
+    openTest: unavailable,
+    endTest: unavailable,
     captureSchoolSettingsAuthority: unavailable,
     releaseSchoolSettingsAuthority: () => undefined,
     updateSchoolDisplayName: unavailable,
@@ -81,6 +90,7 @@ function ownerPort(
       accountId,
       email: "owner@example.test",
       emailVerified: true,
+      providerSessionId,
     }),
     readAssurance: async () => ({
       currentAuthenticationMethods: ["password"],
@@ -182,6 +192,7 @@ function invitationHarness(overrides: Partial<SupabaseStaffAuthPort> = {}) {
         accountId,
         email: "invitee@example.test",
         emailVerified: true,
+        providerSessionId,
       }),
       readAssurance: async () => ({
         currentAuthenticationMethods: ["password"],
@@ -236,6 +247,295 @@ function invitationHarness(overrides: Partial<SupabaseStaffAuthPort> = {}) {
   };
 }
 
+describe("verified provider session continuity", () => {
+  function adapterFor(overrides: Partial<SupabaseStaffAuthPort>) {
+    return createSupabaseStaffAuthAdapter({
+      clock: { now: Date.now },
+      operationIds: operationIdSource(),
+      port: ownerPort(overrides),
+      createBlobUrl: () => {
+        throw new Error("Unexpected presentation");
+      },
+      revokeBlobUrl: () => undefined,
+    });
+  }
+
+  it("rotates only the local session generation on a verified new provider session without an event", async () => {
+    let current = providerSessionId;
+    const captureStaffManagementAuthority = vi.fn(async () => ({
+      status: "unavailable",
+    }));
+    const adapter = adapterFor({
+      readAccount: async () => ({
+        accountId,
+        email: "owner@example.test",
+        emailVerified: true,
+        providerSessionId: current,
+      }),
+      captureStaffManagementAuthority,
+    });
+    try {
+      const first = await adapter.read();
+      if (first.kind !== "access_granted")
+        throw new Error("Expected initial authority");
+      const renewed = await adapter.read();
+      expect(renewed).toEqual(first);
+      current = "b1000000-0000-4000-8000-000000000002";
+      const changed = await adapter.read();
+      if (changed.kind !== "access_granted")
+        throw new Error("Expected replacement authority");
+      expect(changed.providerSessionId).toBe(current);
+      expect(changed.sessionGeneration).not.toBe(first.sessionGeneration);
+      expect(changed.identityGeneration).toBe(first.identityGeneration);
+      expect(changed.identity).toEqual(first.identity);
+      await expect(
+        adapter.perform({
+          type: "create_staff_invitation",
+          operationId: "90000000-0000-4000-8000-000000000001",
+          expectedIdentityGeneration: first.identityGeneration,
+          expectedSessionGeneration: first.sessionGeneration,
+          schoolId,
+          email: "invited@example.test",
+          targetRole: "teacher",
+        }),
+      ).rejects.toThrow("continuity");
+      expect(captureStaffManagementAuthority).not.toHaveBeenCalled();
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it.each([undefined, null, "session-1", providerSessionId.toUpperCase()])(
+    "rejects account projection with missing or malformed SID %s",
+    async (value) => {
+      const adapter = adapterFor({
+        readAccount: async () => ({
+          accountId,
+          email: "owner@example.test",
+          emailVerified: true,
+          ...(value === undefined ? {} : { providerSessionId: value }),
+        }),
+      });
+      try {
+        await expect(adapter.read()).rejects.toThrow("account result");
+      } finally {
+        adapter.dispose();
+      }
+    },
+  );
+
+  it("supplies the visible provider session to sign-out capture before awaiting", async () => {
+    const captureSignOutAuthority = vi.fn(async () => ({
+      status: "unavailable",
+    }));
+    const adapter = adapterFor({ captureSignOutAuthority });
+    try {
+      await adapter.read();
+      await expect(
+        adapter.perform({
+          type: "sign_out",
+          operationId: "90000000-0000-4000-8000-000000000001",
+          scope: "local",
+        }),
+      ).rejects.toThrow("Sign-out authority");
+      expect(captureSignOutAuthority).toHaveBeenCalledExactlyOnceWith(
+        accountId,
+        providerSessionId,
+      );
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it.each(["during_capture", "after_acceptance"] as const)(
+    "rejects a replacement recipient session %s before password or further invitation egress",
+    async (stage) => {
+      let current = providerSessionId;
+      const replacement = "b1000000-0000-4000-8000-000000000002";
+      const capturePasswordAuthority = vi.fn(async () => {
+        if (stage === "during_capture") current = replacement;
+        return passwordAuthority;
+      });
+      const acceptInvitation = vi.fn(async () => {
+        current = replacement;
+        return [{ code: "invitation_accepted" }];
+      });
+      const fixture = invitationHarness({
+        readAccount: async () => ({
+          accountId,
+          email: "invitee@example.test",
+          emailVerified: true,
+          providerSessionId: current,
+        }),
+        capturePasswordAuthority,
+        acceptInvitation,
+      });
+      try {
+        await expect(fixture.accept()).resolves.toMatchObject({
+          result:
+            stage === "during_capture"
+              ? { kind: "invitation_acceptance_uncertain" }
+              : { kind: "invitation_accepted", passwordOutcome: "unknown" },
+        });
+        expect(capturePasswordAuthority).toHaveBeenCalledExactlyOnceWith(
+          accountId,
+          providerSessionId,
+        );
+        expect(acceptInvitation).toHaveBeenCalledTimes(
+          stage === "during_capture" ? 0 : 1,
+        );
+        expect(fixture.updatePassword).not.toHaveBeenCalled();
+        expect(fixture.signOut).not.toHaveBeenCalled();
+        expect(
+          fixture.releasePasswordAuthority,
+        ).toHaveBeenCalledExactlyOnceWith(passwordAuthority);
+      } finally {
+        fixture.adapter.dispose();
+      }
+    },
+  );
+});
+
+describe("enrollment cleanup on verified session replacement", () => {
+  async function pendingEnrollment() {
+    let currentSessionId = providerSessionId;
+    let emailVerified = true;
+    let revoked = false;
+    const enrollTotp = vi.fn(async () => ({
+      factorId,
+      qrCode: encodedQr(),
+      status: "enrolled",
+    }));
+    const challengeTotp = vi.fn(async () => ({
+      challengeId,
+      status: "challenged",
+    }));
+    const verifyTotp = vi.fn(async () => ({ status: "rejected" }));
+    const removeTotpFactor = vi.fn(async () => ({ status: "removed" }));
+    const revokeBlobUrl = vi.fn();
+    const original = ownerPort();
+    const adapter = createSupabaseStaffAuthAdapter({
+      clock: { now: Date.now },
+      operationIds: operationIdSource(),
+      createBlobUrl: () => "blob:original-session-enrollment",
+      revokeBlobUrl,
+      port: ownerPort({
+        readAccount: async () => ({
+          accountId,
+          email: "owner@example.test",
+          emailVerified,
+          providerSessionId: currentSessionId,
+        }),
+        readCurrentContext: async () =>
+          revoked
+            ? inactiveContext().map((row) => ({
+                ...row,
+                code: "session_revoked",
+                profile_id: null,
+              }))
+            : original.readCurrentContext(),
+        readAssurance: async () => ({
+          currentAuthenticationMethods: ["password"],
+          currentLevel: "aal1",
+          nextLevel: "aal2",
+        }),
+        readTotpFactors: async () => ({ factors: [] }),
+        enrollTotp,
+        challengeTotp,
+        verifyTotp,
+        removeTotpFactor,
+      }),
+    });
+    await adapter.read();
+    const ceremonyOperationId = "90000000-0000-4000-8000-000000000081";
+    const enrollment = await adapter.perform({
+      type: "begin_totp_enrollment",
+      operationId: ceremonyOperationId,
+    });
+    if (enrollment.result.kind !== "totp_enrollment_ready")
+      throw new Error("Expected pending enrollment");
+    const enrollmentReceipt = enrollment.result.enrollmentReceipt;
+    return {
+      adapter,
+      enrollTotp,
+      challengeTotp,
+      verifyTotp,
+      removeTotpFactor,
+      revokeBlobUrl,
+      replaceSession(
+        branch: "active" | "email_unverified" | "session_revoked",
+      ) {
+        currentSessionId = "b1000000-0000-4000-8000-000000000002";
+        emailVerified = branch !== "email_unverified";
+        revoked = branch === "session_revoked";
+      },
+      verifyOldReceipt() {
+        return adapter.perform({
+          type: "verify_totp",
+          purpose: "enrollment",
+          code: "123456",
+          operationId: "90000000-0000-4000-8000-000000000082",
+          ceremonyOperationId,
+          enrollmentReceipt,
+        });
+      },
+    };
+  }
+
+  it.each(["active", "email_unverified", "session_revoked"] as const)(
+    "discards the old blob and receipt before %s replacement-session cleanup can mutate S2",
+    async (branch) => {
+      const fixture = await pendingEnrollment();
+      try {
+        fixture.replaceSession(branch);
+        await expect(fixture.adapter.read()).resolves.toMatchObject({
+          kind:
+            branch === "active"
+              ? "access_granted"
+              : branch === "email_unverified"
+                ? "email_verification_required"
+                : "session_revoked",
+        });
+        expect(fixture.revokeBlobUrl).toHaveBeenCalledExactlyOnceWith(
+          "blob:original-session-enrollment",
+        );
+        expect(fixture.removeTotpFactor).not.toHaveBeenCalled();
+        await expect(fixture.verifyOldReceipt()).resolves.toMatchObject({
+          result: { kind: "totp_rejected" },
+        });
+        expect(fixture.enrollTotp).toHaveBeenCalledOnce();
+        expect(fixture.challengeTotp).not.toHaveBeenCalled();
+        expect(fixture.verifyTotp).not.toHaveBeenCalled();
+        expect(fixture.removeTotpFactor).not.toHaveBeenCalled();
+        expect(fixture.revokeBlobUrl).toHaveBeenCalledOnce();
+      } finally {
+        fixture.adapter.dispose();
+      }
+    },
+  );
+
+  it("preserves ordinary same-session factor cleanup after explicit rejected verification", async () => {
+    const fixture = await pendingEnrollment();
+    try {
+      await fixture.adapter.read();
+      expect(fixture.revokeBlobUrl).not.toHaveBeenCalled();
+      await expect(fixture.verifyOldReceipt()).resolves.toMatchObject({
+        result: { kind: "totp_rejected" },
+      });
+      expect(fixture.challengeTotp).toHaveBeenCalledExactlyOnceWith(factorId);
+      expect(fixture.verifyTotp).toHaveBeenCalledOnce();
+      expect(fixture.removeTotpFactor).toHaveBeenCalledExactlyOnceWith(
+        factorId,
+      );
+      expect(fixture.revokeBlobUrl).toHaveBeenCalledExactlyOnceWith(
+        "blob:original-session-enrollment",
+      );
+    } finally {
+      fixture.adapter.dispose();
+    }
+  });
+});
+
 describe("Supabase staff auth adapter", () => {
   it("reports signed-out only after the provider session boundary confirms it", async () => {
     const adapter = createSupabaseStaffAuthAdapter({
@@ -264,6 +564,7 @@ describe("Supabase staff auth adapter", () => {
           accountId,
           email: "teacher@example.test",
           emailVerified: true,
+          providerSessionId,
         }),
         readCurrentContext: async () => [
           {
@@ -316,6 +617,7 @@ describe("Supabase staff auth adapter", () => {
             accountId,
             email: "teacher@example.test",
             emailVerified: true,
+            providerSessionId,
           }),
           readCurrentContext: async () => [
             {
@@ -408,6 +710,7 @@ describe("Supabase staff auth adapter", () => {
           accountId,
           email: "teacher@example.test",
           emailVerified: true,
+          providerSessionId,
         }),
         readAssurance: async () => ({
           currentAuthenticationMethods: ["password"],
@@ -449,6 +752,7 @@ describe("Supabase staff auth adapter", () => {
       kind: "access_granted",
       manageableInvitations: [],
       manageableStaff: [],
+      providerSessionId,
       secondFactor: "satisfied",
       sessionGeneration: firstOperationId,
     });
@@ -471,6 +775,7 @@ describe("Supabase staff auth adapter", () => {
           accountId,
           email: "owner@example.test",
           emailVerified: true,
+          providerSessionId,
         }),
         readAssurance: async () => ({
           currentAuthenticationMethods: ["password", "totp"],
@@ -625,6 +930,7 @@ describe("Supabase staff auth adapter", () => {
             accountId,
             email: "owner@example.test",
             emailVerified: true,
+            providerSessionId,
           }),
           readAssurance: async () => ({
             currentAuthenticationMethods: ["password"],
@@ -739,6 +1045,7 @@ describe("Supabase staff auth adapter", () => {
           accountId,
           email: "teacher@example.test",
           emailVerified: true,
+          providerSessionId,
         }),
         readAssurance: async () => ({
           currentAuthenticationMethods: ["password"],
@@ -1072,8 +1379,10 @@ describe("Supabase staff auth adapter", () => {
       },
       operationIds: operationIdSource(),
       port: port({
-        capturePasswordAuthority: async (expectedAccountId) => {
-          calls.push(["capture", expectedAccountId]);
+        capturePasswordAuthority: async (
+          ...expected: [] | [string, string]
+        ) => {
+          calls.push(["capture", expected[0]]);
           return passwordAuthority;
         },
         beginPasswordRecovery: async (operationId, authority) => {
@@ -1495,6 +1804,7 @@ describe("Supabase staff auth adapter", () => {
           accountId,
           email: "invitee@example.test",
           emailVerified: true,
+          providerSessionId,
         }),
         readAssurance: async () => ({
           currentAuthenticationMethods: ["password"],
@@ -1605,7 +1915,10 @@ describe("Supabase staff auth adapter", () => {
       acceptInvitation,
     });
     const result = await fixture.accept();
-    expect(capturePasswordAuthority).toHaveBeenCalledExactlyOnceWith(accountId);
+    expect(capturePasswordAuthority).toHaveBeenCalledExactlyOnceWith(
+      accountId,
+      providerSessionId,
+    );
     expect(acceptInvitation).not.toHaveBeenCalled();
     expect(fixture.updatePassword).not.toHaveBeenCalled();
     expect(fixture.signOut).not.toHaveBeenCalled();
@@ -1644,6 +1957,7 @@ describe("Supabase staff auth adapter", () => {
     });
     expect(fixture.capturePasswordAuthority).toHaveBeenCalledExactlyOnceWith(
       accountId,
+      providerSessionId,
     );
     expect(calls).toEqual([
       [
@@ -1860,6 +2174,7 @@ describe("Supabase staff auth adapter", () => {
         accountId: currentAccountId,
         email: "invitee@example.test",
         emailVerified: true,
+        providerSessionId,
       }),
     });
     await expect(fixture.accept()).resolves.toMatchObject({
@@ -1905,6 +2220,7 @@ describe("Supabase staff auth adapter", () => {
           accountId: currentAccountId,
           email: "invitee@example.test",
           emailVerified: true,
+          providerSessionId,
         }),
       });
       await expect(fixture.accept()).resolves.toMatchObject({
@@ -1928,6 +2244,7 @@ describe("Supabase staff auth adapter", () => {
         accountId: currentAccountId,
         email: "invitee@example.test",
         emailVerified: true,
+        providerSessionId,
       }),
       updatePassword,
     });
@@ -1997,6 +2314,7 @@ describe("Supabase staff auth adapter", () => {
           accountId,
           email: "invitee@example.test",
           emailVerified: true,
+          providerSessionId,
         }),
         readCurrentInvitations: async () => {
           invitationReads += 1;
@@ -2090,6 +2408,7 @@ describe("Supabase staff auth adapter", () => {
           accountId,
           email: "invitee@example.test",
           emailVerified: true,
+          providerSessionId,
         }),
         readCurrentInvitations: async () => {
           invitationReads += 1;
@@ -2158,6 +2477,7 @@ describe("Supabase staff auth adapter", () => {
           accountId: currentAccountId,
           email: "invitee@example.test",
           emailVerified: true,
+          providerSessionId,
         }),
         readCurrentInvitations: async () => {
           invitationReads += 1;
@@ -2335,6 +2655,7 @@ describe("Supabase staff auth adapter", () => {
             accountId: currentAccountId,
             email: "owner@example.test",
             emailVerified: true,
+            providerSessionId,
           }),
           readAssurance: async () => {
             assuranceReads += 1;
@@ -3050,6 +3371,7 @@ describe("Supabase staff auth adapter", () => {
           accountId,
           email: "teacher@example.test",
           emailVerified: true,
+          providerSessionId,
         }),
         readAssurance: async () => ({
           currentAuthenticationMethods: ["password"],
@@ -3126,6 +3448,7 @@ describe("Supabase staff auth adapter", () => {
           accountId,
           email: "teacher@example.test",
           emailVerified: true,
+          providerSessionId,
         }),
         readAssurance: async () => ({
           currentAuthenticationMethods: ["password"],
@@ -3196,6 +3519,7 @@ describe("Supabase staff auth adapter", () => {
           accountId,
           email: "teacher@example.test",
           emailVerified: true,
+          providerSessionId,
         }),
         readAssurance: async () => ({
           currentAuthenticationMethods: ["password"],
@@ -3975,7 +4299,10 @@ describe("staff membership administration authority", () => {
     try {
       expect(test.actor.manageableStaff[0]?.roleRevision).toBe(3);
       const result = await test.adapter.perform(test.command);
-      expect(test.capture).toHaveBeenCalledExactlyOnceWith(accountId);
+      expect(test.capture).toHaveBeenCalledExactlyOnceWith(
+        accountId,
+        providerSessionId,
+      );
       expect(test.change).toHaveBeenCalledExactlyOnceWith(
         {
           profileId: targetProfileId,

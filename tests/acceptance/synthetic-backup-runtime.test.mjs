@@ -7,6 +7,7 @@ import {
   isExpectedInvalidRootCertificate,
   nativeClientWrapper,
   sourceConfiguration,
+  withSessionTimezone,
 } from "./synthetic-backup-runtime.mjs";
 
 const node = process.execPath;
@@ -129,6 +130,7 @@ test("native wrapper uses an explicit socket, safe arguments, and named PG envir
     /^#!\/bin\/sh\nexec \/usr\/bin\/docker --host unix:\/\/\/var\/run\/docker.sock exec --interactive /u,
   );
   assert.match(wrapper, /--env PGPASSWORD /u);
+  assert.match(wrapper, /--env PGTZ /u);
   assert.doesNotMatch(wrapper, /PGPASSWORD=|--env-file|--tty|\$\(/u);
   assert.match(wrapper, /\/usr\/lib\/postgresql\/bin\/pg_dump "\$@"\n$/u);
   await boundedCommand("/bin/sh", ["-n"], { input: wrapper, timeoutMs: 5_000 });
@@ -144,6 +146,33 @@ test("native wrapper uses an explicit socket, safe arguments, and named PG envir
       ),
     failure("NATIVE_WRAPPER_INVALID"),
   );
+});
+
+test("fixture session timezones preserve explicit UTC export without mutating requests", async () => {
+  const calls = [];
+  const runner = withSessionTimezone(async (request) => {
+    calls.push(request);
+    return Buffer.from("synthetic result");
+  }, "Asia/Tokyo");
+  const observation = Object.freeze({
+    executable: "/operator-tools/psql",
+    environment: Object.freeze({ LANG: "C", PGHOST: "127.0.0.1" }),
+  });
+  const dump = Object.freeze({
+    executable: "/operator-tools/pg_dump",
+    environment: Object.freeze({ LANG: "C", PGHOST: "127.0.0.1", PGTZ: "UTC" }),
+  });
+  const originalTimezone = process.env.PGTZ;
+  assert.equal((await runner(observation)).toString(), "synthetic result");
+  await runner(dump);
+  assert.deepEqual(
+    calls.map((call) => call.environment.PGTZ),
+    ["Asia/Tokyo", "UTC"],
+  );
+  assert.equal(observation.environment.PGTZ, undefined);
+  assert.equal(dump.environment.PGTZ, "UTC");
+  assert.equal(process.env.PGTZ, originalTimezone);
+  assert.notEqual(calls[0].environment, observation.environment);
 });
 
 const emptyRootDiagnostic =

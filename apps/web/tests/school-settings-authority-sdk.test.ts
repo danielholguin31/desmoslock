@@ -14,6 +14,12 @@ const accounts = {
   B: "a1000000-0000-4000-8000-000000000002",
 } as const;
 type Account = keyof typeof accounts;
+const providerSessionIds: Record<Account, string> = {
+  A: "b1000000-0000-4000-8000-000000000001",
+  B: "b1000000-0000-4000-8000-000000000002",
+};
+const replacementSessionId = "b1000000-0000-4000-8000-000000000003";
+type SessionVariant = Account | "A2" | "AR";
 const settingsPath = "/rest/v1/rpc/update_school_display_name";
 const request = {
   displayName: "École North",
@@ -21,9 +27,25 @@ const request = {
   schoolId: "11000000-0000-4000-8000-000000000001",
 };
 
-function session(account: Account) {
+function session(
+  account: Account,
+  providerSessionId = providerSessionIds[account],
+  tokenVersion = 0,
+) {
+  const accessToken = [
+    { alg: "HS256", typ: "JWT" },
+    {
+      exp: Math.floor(Date.now() / 1_000) + 3_600,
+      sub: accounts[account],
+      session_id: providerSessionId,
+      jti: String(tokenVersion),
+    },
+    "synthetic-signature",
+  ]
+    .map((part) => Buffer.from(JSON.stringify(part)).toString("base64url"))
+    .join(".");
   return {
-    access_token: `synthetic-school-settings-${account}-token`,
+    access_token: accessToken,
     expires_at: Math.floor(Date.now() / 1_000) + 3_600,
     expires_in: 3_600,
     refresh_token: `synthetic-school-settings-${account}-refresh`,
@@ -41,7 +63,12 @@ afterEach(() => {
 // Installed SDK and real port, with memory-only sessions and intercepted HTTP.
 // These checks prove transport/account binding, not live database authorization.
 async function harness() {
-  const sessions = { A: session("A"), B: session("B") };
+  const sessions = {
+    A: session("A"),
+    B: session("B"),
+    A2: session("A", replacementSessionId),
+    AR: session("A", providerSessionIds.A, 1),
+  };
   const storage = new Map([[storageKey, JSON.stringify(sessions.A)]]);
   const requests: Array<{ account: Account; request: Request; body: unknown }> =
     [];
@@ -65,14 +92,12 @@ async function harness() {
   const intercepted: typeof fetch = async (input, init) => {
     const fetched = new Request(input, init);
     const url = new URL(fetched.url);
-    const account =
-      fetched.headers.get("authorization") ===
-      `Bearer ${sessions.A.access_token}`
-        ? "A"
-        : fetched.headers.get("authorization") ===
-            `Bearer ${sessions.B.access_token}`
-          ? "B"
-          : null;
+    const variant = (Object.keys(sessions) as SessionVariant[]).find(
+      (key) =>
+        fetched.headers.get("authorization") ===
+        `Bearer ${sessions[key].access_token}`,
+    );
+    const account = variant === undefined ? null : variant === "B" ? "B" : "A";
     if (
       url.origin !== backend ||
       account === null ||
@@ -168,6 +193,12 @@ async function harness() {
   });
   return {
     getSession,
+    sessions,
+    replaceSession(variant: SessionVariant) {
+      storage.set(storageKey, JSON.stringify(sessions[variant]));
+    },
+    sessionUnchanged: (variant: SessionVariant) =>
+      storage.get(storageKey) === JSON.stringify(sessions[variant]),
     port,
     requests,
     setVerification(body: unknown, status: number) {
@@ -196,7 +227,10 @@ async function harness() {
       return gate;
     },
     async capture() {
-      const result = await port.captureSchoolSettingsAuthority(accounts.A);
+      const result = await port.captureSchoolSettingsAuthority(
+        accounts.A,
+        providerSessionIds.A,
+      );
       expect(result).toEqual({
         status: "ready",
         authorityHandle: expect.any(String),
@@ -215,11 +249,81 @@ async function harness() {
 }
 
 describe("installed SDK School settings authority", () => {
+  it("rejects the same account's replacement session before capture, then accepts a fresh matching session", async () => {
+    const h = await harness();
+    h.replaceSession("A2");
+    await expect(
+      h.port.captureSchoolSettingsAuthority(accounts.A, providerSessionIds.A),
+    ).resolves.toEqual({ status: "rejected" });
+    expect(h.mutations()).toEqual([]);
+    expect(h.requests).toHaveLength(1);
+    expect(h.requests[0]?.request.headers.get("authorization")).toBe(
+      `Bearer ${h.sessions.A2.access_token}`,
+    );
+    expect(h.sessionUnchanged("A2")).toBe(true);
+    const fresh = await h.port.captureSchoolSettingsAuthority(
+      accounts.A,
+      replacementSessionId,
+    );
+    expect(fresh).toMatchObject({ status: "ready" });
+  });
+
+  it("accepts a renewed token for the expected session and freezes it through egress", async () => {
+    const h = await harness();
+    h.replaceSession("AR");
+    const handle = await h.capture();
+    h.replaceSession("A2");
+    await expect(
+      h.port.updateSchoolDisplayName(request, handle),
+    ).resolves.toEqual([{ code: "school_display_name_updated" }]);
+    expect(h.requests).toHaveLength(2);
+    expect(
+      h.requests.every(
+        ({ request }) =>
+          request.headers.get("authorization") ===
+          `Bearer ${h.sessions.AR.access_token}`,
+      ),
+    ).toBe(true);
+    expect(h.sessionUnchanged("A2")).toBe(true);
+  });
+
+  it.each(["during verification", "after capture"] as const)(
+    "keeps original S1 when same-account S2 enters storage %s",
+    async (timing) => {
+      const h = await harness();
+      const gate =
+        timing === "during verification" ? h.hold("/auth/v1/user") : undefined;
+      const capture = h.capture();
+      let handle: string;
+      if (gate !== undefined) {
+        await gate.entered.promise;
+        h.replaceSession("A2");
+        gate.released.resolve();
+        handle = await capture;
+      } else {
+        handle = await capture;
+        h.replaceSession("A2");
+      }
+      await expect(
+        h.port.updateSchoolDisplayName(request, handle),
+      ).resolves.toEqual([{ code: "school_display_name_updated" }]);
+      expect(h.mutations()).toHaveLength(1);
+      expect(
+        h.requests.every(
+          ({ request }) =>
+            request.headers.get("authorization") ===
+            `Bearer ${h.sessions.A.access_token}`,
+        ),
+      ).toBe(true);
+      expect(h.sessionUnchanged("A2")).toBe(true);
+    },
+  );
+
   it("rejects replacement B before capture without a verification or mutation request", async () => {
     const h = await harness();
     h.replaceAccount();
     await expect(
-      h.port.captureSchoolSettingsAuthority(accounts.A),
+      h.port.captureSchoolSettingsAuthority(accounts.A, providerSessionIds.A),
     ).resolves.toEqual({ status: "rejected" });
     expect(h.requests).toEqual([]);
     expect(h.getSession).toHaveBeenCalledOnce();
@@ -254,7 +358,7 @@ describe("installed SDK School settings authority", () => {
       });
       expect(Object.fromEntries(mutation.request.headers)).toEqual({
         apikey: publishableKey,
-        authorization: "Bearer synthetic-school-settings-A-token",
+        authorization: `Bearer ${h.sessions.A.access_token}`,
         "content-type": "application/json",
         "content-profile": "desmoslock_v2",
       });
@@ -290,7 +394,7 @@ describe("installed SDK School settings authority", () => {
       const h = await harness();
       h.setVerification(body, status);
       await expect(
-        h.port.captureSchoolSettingsAuthority(accounts.A),
+        h.port.captureSchoolSettingsAuthority(accounts.A, providerSessionIds.A),
       ).resolves.toEqual({ status: expected });
       expect(h.requests).toHaveLength(1);
       expect(h.mutations()).toEqual([]);
@@ -300,7 +404,10 @@ describe("installed SDK School settings authority", () => {
   it("invalidates a pending capture on reset and cannot return its late authority", async () => {
     const h = await harness();
     const gate = h.hold("/auth/v1/user");
-    const capture = h.port.captureSchoolSettingsAuthority(accounts.A);
+    const capture = h.port.captureSchoolSettingsAuthority(
+      accounts.A,
+      providerSessionIds.A,
+    );
     await gate.entered.promise;
     h.port.clearPrivateAuthContinuations();
     gate.released.resolve();
@@ -342,7 +449,10 @@ describe("installed SDK School settings authority", () => {
       const gate = h.hold(phase === "capture" ? "/auth/v1/user" : settingsPath);
       const operation =
         handle === null
-          ? h.port.captureSchoolSettingsAuthority(accounts.A)
+          ? h.port.captureSchoolSettingsAuthority(
+              accounts.A,
+              providerSessionIds.A,
+            )
           : h.port.updateSchoolDisplayName(request, handle);
       const signal = await gate.entered.promise;
       const settled = vi.fn();

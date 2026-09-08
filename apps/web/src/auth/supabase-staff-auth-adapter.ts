@@ -34,6 +34,7 @@ import {
   type UpdateSchoolDisplayNameRequest,
 } from "@desmoslock/contracts";
 
+import type { TestWorkspacePort } from "../test-workspace/test-workspace-controller.js";
 import type {
   StaffAuthAccessGrant,
   StaffAuthAccessEvent,
@@ -47,16 +48,29 @@ import type {
   StaffAuthOperationIdSource,
 } from "./staff-auth-controller.js";
 
-export interface SupabaseStaffAuthPort {
-  captureSchoolSettingsAuthority(expectedAccountId: string): Promise<unknown>;
+export interface SupabaseStaffAuthPort extends TestWorkspacePort {
+  captureSchoolSettingsAuthority(
+    expectedAccountId: string,
+    expectedProviderSessionId: string,
+  ): Promise<unknown>;
   releaseSchoolSettingsAuthority(authorityHandle: string): void;
   updateSchoolDisplayName(
     request: UpdateSchoolDisplayNameRequest,
     authorityHandle: string,
   ): Promise<unknown>;
-  capturePasswordAuthority(expectedAccountId?: string): Promise<string | null>;
-  captureSignOutAuthority(expectedAccountId: string): Promise<unknown>;
-  captureStaffManagementAuthority(expectedAccountId: string): Promise<unknown>;
+  capturePasswordAuthority(): Promise<string | null>;
+  capturePasswordAuthority(
+    expectedAccountId: string,
+    expectedProviderSessionId: string,
+  ): Promise<string | null>;
+  captureSignOutAuthority(
+    expectedAccountId: string,
+    expectedProviderSessionId: string,
+  ): Promise<unknown>;
+  captureStaffManagementAuthority(
+    expectedAccountId: string,
+    expectedProviderSessionId: string,
+  ): Promise<unknown>;
   releaseStaffManagementAuthority(authorityHandle: string): void;
   changeMembershipRole(
     request: ChangeStaffMembershipRoleRequest,
@@ -141,6 +155,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
 }): SupabaseStaffAuthAdapter {
   let disposed = false;
   let sessionGeneration: string | null = null;
+  let providerSessionId: string | null = null;
   let identityGeneration: string | null = null;
   let identityFacts: IdentityFacts | null = null;
   let schoolPresentation: {
@@ -224,6 +239,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
 
   function clearAuthorityState(removeEnrollmentFactors = true): void {
     sessionGeneration = null;
+    providerSessionId = null;
     identityGeneration = null;
     identityFacts = null;
     schoolPresentation = null;
@@ -317,11 +333,6 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     if (session?.status !== "authenticated") {
       throw new Error("Staff authentication session result is unavailable");
     }
-    const candidateSessionGeneration =
-      sessionGeneration === null || options.rotateSession === true
-        ? nextGeneration()
-        : sessionGeneration;
-
     const accountResult = await dependencies.port.readAccount();
     if (decodeStatus(accountResult, ["signed_out"]) === "signed_out") {
       clearAuthorityState(false);
@@ -332,8 +343,22 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     if (account === null) {
       throw new Error("Staff authentication account result is unavailable");
     }
+    if (
+      providerSessionId !== null &&
+      providerSessionId !== account.providerSessionId
+    ) {
+      // Old enrollment cleanup must never select the replacement SDK session.
+      clearEnrollmentReceipts(false);
+    }
+    const candidateSessionGeneration =
+      sessionGeneration === null ||
+      options.rotateSession === true ||
+      providerSessionId !== account.providerSessionId
+        ? nextGeneration()
+        : sessionGeneration;
     if (!account.emailVerified) {
       sessionGeneration = candidateSessionGeneration;
+      providerSessionId = account.providerSessionId;
       identityGeneration = null;
       identityFacts = null;
       challengeReceipts.clear();
@@ -346,6 +371,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     );
     if (context.kind !== "active") {
       sessionGeneration = candidateSessionGeneration;
+      providerSessionId = account.providerSessionId;
       identityGeneration = null;
       identityFacts = null;
       challengeReceipts.clear();
@@ -452,6 +478,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       kind: "access_granted",
       manageableInvitations,
       manageableStaff,
+      providerSessionId: account.providerSessionId,
       sessionGeneration: candidateSessionGeneration,
     };
     let result: StaffAuthAccessGrant;
@@ -515,6 +542,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     }
     trimMap(challengeReceipts, 16);
     sessionGeneration = candidateSessionGeneration;
+    providerSessionId = account.providerSessionId;
     identityGeneration = candidateIdentityGeneration;
     identityFacts = facts;
     return result;
@@ -882,8 +910,10 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       return { kind: "invitation_rejected", reason: "invalid" };
     }
     const initiatingRevision = eventRevision;
+    const initiatingProviderSessionId = account.providerSessionId;
     const authorityHandle = await dependencies.port.capturePasswordAuthority(
       receipt.accountId,
+      initiatingProviderSessionId,
     );
     if (authorityHandle === null)
       return { kind: "invitation_rejected", reason: "invalid" };
@@ -903,6 +933,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
             currentSession === "authenticated" &&
             currentAccount?.emailVerified === true &&
             currentAccount.accountId === receipt!.accountId &&
+            currentAccount.providerSessionId === initiatingProviderSessionId &&
             currentAccount.email === receipt!.email
           );
         } catch {
@@ -1185,11 +1216,14 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     // happens to contain when a later SDK operation resumes.
     const initiatingIdentity = identityFacts;
     const expectedAccountId = initiatingIdentity?.accountId;
-    if (expectedAccountId === undefined) {
+    const expectedProviderSessionId = providerSessionId;
+    if (expectedAccountId === undefined || expectedProviderSessionId === null) {
       throw new Error("Sign-out requires authoritative re-entry");
     }
-    const captured =
-      await dependencies.port.captureSignOutAuthority(expectedAccountId);
+    const captured = await dependencies.port.captureSignOutAuthority(
+      expectedAccountId,
+      expectedProviderSessionId,
+    );
     if (decodeStatus(captured, ["ended"]) === "ended") {
       clearAuthorityState(false);
       invitationReceipts.clear();
@@ -1207,7 +1241,10 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     }
     const authorityHandle = authority.authorityHandle;
     try {
-      if (identityFacts !== initiatingIdentity) {
+      if (
+        identityFacts !== initiatingIdentity ||
+        providerSessionId !== expectedProviderSessionId
+      ) {
         throw new Error("Sign-out was abandoned; re-entry required");
       }
       const revocationRows =
@@ -1259,6 +1296,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
   >;
   interface ManagementIntent {
     readonly accountId: string;
+    readonly providerSessionId: string;
     readonly identityGeneration: string;
     readonly sessionGeneration: string;
     readonly revision: number;
@@ -1273,6 +1311,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       identityFacts === null ||
       identityGeneration === null ||
       sessionGeneration === null ||
+      providerSessionId === null ||
       identityGeneration !== request.expectedIdentityGeneration ||
       sessionGeneration !== request.expectedSessionGeneration ||
       eventRevision !== processedEventRevision
@@ -1281,6 +1320,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     }
     return {
       accountId: identityFacts.accountId,
+      providerSessionId,
       identityGeneration,
       sessionGeneration,
       revision: eventRevision,
@@ -1293,6 +1333,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
       eventRevision === intent.revision &&
       identityGeneration === intent.identityGeneration &&
       sessionGeneration === intent.sessionGeneration &&
+      providerSessionId === intent.providerSessionId &&
       identityFacts?.accountId === intent.accountId
     );
   }
@@ -1308,6 +1349,7 @@ export function createSupabaseStaffAuthAdapter(dependencies: {
     const intent = captureManagementIntent(request);
     const captured = await dependencies.port.captureStaffManagementAuthority(
       intent.accountId,
+      intent.providerSessionId,
     );
     const ready = snapshotExactRecord(captured, ["status", "authorityHandle"]);
     if (ready?.status !== "ready" || !validText(ready.authorityHandle, 256)) {
@@ -2261,6 +2303,7 @@ function sameAccessAuthority(
   return (
     left.identityGeneration === right.identityGeneration &&
     left.sessionGeneration === right.sessionGeneration &&
+    left.providerSessionId === right.providerSessionId &&
     left.identity.accountId === right.identity.accountId &&
     left.identity.email === right.identity.email &&
     left.identity.membership.id === right.identity.membership.id &&
@@ -2463,20 +2506,24 @@ const canonicalSlugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 
 function decodeAccount(value: unknown): {
   readonly accountId: string;
+  readonly providerSessionId: string;
   readonly email: string;
   readonly emailVerified: boolean;
 } | null {
   const account = snapshotExactRecord(value, [
     "accountId",
+    "providerSessionId",
     "email",
     "emailVerified",
   ]);
   return account !== null &&
     isCanonicalUuid(account.accountId) &&
+    isCanonicalUuid(account.providerSessionId) &&
     isCanonicalEmail(account.email) &&
     typeof account.emailVerified === "boolean"
     ? {
         accountId: account.accountId,
+        providerSessionId: account.providerSessionId,
         email: account.email,
         emailVerified: account.emailVerified,
       }

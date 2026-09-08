@@ -32,6 +32,12 @@ import {
   type SchoolSettingsPort,
 } from "../school-settings/school-settings-controller.js";
 import { bindSchoolSettingsView } from "../school-settings/school-settings-view.js";
+import {
+  createTestWorkspaceController,
+  type TestWorkspaceController,
+  type TestWorkspacePort,
+} from "../test-workspace/test-workspace-controller.js";
+import { bindTestWorkspaceView } from "../test-workspace/test-workspace-view.js";
 
 const sensitiveCallbackKeys = new Set([
   "access_token",
@@ -118,12 +124,17 @@ export interface StaffAuthApplicationFactories {
     root: HTMLElement,
     controller: SchoolSettingsController,
   ) => () => void;
+  readonly bindTestWorkspaceView: (
+    root: HTMLElement,
+    controller: TestWorkspaceController,
+  ) => () => void;
   readonly createStaffServices: (
     configuration: PublicWebConfiguration,
     operationIds: StaffAuthOperationIdSource,
   ) => {
     readonly adapter: StaffAuthApplicationAdapter;
     readonly schoolSettingsPort: SchoolSettingsPort;
+    readonly testWorkspacePort: TestWorkspacePort;
   };
   readonly observeHealth: (
     configuration: PublicWebConfiguration,
@@ -278,12 +289,18 @@ interface StaffAuthApplicationGeneration {
   readonly controller: StaffAuthController;
   readonly initialization: Promise<unknown>;
   readonly settingsController: SchoolSettingsController;
+  readonly testController: TestWorkspaceController;
   unsubscribeProduct: (() => void) | null;
   disposeSettingsView: (() => void) | null;
+  disposeTestView: (() => void) | null;
+  testRoot: HTMLElement | null;
+  settingsRoot: HTMLElement | null;
+  initialTestReadStarted: boolean;
+  entryFocusSettled: boolean;
   disposeView: (() => void) | null;
   disposed: boolean;
   membershipRefresh: Promise<StaffProductRefreshResult> | null;
-  membershipRefreshCompletion: Promise<void> | null;
+  visibleRefresh: Promise<void> | null;
 }
 
 function startScrubbedStaffAuthApplication(
@@ -331,16 +348,18 @@ function startScrubbedStaffAuthApplication(
     readonly callbackLost: boolean;
     readonly pendingCallback: PrivateStaffAuthPendingCallback | null;
   }): StaffAuthApplicationGeneration {
-    const { adapter, schoolSettingsPort } =
+    const { adapter, schoolSettingsPort, testWorkspacePort } =
       runtimeConfiguration === null
         ? {
             adapter: createUnavailableAdapter(),
             schoolSettingsPort: createUnavailableSchoolSettingsPort(),
+            testWorkspacePort: createUnavailableTestWorkspacePort(),
           }
         : factories.createStaffServices(runtimeConfiguration, operationIds);
     let clearProduct = () =>
       clearProtectedSchoolDataRoot(elements.protectedSchoolDataRoot);
     let constructedSettings: SchoolSettingsController | null = null;
+    let constructedTests: TestWorkspaceController | null = null;
     try {
       const flows = createStaffRecoveryFlowStore({
         clock,
@@ -383,16 +402,30 @@ function startScrubbedStaffAuthApplication(
         refreshAccess: () => refreshGenerationMembership(generation),
       });
       constructedSettings = settingsController;
+      const testController = createTestWorkspaceController({
+        port: testWorkspacePort,
+        getAccess: () => controller.getProductAccess(),
+        refreshAccess: () => refreshGenerationMembership(generation),
+        creationRequestIds: operationIds,
+      });
+      constructedTests = testController;
       const generation: StaffAuthApplicationGeneration = {
         adapter,
         controller,
         settingsController,
+        testController,
         unsubscribeProduct: null,
         disposeSettingsView: null,
+        disposeTestView: null,
+        testRoot: null,
+        settingsRoot: null,
+        initialTestReadStarted: false,
+        entryFocusSettled:
+          options.callbackLost || options.pendingCallback !== null,
         disposeView: null,
         disposed: false,
         membershipRefresh: null,
-        membershipRefreshCompletion: null,
+        visibleRefresh: null,
         initialization: options.bootstrap
           ? controller.dispatch({ type: "bootstrap" })
           : Promise.resolve(controller.getSnapshot()),
@@ -402,15 +435,25 @@ function startScrubbedStaffAuthApplication(
         settingsController.setAccess(
           access.kind === "paused" ? access : { kind: "unavailable" },
         );
-        detachSettingsView(generation);
+        testController.setAccess(
+          access.kind === "paused" ? access : { kind: "unavailable" },
+        );
+        if (access.kind !== "paused") generation.initialTestReadStarted = false;
+        detachProductViews(generation);
         clearProtectedSchoolDataRoot(elements.protectedSchoolDataRoot);
       };
       generation.unsubscribeProduct = controller.subscribe(() =>
         synchronizeProduct(generation),
       );
       settingsController.setAccess(controller.getProductAccess());
+      testController.setAccess(controller.getProductAccess());
       return generation;
     } catch (error) {
+      try {
+        constructedTests?.dispose();
+      } catch {
+        // Settings and provider disposal remain required.
+      }
       try {
         constructedSettings?.dispose();
       } catch {
@@ -436,16 +479,63 @@ function startScrubbedStaffAuthApplication(
     );
   }
 
-  function detachSettingsView(
+  function detachProductViews(
     generation: StaffAuthApplicationGeneration,
   ): void {
-    const dispose = generation.disposeSettingsView;
+    const disposeSettings = generation.disposeSettingsView;
+    const disposeTests = generation.disposeTestView;
     generation.disposeSettingsView = null;
+    generation.disposeTestView = null;
+    generation.settingsRoot = null;
+    generation.testRoot = null;
     try {
-      dispose?.();
+      disposeTests?.();
     } catch {
-      // The protected root is still scrubbed by the caller.
+      // A sibling must still be detached if one binder throws.
     }
+    try {
+      disposeSettings?.();
+    } catch {
+      // The containing protected root is still scrubbed by the caller.
+    }
+  }
+
+  function scheduleEntryFocus(
+    generation: StaffAuthApplicationGeneration,
+  ): void {
+    if (generation.entryFocusSettled) return;
+    const snapshot = generation.controller.getSnapshot();
+    if (snapshot.kind !== "authenticated") {
+      if (
+        snapshot.kind !== "bootstrapping" &&
+        snapshot.kind !== "signed_out" &&
+        snapshot.kind !== "signing_in" &&
+        snapshot.kind !== "sign_in_rejected"
+      ) {
+        // Callback and MFA ceremonies keep their own focus handoff.
+        generation.entryFocusSettled = true;
+      }
+      return;
+    }
+    generation.entryFocusSettled = true;
+    const identity = snapshot.identity;
+    queueMicrotask(() => {
+      if (!generationIsCurrent(generation)) return;
+      const current = generation.controller.getSnapshot();
+      if (current.kind !== "authenticated" || current.identity !== identity)
+        return;
+      const authRoot = elements.authRoot;
+      const target =
+        authRoot.querySelector<HTMLElement>("input, select") ??
+        authRoot.querySelector<HTMLElement>("h1");
+      // Auth rendering runs synchronously after the application subscriber.
+      // Hand off only its known initial autofocus, never a later user choice.
+      if (target === null || authRoot.ownerDocument.activeElement !== target)
+        return;
+      generation.testRoot
+        ?.querySelector<HTMLElement>("[data-test-workspace-heading]")
+        ?.focus();
+    });
   }
 
   function synchronizeProduct(
@@ -454,29 +544,52 @@ function startScrubbedStaffAuthApplication(
     if (!generationIsCurrent(generation)) return;
     const access = generation.controller.getProductAccess();
     generation.settingsController.setAccess(access);
+    generation.testController.setAccess(access);
+    if (generation.disposeView !== null) scheduleEntryFocus(generation);
     if (access.kind !== "ready") {
-      detachSettingsView(generation);
+      detachProductViews(generation);
       clearProtectedSchoolDataRoot(elements.protectedSchoolDataRoot);
       return;
     }
-    if (
-      generation.disposeView === null ||
-      generation.disposeSettingsView !== null
-    )
-      return;
+    if (generation.disposeView === null) return;
     try {
-      const dispose = factories.bindSchoolSettingsView(
-        elements.protectedSchoolDataRoot,
-        generation.settingsController,
-      );
-      if (!generationIsCurrent(generation)) {
-        dispose();
-        return;
+      if (generation.disposeSettingsView === null) {
+        const root = elements.protectedSchoolDataRoot;
+        const testRoot = root.ownerDocument.createElement("section");
+        testRoot.dataset.testWorkspaceRoot = "";
+        const settingsRoot = root.ownerDocument.createElement("section");
+        settingsRoot.dataset.schoolSettingsRoot = "";
+        root.replaceChildren(testRoot, settingsRoot);
+        generation.testRoot = testRoot;
+        generation.settingsRoot = settingsRoot;
+        generation.disposeTestView = factories.bindTestWorkspaceView(
+          testRoot,
+          generation.testController,
+        );
+        generation.disposeSettingsView = factories.bindSchoolSettingsView(
+          settingsRoot,
+          generation.settingsController,
+        );
+        if (!generationIsCurrent(generation)) {
+          detachProductViews(generation);
+          return;
+        }
+        revealFreshStaffAuthRoot(root);
       }
-      generation.disposeSettingsView = dispose;
-      revealFreshStaffAuthRoot(elements.protectedSchoolDataRoot);
+      if (!generation.initialTestReadStarted) {
+        generation.initialTestReadStarted = true;
+        // Use the same fresh authority leaf as later visible-page refreshes.
+        // A ready snapshot alone is not permission for a Test read.
+        queueMicrotask(() => {
+          if (generationIsCurrent(generation)) {
+            void refreshVisibleData(generation);
+          }
+        });
+      }
     } catch {
       generation.settingsController.setAccess({ kind: "unavailable" });
+      generation.testController.setAccess({ kind: "unavailable" });
+      detachProductViews(generation);
       clearProtectedSchoolDataRoot(elements.protectedSchoolDataRoot);
     }
   }
@@ -494,11 +607,16 @@ function startScrubbedStaffAuthApplication(
       // Continue through product and provider disposal.
     }
     try {
+      generation.testController.dispose();
+    } catch {
+      // Continue through sibling and provider disposal.
+    }
+    try {
       generation.settingsController.dispose();
     } catch {
       // A product failure cannot preserve auth authority.
     }
-    detachSettingsView(generation);
+    detachProductViews(generation);
     const disposeView = generation.disposeView;
     generation.disposeView = null;
     if (disposeView !== null) {
@@ -543,6 +661,10 @@ function startScrubbedStaffAuthApplication(
       generation.disposeView = disposeView;
       revealFreshStaffAuthRoot(elements.authRoot);
       synchronizeProduct(generation);
+      if (generation.controller.getProductAccess().kind === "ready") {
+        await refreshVisibleData(generation);
+        if (!generationIsCurrent(generation)) return;
+      }
       if (runtimeConfiguration === null) {
         renderBackendObservation(elements.status, {
           reason: "configuration_invalid",
@@ -600,23 +722,46 @@ function startScrubbedStaffAuthApplication(
       })
       .catch((): StaffProductRefreshResult => ({ kind: "unavailable" }));
     generation.membershipRefresh = refresh;
-    generation.membershipRefreshCompletion = refresh.then(() => undefined);
     void refresh.then(() => {
       if (generation.membershipRefresh === refresh) {
         generation.membershipRefresh = null;
-        generation.membershipRefreshCompletion = null;
       }
+    });
+    return refresh;
+  }
+
+  function refreshVisibleData(
+    generation: StaffAuthApplicationGeneration,
+  ): Promise<void> {
+    if (!generationIsCurrent(generation)) return Promise.resolve();
+    if (generation.visibleRefresh !== null) return generation.visibleRefresh;
+    const refresh = refreshGenerationMembership(generation)
+      .then(async (result) => {
+        if (
+          !generationIsCurrent(generation) ||
+          result.kind !== "fresh_authorized"
+        )
+          return;
+        await generation.testController.refreshFromStaff(result);
+      })
+      .catch(() => {
+        if (generationIsCurrent(generation)) {
+          generation.testController.setAccess({ kind: "unavailable" });
+        }
+      });
+    generation.visibleRefresh = refresh;
+    void refresh.then(() => {
+      if (generation.visibleRefresh === refresh)
+        generation.visibleRefresh = null;
     });
     return refresh;
   }
 
   function refreshMembership(): Promise<void> {
     const generation = currentGeneration;
-    if (generation === null) return Promise.resolve();
-    const refresh = refreshGenerationMembership(generation);
-    return (
-      generation.membershipRefreshCompletion ?? refresh.then(() => undefined)
-    );
+    return generation === null
+      ? Promise.resolve()
+      : refreshVisibleData(generation);
   }
 
   function resume(): Promise<void> {
@@ -901,6 +1046,7 @@ export function createProductionStaffAuthApplicationFactories(dependencies: {
   return {
     bindView: bindStaffAuthView,
     bindSchoolSettingsView,
+    bindTestWorkspaceView,
     createStaffServices(configuration, operationIds) {
       const port = createProductionSupabaseStaffAuthPort(
         configuration,
@@ -918,6 +1064,16 @@ export function createProductionStaffAuthApplicationFactories(dependencies: {
           captureSchoolSettingsAuthority: port.captureSchoolSettingsAuthority,
           updateSchoolDisplayName: port.updateSchoolDisplayName,
           releaseSchoolSettingsAuthority: port.releaseSchoolSettingsAuthority,
+        },
+        testWorkspacePort: {
+          captureTestWorkspaceAuthority: port.captureTestWorkspaceAuthority,
+          releaseTestWorkspaceAuthority: port.releaseTestWorkspaceAuthority,
+          readSchoolTests: port.readSchoolTests,
+          readSchoolTest: port.readSchoolTest,
+          createSchoolTest: port.createSchoolTest,
+          updateTestTitle: port.updateTestTitle,
+          openTest: port.openTest,
+          endTest: port.endTest,
         },
       };
     },
@@ -942,6 +1098,22 @@ function createUnavailableSchoolSettingsPort(): SchoolSettingsPort {
       return null;
     },
     releaseSchoolSettingsAuthority() {},
+  };
+}
+
+function createUnavailableTestWorkspacePort(): TestWorkspacePort {
+  const unavailable = async () => null;
+  return {
+    async captureTestWorkspaceAuthority() {
+      return { status: "unavailable" };
+    },
+    releaseTestWorkspaceAuthority() {},
+    readSchoolTests: unavailable,
+    readSchoolTest: unavailable,
+    createSchoolTest: unavailable,
+    updateTestTitle: unavailable,
+    openTest: unavailable,
+    endTest: unavailable,
   };
 }
 

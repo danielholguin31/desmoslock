@@ -2,6 +2,11 @@ import { randomUUID } from "node:crypto";
 import test from "node:test";
 
 import {
+  parseReadSchoolTestsRequest,
+  parseReadSchoolTestsRpcResult,
+} from "@desmoslock/contracts";
+
+import {
   createStaffInvitationDependencies,
   handleRequest,
 } from "../../supabase/functions/staff-invitations/index.ts";
@@ -15,10 +20,13 @@ import {
   code,
   createRuntimeHealthCheck,
   directSchoolTableDenied,
+  directTestTableDenied,
   loopbackFetch,
   openDisposableStack,
   password,
   recoverySession,
+  readSchoolTest,
+  readSchoolTests,
   requireUuid,
   rpc,
   rpcDenied,
@@ -358,6 +366,21 @@ commit;`);
           "Recovery did not exercise the real S256 request",
         );
         code(await rpc(recovery, "current_staff_context"), "forbidden");
+        code(
+          await readSchoolTests(recovery, {
+            schoolId: workspaceId,
+            before: null,
+          }),
+          "forbidden",
+        );
+        code(
+          await rpc(recovery, "create_school_test", {
+            workspace_id: workspaceId,
+            creation_request_id: randomUUID(),
+            title: "Recovery cannot create a Test",
+          }),
+          "forbidden",
+        );
         const started = await rpc(recovery, "begin_staff_password_recovery", {
           requested_operation_id: randomUUID(),
         });
@@ -517,6 +540,23 @@ commit;`);
         code(await rpc(first, "current_staff_context"), "session_revoked");
         code(await rpc(second, "current_staff_context"), "session_revoked");
         code(await rpc(owner, "current_staff_context"), "session_revoked");
+        for (const caller of [first, second, owner]) {
+          code(
+            await readSchoolTests(caller, {
+              schoolId: workspaceId,
+              before: null,
+            }),
+            "session_revoked",
+          );
+          code(
+            await rpc(caller, "create_school_test", {
+              workspace_id: workspaceId,
+              creation_request_id: randomUUID(),
+              title: "Revoked session cannot create a Test",
+            }),
+            "session_revoked",
+          );
+        }
         await checkRuntimeHealth("after membership and session revocation");
       },
     );
@@ -684,6 +724,177 @@ where e.workspace_id=${sqlUuid(staff.schoolId)} and e.event_type='school_display
       "School rename failed to update presentation alone through the existing context",
     );
     await checkSchoolRenameAudit(staff, before.school_settings_revision);
+  }
+
+  let administratorTestId;
+  function schoolTestsSnapshot(schoolId) {
+    return sql(`select jsonb_build_object(
+'tests',coalesce((select jsonb_agg(to_jsonb(t)||jsonb_build_object('tuple',t.ctid::text) order by t.id) from desmoslock_v2.tests t where workspace_id=${sqlUuid(schoolId)}),'[]'::jsonb),
+'audit',coalesce((select jsonb_agg(to_jsonb(e)||jsonb_build_object('tuple',e.ctid::text) order by e.id) from desmoslock_v2.staff_audit_events e where workspace_id=${sqlUuid(schoolId)} and test_id is not null),'[]'::jsonb));`);
+  }
+  async function requireTest(staff, testId, schoolId = staff.schoolId) {
+    const result = await readSchoolTest(staff.client, { schoolId, testId });
+    check(result.ok, "Authorized actual Test detail is unavailable");
+    return result.test;
+  }
+  function testRevisionArgs(test, schoolId = test.schoolId) {
+    return {
+      workspace_id: schoolId,
+      test_id: test.id,
+      expected_test_revision: test.revision,
+    };
+  }
+  async function testDoesNotWrite(caller, name, args, expected) {
+    const before = schoolTestsSnapshot(args.workspace_id);
+    code(await rpc(caller, name, args), expected);
+    check(
+      schoolTestsSnapshot(args.workspace_id) === before,
+      "Nonmutating Test outcome changed a Test or audit",
+    );
+  }
+  async function checkTestAudit(
+    staff,
+    testId,
+    event,
+    previousRevision,
+    previousLifecycle,
+    newLifecycle,
+  ) {
+    check(
+      [
+        "test_created",
+        "test_title_updated",
+        "test_opened",
+        "test_ended",
+      ].includes(event),
+      "Unknown Test audit assertion",
+    );
+    check(
+      previousRevision === null ||
+        (Number.isSafeInteger(previousRevision) && previousRevision >= 1),
+      "Invalid prior Test audit revision",
+    );
+    check(
+      (previousLifecycle === null ||
+        ["draft", "open", "ended"].includes(previousLifecycle)) &&
+        ["draft", "open", "ended"].includes(newLifecycle),
+      "Invalid Test audit lifecycle",
+    );
+    const { session } = await auth(() => staff.client.auth.getSession());
+    const sessionId = sessionClaims(session).session_id;
+    const nextRevision = previousRevision === null ? 1 : previousRevision + 1;
+    check(
+      sql(`select count(*)=1 and bool_and(
+e.event_type='${event}' and e.result_code=e.event_type and e.actor_profile_id=${sqlUuid(staff.profileId)} and e.session_id=${sqlUuid(sessionId)}
+and e.workspace_id=${sqlUuid(staff.schoolId)} and e.previous_test_revision is not distinct from ${previousRevision ?? "null"}::bigint
+and e.previous_test_lifecycle is not distinct from ${previousLifecycle === null ? "null" : `'${previousLifecycle}'`}::text and e.new_test_lifecycle='${newLifecycle}'
+and e.subject_profile_id is null and e.invitation_id is null and e.previous_role is null and e.new_role is null
+and e.previous_role_revision is null and e.new_role_revision is null and e.previous_settings_revision is null and e.new_settings_revision is null)
+from desmoslock_v2.staff_audit_events e where e.test_id=${sqlUuid(testId)} and e.new_test_revision=${nextRevision};`) ===
+        "t",
+      "Test mutation omitted its one attributable typed audit",
+    );
+  }
+  async function createTest(staff, title, creationRequestId = randomUUID()) {
+    const outcome = await rpc(staff.client, "create_school_test", {
+      workspace_id: staff.schoolId,
+      creation_request_id: creationRequestId,
+      title,
+    });
+    code(outcome, "test_created");
+    const testId = requireUuid(outcome.test_id);
+    const test = await requireTest(staff, testId);
+    check(
+      test.title === title &&
+        test.lifecycle === "draft" &&
+        test.revision === 1 &&
+        test.createdByProfileId === staff.profileId &&
+        test.openedAt === null &&
+        test.endedAt === null,
+      "Real Test creation changed its initial state or derived creator",
+    );
+    await checkTestAudit(staff, testId, "test_created", null, null, "draft");
+    return { test, creationRequestId };
+  }
+  async function updateTestTitle(staff, testId, title) {
+    const before = await requireTest(staff, testId);
+    code(
+      await rpc(staff.client, "update_test_title", {
+        ...testRevisionArgs(before),
+        title,
+      }),
+      "test_title_updated",
+    );
+    const after = await requireTest(staff, testId);
+    check(
+      after.title === title &&
+        after.revision === before.revision + 1 &&
+        after.lifecycle === before.lifecycle &&
+        after.createdByProfileId === before.createdByProfileId &&
+        after.createdAt === before.createdAt &&
+        after.openedAt === before.openedAt &&
+        after.endedAt === before.endedAt,
+      "Test title update altered lifecycle or immutable attribution",
+    );
+    await checkTestAudit(
+      staff,
+      testId,
+      "test_title_updated",
+      before.revision,
+      before.lifecycle,
+      before.lifecycle,
+    );
+    return after;
+  }
+  async function openTest(staff, testId) {
+    const before = await requireTest(staff, testId);
+    code(
+      await rpc(staff.client, "open_test", testRevisionArgs(before)),
+      "test_opened",
+    );
+    const after = await requireTest(staff, testId);
+    check(
+      after.lifecycle === "open" &&
+        after.revision === before.revision + 1 &&
+        after.title === before.title &&
+        after.openedAt !== null &&
+        after.endedAt === null,
+      "Test opening omitted its authoritative revision or timestamp",
+    );
+    await checkTestAudit(
+      staff,
+      testId,
+      "test_opened",
+      before.revision,
+      "draft",
+      "open",
+    );
+    return after;
+  }
+  async function endTest(staff, testId) {
+    const before = await requireTest(staff, testId);
+    code(
+      await rpc(staff.client, "end_test", testRevisionArgs(before)),
+      "test_ended",
+    );
+    const after = await requireTest(staff, testId);
+    check(
+      after.lifecycle === "ended" &&
+        after.revision === before.revision + 1 &&
+        after.title === before.title &&
+        after.openedAt === before.openedAt &&
+        after.endedAt !== null,
+      "Test ending omitted its authoritative revision or timestamp",
+    );
+    await checkTestAudit(
+      staff,
+      testId,
+      "test_ended",
+      before.revision,
+      "open",
+      "ended",
+    );
+    return after;
   }
 
   await t.test(
@@ -1149,6 +1360,538 @@ and a.query like '%"update_school_display_name"%';`);
   );
 
   await t.test(
+    "actual SQL Test pages preserve microseconds and UUID boundary ties through the production decoder",
+    async () => {
+      await checkRuntimeHealth("before real Test pagination");
+      check(
+        sql(
+          `select count(*)=0 from desmoslock_v2.tests where workspace_id=${sqlUuid(schoolB)};`,
+        ) === "t",
+        "Test pagination requires its existing runtime School to be empty",
+      );
+      const prefix = randomUUID().slice(0, 24);
+      // These run-owned SQL fixtures deliberately exercise exact ordering keys;
+      // their fixed times are test inputs, never claimed as creation evidence.
+      const expected = Array.from({ length: 55 }, (_, index) => ({
+        id: `${prefix}${(100 - index).toString(16).padStart(12, "0")}`,
+        createdAt: `2001-01-01T00:00:00.${String(900 - Math.floor(index / 3)).padStart(6, "0")}Z`,
+        creationRequestId: randomUUID(),
+      }));
+      sql(`insert into desmoslock_v2.tests(id,workspace_id,created_by_profile_id,title,seed_key,lifecycle,revision,created_at,opened_at,ended_at,creation_request_id) values
+${expected.map((row) => `(${sqlUuid(row.id)},${sqlUuid(schoolB)},${sqlUuid(foreignTeacher.profileId)},'Disposable exact page Test',null,'draft',1,'${row.createdAt}'::timestamptz,null,null,${sqlUuid(row.creationRequestId)})`).join(",\n")};`);
+      const request = { schoolId: schoolB, before: null };
+      const rows = await rpcRows(
+        foreignTeacher.client,
+        "current_school_tests",
+        {
+          workspace_id: schoolB,
+          before_created_at: null,
+          before_test_id: null,
+        },
+      );
+      check(
+        rows.length === 51,
+        "Actual Test SQL reader did not provide fifty rows plus lookahead",
+      );
+      const first = parseReadSchoolTestsRpcResult(rows, request);
+      check(
+        first?.ok &&
+          first.page.items.length === 50 &&
+          first.page.nextCursor?.testId === expected[49].id &&
+          first.page.nextCursor.createdAt === expected[49].createdAt &&
+          rows[50].test_id === expected[50].id &&
+          rows[50].created_at === expected[49].createdAt,
+        "SQL-to-TypeScript page lost the exact fiftieth-row cursor or tied lookahead",
+      );
+      const nextRequest = parseReadSchoolTestsRequest({
+        schoolId: schoolB,
+        before: first.page.nextCursor,
+      });
+      check(
+        nextRequest !== null,
+        "Decoded Test cursor was not a canonical next request",
+      );
+      const second = await readSchoolTests(foreignTeacher.client, nextRequest);
+      check(
+        second.ok &&
+          second.page.items.length === 5 &&
+          second.page.nextCursor === null,
+        "Actual next Test request skipped a tied boundary row or invented another page",
+      );
+      const all = [...first.page.items, ...second.page.items];
+      check(
+        all.length === expected.length &&
+          new Set(all.map((row) => row.id)).size === expected.length &&
+          all.every(
+            (row, index) =>
+              row.id === expected[index].id &&
+              row.createdAt === expected[index].createdAt &&
+              row.schoolId === schoolB,
+          ),
+        "Real Test pagination omitted, duplicated or rounded a native tuple",
+      );
+      const outside = await requireTest(foreignTeacher, expected[54].id);
+      check(
+        outside.createdAt === expected[54].createdAt,
+        "Targeted Test reader could not recover a selection outside the first page",
+      );
+      await checkRuntimeHealth("after real Test pagination");
+    },
+  );
+
+  await t.test(
+    "real Test authority permits Teacher AAL1 and same-School colleagues with exact lifecycle outcomes",
+    async () => {
+      const teacherSession = await auth(() =>
+        foreignTeacher.client.auth.getSession(),
+      );
+      check(
+        sessionClaims(teacherSession.session).aal === "aal1",
+        "Teacher Test authority was not exercised at actual AAL1",
+      );
+      const empty = await readSchoolTests(ownerA.client, {
+        schoolId: schoolA,
+        before: null,
+      });
+      check(
+        empty.ok && empty.page.items.length === 0,
+        "Empty runtime School Test list was not an exact empty success",
+      );
+      const created = await createTest(ownerA, "Owner created colleague Test");
+      let current = created.test;
+      for (const staff of [ownerA, administrator, teacher]) {
+        const detail = await requireTest(staff, current.id);
+        const page = await readSchoolTests(staff.client, {
+          schoolId: schoolA,
+          before: null,
+        });
+        check(
+          detail.createdByProfileId === ownerA.profileId &&
+            page.ok &&
+            page.page.items.some((row) => row.id === current.id),
+          "A colleague could not read the same-School Test",
+        );
+      }
+      current = await updateTestTitle(
+        teacher,
+        current.id,
+        "Teacher edited colleague Test 学校",
+      );
+      const beforeReplay = schoolTestsSnapshot(schoolA);
+      const replay = await rpc(ownerA.client, "create_school_test", {
+        workspace_id: schoolA,
+        creation_request_id: created.creationRequestId,
+        title: "Replay must not replace current title",
+      });
+      check(
+        replay.code === "test_creation_already_recorded" &&
+          replay.test_id === current.id &&
+          schoolTestsSnapshot(schoolA) === beforeReplay,
+        "Create replay changed current Test facts or appended an audit",
+      );
+      await testDoesNotWrite(
+        teacher.client,
+        "update_test_title",
+        { ...testRevisionArgs(current), title: current.title },
+        "test_title_unchanged",
+      );
+      await testDoesNotWrite(
+        ownerA.client,
+        "update_test_title",
+        {
+          ...testRevisionArgs(current),
+          expected_test_revision: 1,
+          title: current.title,
+        },
+        "test_revision_conflict",
+      );
+      await testDoesNotWrite(
+        teacher.client,
+        "end_test",
+        testRevisionArgs(current),
+        "test_transition_rejected",
+      );
+      const draftRevision = current.revision;
+      current = await openTest(administrator, current.id);
+      await testDoesNotWrite(
+        teacher.client,
+        "open_test",
+        testRevisionArgs(current),
+        "test_already_open",
+      );
+      await testDoesNotWrite(
+        administrator.client,
+        "open_test",
+        { ...testRevisionArgs(current), expected_test_revision: draftRevision },
+        "test_revision_conflict",
+      );
+      current = await updateTestTitle(
+        teacher,
+        current.id,
+        "Open Test title remains editable",
+      );
+      const openRevision = current.revision;
+      current = await endTest(ownerA, current.id);
+      await testDoesNotWrite(
+        teacher.client,
+        "end_test",
+        testRevisionArgs(current),
+        "test_already_ended",
+      );
+      await testDoesNotWrite(
+        ownerA.client,
+        "end_test",
+        { ...testRevisionArgs(current), expected_test_revision: openRevision },
+        "test_revision_conflict",
+      );
+      await testDoesNotWrite(
+        teacher.client,
+        "open_test",
+        testRevisionArgs(current),
+        "test_transition_rejected",
+      );
+      await testDoesNotWrite(
+        teacher.client,
+        "update_test_title",
+        { ...testRevisionArgs(current), title: current.title },
+        "test_transition_rejected",
+      );
+
+      const aal1Created = await createTest(
+        foreignTeacher,
+        "AAL1 Teacher creates Test",
+      );
+      await updateTestTitle(
+        ownerB,
+        aal1Created.test.id,
+        "Owner edits Teacher-created Test",
+      );
+      const foreignCreated = await createTest(
+        ownerB,
+        "Owner B creates colleague Test",
+      );
+      await updateTestTitle(
+        foreignTeacher,
+        foreignCreated.test.id,
+        "AAL1 Teacher edits Owner Test",
+      );
+      await openTest(foreignTeacher, foreignCreated.test.id);
+      await endTest(foreignTeacher, foreignCreated.test.id);
+      administratorTestId = (
+        await createTest(
+          administrator,
+          "Creator revocation must retain colleague Test",
+        )
+      ).test.id;
+
+      const beforeDeniedA = schoolTestsSnapshot(schoolA);
+      const beforeDeniedB = schoolTestsSnapshot(schoolB);
+      for (const [caller, denied] of [
+        [ownerAal1, "step_up_required"],
+        [uninvited.client, "membership_inactive"],
+        [ownerB.client, "membership_inactive"],
+      ]) {
+        code(
+          await readSchoolTests(caller, { schoolId: schoolA, before: null }),
+          denied,
+        );
+        code(
+          await readSchoolTest(caller, {
+            schoolId: schoolA,
+            testId: current.id,
+          }),
+          denied,
+        );
+        await testDoesNotWrite(
+          caller,
+          "create_school_test",
+          {
+            workspace_id: schoolA,
+            creation_request_id: randomUUID(),
+            title: "Denied Test creation",
+          },
+          denied,
+        );
+        for (const name of ["update_test_title", "open_test", "end_test"])
+          await testDoesNotWrite(
+            caller,
+            name,
+            {
+              ...testRevisionArgs(current),
+              ...(name === "update_test_title"
+                ? { title: "Denied title" }
+                : {}),
+            },
+            denied,
+          );
+      }
+      for (const testId of [
+        foreignCreated.test.id,
+        randomUUID(),
+        "30000000-0000-4000-8000-000000000001",
+      ]) {
+        code(
+          await readSchoolTest(teacher.client, { schoolId: schoolA, testId }),
+          "test_unavailable",
+        );
+        for (const name of ["update_test_title", "open_test", "end_test"])
+          await testDoesNotWrite(
+            teacher.client,
+            name,
+            {
+              workspace_id: schoolA,
+              test_id: testId,
+              expected_test_revision: 1,
+              ...(name === "update_test_title"
+                ? { title: "Hidden target title" }
+                : {}),
+            },
+            "test_unavailable",
+          );
+      }
+      for (const [name, args] of [
+        [
+          "current_school_tests",
+          {
+            workspace_id: schoolA,
+            before_created_at: null,
+            before_test_id: null,
+          },
+        ],
+        ["current_school_test", { workspace_id: schoolA, test_id: current.id }],
+        [
+          "create_school_test",
+          {
+            workspace_id: schoolA,
+            creation_request_id: randomUUID(),
+            title: "Anonymous Test",
+          },
+        ],
+        [
+          "update_test_title",
+          { ...testRevisionArgs(current), title: "Anonymous title" },
+        ],
+        ["open_test", testRevisionArgs(current)],
+        ["end_test", testRevisionArgs(current)],
+      ])
+        await rpcDenied(anonymous, name, args, ["42501"]);
+      await rpcDenied(
+        teacher.client,
+        "create_school_test",
+        {
+          workspace_id: schoolA,
+          creation_request_id: randomUUID(),
+          title: "Forged creator",
+          created_by_profile_id: ownerA.profileId,
+        },
+        ["PGRST202"],
+      );
+      for (const caller of [
+        ownerA.client,
+        administrator.client,
+        teacher.client,
+        foreignTeacher.client,
+        ownerAal1,
+        uninvited.client,
+        anonymous,
+      ]) {
+        await directTestTableDenied(caller, schoolA);
+        await directTestTableDenied(caller, schoolB);
+      }
+      check(
+        schoolTestsSnapshot(schoolA) === beforeDeniedA &&
+          schoolTestsSnapshot(schoolB) === beforeDeniedB,
+        "Denied Test authority changed protected Tests or audit",
+      );
+      // Anonymous checks are complete. Reuse that existing client for an actual
+      // Administrator AAL1 session; do not add another provider client.
+      const administratorAal1 = anonymous;
+      const signedIn = await auth(() =>
+        administratorAal1.auth.signInWithPassword({
+          email: administrator.email,
+          password: administrator.password,
+        }),
+      );
+      check(
+        sessionClaims(signedIn.session).aal === "aal1",
+        "Administrator denial did not use actual AAL1",
+      );
+      code(
+        await readSchoolTests(administratorAal1, {
+          schoolId: schoolA,
+          before: null,
+        }),
+        "step_up_required",
+      );
+      code(
+        await readSchoolTest(administratorAal1, {
+          schoolId: schoolA,
+          testId: current.id,
+        }),
+        "step_up_required",
+      );
+      await testDoesNotWrite(
+        administratorAal1,
+        "create_school_test",
+        {
+          workspace_id: schoolA,
+          creation_request_id: randomUUID(),
+          title: "AAL1 Administrator cannot create",
+        },
+        "step_up_required",
+      );
+      for (const name of ["update_test_title", "open_test", "end_test"])
+        await testDoesNotWrite(
+          administratorAal1,
+          name,
+          {
+            ...testRevisionArgs(current),
+            ...(name === "update_test_title"
+              ? { title: "AAL1 Administrator cannot edit" }
+              : {}),
+          },
+          "step_up_required",
+        );
+      await checkRuntimeHealth(
+        "after real Test authority and lifecycle matrix",
+      );
+    },
+  );
+
+  await t.test(
+    "actual competing Test RPCs serialize duplicate creation and revision-bound title versus open",
+    async () => {
+      verifyDisposableDatabase();
+      for (const duplicateCreation of [true, false]) {
+        const created = duplicateCreation
+          ? null
+          : await createTest(ownerA, "Test revision race");
+        const key = randomUUID();
+        const blocker = await openConnection(
+          `composed-test-${randomUUID().slice(0, 8)}`,
+        );
+        let requests = [];
+        try {
+          await blocker.query(
+            duplicateCreation
+              ? `begin; select 1 from desmoslock_v2.workspaces where id=${sqlUuid(schoolA)} for update;`
+              : `begin; select 1 from desmoslock_v2.tests where id=${sqlUuid(created.test.id)} for update;`,
+          );
+          requests = duplicateCreation
+            ? [0, 1].map(() =>
+                rpc(ownerA.client, "create_school_test", {
+                  workspace_id: schoolA,
+                  creation_request_id: key,
+                  title: "Concurrent same-key Test",
+                }),
+              )
+            : [
+                rpc(ownerA.client, "update_test_title", {
+                  ...testRevisionArgs(created.test),
+                  title: "Concurrent changed title",
+                }),
+                rpc(
+                  teacher.client,
+                  "open_test",
+                  testRevisionArgs(created.test),
+                ),
+              ];
+          const settled = Promise.allSettled(requests);
+          const deadline = Date.now() + 4_000;
+          let observed = false;
+          while (Date.now() < deadline) {
+            const rows = await blocker.query(`select pg_stat_clear_snapshot();
+select count(*)=2 and bool_or(${blocker.pid}=any(pg_blocking_pids(a.pid))) from pg_stat_activity a
+where a.pid<>pg_backend_pid() and a.state='active' and a.wait_event_type='Lock'
+and ${duplicateCreation ? "a.query like '%\"create_school_test\"%'" : "(a.query like '%\"update_test_title\"%' or a.query like '%\"open_test\"%')"};`);
+            if (rows.length === 1 && rows[0] === "t") {
+              observed = true;
+              break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+          check(
+            observed,
+            "Both actual Test RPCs did not demonstrate target lock contention",
+          );
+          await blocker.query("commit;");
+          const results = await settled;
+          check(
+            results.every((entry) => entry.status === "fulfilled"),
+            "Competing actual Test RPC did not complete",
+          );
+          const codes = results.map((entry) => entry.value.code);
+          if (duplicateCreation) {
+            check(
+              codes.filter((value) => value === "test_created").length === 1 &&
+                codes.filter(
+                  (value) => value === "test_creation_already_recorded",
+                ).length === 1 &&
+                results[0].value.test_id === results[1].value.test_id,
+              "Same-key Test creation did not return one committed identity",
+            );
+            const testId = requireUuid(results[0].value.test_id);
+            await checkTestAudit(
+              ownerA,
+              testId,
+              "test_created",
+              null,
+              null,
+              "draft",
+            );
+            check(
+              sql(
+                `select count(*)=1 from desmoslock_v2.tests where workspace_id=${sqlUuid(schoolA)} and created_by_profile_id=${sqlUuid(ownerA.profileId)} and creation_request_id=${sqlUuid(key)};`,
+              ) === "t",
+              "Concurrent creation persisted duplicate Test rows",
+            );
+            check(
+              sql(
+                `select count(*)=1 from desmoslock_v2.staff_audit_events where test_id=${sqlUuid(testId)};`,
+              ) === "t",
+              "Concurrent creation appended duplicate audit",
+            );
+          } else {
+            check(
+              codes.filter((value) =>
+                ["test_title_updated", "test_opened"].includes(value),
+              ).length === 1 && codes.includes("test_revision_conflict"),
+              "Test title/open race did not produce one commit and one conflict",
+            );
+            const after = await requireTest(ownerA, created.test.id);
+            const titleWon = codes.includes("test_title_updated");
+            check(
+              after.revision === 2 &&
+                after.lifecycle === (titleWon ? "draft" : "open") &&
+                after.title ===
+                  (titleWon ? "Concurrent changed title" : created.test.title),
+              "Test race split title, lifecycle and revision",
+            );
+            await checkTestAudit(
+              titleWon ? ownerA : teacher,
+              after.id,
+              titleWon ? "test_title_updated" : "test_opened",
+              1,
+              "draft",
+              titleWon ? "draft" : "open",
+            );
+            check(
+              sql(
+                `select count(*)=2 from desmoslock_v2.staff_audit_events where test_id=${sqlUuid(after.id)};`,
+              ) === "t",
+              "Test revision race appended more than one transition audit",
+            );
+          }
+        } finally {
+          await blocker.close();
+          await Promise.allSettled(requests);
+        }
+      }
+      await checkRuntimeHealth("after real competing Test commits");
+    },
+  );
+
+  await t.test(
     "real Administrator revocation is attributable and cannot resurrect revoked staff",
     async () => {
       const revokee = addTarget();
@@ -1369,6 +2112,72 @@ rollback;`) === "t",
             "The existing provider session did not reflect its current Teacher role",
           );
         const denied = removal ? "membership_inactive" : "forbidden";
+        requireUuid(administratorTestId);
+        const retainedTest = await requireTest(ownerA, administratorTestId);
+        if (removal) {
+          code(
+            await readSchoolTests(administrator.client, {
+              schoolId: schoolA,
+              before: null,
+            }),
+            "membership_inactive",
+          );
+          code(
+            await readSchoolTest(administrator.client, {
+              schoolId: schoolA,
+              testId: administratorTestId,
+            }),
+            "membership_inactive",
+          );
+          await testDoesNotWrite(
+            administrator.client,
+            "create_school_test",
+            {
+              workspace_id: schoolA,
+              creation_request_id: randomUUID(),
+              title: "Revoked staff cannot create Test",
+            },
+            "membership_inactive",
+          );
+          for (const name of ["update_test_title", "open_test", "end_test"])
+            await testDoesNotWrite(
+              administrator.client,
+              name,
+              {
+                ...testRevisionArgs(retainedTest),
+                ...(name === "update_test_title"
+                  ? { title: "Revoked staff cannot edit Test" }
+                  : {}),
+              },
+              "membership_inactive",
+            );
+          const colleague = await updateTestTitle(
+            teacher,
+            administratorTestId,
+            "Colleague retains Test after creator revocation",
+          );
+          check(
+            colleague.createdByProfileId === administrator.profileId,
+            "Creator revocation changed immutable Test attribution",
+          );
+          await openTest(ownerA, administratorTestId);
+          await endTest(teacher, administratorTestId);
+        } else {
+          const page = await readSchoolTests(administrator.client, {
+            schoolId: schoolA,
+            before: null,
+          });
+          check(
+            page.ok &&
+              page.page.items.some((test) => test.id === administratorTestId),
+            "Same-session Administrator downgrade incorrectly removed Teacher Test reads",
+          );
+          await updateTestTitle(
+            administrator,
+            administratorTestId,
+            "New Teacher operation after Administrator downgrade",
+          );
+        }
         const schoolContext = await rpc(ownerA.client, "current_staff_context");
         await schoolDenialDoesNotWrite(
           administrator.client,
@@ -1476,6 +2285,13 @@ rollback;`) === "t",
           confirmationTargetEmail: teacher.email,
           renameExternally: async (displayName) =>
             renameSchool(ownerA, displayName),
+        },
+        testWorkspace: {
+          titlePrefix: "Real browser Test",
+          updateTitleExternally: async (testId, title) =>
+            updateTestTitle(ownerA, testId, title),
+          openExternally: async (testId) => openTest(ownerA, testId),
+          endExternally: async (testId) => endTest(ownerA, testId),
         },
       });
       await checkRuntimeHealth(

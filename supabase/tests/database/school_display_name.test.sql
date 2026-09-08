@@ -158,7 +158,9 @@ select results_eq(
     ('id'::text), ('occurred_at'), ('event_type'), ('result_code'), ('workspace_id'),
     ('actor_profile_id'), ('subject_profile_id'), ('invitation_id'), ('session_id'),
     ('previous_role'), ('new_role'), ('previous_role_revision'), ('new_role_revision'),
-    ('previous_settings_revision'), ('new_settings_revision')
+    ('previous_settings_revision'), ('new_settings_revision'),
+    ('test_id'), ('previous_test_revision'), ('new_test_revision'),
+    ('previous_test_lifecycle'), ('new_test_lifecycle')
   ) as expected(column_name) order by 1$$,
   'the exact audit schema contains no old or new School names or arbitrary payload'
 );

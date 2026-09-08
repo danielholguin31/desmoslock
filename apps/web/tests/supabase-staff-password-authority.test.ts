@@ -11,6 +11,9 @@ const backendUrl = "https://backend.example.test";
 const publishableKey = "sb_publishable_rrrrrrrrrrrrrrrrrrrrrr_cccccccc";
 const accountA = "a1000000-0000-4000-8000-000000000001";
 const accountB = "a1000000-0000-4000-8000-000000000002";
+const providerSessionA = "b1000000-0000-4000-8000-000000000001";
+const providerSessionB = "b1000000-0000-4000-8000-000000000002";
+const replacementSessionId = "b1000000-0000-4000-8000-000000000003";
 const invitationId = "41000000-0000-4000-8000-000000000001";
 const operationId = "51000000-0000-4000-8000-000000000001";
 const password = "synthetic replacement password only";
@@ -31,7 +34,10 @@ function responseAt(url: string, body: unknown, status = 200): Response {
 }
 
 async function capture(port: SupabaseStaffAuthPort, accountId = accountA) {
-  const handle = await port.capturePasswordAuthority(accountId);
+  const handle = await port.capturePasswordAuthority(
+    accountId,
+    accountId === accountA ? providerSessionA : providerSessionB,
+  );
   expect(typeof handle).toBe("string");
   if (handle === null) throw new Error("Synthetic authority was not captured");
   cleanups.push(() => port.releasePasswordAuthority(handle));
@@ -39,11 +45,13 @@ async function capture(port: SupabaseStaffAuthPort, accountId = accountA) {
 }
 
 function harness() {
+  const sessionA = syntheticSdkSession(accountA);
+  const sessionB = syntheticSdkSession(accountB);
   let currentAccount = accountA;
   const unavailable = vi.fn(async () => ({ data: null, error: {} }));
   const getSession = vi.fn(async () => ({
     data: {
-      session: { access_token: `synthetic-token-${currentAccount}` },
+      session: currentAccount === accountA ? sessionA : sessionB,
     },
     error: null,
   }));
@@ -84,7 +92,7 @@ function harness() {
     const url = String(input);
     const bearer = new Headers(init?.headers).get("authorization");
     const id =
-      bearer === `Bearer synthetic-token-${accountA}` ? accountA : accountB;
+      bearer === `Bearer ${sessionA.access_token}` ? accountA : accountB;
     if (url.includes("/logout?")) return responseAt(url, null, 204);
     if (url.includes("/rest/v1/")) return responseAt(url, [{ ok: true }]);
     return responseAt(url, { id });
@@ -98,6 +106,7 @@ function harness() {
   });
   return {
     getSession,
+    sessionA,
     port,
     request,
     sdkSignOut,
@@ -114,7 +123,7 @@ describe("operation-local password authority", () => {
     vi.useFakeTimers();
     const test = harness();
     const tokens = {
-      access_token: `synthetic-token-${accountA}`,
+      access_token: test.sessionA.access_token,
       expires_in: 3_600,
       refresh_token: "synthetic-refresh-token",
       token_type: "bearer",
@@ -201,7 +210,7 @@ describe("operation-local password authority", () => {
     for (const [, init] of test.request.mock.calls) {
       const headers = new Headers(init?.headers);
       expect(headers.get("authorization")).toBe(
-        `Bearer synthetic-token-${accountA}`,
+        `Bearer ${test.sessionA.access_token}`,
       );
       expect(headers.get("apikey")).toBe(publishableKey);
       expect(init).toMatchObject({
@@ -229,7 +238,7 @@ describe("operation-local password authority", () => {
     const test = harness();
     test.request.mockImplementationOnce(async (url) =>
       responseAt(String(url), {
-        access_token: `synthetic-token-${accountA}`,
+        access_token: test.sessionA.access_token,
         expires_in: 3_600,
         refresh_token: "synthetic-refresh-token",
         token_type: "bearer",
@@ -274,22 +283,42 @@ describe("operation-local password authority", () => {
     });
     for (const [, init] of test.request.mock.calls) {
       expect(new Headers(init?.headers).get("authorization")).toBe(
-        `Bearer synthetic-token-${accountA}`,
+        `Bearer ${test.sessionA.access_token}`,
       );
     }
     expect(test.sdkSignOut).not.toHaveBeenCalled();
     expect(test.unavailable).not.toHaveBeenCalled();
   });
 
-  it("requires verified expected invitation identity before allowing writes", async () => {
+  it("rejects a replacement invitation account before verification or writes", async () => {
     const test = harness();
     test.switchAccount();
     await expect(
-      test.port.capturePasswordAuthority(accountA),
+      test.port.capturePasswordAuthority(accountA, providerSessionA),
+    ).resolves.toBeNull();
+    expect(test.request).not.toHaveBeenCalled();
+    expect(test.unavailable).not.toHaveBeenCalled();
+  });
+
+  it("requires the verified user to match the expected invitation account", async () => {
+    const test = harness();
+    test.request.mockImplementationOnce(async (url) =>
+      responseAt(String(url), { id: accountB }),
+    );
+    await expect(
+      test.port.capturePasswordAuthority(accountA, providerSessionA),
     ).resolves.toBeNull();
     expect(test.request).toHaveBeenCalledOnce();
     expect(test.request.mock.calls[0]![1]!.method).toBe("GET");
-    expect(test.unavailable).not.toHaveBeenCalled();
+  });
+
+  it("rejects the obsolete one-argument password capture without using recovery or HTTP", async () => {
+    const test = harness();
+    await expect(
+      Reflect.apply(test.port.capturePasswordAuthority, test.port, [accountA]),
+    ).resolves.toBeNull();
+    expect(test.getSession).not.toHaveBeenCalled();
+    expect(test.request).not.toHaveBeenCalled();
   });
 
   it("makes released, expired and unknown handles inert without SDK fallbacks", async () => {
@@ -419,7 +448,7 @@ describe("operation-local password authority", () => {
       return response;
     });
     await expect(
-      test.port.capturePasswordAuthority(accountA),
+      test.port.capturePasswordAuthority(accountA, providerSessionA),
     ).resolves.toBeNull();
     test.request.mockImplementationOnce(async (url) => {
       const response = responseAt(String(url), { id: accountA });
@@ -427,15 +456,26 @@ describe("operation-local password authority", () => {
       return response;
     });
     await expect(
-      test.port.capturePasswordAuthority(accountA),
+      test.port.capturePasswordAuthority(accountA, providerSessionA),
     ).resolves.toBeNull();
   });
 });
 
-function syntheticSdkSession(accountId: string) {
+function syntheticSdkSession(
+  accountId: string,
+  providerSessionId = accountId === accountA
+    ? providerSessionA
+    : providerSessionB,
+  tokenVersion = 0,
+) {
   const expiresAt = Math.floor(Date.now() / 1_000) + 3_600;
   const payload = Buffer.from(
-    JSON.stringify({ exp: expiresAt, sub: accountId }),
+    JSON.stringify({
+      exp: expiresAt,
+      sub: accountId,
+      session_id: providerSessionId,
+      jti: String(tokenVersion),
+    }),
   ).toString("base64url");
   return {
     access_token: `${Buffer.from('{"alg":"HS256"}').toString("base64url")}.${payload}.synthetic-signature`,
@@ -455,15 +495,23 @@ function installedSdkHarness() {
   const storageKey = "desmoslock-password-authority-synthetic";
   const sessionA = syntheticSdkSession(accountA);
   const sessionB = syntheticSdkSession(accountB);
+  const sessions = {
+    A: sessionA,
+    B: sessionB,
+    A2: syntheticSdkSession(accountA, replacementSessionId),
+    AR: syntheticSdkSession(accountA, providerSessionA, 1),
+  };
   const memory = new Map<string, string>([
     [storageKey, JSON.stringify(sessionA)],
   ]);
   const request = vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input);
     if (url.includes("/logout?")) return responseAt(url, null, 204);
+    if (url.includes("/rest/v1/rpc/accept_staff_invitation"))
+      return responseAt(url, [{ code: "invitation_accepted" }]);
     const token = new Headers(init?.headers).get("authorization");
     return responseAt(url, {
-      id: token === `Bearer ${sessionA.access_token}` ? accountA : accountB,
+      id: token === `Bearer ${sessionB.access_token}` ? accountB : accountA,
     });
   });
   const client = createClient(backendUrl, publishableKey, {
@@ -491,7 +539,17 @@ function installedSdkHarness() {
     publishableKey,
     url: backendUrl,
   });
+  cleanups.push(() => {
+    port.clearPrivateAuthContinuations();
+    client.auth.stopAutoRefresh();
+  });
   return {
+    sessions,
+    replaceSession(variant: keyof typeof sessions) {
+      memory.set(storageKey, JSON.stringify(sessions[variant]));
+    },
+    sessionUnchanged: (variant: keyof typeof sessions) =>
+      memory.get(storageKey) === JSON.stringify(sessions[variant]),
     memory,
     port,
     request,
@@ -505,6 +563,108 @@ function installedSdkHarness() {
 }
 
 describe("installed Supabase SDK account-switch regression (intercepted fetch only)", () => {
+  it.each(["A2", "B"] as const)(
+    "rejects fresh invitation/password capture after replacement %s without mutating replacement storage",
+    async (variant) => {
+      const test = installedSdkHarness();
+      test.replaceSession(variant);
+      await expect(
+        test.port.capturePasswordAuthority(accountA, providerSessionA),
+      ).resolves.toBeNull();
+      expect(
+        test.request.mock.calls.filter(([, init]) => init?.method !== "GET"),
+      ).toEqual([]);
+      expect(test.request).toHaveBeenCalledTimes(variant === "A2" ? 1 : 0);
+      expect(test.sessionUnchanged(variant)).toBe(true);
+    },
+  );
+
+  it("accepts renewed S1 for fresh invitation/password capture and keeps that token through acceptance, password and cleanup", async () => {
+    const test = installedSdkHarness();
+    test.replaceSession("AR");
+    const handle = await capture(test.port);
+    test.replaceSession("A2");
+    await expect(
+      test.port.acceptInvitation(
+        { displayName: "Taylor", invitationId },
+        handle,
+      ),
+    ).resolves.toEqual([{ code: "invitation_accepted" }]);
+    await expect(test.port.updatePassword(password, handle)).resolves.toEqual({
+      status: "updated",
+    });
+    await expect(test.port.signOut("all", handle)).resolves.toEqual({
+      status: "signed_out",
+    });
+    expect(
+      test.request.mock.calls.map(([url, init]) => [String(url), init?.method]),
+    ).toEqual([
+      [`${backendUrl}/auth/v1/user`, "GET"],
+      [`${backendUrl}/rest/v1/rpc/accept_staff_invitation`, "POST"],
+      [`${backendUrl}/auth/v1/user`, "PUT"],
+      [`${backendUrl}/auth/v1/logout?scope=global`, "POST"],
+    ]);
+    expect(
+      test.request.mock.calls.every(
+        ([, init]) =>
+          new Headers(init?.headers).get("authorization") ===
+          `Bearer ${test.sessions.AR.access_token}`,
+      ),
+    ).toBe(true);
+    expect(test.sessionUnchanged("A2")).toBe(true);
+  });
+
+  it.each(["during verification", "after capture"] as const)(
+    "fresh password authority stays on original S1 if S2 enters storage %s",
+    async (timing) => {
+      const test = installedSdkHarness();
+      if (timing === "during verification") {
+        test.request.mockImplementationOnce(async (url) => {
+          test.replaceSession("A2");
+          return responseAt(String(url), test.sessionA.user);
+        });
+      }
+      const handle = await capture(test.port);
+      if (timing === "after capture") test.replaceSession("A2");
+      await expect(test.port.updatePassword(password, handle)).resolves.toEqual(
+        { status: "updated" },
+      );
+      expect(test.request).toHaveBeenCalledTimes(2);
+      expect(
+        test.request.mock.calls.every(
+          ([, init]) =>
+            new Headers(init?.headers).get("authorization") ===
+            `Bearer ${test.sessionA.access_token}`,
+        ),
+      ).toBe(true);
+      expect(test.sessionUnchanged("A2")).toBe(true);
+    },
+  );
+
+  it.each(["A2", "AR"] as const)(
+    "no-argument recovery still requires the exact original recovery token after storage becomes %s",
+    async (variant) => {
+      vi.useFakeTimers();
+      const test = installedSdkHarness();
+      test.request.mockImplementationOnce(async (url) =>
+        responseAt(String(url), test.sessionA),
+      );
+      await expect(
+        test.port.exchangeRecoveryCode({
+          authorizationCode: "synthetic-code",
+          verifier: "v".repeat(43),
+        }),
+      ).resolves.toEqual({ status: "ready" });
+      test.replaceSession(variant);
+      test.request.mockClear();
+      await expect(test.port.capturePasswordAuthority()).resolves.toBeNull();
+      expect(test.request).not.toHaveBeenCalled();
+      expect(test.sessionUnchanged(variant)).toBe(true);
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
   it("requires an established recovery exchange before no-argument capture", async () => {
     const test = installedSdkHarness();
     await expect(test.port.capturePasswordAuthority()).resolves.toBeNull();
@@ -594,7 +754,7 @@ describe("installed Supabase SDK account-switch regression (intercepted fetch on
       );
     });
     await expect(
-      test.port.capturePasswordAuthority(accountA),
+      test.port.capturePasswordAuthority(accountA, providerSessionA),
     ).resolves.toBeNull();
     expect(JSON.parse(test.memory.get(test.storageKey)!)).toEqual(
       test.sessionB,

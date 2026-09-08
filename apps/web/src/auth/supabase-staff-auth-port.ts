@@ -3,11 +3,16 @@ import { createClient } from "@supabase/supabase-js";
 import type {
   AcceptStaffInvitationRequest,
   ChangeStaffMembershipRoleRequest,
+  CreateSchoolTestRequest,
   CreateStaffInvitationRequest,
+  ReadSchoolTestRequest,
+  ReadSchoolTestsRequest,
   RequestStaffPasswordRecoveryRequest,
   RevokeStaffInvitationRequest,
   RevokeStaffMembershipRequest,
+  TestRevisionRequest,
   UpdateSchoolDisplayNameRequest,
+  UpdateTestTitleRequest,
 } from "@desmoslock/contracts";
 import {
   parseCreateStaffInvitationResponse,
@@ -311,6 +316,46 @@ function isOpaqueToken(value: unknown): value is string {
   );
 }
 
+const canonicalUuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+
+function isCanonicalUuid(value: unknown): value is string {
+  return typeof value === "string" && canonicalUuidPattern.test(value);
+}
+
+// Call only after direct /user verification of this exact token and account.
+// Decoding a storage token alone does not establish provider authority.
+function verifiedProviderSessionId(
+  accessToken: string,
+  accountId: string,
+): string | null {
+  try {
+    const parts = accessToken.split(".");
+    if (
+      parts.length !== 3 ||
+      parts.some((part) => !/^[A-Za-z0-9_-]+$/u.test(part))
+    )
+      return null;
+    const payload = parts[1]!;
+    const bytes = Uint8Array.from(
+      atob(payload.replace(/-/gu, "+").replace(/_/gu, "/")),
+      (character) => character.charCodeAt(0),
+    );
+    const claims: unknown = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+    );
+    const sub = objectProperty(claims, "sub");
+    const providerSessionId = objectProperty(claims, "session_id");
+    return isCanonicalUuid(sub) &&
+      sub === accountId &&
+      isCanonicalUuid(providerSessionId)
+      ? providerSessionId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function decodeDirectPkceTokens(value: unknown): {
   readonly accessToken: string;
   readonly refreshToken: string;
@@ -553,7 +598,8 @@ export function createSupabaseStaffAuthPort(
   }
 
   let authorityGeneration = 0;
-  type AuthorityPurpose = "password" | "staff_management" | "school_settings";
+  type AuthorityPurpose =
+    "password" | "staff_management" | "school_settings" | "test_workspace";
   const capturedAuthorities = new Map<
     string,
     {
@@ -601,6 +647,12 @@ export function createSupabaseStaffAuthPort(
 
   function releaseSchoolSettingsAuthority(handle: string): void {
     if (capturedAuthorities.get(handle)?.purpose === "school_settings") {
+      releaseCapturedAuthority(handle);
+    }
+  }
+
+  function releaseTestWorkspaceAuthority(handle: string): void {
+    if (capturedAuthorities.get(handle)?.purpose === "test_workspace") {
       releaseCapturedAuthority(handle);
     }
   }
@@ -692,6 +744,28 @@ export function createSupabaseStaffAuthPort(
     args: Readonly<Record<string, unknown>>,
   ): Promise<unknown> {
     const authority = capturedAuthority(handle, "staff_management");
+    if (authority === null) return null;
+    const result = await directAuthorityRequest(
+      authority.accessToken,
+      `/rest/v1/rpc/${name}`,
+      "POST",
+      args,
+    );
+    return result?.status === 200 ? result.body : null;
+  }
+
+  async function testWorkspaceRpc(
+    handle: string,
+    name:
+      | "current_school_tests"
+      | "current_school_test"
+      | "create_school_test"
+      | "update_test_title"
+      | "open_test"
+      | "end_test",
+    args: Readonly<Record<string, unknown>>,
+  ): Promise<unknown> {
+    const authority = capturedAuthority(handle, "test_workspace");
     if (authority === null) return null;
     const result = await directAuthorityRequest(
       authority.accessToken,
@@ -819,10 +893,16 @@ export function createSupabaseStaffAuthPort(
 
   async function captureAccountAuthority(
     expectedAccountId: string,
+    expectedProviderSessionId: string,
     purpose: AuthorityPurpose,
   ) {
     const generation = authorityGeneration;
     try {
+      if (
+        !isCanonicalUuid(expectedAccountId) ||
+        !isCanonicalUuid(expectedProviderSessionId)
+      )
+        return { status: "unavailable" };
       const snapshot = await snapshotSessionAuthority();
       if (generation !== authorityGeneration) return { status: "unavailable" };
       if (snapshot.status !== "ready") return { status: snapshot.status };
@@ -845,6 +925,13 @@ export function createSupabaseStaffAuthPort(
         return { status: "unavailable" };
       }
       if (accountId !== snapshot.accountId) return { status: "rejected" };
+      const providerSessionId = verifiedProviderSessionId(
+        snapshot.accessToken,
+        accountId,
+      );
+      if (providerSessionId === null) return { status: "unavailable" };
+      if (providerSessionId !== expectedProviderSessionId)
+        return { status: "rejected" };
       if (capturedAuthorities.size >= 16) return { status: "unavailable" };
       const handle = crypto.randomUUID();
       capturedAuthorities.set(handle, {
@@ -862,15 +949,48 @@ export function createSupabaseStaffAuthPort(
   }
 
   return {
-    captureSignOutAuthority(expectedAccountId: string) {
-      return captureAccountAuthority(expectedAccountId, "password");
+    captureSignOutAuthority(
+      expectedAccountId: string,
+      expectedProviderSessionId: string,
+    ) {
+      return captureAccountAuthority(
+        expectedAccountId,
+        expectedProviderSessionId,
+        "password",
+      );
     },
-    captureStaffManagementAuthority(expectedAccountId: string) {
-      return captureAccountAuthority(expectedAccountId, "staff_management");
+    captureStaffManagementAuthority(
+      expectedAccountId: string,
+      expectedProviderSessionId: string,
+    ) {
+      return captureAccountAuthority(
+        expectedAccountId,
+        expectedProviderSessionId,
+        "staff_management",
+      );
     },
-    captureSchoolSettingsAuthority(expectedAccountId: string) {
-      return captureAccountAuthority(expectedAccountId, "school_settings");
+    captureSchoolSettingsAuthority(
+      expectedAccountId: string,
+      expectedProviderSessionId: string,
+    ) {
+      return captureAccountAuthority(
+        expectedAccountId,
+        expectedProviderSessionId,
+        "school_settings",
+      );
     },
+    async captureTestWorkspaceAuthority(
+      expectedAccountId: string,
+      expectedProviderSessionId: string,
+    ) {
+      const result = await captureAccountAuthority(
+        expectedAccountId,
+        expectedProviderSessionId,
+        "test_workspace",
+      );
+      return result.status === "ready" ? result : { status: "unavailable" };
+    },
+    releaseTestWorkspaceAuthority,
     releaseSchoolSettingsAuthority,
     releaseStaffManagementAuthority,
     clearPrivateAuthContinuations() {
@@ -880,7 +1000,25 @@ export function createSupabaseStaffAuthPort(
         releaseCapturedAuthority(handle);
       }
     },
-    async capturePasswordAuthority(expectedAccountId?: string) {
+    async capturePasswordAuthority(...expected: [] | [string, string]) {
+      const [expectedAccountId, expectedProviderSessionId] = expected;
+      if (expected.length !== 0) {
+        if (
+          expected.length !== 2 ||
+          expectedAccountId === undefined ||
+          expectedProviderSessionId === undefined
+        )
+          return null;
+        const result = await captureAccountAuthority(
+          expectedAccountId,
+          expectedProviderSessionId,
+          "password",
+        );
+        return result.status === "ready" &&
+          typeof result.authorityHandle === "string"
+          ? result.authorityHandle
+          : null;
+      }
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
         const recovery =
@@ -1227,8 +1365,14 @@ export function createSupabaseStaffAuthPort(
         ) {
           return null;
         }
+        const providerSessionId = verifiedProviderSessionId(
+          snapshot.accessToken,
+          snapshot.accountId,
+        );
+        if (providerSessionId === null) return null;
         return {
           accountId,
+          providerSessionId,
           email,
           emailVerified:
             confirmedAt !== null &&
@@ -1436,6 +1580,51 @@ export function createSupabaseStaffAuthPort(
         },
       );
       return result?.status === 200 ? result.body : null;
+    },
+    readSchoolTests(request: ReadSchoolTestsRequest, authorityHandle: string) {
+      return testWorkspaceRpc(authorityHandle, "current_school_tests", {
+        before_created_at: request.before?.createdAt ?? null,
+        before_test_id: request.before?.testId ?? null,
+        workspace_id: request.schoolId,
+      });
+    },
+    readSchoolTest(request: ReadSchoolTestRequest, authorityHandle: string) {
+      return testWorkspaceRpc(authorityHandle, "current_school_test", {
+        test_id: request.testId,
+        workspace_id: request.schoolId,
+      });
+    },
+    createSchoolTest(
+      request: CreateSchoolTestRequest,
+      authorityHandle: string,
+    ) {
+      return testWorkspaceRpc(authorityHandle, "create_school_test", {
+        creation_request_id: request.creationRequestId,
+        title: request.title,
+        workspace_id: request.schoolId,
+      });
+    },
+    updateTestTitle(request: UpdateTestTitleRequest, authorityHandle: string) {
+      return testWorkspaceRpc(authorityHandle, "update_test_title", {
+        expected_test_revision: request.expectedTestRevision,
+        test_id: request.testId,
+        title: request.title,
+        workspace_id: request.schoolId,
+      });
+    },
+    openTest(request: TestRevisionRequest, authorityHandle: string) {
+      return testWorkspaceRpc(authorityHandle, "open_test", {
+        expected_test_revision: request.expectedTestRevision,
+        test_id: request.testId,
+        workspace_id: request.schoolId,
+      });
+    },
+    endTest(request: TestRevisionRequest, authorityHandle: string) {
+      return testWorkspaceRpc(authorityHandle, "end_test", {
+        expected_test_revision: request.expectedTestRevision,
+        test_id: request.testId,
+        workspace_id: request.schoolId,
+      });
     },
     async signIn(input: { readonly email: string; readonly password: string }) {
       try {

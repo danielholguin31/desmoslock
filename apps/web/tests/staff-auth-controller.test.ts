@@ -87,6 +87,7 @@ function access(
     email?: string;
     identity?: StaffAuthBoundaryIdentity;
     identityGeneration?: string;
+    providerSessionId?: string;
     manageableInvitations?: readonly StaffAuthBoundaryManagedInvitation[];
     manageableStaff?: readonly StaffAuthBoundaryManagedStaff[];
     factorChoices?: readonly {
@@ -108,6 +109,8 @@ function access(
     assuranceLevel,
     identity: options.identity ?? identity(role, options.email),
     identityGeneration: options.identityGeneration ?? `identity-${role}`,
+    providerSessionId:
+      options.providerSessionId ?? "81000000-0000-4000-8000-000000000001",
     kind: "access_granted" as const,
     manageableInvitations: options.manageableInvitations ?? [],
     manageableStaff:

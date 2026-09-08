@@ -4,7 +4,8 @@ This source tranche adds a required real backup/restore gate for the internal
 baseline. The corrected eight-migration baseline passed the real TLS/export/
 restore checks and full staff suite on both source `5b5722b` and merged main
 `73d8b8a`; exact run links and the sanitized receipt are recorded below.
-The current nine-migration School settings extension requires a new runtime run.
+The nine-migration School extension also passed on source `6939c59`, merged as
+`d8fadca`; the current ten-migration Test extension requires a new runtime run.
 The existing hosted staging project and legacy deployment restrictions remain
 separate from this disposable CI lane.
 
@@ -241,10 +242,22 @@ These receipts attest the eight-migration Membership baseline. The School
 settings branch retains that runtime harness and adds a ninth migration whose
 current aggregate is
 `9264f3b4933e4f1bb207d5a1a130ab0b3edafea787ac37fb25268b09afba2538`.
-Its SQL, competing writes, School browser journeys and restored-target acceptance
-remain pending exact-commit CI. Neither baseline CI nor the School local source
-checks prove hosted staging migration/export, delivered hosted email or packaged
-desktop staging acceptance.
+That School extension subsequently passed all 12 required source jobs in
+[verification 34194857958](https://github.com/danielholguin31/desmoslock/actions/runs/34194857958)
+and [security 34194857978](https://github.com/danielholguin31/desmoslock/actions/runs/34194857978)
+on `6939c59724d3c5e98478defc1399b40166f0c199`, then merged with identical source
+tree as [`d8fadca`](https://github.com/danielholguin31/desmoslock/commit/d8fadcafe8aa5fbc7ef6ca6717d61899677b49fc).
+The fresh database job passed 599 assertions across nine files. The real
+roundtrip confirmed all six success observations, including the full staff
+suite on the restored target, and cleanup passed. Nested per-group counters
+remain withheld. The selected repair updated the current SQL attestation pins
+and enforced the exact six-column pristine School archive; earlier candidate
+checkpoints remain historical.
+
+The current Test extension needs new exact-commit ten-migration evidence,
+including its strict eleven-column Test archive and timezone roundtrip. None
+of these local/source CI gates proves hosted staging migration/export, delivered
+hosted email or packaged desktop staging acceptance.
 
 Primary implementation references: [pinned CLI image list](https://raw.githubusercontent.com/supabase/cli/v2.115.0/apps/cli-go/pkg/config/templates/Dockerfile),
 [exact PostgreSQL image build](https://raw.githubusercontent.com/supabase/postgres/17.6.1.159/Dockerfile-17),

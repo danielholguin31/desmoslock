@@ -49,7 +49,7 @@ select results_eq(
     select id, schema_generation, migration_set_sha256
     from desmoslock_v2.internal_release_attestation
   $$,
-  $$values (1::smallint, 4, '9264f3b4933e4f1bb207d5a1a130ab0b3edafea787ac37fb25268b09afba2538')$$,
+  $$values (1::smallint, 4, '5cf17174bf44e491a6bd78fe540326d8bdee169518d75c8082e5bd9b833f3f62')$$,
   'the database records the exact versioned migration attestation'
 );
 select is_empty(
@@ -141,7 +141,7 @@ select results_eq(
     select schema_generation, fixture_version, fixture_digest, migration_set_sha256, fixture_valid
     from desmoslock_v2.internal_baseline_status()
   $$,
-  $$values (4, 'internal-baseline-v2', 'f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201', '9264f3b4933e4f1bb207d5a1a130ab0b3edafea787ac37fb25268b09afba2538', true)$$,
+  $$values (4, 'internal-baseline-v2', 'f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201', '5cf17174bf44e491a6bd78fe540326d8bdee169518d75c8082e5bd9b833f3f62', true)$$,
   'service baseline status verifies the pinned fixture digest'
 );
 
@@ -440,13 +440,15 @@ reset role;
 select throws_ok(
   $$
     insert into desmoslock_v2.tests (
-      id, workspace_id, created_by_profile_id, title, seed_key
+      id, workspace_id, created_by_profile_id, title, seed_key,
+      lifecycle, revision, created_at, opened_at, ended_at, creation_request_id
     ) values (
       '90000000-0000-4000-8000-000000000002',
       '10000000-0000-4000-8000-000000000001',
       '20000000-0000-4000-8000-000000000013',
       'Rejected cross-School Test',
-      'rejected.cross-school-test'
+      'rejected.cross-school-test',
+      'draft', 1, '2000-01-01T00:00:00.000000Z'::timestamptz, null, null, null
     )
   $$,
   '23503',

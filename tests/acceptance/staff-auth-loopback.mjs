@@ -7,7 +7,13 @@ import { isDeepStrictEqual } from "node:util";
 
 import { createClient } from "@supabase/supabase-js";
 import {
+  parseCreateSchoolTestRpcResult,
+  parseEndTestRpcResult,
+  parseOpenTestRpcResult,
+  parseReadSchoolTestRpcResult,
+  parseReadSchoolTestsRpcResult,
   parseSchoolDisplayName,
+  parseUpdateTestTitleRpcResult,
   parseUpdateSchoolDisplayNameRpcResult,
 } from "@desmoslock/contracts";
 
@@ -364,7 +370,77 @@ export async function rpc(supabase, name, args = {}) {
       parseUpdateSchoolDisplayNameRpcResult(rows) !== null,
       "School update did not return an exact code-only outcome",
     );
+  if (name === "create_school_test")
+    check(
+      parseCreateSchoolTestRpcResult(rows) !== null,
+      "Test creation returned a malformed outcome",
+    );
+  if (name === "update_test_title")
+    check(
+      parseUpdateTestTitleRpcResult(rows) !== null,
+      "Test title update returned a malformed outcome",
+    );
+  if (name === "open_test")
+    check(
+      parseOpenTestRpcResult(rows) !== null,
+      "Test opening returned a malformed outcome",
+    );
+  if (name === "end_test")
+    check(
+      parseEndTestRpcResult(rows) !== null,
+      "Test ending returned a malformed outcome",
+    );
   return rows[0];
+}
+
+export async function readSchoolTests(supabase, request) {
+  const rows = await rpcRows(supabase, "current_school_tests", {
+    workspace_id: request.schoolId,
+    before_created_at: request.before?.createdAt ?? null,
+    before_test_id: request.before?.testId ?? null,
+  });
+  const result = parseReadSchoolTestsRpcResult(rows, request);
+  check(
+    result !== null,
+    "Actual Test page failed the production contract decoder",
+  );
+  return result;
+}
+
+export async function readSchoolTest(supabase, request) {
+  const rows = await rpcRows(supabase, "current_school_test", {
+    workspace_id: request.schoolId,
+    test_id: request.testId,
+  });
+  const result = parseReadSchoolTestRpcResult(rows, request);
+  check(
+    result !== null,
+    "Actual Test detail failed the production contract decoder",
+  );
+  return result;
+}
+
+export async function directTestTableDenied(supabase, schoolId) {
+  requireUuid(schoolId);
+  for (const write of [false, true]) {
+    let result;
+    try {
+      const table = supabase.schema("desmoslock_v2").from("tests");
+      result = await (
+        write
+          ? table.update({ title: "Forbidden direct Test title" })
+          : table.select("id,title,lifecycle,revision")
+      ).eq("workspace_id", schoolId);
+    } catch {
+      throw new Error(
+        "Direct Test table denial was not observed; details redacted",
+      );
+    }
+    check(
+      result?.data === null && result.error?.code === "42501",
+      "Direct Test table access did not fail at the privilege boundary",
+    );
+  }
 }
 
 function checkStaffContext(row) {
