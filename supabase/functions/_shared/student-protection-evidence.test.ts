@@ -44,7 +44,7 @@ async function digest(bytes: Uint8Array | null): Promise<string> {
     (byte) => byte.toString(16).padStart(2, "0"),
   ).join("");
 }
-async function fixture(counter = 1) {
+async function fixture(counter = 1, vectorIndex = 2) {
   const keys = (await crypto.subtle.generateKey("Ed25519", true, [
     "sign",
     "verify",
@@ -55,7 +55,7 @@ async function fixture(counter = 1) {
   assert(publicKey !== null);
   const thumbprint = await edgeStudentKeyThumbprint(publicKey);
   assert(thumbprint !== null);
-  const vector = vectors.vectors[2];
+  const vector = vectors.vectors[vectorIndex];
   assert(vector !== undefined);
   const context = {
     apiOrigin,
@@ -532,6 +532,42 @@ for (const kind of [
         503,
         unavailable,
       );
+    },
+  );
+}
+
+for (const vectorIndex of [3, 4]) {
+  Deno.test(
+    `preflight evidence prefix ${vectorIndex} reaches the existing commit with a real original-key proof`,
+    async () => {
+      const f = await fixture(1, vectorIndex);
+      const result = await check(
+        await handleRequest(post(f.input), f.dependencies),
+        200,
+      );
+      equal(result, {
+        status: "accepted",
+        code: "STUDENT_EVIDENCE_ACCEPTED",
+        scope: f.input.scope,
+        batchDigest: f.input.batchDigest,
+        acceptedProofCounter: 1,
+        acknowledged: f.ack,
+      });
+      equal(
+        f.calls.map((call) => call.kind),
+        ["key", "commit"],
+      );
+      const committed = f.calls[1]?.value as StudentEvidenceCommitRpcInput;
+      equal(committed.facts, f.input.facts);
+      equal(committed.verified_public_key, f.input.publicKey);
+      assert(!("capability_token" in committed));
+      const retry = await f.sign(2);
+      const replay = await check(
+        await handleRequest(post(retry), f.dependencies),
+        200,
+      );
+      equal(replay.acknowledged, f.ack);
+      equal(replay.acceptedProofCounter, 2);
     },
   );
 }

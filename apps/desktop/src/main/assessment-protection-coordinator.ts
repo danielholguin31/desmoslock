@@ -14,6 +14,7 @@ import type {
 } from "./native-protection-adapter.js";
 import type {
   FreshStudentAdmission,
+  PreflightReportReceipt,
   StudentAdmissionSnapshot,
   StudentSessionCoordinator,
 } from "./student-session-coordinator.js";
@@ -80,6 +81,14 @@ interface Attempt {
   failure: LocalEndCause | null;
   cleanup: CleanupState;
   receipt: FreshStudentAdmission | null;
+  reportReceipt: PreflightReportReceipt | null;
+  preflightFailure: Extract<
+    ProtectionTransition,
+    { kind: "preflight_failure" }
+  > | null;
+  preflightWrite: Promise<boolean> | null;
+  preflightWritePending: boolean;
+  preflightCommitted: boolean;
   visible: boolean;
   startRunning: boolean;
   preparing: boolean;
@@ -397,10 +406,110 @@ export function createAssessmentProtectionCoordinator(
     return transitionTail.then(() => result);
   }
   function queueFailure(t: Attempt): void {
-    if (t.failureQueued || !t.engagingAttempted || t.failure === null) return;
+    if (t.failureQueued || t.failure === null) return;
+    if (!t.engagingAttempted) {
+      if (
+        t.reportReceipt === null ||
+        t.nativeInvoked ||
+        t.lastSequence !== 0 ||
+        t.terminal !== null ||
+        (t.failure !== "application_policy" &&
+          t.failure !== "shortcut_unavailable")
+      )
+        return;
+      t.failureQueued = true;
+      t.preflightFailure = Object.freeze({
+        kind: "preflight_failure",
+        receipt: t.reportReceipt,
+        attemptId: t.id,
+        expectedProtectionRevision: protection?.revision ?? 0,
+        cause: t.failure,
+        categories: t.categories,
+      });
+      writePreflightFailure(t);
+      return;
+    }
     t.failureQueued = true;
     const cause = t.failure;
     void enqueue(t, () => ({ kind: "failure", cause }));
+  }
+  function writePreflightFailure(t: Attempt): void {
+    if (
+      t.preflightFailure === null ||
+      t.preflightWritePending ||
+      t.preflightCommitted
+    )
+      return;
+    t.preflightWritePending = true;
+    const command = t.preflightFailure;
+    // This is the first journal command for this attempt. Invoke the Student
+    // owner now so it marks the original report reservation before any observer
+    // can reenter or identity replacement can wait behind its durable writer.
+    t.preflightWrite = (async () => {
+      try {
+        const outcome =
+          await options.student.commitProtectionTransition(command);
+        const context = options.student.readProtectionContext();
+        protection = context.protection;
+        delivery = context.delivery;
+        if (outcome.status !== "committed") {
+          markPersistenceFailure(t);
+          return false;
+        }
+        t.preflightCommitted = true;
+        return true;
+      } catch {
+        markPersistenceFailure(t);
+        return false;
+      } finally {
+        t.preflightWritePending = false;
+      }
+    })();
+    transitionTail = t.preflightWrite.then(() => undefined);
+  }
+  function applicationFailure(t: Attempt, blocked = false): false {
+    if (!currentAttempt(t)) return false;
+    setCategory(t, "applications", {
+      status: blocked ? "failed" : "unavailable",
+      code: blocked
+        ? "prohibited_application"
+        : "application_observation_unavailable",
+    });
+    requestLocalEnd("application_policy");
+    return false;
+  }
+  function checkApplications(t: Attempt): boolean {
+    try {
+      const status = options.native.readApplicationStatus().status;
+      if (!currentAttempt(t)) return false;
+      if (status !== "clear")
+        return applicationFailure(t, status === "blocked");
+      setCategory(t, "applications", confirmed);
+      return true;
+    } catch {
+      return applicationFailure(t);
+    }
+  }
+  function shortcutFailure(t: Attempt): false {
+    if (!currentAttempt(t)) return false;
+    setCategory(t, "shortcuts", {
+      status: "unavailable",
+      code: "emergency_shortcut_unavailable",
+    });
+    requestLocalEnd("shortcut_unavailable");
+    return false;
+  }
+  function checkShortcut(t: Attempt): boolean {
+    if (!currentAttempt(t)) return false;
+    try {
+      if (!t.shortcutOwned || !options.shortcuts.isRegistered())
+        return shortcutFailure(t);
+      if (!currentAttempt(t)) return false;
+      setCategory(t, "shortcuts", confirmed);
+      return true;
+    } catch {
+      return shortcutFailure(t);
+    }
   }
   function hide(t: Attempt): void {
     t.live = false;
@@ -456,6 +565,10 @@ export function createAssessmentProtectionCoordinator(
     const t = attempt;
     if (t === null || disposed || t.finalCommitStarted) return;
     t.failure ??= cause;
+    // Capture the first observed preflight report before even synchronous owned
+    // containment callbacks can reenter. The writer returns a promise; local
+    // containment and native end still do not wait for persistence.
+    if (!t.engagingAttempted) queueFailure(t);
     t.phase = t.priorProcess ? "recovery_required" : "ending";
     t.cleanup = t.priorProcess ? "unconfirmed" : "pending";
     hide(t);
@@ -497,29 +610,8 @@ export function createAssessmentProtectionCoordinator(
         )
     )
       return false;
+    if (!checkApplications(t) || !checkShortcut(t)) return false;
     try {
-      const app = options.native.readApplicationStatus();
-      if (app.status !== "clear") {
-        setCategory(t, "applications", {
-          status: app.status === "blocked" ? "failed" : "unavailable",
-          code:
-            app.status === "blocked"
-              ? "prohibited_application"
-              : "application_observation_unavailable",
-        });
-        requestLocalEnd("application_policy");
-        return false;
-      }
-      setCategory(t, "applications", confirmed);
-      if (!t.shortcutOwned || !options.shortcuts.isRegistered()) {
-        setCategory(t, "shortcuts", {
-          status: "unavailable",
-          code: "emergency_shortcut_unavailable",
-        });
-        requestLocalEnd("shortcut_unavailable");
-        return false;
-      }
-      setCategory(t, "shortcuts", confirmed);
       if (!options.window.isReady() || t.surface === null) {
         setCategory(t, "windowNetwork", {
           status: "unavailable",
@@ -682,6 +774,7 @@ export function createAssessmentProtectionCoordinator(
     if (t.finalizing !== null) return t.finalizing;
     const work = async (): Promise<void> => {
       if (t.terminal === null && t.nativeInvoked && !t.beginFailed) return;
+      if (t.preflightWrite !== null && !(await t.preflightWrite)) return;
       if (t.terminal !== null && !t.terminalCommitted) {
         const event = t.terminal;
         t.terminalCommitted = await enqueue(t, () => ({
@@ -757,7 +850,7 @@ export function createAssessmentProtectionCoordinator(
       t.finalCommitStarted = true;
       if (review?.attempt === t) review = null;
       publish();
-      if (t.engagingAttempted) {
+      if (t.engagingAttempted || t.preflightCommitted) {
         const committed =
           t.terminal !== null
             ? await enqueue(t, () => ({ kind: "cleanup", outcome: "complete" }))
@@ -765,6 +858,10 @@ export function createAssessmentProtectionCoordinator(
                 kind: "disposed_without_terminal_observation",
               }));
         if (!committed) return;
+      }
+      if (t.reportReceipt !== null && t.preflightFailure === null) {
+        options.student.releasePreflightReport(t.reportReceipt);
+        t.reportReceipt = null;
       }
       t.cleanup = "complete";
       t.phase = t.nativeEndObserved ? "ended" : "failed";
@@ -811,6 +908,11 @@ export function createAssessmentProtectionCoordinator(
       failure: priorProcess ? "native_failure" : null,
       cleanup: priorProcess ? "unconfirmed" : "not_requested",
       receipt: null,
+      reportReceipt: null,
+      preflightFailure: null,
+      preflightWrite: null,
+      preflightWritePending: false,
+      preflightCommitted: false,
       visible: false,
       startRunning: false,
       preparing: false,
@@ -855,6 +957,10 @@ export function createAssessmentProtectionCoordinator(
     )
       unreadableRecovery = true;
     const latest = protection?.latestAttempt;
+    const first =
+      latest === undefined || latest === null
+        ? undefined
+        : protection?.facts.find((fact) => fact.attemptId === latest.attemptId);
     if (attempt === null && latest != null && latest.cleanup !== "complete") {
       attempt = makeAttempt(
         latest.attemptId,
@@ -862,6 +968,28 @@ export function createAssessmentProtectionCoordinator(
         () => true,
         true,
       );
+      if (first?.slot === "failure" && first.cause !== "none") {
+        attempt.categories = first.categories;
+        attempt.failure = first.cause;
+      }
+    } else if (
+      attempt === null &&
+      latest?.cleanup === "complete" &&
+      first?.slot === "failure" &&
+      first.cause !== "none"
+    ) {
+      // Historical client report only. Cleanup permits a fresh explicit Start;
+      // neither the original admission nor native engagement is restored here.
+      lastProtection = Object.freeze({
+        phase: "failed",
+        categories: first.categories,
+        failure: first.cause,
+        calculatorVisible: false,
+        nativeEndObserved: false,
+        cleanup: "complete",
+        evidence: "queued",
+        emergencyReview: false,
+      });
     }
   }
   const unsubscribeObservation = options.student.subscribeAdmissionObservation(
@@ -937,6 +1065,18 @@ export function createAssessmentProtectionCoordinator(
       }
       t.receipt = fresh.authority;
       armObservation(t, fresh.authority);
+      t.reportReceipt = options.student.reservePreflightReport(
+        fresh.authority,
+        t.id,
+      );
+      if (t.reportReceipt === null) {
+        setCategory(t, "persistence", {
+          status: "unavailable",
+          code: "durability_unavailable",
+        });
+        requestLocalEnd("persistence_unavailable");
+        return;
+      }
       t.unsubscribeNative = options.native.subscribe((event) => {
         try {
           nativeEvent(t, event);
@@ -944,12 +1084,18 @@ export function createAssessmentProtectionCoordinator(
           requestLocalEnd("native_failure");
         }
       });
-      t.unsubscribeApplications = options.native.observeApplicationStatus(
-        (value) => {
-          if (attempt === t && t.live && value.status !== "clear")
-            requestLocalEnd("application_policy");
-        },
-      );
+      try {
+        t.unsubscribeApplications = options.native.observeApplicationStatus(
+          (value) => {
+            if (currentAttempt(t) && value.status !== "clear")
+              applicationFailure(t, value.status === "blocked");
+          },
+        );
+      } catch {
+        applicationFailure(t);
+        return;
+      }
+      if (!currentAttempt(t)) return;
       if (!options.native.inspectSupport().available) {
         setCategory(t, "aac", {
           status: "unavailable",
@@ -958,31 +1104,16 @@ export function createAssessmentProtectionCoordinator(
         requestLocalEnd("native_failure");
         return;
       }
-      const app = options.native.readApplicationStatus();
-      if (app.status !== "clear") {
-        setCategory(t, "applications", {
-          status: app.status === "blocked" ? "failed" : "unavailable",
-          code:
-            app.status === "blocked"
-              ? "prohibited_application"
-              : "application_observation_unavailable",
+      if (!checkApplications(t)) return;
+      try {
+        t.shortcutOwned = options.shortcuts.register(() => {
+          if (attempt === t) reviewEmergency(view.revision, () => true);
         });
-        requestLocalEnd("application_policy");
+      } catch {
+        shortcutFailure(t);
         return;
       }
-      setCategory(t, "applications", confirmed);
-      t.shortcutOwned = options.shortcuts.register(() => {
-        if (attempt === t) reviewEmergency(view.revision, () => true);
-      });
-      if (!t.shortcutOwned || !options.shortcuts.isRegistered()) {
-        setCategory(t, "shortcuts", {
-          status: "unavailable",
-          code: "emergency_shortcut_unavailable",
-        });
-        requestLocalEnd("shortcut_unavailable");
-        return;
-      }
-      setCategory(t, "shortcuts", confirmed);
+      if (!checkShortcut(t)) return;
       if (!checkReceipt(t, fresh.authority)) return;
       t.windowOwned = true;
       await options.window.prepare();
@@ -1150,7 +1281,10 @@ export function createAssessmentProtectionCoordinator(
       )
         return;
       await options.student.retryPending();
-      if (attempt !== null && !attempt.live) void finalize(attempt);
+      if (attempt !== null && !attempt.live) {
+        writePreflightFailure(attempt);
+        void finalize(attempt);
+      }
     },
     async refresh() {
       if (disposed || (stopping && attempt === null)) return;
@@ -1170,6 +1304,14 @@ export function createAssessmentProtectionCoordinator(
         await options.student.refresh();
       } catch {
         requestLocalEnd("backend_unavailable");
+      }
+      if (
+        attempt !== null &&
+        !attempt.live &&
+        attempt.preflightFailure !== null
+      ) {
+        writePreflightFailure(attempt);
+        void finalize(attempt);
       }
     },
     async forfeit(revision: number, isCurrent: () => boolean) {

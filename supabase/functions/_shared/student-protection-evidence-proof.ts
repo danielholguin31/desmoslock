@@ -419,6 +419,21 @@ export function parseNativeEvidenceOriginBuild(
   const identity = parseClientBuildIdentity(build.identity);
   return identity === null ? null : Object.freeze({ kind: "build", identity });
 }
+function isPreflightFailure(fact: NativeProtectionFact): boolean {
+  if (fact.slot !== "failure") return false;
+  const application = fact.categories.applications;
+  const shortcut = fact.categories.shortcuts;
+  return (
+    (fact.cause === "application_policy" &&
+      ((application.status === "failed" &&
+        application.code === "prohibited_application") ||
+        (application.status === "unavailable" &&
+          application.code === "application_observation_unavailable"))) ||
+    (fact.cause === "shortcut_unavailable" &&
+      (shortcut.status === "failed" || shortcut.status === "unavailable") &&
+      shortcut.code === "emergency_shortcut_unavailable")
+  );
+}
 /** A complete currently known prefix for one attempt, never a suffix or sorted repair. */
 export function parseNativeProtectionFactPrefix(
   value: unknown,
@@ -439,13 +454,27 @@ export function parseNativeProtectionFactPrefix(
       ids.has(fact.eventId) ||
       seenSlots.has(fact.slot) ||
       (first === undefined
-        ? fact.slot !== "engaging"
+        ? fact.slot !== "engaging" && !isPreflightFailure(fact)
         : fact.attemptId !== first.attemptId ||
           !sameScope(fact.scope, first.scope)) ||
       (fact.slot === "locked" && !seenSlots.has("began")) ||
       (fact.nativeSequence !== null && fact.nativeSequence < nativeSequence) ||
       (fact.nativeEvent !== null &&
         (fact.nativeSequence ?? 0) <= nativeSequence)
+    )
+      return null;
+    // A preflight report is a client-observed failure followed only by owned
+    // cleanup. It cannot later acquire engagement or native delegate claims.
+    if (
+      (first ?? fact).slot === "failure" &&
+      (facts.length > 1 ||
+        fact.phase !== "failed" ||
+        fact.nativeEvent !== null ||
+        fact.nativeSequence !== null ||
+        fact.categories.aac.status !== "pending" ||
+        fact.categories.aac.code !== "awaiting_native_begin" ||
+        (first !== undefined &&
+          (fact.slot !== "cleanup" || fact.cause !== "none")))
     )
       return null;
     facts.push(fact);

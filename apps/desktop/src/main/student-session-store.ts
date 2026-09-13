@@ -14,6 +14,7 @@ import {
   encodeNativeProtectionFactDigestInput,
   encodeStudentEvidenceBatchDigestInput,
   parseNativeEvidenceOriginBuild,
+  parseNativeProtectionFactPrefix,
   type NativeEvidenceOriginBuild,
   type NativeEvidenceAcknowledgment,
 } from "@desmoslock/contracts";
@@ -35,7 +36,10 @@ import type {
   NativeAssessmentEvent,
   NativeEventType,
 } from "./native-protection-adapter.js";
-import type { FreshStudentAdmission } from "./student-session-coordinator.js";
+import type {
+  FreshStudentAdmission,
+  PreflightReportReceipt,
+} from "./student-session-coordinator.js";
 
 export { parseLocalEndCause } from "./assessment-protection-types.js";
 
@@ -85,6 +89,14 @@ export interface StoredNativeProtection {
 }
 
 export type ProtectionTransition =
+  | {
+      readonly kind: "preflight_failure";
+      readonly attemptId: string;
+      readonly expectedProtectionRevision: number;
+      readonly receipt: PreflightReportReceipt;
+      readonly cause: "application_policy" | "shortcut_unavailable";
+      readonly categories: ProtectionCategories;
+    }
   | {
       readonly kind: "disposed_without_terminal_observation";
       readonly attemptId: string;
@@ -697,7 +709,12 @@ function parseStoredNativeProtection(
   const eventIds = new Set<string>();
   const attempts = new Map<
     string,
-    { scope: StudentSessionScope; slots: Set<FactSlot>; sequence: number }
+    {
+      scope: StudentSessionScope;
+      slots: Set<FactSlot>;
+      sequence: number;
+      preflight: boolean;
+    }
   >();
   let previousSequence = 0;
   let latestAttemptId: string | null = null;
@@ -718,7 +735,12 @@ function parseStoredNativeProtection(
       return null;
     const attempt = attempts.get(fact.attemptId);
     if (attempt === undefined) {
-      if (fact.slot !== "engaging") return null;
+      if (
+        fact.slot !== "engaging" &&
+        (fact.slot !== "failure" ||
+          parseNativeProtectionFactPrefix([fact]) === null)
+      )
+        return null;
       if (
         latestAttemptId !== null &&
         !attempts.get(latestAttemptId)?.slots.has("cleanup")
@@ -728,6 +750,7 @@ function parseStoredNativeProtection(
         scope: fact.scope,
         slots: new Set([fact.slot]),
         sequence: fact.nativeSequence ?? 0,
+        preflight: fact.slot === "failure",
       });
       latestAttemptId = fact.attemptId;
     } else {
@@ -735,6 +758,11 @@ function parseStoredNativeProtection(
         latestAttemptId !== fact.attemptId ||
         !sameScope(attempt.scope, fact.scope) ||
         attempt.slots.has(fact.slot) ||
+        (attempt.preflight &&
+          parseNativeProtectionFactPrefix([
+            ...facts.filter((prior) => prior.attemptId === fact.attemptId),
+            fact,
+          ]) === null) ||
         (fact.slot === "locked" && !attempt.slots.has("began")) ||
         (fact.nativeSequence !== null &&
           fact.nativeSequence < attempt.sequence) ||
@@ -788,6 +816,19 @@ function parseStoredNativeProtection(
         retained.slots.has("abandoned")
     )
       return null;
+    if (
+      retained.preflight &&
+      (latestAttempt.phase !== "failed" ||
+        latestAttempt.nativeSequence !== null ||
+        latestAttempt.abandonment !== "none" ||
+        (retained.slots.has("cleanup")
+          ? latestAttempt.cleanup !== "complete" ||
+            latestAttempt.nativeDisposition !==
+              "disposed_without_terminal_observation"
+          : latestAttempt.cleanup !== "pending" ||
+            latestAttempt.nativeDisposition !== "not_started"))
+    )
+      return null;
   }
   return Object.freeze({
     policyVersion: 1,
@@ -811,19 +852,21 @@ export function parseProtectionTransition(
         : null;
     const common = ["kind", "attemptId", "expectedProtectionRevision"];
     const additional =
-      kind === "engaging"
-        ? ["authority", "categories"]
-        : kind === "locked"
-          ? ["authority", "categories", "nativeSequence"]
-          : kind === "began" || kind === "native_terminal"
-            ? ["event"]
-            : kind === "ending" || kind === "failure" || kind === "abandoned"
-              ? ["cause"]
-              : kind === "cleanup"
-                ? ["outcome"]
-                : kind === "disposed_without_terminal_observation"
-                  ? []
-                  : null;
+      kind === "preflight_failure"
+        ? ["receipt", "cause", "categories"]
+        : kind === "engaging"
+          ? ["authority", "categories"]
+          : kind === "locked"
+            ? ["authority", "categories", "nativeSequence"]
+            : kind === "began" || kind === "native_terminal"
+              ? ["event"]
+              : kind === "ending" || kind === "failure" || kind === "abandoned"
+                ? ["cause"]
+                : kind === "cleanup"
+                  ? ["outcome"]
+                  : kind === "disposed_without_terminal_observation"
+                    ? []
+                    : null;
     if (additional === null) return null;
     const row = object(value, [...common, ...additional]);
     if (
@@ -840,6 +883,40 @@ export function parseProtectionTransition(
     };
     if (kind === "disposed_without_terminal_observation")
       return Object.freeze({ ...base, kind });
+    if (kind === "preflight_failure") {
+      const categories = parseProtectionCategories(row.categories);
+      const cause = row.cause;
+      if (
+        categories === null ||
+        (cause !== "application_policy" && cause !== "shortcut_unavailable") ||
+        typeof row.receipt !== "object" ||
+        row.receipt === null ||
+        Array.isArray(row.receipt) ||
+        categories.aac.status !== "pending" ||
+        categories.aac.code !== "awaiting_native_begin" ||
+        (cause === "application_policy"
+          ? !(
+              (categories.applications.status === "failed" &&
+                categories.applications.code === "prohibited_application") ||
+              (categories.applications.status === "unavailable" &&
+                categories.applications.code ===
+                  "application_observation_unavailable")
+            )
+          : !(
+              (categories.shortcuts.status === "failed" ||
+                categories.shortcuts.status === "unavailable") &&
+              categories.shortcuts.code === "emergency_shortcut_unavailable"
+            ))
+      )
+        return null;
+      return Object.freeze({
+        ...base,
+        kind,
+        receipt: row.receipt as PreflightReportReceipt,
+        cause,
+        categories,
+      });
+    }
     if (kind === "engaging" || kind === "locked") {
       const categories = parseProtectionCategories(row.categories);
       if (

@@ -2,11 +2,15 @@ import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import type { NativeEvidenceOriginBuild } from "@desmoslock/contracts";
 
-import { createStudentSessionCoordinator } from "../../../apps/desktop/src/main/student-session-coordinator.js";
+import {
+  createStudentSessionCoordinator,
+  type PreflightReportReceipt,
+} from "../../../apps/desktop/src/main/student-session-coordinator.js";
 import { createStudentSessionCrypto } from "../../../apps/desktop/src/main/student-session-crypto.js";
 import {
   createStudentSessionStore,
   openNativeStudentRecordStore,
+  type ProtectionTransition,
 } from "../../../apps/desktop/src/main/student-session-store.js";
 import { createStudentSessionTransport } from "../../../apps/desktop/src/main/student-session-transport.js";
 
@@ -120,6 +124,17 @@ async function worker() {
           }
         : syntheticOriginBuild,
   });
+  type PreflightFailureCommand = Extract<
+    ProtectionTransition,
+    { kind: "preflight_failure" }
+  >;
+  // One private reservation per worker; neither receipt nor admission is serialized.
+  let reservedPreflight: {
+    readonly attemptId: string;
+    readonly receipt: PreflightReportReceipt;
+    readonly expectedProtectionRevision: number;
+    observed: PreflightFailureCommand | null;
+  } | null = null;
   const lines = createInterface({ input: process.stdin });
   lines.on("line", (line) => {
     void (async () => {
@@ -153,6 +168,114 @@ async function worker() {
               admission === null
                 ? "unavailable"
                 : (await coordinator.readFreshAdmission(admission)).status;
+            break;
+          }
+          case "reserve-preflight": {
+            if (reservedPreflight !== null)
+              throw new Error("Synthetic preflight already reserved");
+            const admission = coordinator.readProtectionContext().admission;
+            if (admission === null)
+              throw new Error("Synthetic admission unavailable");
+            const read = await coordinator.readFreshAdmission(admission);
+            if (read.status !== "fresh")
+              throw new Error("Synthetic fresh read unavailable");
+            const expectedProtectionRevision =
+              coordinator.readProtectionContext().protection?.revision ?? 0;
+            const attemptId = randomUUID();
+            const receipt = coordinator.reservePreflightReport(
+              read.authority,
+              attemptId,
+            );
+            if (receipt === null)
+              throw new Error("Synthetic preflight reservation unavailable");
+            reservedPreflight = {
+              attemptId,
+              receipt,
+              expectedProtectionRevision,
+              observed: null,
+            };
+            result = { status: "reserved", attemptId };
+            break;
+          }
+          case "preflight-application-failure":
+          case "preflight-shortcut-failure": {
+            const reservation = reservedPreflight;
+            if (reservation === null)
+              throw new Error("Synthetic preflight reservation missing");
+            const cause =
+              command.operation === "preflight-application-failure"
+                ? "application_policy"
+                : "shortcut_unavailable";
+            if (reservation.observed === null) {
+              // Capture once BEFORE the real write can block or lose its reply.
+              // These are synthetic observations; this worker never invokes AAC.
+              reservation.observed = Object.freeze({
+                kind: "preflight_failure",
+                attemptId: reservation.attemptId,
+                expectedProtectionRevision:
+                  reservation.expectedProtectionRevision,
+                receipt: reservation.receipt,
+                cause,
+                categories: Object.freeze({
+                  aac: Object.freeze({
+                    status: "pending",
+                    code: "awaiting_native_begin",
+                  }),
+                  applications: Object.freeze(
+                    cause === "application_policy"
+                      ? { status: "failed", code: "prohibited_application" }
+                      : { status: "confirmed", code: "none" },
+                  ),
+                  shortcuts: Object.freeze(
+                    cause === "shortcut_unavailable"
+                      ? {
+                          status: "failed",
+                          code: "emergency_shortcut_unavailable",
+                        }
+                      : { status: "confirmed", code: "none" },
+                  ),
+                  persistence: Object.freeze({
+                    status: "confirmed",
+                    code: "none",
+                  }),
+                  windowNetwork: Object.freeze({
+                    status: "confirmed",
+                    code: "none",
+                  }),
+                }),
+              });
+            } else if (reservation.observed.cause !== cause) {
+              throw new Error("Synthetic preflight cause cannot change");
+            }
+            result = {
+              attemptId: reservation.attemptId,
+              ...(await coordinator.commitProtectionTransition(
+                reservation.observed,
+              )),
+            };
+            break;
+          }
+          case "synthetic-preflight-cleanup": {
+            const reservation = reservedPreflight;
+            const context = coordinator.readProtectionContext();
+            if (
+              reservation?.observed == null ||
+              context.protection?.latestAttempt?.attemptId !==
+                reservation.attemptId
+            )
+              throw new Error(
+                "Synthetic reported preflight attempt unavailable",
+              );
+            // Synthetic disposal proof only: no AAC invocation or native event.
+            result = {
+              attemptId: reservation.attemptId,
+              synthetic: true,
+              ...(await coordinator.commitProtectionTransition({
+                kind: "disposed_without_terminal_observation",
+                attemptId: reservation.attemptId,
+                expectedProtectionRevision: context.protection.revision,
+              })),
+            };
             break;
           }
           case "engaging": {

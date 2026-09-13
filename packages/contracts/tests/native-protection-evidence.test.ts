@@ -702,3 +702,168 @@ describe("staff historical evidence projection", () => {
     ).toBeNull();
   });
 });
+
+function preflightFacts(
+  cause: "application_policy" | "shortcut_unavailable" = "application_policy",
+  status: "failed" | "unavailable" = "unavailable",
+): NativeProtectionFact[] {
+  const failure: NativeProtectionFact = {
+    ...fact,
+    sequence: 1,
+    eventId: uuid(701),
+    attemptId: uuid(700),
+    slot: "failure",
+    phase: "failed",
+    nativeEvent: null,
+    nativeSequence: null,
+    cause,
+    categories: {
+      aac: { status: "pending", code: "awaiting_native_begin" },
+      shortcuts: { status: "pending", code: "none" },
+      applications: { status: "pending", code: "none" },
+      persistence: { status: "pending", code: "none" },
+      windowNetwork: { status: "pending", code: "none" },
+      ...(cause === "application_policy"
+        ? {
+            applications: {
+              status,
+              code:
+                status === "failed"
+                  ? "prohibited_application"
+                  : "application_observation_unavailable",
+            } as const,
+          }
+        : {
+            shortcuts: {
+              status,
+              code: "emergency_shortcut_unavailable",
+            } as const,
+          }),
+    },
+  };
+  return [
+    failure,
+    {
+      ...failure,
+      sequence: 2,
+      eventId: uuid(702),
+      slot: "cleanup",
+      cause: "none",
+      categories: {
+        ...failure.categories,
+        persistence: { status: "confirmed", code: "none" },
+      },
+    },
+  ];
+}
+
+describe("preflight failure-first report prefix", () => {
+  it.each([
+    ["application_policy", "failed"],
+    ["application_policy", "unavailable"],
+    ["shortcut_unavailable", "failed"],
+    ["shortcut_unavailable", "unavailable"],
+  ] as const)(
+    "accepts %s/%s as a failure and later owned cleanup without native claims",
+    (cause, status) => {
+      const facts = preflightFacts(cause, status);
+      for (const prefix of [facts.slice(0, 1), facts]) {
+        expect(parseNativeProtectionFactPrefix(prefix)).toEqual(prefix);
+        expect(
+          parseStudentEvidenceRequest({ ...request(), facts: prefix }),
+        ).not.toBeNull();
+      }
+      const contentDigests = facts.map((fact) =>
+        hash(encodeNativeProtectionFactDigestInput({ ...context(), fact }))!,
+      );
+      expect(
+        encodeStudentEvidenceBatchDigestInput({
+          ...context(),
+          facts,
+          contentDigests,
+        }),
+      ).not.toBeNull();
+    },
+  );
+  it("rejects a claimed engagement, native observation or unrelated failure on a preflight prefix", () => {
+    const [failure, cleanup] = preflightFacts();
+    for (const change of [
+      { phase: "engaging" },
+      { phase: "recovery_required" },
+      { nativeSequence: 1 },
+      { nativeEvent: "interrupted", nativeSequence: 1 },
+      { cause: "native_failure" },
+      { cause: "shortcut_unavailable" },
+      {
+        categories: {
+          ...failure!.categories,
+          applications: { status: "confirmed", code: "none" },
+        },
+      },
+      {
+        categories: {
+          ...failure!.categories,
+          applications: {
+            status: "failed",
+            code: "application_observation_unavailable",
+          },
+        },
+      },
+      {
+        categories: {
+          ...failure!.categories,
+          aac: { status: "pending", code: "none" },
+        },
+      },
+      {
+        categories: {
+          ...failure!.categories,
+          aac: { status: "confirmed", code: "none" },
+        },
+      },
+    ])
+      expect(
+        parseNativeProtectionFactPrefix([{ ...failure, ...change }]),
+      ).toBeNull();
+    for (const later of vector.facts) {
+      if (later.slot === "cleanup") continue;
+      expect(
+        parseNativeProtectionFactPrefix([
+          failure,
+          {
+            ...later,
+            sequence: 2,
+            eventId: uuid(703),
+            attemptId: failure!.attemptId,
+            scope: failure!.scope,
+          },
+        ]),
+      ).toBeNull();
+    }
+    for (const change of [
+      { phase: "ended" },
+      { cause: "application_policy" },
+      { nativeSequence: 1 },
+      {
+        categories: {
+          ...cleanup!.categories,
+          aac: { status: "confirmed", code: "none" },
+        },
+      },
+      { scope: { ...cleanup!.scope, epoch: 1 } },
+      { attemptId: uuid(900) },
+      { sequence: 1 },
+      { eventId: failure!.eventId },
+    ])
+      expect(
+        parseNativeProtectionFactPrefix([failure, { ...cleanup, ...change }]),
+      ).toBeNull();
+    expect(
+      parseNativeProtectionFactPrefix([
+        failure,
+        cleanup,
+        { ...cleanup, sequence: 3, eventId: uuid(704) },
+      ]),
+    ).toBeNull();
+  });
+});

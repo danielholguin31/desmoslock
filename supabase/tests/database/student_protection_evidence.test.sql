@@ -169,6 +169,211 @@ begin
 end;
 $$;
 
+-- Failure-first is a separate finite historical-report prefix. Isolate these
+-- fixtures so every earlier golden vector and later exact count/counter test
+-- continues to exercise its original engaged-attempt history.
+savepoint preflight_evidence_cases;
+create function pg_temp.preflight_fact(
+  cause text default 'shortcut_unavailable', status text default 'unavailable',
+  slot text default 'failure', sequence bigint default 1, attempt integer default 1, scope jsonb default null
+) returns jsonb language sql as $$
+  select pg_temp.evidence_fact($4,'engaging',$5,$6) || jsonb_build_object(
+    'eventId','9c000000-0000-4000-8000-' || lpad($4::text,12,'0'),
+    'attemptId','9d000000-0000-4000-8000-' || lpad($5::text,12,'0'),
+    'slot',$3,'phase','failed','cause',case when $3 = 'cleanup' then 'none' else $1 end,
+    'categories',jsonb_set(pg_temp.evidence_fact($4,'engaging',$5,$6)->'categories',
+      case when $1 = 'application_policy' then array['applications'] else array['shortcuts'] end,
+      jsonb_build_object('status',$2,'code',case when $1 = 'application_policy'
+        then case when $2 = 'failed' then 'prohibited_application' else 'application_observation_unavailable' end
+        else 'emergency_shortcut_unavailable' end)));
+$$;
+create function pg_temp.preflight_batch(facts jsonb) returns text language sql as $$
+  select desmoslock_v2.internal_student_evidence_batch_digest('http://127.0.0.1:54321',
+    desmoslock_v2.internal_student_key_thumbprint(repeat('A',43)),$1->0->'scope','{"kind":"unverified_build"}',$1);
+$$;
+create temporary table preflight_variants (name text, failure jsonb, cleanup jsonb);
+insert into preflight_variants
+select cause || '/' || status,pg_temp.preflight_fact(cause,status),
+  pg_temp.preflight_fact(cause,status,'cleanup',2)
+from (values ('application_policy'),('shortcut_unavailable')) c(cause)
+cross join (values ('failed'),('unavailable')) s(status);
+select ok(pg_temp.preflight_batch(jsonb_build_array(failure)) is not null,name || ' failure-only prefix accepted') from preflight_variants;
+select ok(pg_temp.preflight_batch(jsonb_build_array(failure,cleanup)) is not null,name || ' failure/cleanup prefix accepted') from preflight_variants;
+select ok(pg_temp.preflight_batch(jsonb_build_array(pg_temp.preflight_fact(),
+  jsonb_set(pg_temp.preflight_fact('shortcut_unavailable','unavailable','cleanup',2),'{categories,persistence}',
+    '{"status":"unavailable","code":"durability_unavailable"}'))) is not null,
+  'cleanup can carry changed strict categories without rewriting the initiating failure');
+select ok(not has_function_privilege(role,
+  'desmoslock_v2.internal_student_evidence_batch_bytes(text,text,jsonb,jsonb,jsonb)','EXECUTE'),
+  role || ' cannot call the private prefix validator directly')
+from (values ('anon'),('authenticated'),('service_role')) r(role);
+
+create temporary table preflight_invalid (name text primary key, facts jsonb not null);
+insert into preflight_invalid
+select 'failure ' || label,jsonb_build_array(jsonb_set(pg_temp.preflight_fact(),at,replacement))
+from (values
+  ('wrong phase',array['phase'],'"ending"'::jsonb),
+  ('native sequence',array['nativeSequence'],'1'::jsonb),
+  ('unrelated cause',array['cause'],'"native_failure"'::jsonb),
+  ('wrong category for cause',array['cause'],'"application_policy"'::jsonb),
+  ('confirmed initiating category',array['categories','shortcuts'],'{"status":"confirmed","code":"none"}'::jsonb),
+  ('AAC wrong pending code',array['categories','aac'],'{"status":"pending","code":"none"}'::jsonb),
+  ('AAC confirmed',array['categories','aac'],'{"status":"confirmed","code":"none"}'::jsonb),
+  ('unsafe sequence',array['sequence'],'9007199254740992'::jsonb),
+  ('wrong policy',array['policyVersion'],'2'::jsonb)
+) failures(label,at,replacement);
+insert into preflight_invalid values
+  ('failure native interruption',jsonb_build_array(pg_temp.preflight_fact() || '{"nativeEvent":"interrupted","nativeSequence":1}')),
+  ('applications failed with unavailable code',jsonb_build_array(jsonb_set(pg_temp.preflight_fact('application_policy','failed'),
+    '{categories,applications,code}','"application_observation_unavailable"'))),
+  ('applications unavailable with prohibited code',jsonb_build_array(jsonb_set(pg_temp.preflight_fact('application_policy','unavailable'),
+    '{categories,applications,code}','"prohibited_application"'))),
+  ('failure third fact',jsonb_build_array(pg_temp.preflight_fact(),pg_temp.preflight_fact('shortcut_unavailable','unavailable','cleanup',2),
+    pg_temp.preflight_fact('shortcut_unavailable','unavailable','cleanup',3)));
+insert into preflight_invalid
+select 'cleanup ' || label,jsonb_build_array(pg_temp.preflight_fact(),
+  jsonb_set(pg_temp.preflight_fact('shortcut_unavailable','unavailable','cleanup',2),at,replacement))
+from (values
+  ('wrong phase',array['phase'],'"ended"'::jsonb),
+  ('nonempty cause',array['cause'],'"application_policy"'::jsonb),
+  ('native sequence',array['nativeSequence'],'1'::jsonb),
+  ('AAC changed',array['categories','aac'],'{"status":"confirmed","code":"none"}'::jsonb),
+  ('category malformed',array['categories','persistence'],'{"status":"unavailable","code":"prohibited_application"}'::jsonb),
+  ('wrong attempt',array['attemptId'],'"9d000000-0000-4000-8000-000000000002"'::jsonb),
+  ('wrong scope',array['scope','epoch'],'2'::jsonb),
+  ('duplicate event',array['eventId'],'"9c000000-0000-4000-8000-000000000001"'::jsonb),
+  ('nonincreasing sequence',array['sequence'],'1'::jsonb)
+) failures(label,at,replacement);
+-- Each forbidden continuation comes from the existing independently pinned
+-- eight-slot vector, preserving a generally valid fact instead of relying on
+-- a malformed native observation to reject the new branch.
+insert into preflight_invalid
+select 'continuation ' || (f.fact->>'slot'),jsonb_build_array(pg_temp.preflight_fact(),
+  f.fact || jsonb_build_object('sequence',2,'eventId','9c000000-0000-4000-8000-000000000002',
+    'attemptId',pg_temp.preflight_fact()->>'attemptId','scope',pg_temp.evidence_scope()))
+from evidence_vectors v cross join lateral jsonb_array_elements(v.vector->'facts') f(fact)
+where v.name='known_maximum' and f.fact->>'slot' <> 'cleanup';
+select ok(desmoslock_v2.internal_evidence_fact_array(facts->1) is not null,
+  name || ' has a generally valid second fact') from preflight_invalid where name like 'continuation %' order by name;
+select ok(pg_temp.preflight_batch(facts) is null,name || ' is rejected') from preflight_invalid order by name;
+
+-- Actual production admission and ingestion (with synthetic SQL Auth fixtures)
+-- prove original receipts, strict recurrence, staff visibility and unchanged
+-- proof/rate/cap behavior. They do not prove Ed25519 or native execution.
+insert into student_results select 'preflight-joined',to_jsonb(pg_temp.student_join('initial',
+  '56000000-0000-4000-8000-000000000006','66000000-0000-4000-8000-000000000006',repeat('E',42)||'A',
+  repeat('1',64),repeat('4',64),repeat('5',64)));
+select is((select result->>'code' from student_results where label='preflight-joined'),'ok','preflight reporting binding admitted');
+create temporary table preflight_runtime (failure jsonb not null, cleanup jsonb not null);
+insert into preflight_runtime
+select pg_temp.preflight_fact('application_policy','failed','failure',1,1,scope),
+  pg_temp.preflight_fact('application_policy','failed','cleanup',2,1,scope)
+from (select jsonb_build_object('schoolId',result->>'school_id','testId',result->>'test_id',
+  'studentSessionId',result->>'student_session_id','deviceSessionId',result->>'device_session_id','epoch',1) scope
+  from student_results where label='preflight-joined') bound;
+savepoint preflight_reporting;
+insert into student_results select 'preflight-first',pg_temp.evidence_ingest(jsonb_build_array(failure),1,repeat('E',42)||'A') from preflight_runtime;
+select is((select result->>'code' from student_results where label='preflight-first'),'ok','failure-first report commits through unchanged authenticated ingress');
+select is((select count(*) from desmoslock_v2.student_protection_events),1::bigint,'failure-first inserts exactly one historical fact');
+select is((select revision from desmoslock_v2.student_sessions where device_session_id='66000000-0000-4000-8000-000000000006'),1::bigint,'preflight history does not advance admission revision');
+insert into student_results select 'preflight-retry',pg_temp.evidence_ingest(jsonb_build_array(failure),2,repeat('E',42)||'A') from preflight_runtime;
+select is((select result->'acknowledged' from student_results where label='preflight-retry'),
+  (select result->'acknowledged' from student_results where label='preflight-first'),'failure-first lost ACK returns exact original content and receipt');
+select is((select jsonb_build_object('reportCount',evidence_summary->'reportCount','failureCount',evidence_summary->'failureCount')
+  from desmoslock_v2.current_test_student_sessions(
+    '16000000-0000-4000-8000-000000000001','36000000-0000-4000-8000-000000000001',null,null)
+  where session_id=(select (result->>'student_session_id')::uuid from student_results where label='preflight-joined')),
+  '{"reportCount":1,"failureCount":1}'::jsonb,'Teacher summary counts the exact failure-only retry once');
+insert into student_results values ('preflight-before-denial',pg_temp.evidence_snapshot());
+select is(pg_temp.evidence_ingest(jsonb_build_array(cleanup),3,repeat('E',42)||'A')->>'code','student_session_denied',
+  'cleanup cannot omit the committed initial failure') from preflight_runtime;
+select is(pg_temp.evidence_ingest(jsonb_build_array(jsonb_set(failure,'{categories,applications}',
+  '{"status":"unavailable","code":"application_observation_unavailable"}'),cleanup),3,repeat('E',42)||'A')->>'code',
+  'student_session_denied','valid alternative failure cannot replace the immutable first fact') from preflight_runtime;
+select is(pg_temp.evidence_ingest(jsonb_build_array(failure,cleanup),3,repeat('E',42)||'A','{"kind":"legacy_unknown"}')->>'code',
+  'student_session_denied','preflight append cannot relabel the original build') from preflight_runtime;
+select is(pg_temp.evidence_ingest(jsonb_build_array(failure,cleanup),3,repeat('F',42)||'A')->>'code',
+  'student_session_denied','replacement signer cannot claim original preflight report') from preflight_runtime;
+select is(pg_temp.evidence_ingest(jsonb_build_array(jsonb_set(failure,'{scope,epoch}','2')),3,repeat('E',42)||'A')->>'code',
+  'student_session_denied','preflight report remains bound to the original epoch') from preflight_runtime;
+select is(pg_temp.evidence_snapshot(),(select result from student_results where label='preflight-before-denial'),
+  'all preflight denials preserve exact physical rows, original receipts, shared counter and quota');
+insert into student_results select 'preflight-cleanup',pg_temp.evidence_ingest(jsonb_build_array(failure,cleanup),3,repeat('E',42)||'A') from preflight_runtime;
+select is((select result->>'code' from student_results where label='preflight-cleanup'),'ok','unchanged failure prefix appends cleanup');
+select is((select result->'acknowledged'->0 from student_results where label='preflight-cleanup'),
+  (select result->'acknowledged'->0 from student_results where label='preflight-first'),'cleanup append preserves the original first receipt');
+-- Both immutable reports retain a failed application category. The summary
+-- counts failure-bearing reports, not distinct attempts or failure slots.
+select is((select jsonb_build_object('reportCount',evidence_summary->'reportCount','failureCount',evidence_summary->'failureCount')
+  from desmoslock_v2.current_test_student_sessions(
+    '16000000-0000-4000-8000-000000000001','36000000-0000-4000-8000-000000000001',null,null)
+  where session_id=(select (result->>'student_session_id')::uuid from student_results where label='preflight-joined')),
+  '{"reportCount":2,"failureCount":2}'::jsonb,'Teacher summary counts the failed initial and cleanup reports once each');
+select is((select count(*) from desmoslock_v2.current_student_protection_events(
+  '16000000-0000-4000-8000-000000000001','36000000-0000-4000-8000-000000000001',
+  (select (result->>'student_session_id')::uuid from student_results where label='preflight-joined'),null,null)
+  where fact->>'slot'='failure'),1::bigint,'Teacher history retains exactly one initiating failure after retry and cleanup');
+select ok((select bool_and(fact->>'phase'='failed' and fact->'nativeEvent'='null'::jsonb and fact->'nativeSequence'='null'::jsonb)
+  from desmoslock_v2.current_student_protection_events('16000000-0000-4000-8000-000000000001','36000000-0000-4000-8000-000000000001',
+    (select (result->>'student_session_id')::uuid from student_results where label='preflight-joined'),null,null)),
+  'Teacher detail receives failed preflight facts with no invented native event');
+select is((pg_temp.student_read((select (result->>'student_session_id')::uuid from student_results where label='preflight-joined'),
+  '66000000-0000-4000-8000-000000000006',1,repeat('4',64),repeat('E',42)||'A',3)).code,
+  'student_session_denied','live read cannot replay a preflight evidence counter');
+select is(pg_temp.evidence_ingest(jsonb_build_array(failure),4,repeat('E',42)||'A')->>'code','ok',
+  'earlier exact failure-only prefix remains recoverable after cleanup') from preflight_runtime;
+insert into student_results values ('preflight-rate',pg_temp.evidence_snapshot());
+select is(pg_temp.evidence_ingest(jsonb_build_array(failure),5,repeat('E',42)||'A')->>'code','student_session_denied',
+  'preflight retries consume the unchanged four-per-minute allowance') from preflight_runtime;
+select is(pg_temp.evidence_snapshot(),(select result from student_results where label='preflight-rate'),'preflight rate denial changes no durable row');
+
+-- Reach the attempt ceiling through real commit calls, with only 32 facts.
+-- Age only synthetic quota timestamps every four successful invocations using
+-- the existing helper; preserve each monotonic proof counter. The existing
+-- later test separately covers the 256-fact ceiling.
+rollback to savepoint preflight_reporting;
+create temporary table preflight_capacity_results (attempt integer primary key, result jsonb not null);
+do $$
+declare attempt integer; counter bigint; scope jsonb;
+begin
+  select failure->'scope' into scope from preflight_runtime;
+  for attempt in 1..32 loop
+    if attempt > 1 and (attempt - 1) % 4 = 0 then perform pg_temp.evidence_age_window(); end if;
+    select p.last_accepted_proof_counter + 1 into counter from desmoslock_v2.student_device_proof_state p
+      where p.device_session_id='66000000-0000-4000-8000-000000000006';
+    insert into preflight_capacity_results values (attempt,pg_temp.evidence_ingest(
+      jsonb_build_array(pg_temp.preflight_fact('shortcut_unavailable','unavailable','failure',attempt,attempt,scope)),
+      counter,repeat('E',42)||'A'));
+  end loop;
+end;
+$$;
+select is(result->>'code','ok','failure-only capacity attempt ' || attempt || ' is admitted') from preflight_capacity_results order by attempt;
+select is((select count(distinct attempt_id) from desmoslock_v2.student_protection_events),32::bigint,
+  'each failure-first attempt counts toward the unchanged 32-attempt ceiling');
+select is((select count(*) from desmoslock_v2.student_protection_events),32::bigint,
+  'failure-only attempt capacity is reached while far below the 256-fact ceiling');
+select pg_temp.evidence_age_window();
+insert into student_results values ('preflight-capacity-before',pg_temp.evidence_snapshot());
+select is(pg_temp.evidence_ingest(jsonb_build_array(pg_temp.preflight_fact('shortcut_unavailable','unavailable','failure',33,33,failure->'scope')),
+  (select last_accepted_proof_counter+1 from desmoslock_v2.student_device_proof_state where device_session_id='66000000-0000-4000-8000-000000000006'),
+  repeat('E',42)||'A')->>'code','student_session_denied','fresh preflight attempt 33 is denied below the fact cap and with available quota') from preflight_runtime;
+select is(pg_temp.evidence_snapshot(),(select result from student_results where label='preflight-capacity-before'),
+  'attempt-cap denial rolls back insertion, counter, quota and physical row changes');
+insert into student_results select 'preflight-capacity-retry',pg_temp.evidence_ingest(
+  jsonb_build_array(pg_temp.preflight_fact('shortcut_unavailable','unavailable','failure',1,1,failure->'scope')),
+  (select last_accepted_proof_counter+1 from desmoslock_v2.student_device_proof_state where device_session_id='66000000-0000-4000-8000-000000000006'),
+  repeat('E',42)||'A') from preflight_runtime;
+select is((select result->'acknowledged' from student_results where label='preflight-capacity-retry'),
+  (select result->'acknowledged' from preflight_capacity_results where attempt=1),'original first receipt remains recoverable at the attempt cap');
+select is(pg_temp.evidence_ingest(jsonb_build_array(
+  pg_temp.preflight_fact('shortcut_unavailable','unavailable','failure',1,1,failure->'scope'),
+  pg_temp.preflight_fact('shortcut_unavailable','unavailable','cleanup',34,1,failure->'scope')),
+  (select last_accepted_proof_counter+1 from desmoslock_v2.student_device_proof_state where device_session_id='66000000-0000-4000-8000-000000000006'),
+  repeat('E',42)||'A')->>'code','ok','cleanup can finish an existing preflight attempt at the attempt cap') from preflight_runtime;
+select is((select count(*) from desmoslock_v2.student_protection_events),33::bigint,'only the admitted cleanup adds a fact at the attempt cap');
+rollback to savepoint preflight_evidence_cases;
+-- End isolated preflight cases; original engaged-attempt tests follow unchanged.
+
 insert into student_results values ('first',pg_temp.evidence_ingest(jsonb_build_array(pg_temp.evidence_fact(1)),1));
 select is((select result->>'code' from student_results where label='first'),'ok','first authenticated report commits');
 select is((select last_accepted_proof_counter from desmoslock_v2.student_device_proof_state),1::bigint,'evidence advances shared proof counter');

@@ -911,6 +911,338 @@ test(
   },
 );
 
+function checkPreflightHistory(record, slots, cause) {
+  assert.equal(record.version, 4);
+  const { integritySha256, ...payload } = record;
+  assert.match(integritySha256, /^[0-9a-f]{64}$/);
+  assert.equal(
+    fingerprint(payload),
+    integritySha256,
+    "Preflight record did not retain the actual v4 payload checksum",
+  );
+  const protection = record.nativeProtection;
+  assert.deepEqual(
+    protection.facts.map((fact) => fact.slot),
+    slots,
+  );
+  for (const fact of protection.facts) {
+    assert.equal(fact.phase, "failed");
+    assert.equal(fact.nativeEvent, null);
+    assert.equal(fact.nativeSequence, null);
+    assert.deepEqual(fact.categories.aac, {
+      status: "pending",
+      code: "awaiting_native_begin",
+    });
+    assert.equal(fact.cause, fact.slot === "failure" ? cause : "none");
+  }
+  assert.equal(protection.latestAttempt.phase, "failed");
+  assert.equal(protection.latestAttempt.nativeSequence, null);
+  assert.equal(protection.latestAttempt.abandonment, "none");
+  assert.equal(
+    protection.latestAttempt.cleanup,
+    slots.length === 1 ? "pending" : "complete",
+  );
+  assert.equal(
+    protection.latestAttempt.nativeDisposition,
+    slots.length === 1
+      ? "not_started"
+      : "disposed_without_terminal_observation",
+  );
+  assert.equal(record.evidence.origins.length, 1);
+  assert.equal(
+    record.evidence.origins[0].attemptId,
+    protection.latestAttempt.attemptId,
+  );
+}
+
+async function reservePreflight(child) {
+  const reservation = await child.command("reserve-preflight");
+  assert.equal(reservation.result.status, "reserved");
+  return reservation.result.attemptId;
+}
+
+for (const [operation, cause] of [
+  ["preflight-application-failure", "application_policy"],
+  ["preflight-shortcut-failure", "shortcut_unavailable"],
+]) {
+  test(
+    `real durable preflight ${cause} history survives lost ACK and restart without native engagement`,
+    macOnly,
+    async (t) => {
+      const f = await fixture(t);
+      let child = await f.launch();
+      await child.command("initialize");
+      await child.command("join", { code });
+      const attemptId = await reservePreflight(child);
+      const before = await f.readRecord();
+      assert.equal(before.nativeProtection, null);
+      assert.equal(before.evidence.origins.length, 0);
+      const result = await child.command(operation);
+      assert.equal(result.result.status, "committed");
+      assert.equal(result.result.attemptId, attemptId);
+      const original = await f.readRecord();
+      checkPreflightHistory(original, ["failure"], cause);
+      same(
+        original.device,
+        before.device,
+        "Preflight replaced its admitted device",
+      );
+      same(
+        original.current,
+        before.current,
+        "Preflight changed admission state",
+      );
+      assert.equal(original.lastReservedCounter, before.lastReservedCounter);
+      assert.equal(
+        original.evidence.origins[0].originalKeyThumbprint,
+        before.device.keyThumbprint,
+      );
+      assert.equal(
+        original.nativeProtection.latestAttempt.attemptId,
+        attemptId,
+      );
+      f.drop("evidence");
+      await child.command("flush");
+      const pending = await f.readRecord();
+      checkPreflightHistory(pending, ["failure"], cause);
+      assert.equal(pending.evidence.pendingBatches.length, 1);
+      assert.equal(pending.evidence.acknowledgments.length, 0);
+      assert.equal(f.evidenceReceipts.size, 1);
+      await child.kill();
+      child = await f.launch("normal", "replacement-build");
+      await child.command("initialize");
+      await child.command("flush");
+      const accepted = await f.readRecord();
+      checkPreflightHistory(accepted, ["failure"], cause);
+      const reports = f.requests.filter(
+        (request) => request.route === "evidence",
+      );
+      assert.equal(reports.length, 2);
+      for (const field of [
+        "facts",
+        "scope",
+        "publicKey",
+        "originBuild",
+        "batchDigest",
+      ])
+        same(
+          reports[0].body[field],
+          reports[1].body[field],
+          `Preflight restart changed ${field}`,
+        );
+      same(
+        reports[1].body.publicKey,
+        original.device.publicKey,
+        "Preflight retry changed its original signing key",
+      );
+      same(
+        reports[1].body.originBuild,
+        original.evidence.origins[0].originBuild,
+        "Restart relabeled the initiating build",
+      );
+      check(
+        reports[1].body.deviceProof.counter >
+          reports[0].body.deviceProof.counter,
+        "Preflight retry reused a reserved proof counter",
+      );
+      same(
+        reports[0].result.acknowledged,
+        reports[1].result.acknowledged,
+        "Lost ACK replay changed exact receipt metadata",
+      );
+      same(
+        accepted.nativeProtection,
+        original.nativeProtection,
+        "ACK changed latest preflight facts or summary",
+      );
+      assert.equal(accepted.evidence.pendingBatches.length, 0);
+      assert.equal(accepted.evidence.acknowledgments.length, 1);
+      await child.kill();
+      child = await f.launch();
+      await child.command("initialize");
+      await child.command("flush");
+      assert.equal(
+        f.requests.filter((request) => request.route === "evidence").length,
+        2,
+        "Durable preflight ACK was not restored",
+      );
+      assert.deepEqual(f.failures, []);
+    },
+  );
+}
+
+test(
+  "preflight prefix ACK and held synthetic cleanup preserve original signer and build through real rebind",
+  macOnly,
+  async (t) => {
+    const f = await fixture(t);
+    let child = await f.launch();
+    await child.command("initialize");
+    await child.command("join", { code });
+    const attemptId = await reservePreflight(child);
+    assert.equal(
+      (await child.command("preflight-shortcut-failure")).result.status,
+      "committed",
+    );
+    await child.command("flush");
+    const prefix = await f.readRecord();
+    checkPreflightHistory(prefix, ["failure"], "shortcut_unavailable");
+    assert.equal(prefix.evidence.acknowledgments.length, 1);
+    await child.command("forfeit");
+    const count = f.requests.length;
+    await child.command("block-next-write");
+    // The cleanup observation is synthetic; the store publication and held
+    // return are the production native durable-record helper boundary.
+    const cleanup = child.command("synthetic-preflight-cleanup");
+    await child.event("published-return-blocked");
+    const published = await f.readRecord();
+    checkPreflightHistory(
+      published,
+      ["failure", "cleanup"],
+      "shortcut_unavailable",
+    );
+    assert.equal(published.current, null);
+    assert.equal(published.terminal, true);
+    const targeted = child.command("targeted", { code });
+    await child.command("state");
+    assert.equal(
+      f.requests.length,
+      count,
+      "Readmission overtook an unacknowledged cleanup barrier",
+    );
+    same(
+      (await f.readRecord()).device,
+      prefix.device,
+      "Held cleanup lost its original device owner",
+    );
+    await child.command("release-write");
+    const cleanupResult = (await cleanup).result;
+    assert.equal(cleanupResult.status, "committed");
+    assert.equal(cleanupResult.synthetic, true);
+    assert.equal((await targeted).view.phase, "active");
+    const rebound = await f.readRecord();
+    checkPreflightHistory(
+      rebound,
+      ["failure", "cleanup"],
+      "shortcut_unavailable",
+    );
+    check(
+      rebound.device.keyThumbprint !== prefix.device.keyThumbprint,
+      "Readmission did not replace the current device",
+    );
+    same(
+      rebound.evidence.retiredSigners[0].device,
+      prefix.device,
+      "Rebind discarded the original preflight signer",
+    );
+    same(
+      rebound.evidence.origins[0],
+      prefix.evidence.origins[0],
+      "Rebind changed immutable preflight origin",
+    );
+    same(
+      rebound.nativeProtection.facts[0],
+      prefix.nativeProtection.facts[0],
+      "Cleanup changed the already acknowledged prefix",
+    );
+    await child.kill();
+    child = await f.launch("normal", "replacement-build");
+    await child.command("initialize");
+    await child.command("retry");
+    await child.command("flush");
+    const reports = f.requests.filter(
+      (request) => request.route === "evidence",
+    );
+    assert.equal(reports.length, 2);
+    assert.equal(reports[1].body.facts.length, 2);
+    assert.equal(reports[1].body.facts[0].attemptId, attemptId);
+    same(
+      reports[1].body.facts[0],
+      reports[0].body.facts[0],
+      "Late cleanup replaced the acknowledged failure",
+    );
+    same(
+      reports[1].body.publicKey,
+      reports[0].body.publicKey,
+      "Replacement device signed the old preflight history",
+    );
+    same(
+      reports[1].body.originBuild,
+      reports[0].body.originBuild,
+      "Replacement build relabeled old preflight history",
+    );
+    same(
+      reports[1].body.scope,
+      reports[0].body.scope,
+      "Readmission relabeled the old preflight scope",
+    );
+    check(
+      reports[1].body.deviceProof.counter > reports[0].body.deviceProof.counter,
+      "Original signer counter did not advance for cleanup upload",
+    );
+    const accepted = await f.readRecord();
+    checkPreflightHistory(
+      accepted,
+      ["failure", "cleanup"],
+      "shortcut_unavailable",
+    );
+    assert.equal(accepted.evidence.acknowledgments.length, 2);
+    assert.deepEqual(f.failures, []);
+  },
+);
+
+test(
+  "preflight first-failure evidence waits for actual native publication return without inventing engagement",
+  macOnly,
+  async (t) => {
+    const f = await fixture(t);
+    const child = await f.launch();
+    await child.command("initialize");
+    await child.command("join", { code });
+    const attemptId = await reservePreflight(child);
+    const count = f.requests.length;
+    await child.command("block-next-write");
+    const reporting = child.command("preflight-application-failure");
+    await child.event("published-return-blocked");
+    const published = await f.readRecord();
+    checkPreflightHistory(published, ["failure"], "application_policy");
+    assert.equal(published.nativeProtection.latestAttempt.attemptId, attemptId);
+    const state = await child.command("state");
+    assert.equal(
+      state.protection,
+      null,
+      "Unacknowledged return promoted preflight history in memory",
+    );
+    await child.command("flush");
+    assert.equal(
+      f.requests.length,
+      count,
+      "Preflight evidence escaped before native return acknowledgment",
+    );
+    const contender = await f.launch();
+    assert.equal(
+      (await contender.command("initialize")).view.phase,
+      "unavailable",
+    );
+    await child.command("release-write");
+    assert.equal((await reporting).result.status, "committed");
+    await child.command("flush");
+    const reports = f.requests.filter(
+      (request) => request.route === "evidence",
+    );
+    assert.equal(reports.length, 1);
+    same(
+      reports[0].body.facts,
+      published.nativeProtection.facts,
+      "Post-barrier upload changed the reserved first failure",
+    );
+    const accepted = await f.readRecord();
+    checkPreflightHistory(accepted, ["failure"], "application_policy");
+    assert.equal(accepted.evidence.acknowledgments.length, 1);
+    assert.deepEqual(f.failures, []);
+  },
+);
+
 async function engageEvidence(child) {
   const start = await child.command("engaging");
   assert.equal(start.result.status, "committed");
