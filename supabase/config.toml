@@ -46,6 +46,10 @@ otp_length = 8
 subject = "Reset your DesmosLock password"
 content_path = "./supabase/templates/recovery-v1.html"
 
+[auth.email.template.confirmation]
+subject = "Confirm your DesmosLock email"
+content_path = "./supabase/templates/confirmation-v1.html"
+
 [auth.mfa.totp]
 enroll_enabled = true
 verify_enabled = true

@@ -262,6 +262,7 @@ export function verifySourceReconciliationContract(
         "supabase/functions",
         "supabase/migrations",
         "supabase/seed.sql",
+        "supabase/templates",
         "supabase/tests/database",
       ],
       operations: ["scripts/synthetic-backup"],

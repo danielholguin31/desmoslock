@@ -29,6 +29,7 @@ import {
   type StoredNativeEvidenceOrigin,
   type StoredNativeEvidenceSigner,
   emptyNativeEvidence,
+  canReplaceInitialJoin,
   retainNativeEvidenceSigner,
   pruneNativeEvidence,
 } from "./student-session-store.js";
@@ -158,7 +159,7 @@ export function createStudentSessionCoordinator(options: {
   let issuedAdmission: FreshStudentAdmission | null = null;
   let observationSequence = 0;
   let ownedRenewal = false;
-  let priorProcessUncertain = false;
+  let nativeOwnershipUncertain = false;
   const ownedProtectionAttempts = new Set<string>();
   type ReadOwner = {
     sequence: number | null;
@@ -427,7 +428,9 @@ export function createStudentSessionCoordinator(options: {
       return false;
     }
     if (loaded.kind === "recovery_required") {
-      if (firstLoad) priorProcessUncertain = true;
+      // A rejected record cannot establish native ownership, even when this
+      // process previously read a valid record before an uncertain write.
+      nativeOwnershipUncertain = true;
       storeGeneration = loaded.generation;
       needsReload = false;
       record = null;
@@ -452,7 +455,7 @@ export function createStudentSessionCoordinator(options: {
               "disposed_without_terminal_observation")
         )
       )
-        priorProcessUncertain = true;
+        nativeOwnershipUncertain = true;
     }
     needsReload = false;
     capabilityDeadline = 0; // A process restart cannot inherit a monotonic lease.
@@ -472,7 +475,7 @@ export function createStudentSessionCoordinator(options: {
     publish(
       record?.terminal === true
         ? "forfeited"
-        : record === null
+        : record === null || canReplaceInitialJoin(record)
           ? "entry"
           : "unconfirmed",
     );
@@ -518,6 +521,9 @@ export function createStudentSessionCoordinator(options: {
       return;
     const pending = record.pending;
     const device = record.device;
+    // Only this invocation can know that no earlier join may have committed.
+    // A recovered or retried uncertain intent never regains that permission.
+    const replaceableInitial = canReplaceInitialJoin(record);
     const digest = options.crypto.digestLogicalOperation({
       kind: "join",
       admissionMode: pending.admissionMode,
@@ -539,7 +545,7 @@ export function createStudentSessionCoordinator(options: {
     );
     if (!alive(generation)) return;
     if (!("challengeId" in challenge)) {
-      publish(resultPhase(challenge));
+      publish(replaceableInitial ? "entry" : resultPhase(challenge));
       return;
     }
     const deviceProof = options.crypto.signBootstrap(device, {
@@ -559,12 +565,36 @@ export function createStudentSessionCoordinator(options: {
       reconnectDigest: pending.candidates.reconnectDigest,
       deviceProof,
     };
+    if (
+      replaceableInitial &&
+      !(await write(
+        {
+          ...successor(record),
+          pending: { ...pending, outcome: "uncertain" },
+        },
+        generation,
+      ))
+    )
+      return;
     const sentAt = now();
     if (!alive(generation)) return;
     const accepted = await options.transport.join(request, digest, signal);
     if (!alive(generation)) return;
     if (accepted.status !== "accepted") {
-      publish(resultPhase(accepted));
+      if (replaceableInitial && accepted.status === "denied") {
+        if (
+          await write(
+            {
+              ...successor(record),
+              pending: { ...pending, outcome: "denied" },
+            },
+            generation,
+          )
+        )
+          publish("entry");
+      } else {
+        publish(resultPhase(accepted));
+      }
       return;
     }
     const next = {
@@ -1296,7 +1326,7 @@ export function createStudentSessionCoordinator(options: {
     let categories = facts.at(-1)?.categories;
     if (command.kind === "engaging") {
       if (
-        priorProcessUncertain ||
+        nativeOwnershipUncertain ||
         !isCurrentAdmission(command.authority) ||
         facts.length > protectionFactCapacity - protectionFactReservation ||
         facts.some((fact) => fact.attemptId === command.attemptId) ||
@@ -1431,7 +1461,7 @@ export function createStudentSessionCoordinator(options: {
           break;
         case "disposed_without_terminal_observation":
           if (
-            priorProcessUncertain ||
+            nativeOwnershipUncertain ||
             !ownedProtectionAttempts.has(command.attemptId) ||
             oldFact("native_terminal") !== undefined
           )
@@ -1601,19 +1631,23 @@ export function createStudentSessionCoordinator(options: {
         const parsedCode = parseStudentJoinCode(code);
         if (
           !initialized ||
+          needsReload ||
+          recoveryLatched ||
+          nativeOwnershipUncertain ||
           view.phase !== "entry" ||
-          record !== null ||
+          (record !== null && !canReplaceInitialJoin(record)) ||
           parsedCode === null
         )
           return;
         const next: StudentSessionSuccessor = {
-          version: 3,
+          version: 4,
           apiOrigin: options.apiOrigin,
-          device: options.crypto.createEnrollment(),
+          device: record?.device ?? options.crypto.createEnrollment(),
           current: null,
           pending: {
             kind: "join",
             admissionMode: "initial",
+            outcome: "not_dispatched",
             requestId: requestId(),
             joinCode: parsedCode,
             candidates: options.crypto.createCandidates(),
@@ -1632,7 +1666,7 @@ export function createStudentSessionCoordinator(options: {
         const parsedCode = parseStudentJoinCode(code);
         if (
           !initialized ||
-          priorProcessUncertain ||
+          nativeOwnershipUncertain ||
           view.revision !== snapshotRevision ||
           !["recovery_required", "unavailable", "forfeited"].includes(
             view.phase,
@@ -1653,8 +1687,9 @@ export function createStudentSessionCoordinator(options: {
         )
           return;
         if (
-          record?.nativeProtection?.latestAttempt != null &&
-          record.nativeProtection.latestAttempt.cleanup !== "complete"
+          nativeOwnershipUncertain ||
+          (record?.nativeProtection?.latestAttempt != null &&
+            record.nativeProtection.latestAttempt.cleanup !== "complete")
         )
           return;
         const retainedProtection = record?.nativeProtection ?? null;
@@ -1682,13 +1717,14 @@ export function createStudentSessionCoordinator(options: {
         attemptedWrite = null;
         capabilityDeadline = 0;
         const next: StudentSessionSuccessor = {
-          version: 3,
+          version: 4,
           apiOrigin: options.apiOrigin,
           device: options.crypto.createEnrollment(),
           current: null,
           pending: {
             kind: "join",
             admissionMode: "readmission",
+            outcome: "uncertain",
             requestId: requestId(),
             joinCode: parsedCode,
             candidates: options.crypto.createCandidates(),

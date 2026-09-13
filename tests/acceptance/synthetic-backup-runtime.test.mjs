@@ -3,12 +3,14 @@ import test from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { CURRENT_MIGRATION_FILES } from "../../scripts/synthetic-backup/operator.mjs";
 import "./staff-suite-diagnostics-reporter.test.mjs";
 import {
   boundedCommand,
   connectionFromStatus,
   FixtureFailure,
   isExpectedInvalidRootCertificate,
+  materializeSourceFixture,
   nativeClientWrapper,
   requireRestoredWorkerReceipt,
   runStaffSuite,
@@ -272,6 +274,68 @@ test("source fixture config only changes project and declared ports", () => {
       ),
     failure("SOURCE_PORT_CONFIG_DRIFT"),
   );
+});
+
+test("materialized source includes every configured Auth template and only canonical fixture inputs", async () => {
+  const repositoryRoot = path.resolve(import.meta.dirname, "../..");
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "restore-source-"));
+  const sourceRoot = path.join(temporary, "source");
+  const project = "desmoslock-restore-0123456789abcdef";
+  try {
+    await materializeSourceFixture(
+      repositoryRoot,
+      sourceRoot,
+      project,
+      CURRENT_MIGRATION_FILES,
+    );
+    const config = await fs.readFile(
+      path.join(repositoryRoot, "supabase/config.toml"),
+      "utf8",
+    );
+    const generated = await fs.readFile(
+      path.join(sourceRoot, "supabase/config.toml"),
+      "utf8",
+    );
+    assert.equal(generated, sourceConfiguration(config, project));
+    const templatePaths = Array.from(
+      generated.matchAll(/^content_path = "(.+)"$/gmu),
+      ([, relative]) => {
+        assert.match(relative, /^\.\/supabase\/templates\/[a-z0-9-]+\.html$/u);
+        return relative.slice(2);
+      },
+    );
+    assert.deepEqual(templatePaths.toSorted(), [
+      "supabase/templates/confirmation-v1.html",
+      "supabase/templates/recovery-v1.html",
+    ]);
+    const copiedPaths = [
+      "supabase/seed.sql",
+      ...templatePaths,
+      ...CURRENT_MIGRATION_FILES.map((file) => `supabase/migrations/${file}`),
+    ];
+    for (const relative of copiedPaths) {
+      assert.deepEqual(
+        await fs.readFile(path.join(sourceRoot, relative)),
+        await fs.readFile(path.join(repositoryRoot, relative)),
+        `source fixture must preserve ${relative}`,
+      );
+    }
+    const materializedFiles = [];
+    for (const relative of await fs.readdir(sourceRoot, { recursive: true })) {
+      const stat = await fs.lstat(path.join(sourceRoot, relative));
+      assert.equal(stat.isSymbolicLink(), false);
+      if (stat.isFile()) materializedFiles.push(relative);
+      else assert.equal(stat.isDirectory(), true);
+    }
+    // An exact file inventory also excludes environment files, unrelated assets,
+    // provider caches and the rest of the repository from this isolated source.
+    assert.deepEqual(
+      materializedFiles.toSorted(),
+      ["supabase/config.toml", ...copiedPaths].toSorted(),
+    );
+  } finally {
+    await fs.rm(temporary, { recursive: true });
+  }
 });
 
 test("database status accepts only the exact disposable database endpoint", () => {

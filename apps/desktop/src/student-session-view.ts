@@ -501,6 +501,17 @@ export function bindStudentSessionView(
           failed: "Protection unavailable",
           recovery_required: "Assessment recovery required",
         }[state!.phase];
+    const admission = value?.admission;
+    const idleSummary =
+      admission?.phase === "entry"
+        ? "The calculator remains unavailable. Join a Test, then choose Start assessment to check protection."
+        : admission?.phase === "active"
+          ? "The calculator remains unavailable. Choose Start assessment to check protection."
+          : (admission?.phase === "unavailable" ||
+                admission?.phase === "unconfirmed") &&
+              admission.pendingOperation !== null
+            ? "The calculator remains unavailable. Retry or recover your saved session admission, then choose Start assessment to check protection."
+            : "The calculator remains unavailable. Follow the session guidance to confirm or recover admission before choosing Start assessment.";
     protectionSummary.textContent = !known
       ? "The calculator remains unavailable. Protection could not be checked. Follow your teacher’s instructions."
       : state!.phase === "recovery_required"
@@ -517,7 +528,9 @@ export function bindStudentSessionView(
               ? "The attempt did not establish confirmed protection. Local cleanup is complete. A new Start checks protection again."
               : state!.phase === "preflight" || state!.phase === "engaging"
                 ? "The calculator remains unavailable until native confirmation and all five checks are confirmed."
-                : "The calculator remains unavailable. Join a Test, then choose Start assessment to check protection.";
+                : state!.phase === "idle"
+                  ? idleSummary
+                  : "The calculator remains unavailable. Join a Test, then choose Start assessment to check protection.";
     type Code =
       DesktopStudentView["protection"]["categories"][Category]["code"];
     const categoryCopy: Record<Code, string> = {
@@ -664,7 +677,10 @@ export function bindStudentSessionView(
     summary.textContent = loading
       ? "Checking this device’s saved session."
       : {
-          entry: "Ask your teacher for the Test join code.",
+          entry:
+            snapshot?.admission.pendingOperation === "join"
+              ? "No session was joined. Check the Test join code and try again."
+              : "Ask your teacher for the Test join code.",
           joining:
             "Wait while your saved attempt is checked. Your session is not yet confirmed.",
           active: "Your session admission is confirmed.",
@@ -675,7 +691,9 @@ export function bindStudentSessionView(
                 ? "Your session is not currently confirmed. Refresh to check again or ask your teacher for help."
                 : "Your session is not currently confirmed. Retry the saved attempt without starting a new session.",
           unavailable:
-            "Your session cannot currently be confirmed. Refresh to check again or ask your teacher for help.",
+            snapshot?.admission.pendingOperation == null
+              ? "Your session cannot currently be confirmed. Refresh to check again or ask your teacher for help."
+              : "Your saved attempt cannot currently be confirmed. Retry that attempt or ask your teacher for help.",
           recovery_required: admissionBlocked
             ? "Local protection recovery is required before session recovery. Ask your teacher or operator for help."
             : "Ask your teacher for a private re-admission code to restore an existing session.",
@@ -707,7 +725,7 @@ export function bindStudentSessionView(
     reviewPanel.hidden = !reviewing;
     retry.hidden =
       reviewing ||
-      phase !== "unconfirmed" ||
+      (phase !== "unconfirmed" && phase !== "unavailable") ||
       snapshot?.admission.pendingOperation == null;
     refresh.hidden = reviewing || loading || entry || phase === "joining";
     leave.hidden = reviewing || phase !== "active";
@@ -835,7 +853,7 @@ export function bindStudentSessionView(
       if (
         snapshot === null ||
         !live(snapshot) ||
-        phase !== "unconfirmed" ||
+        (phase !== "unconfirmed" && phase !== "unavailable") ||
         snapshot.admission.pendingOperation === null ||
         review !== null ||
         bridge === undefined

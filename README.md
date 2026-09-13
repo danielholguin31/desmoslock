@@ -15,8 +15,8 @@ published, or presented as current product behavior.
 - Repository: `danielholguin31/desmoslock`
 - Integration branch: `main`
 - Product source: `apps/`, `packages/`, `supabase/config.toml`,
-  `supabase/functions/`, `supabase/migrations/`, `supabase/seed.sql`, and
-  `supabase/tests/database/`
+  `supabase/functions/`, `supabase/migrations/`, `supabase/seed.sql`,
+  `supabase/templates/`, and `supabase/tests/database/`
 - Operations source: `scripts/synthetic-backup/` for the synthetic-only backup
   and local-restore boundary
 - Dependency source: the root `package.json` and root `package-lock.json`

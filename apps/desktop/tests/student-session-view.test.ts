@@ -477,6 +477,52 @@ describe("Student desktop session view", () => {
     expect(view.heading()).toBe("Session unavailable");
   });
 
+  it("returns a definitively unadmitted attempt to public code entry and submits the corrected code without private recovery", async () => {
+    const view = setup();
+    await settle();
+    view.bridge.joinTest.mockResolvedValueOnce(
+      state("entry", 2, { pendingOperation: "join" }),
+    );
+    view.input().value = "123456789ABC";
+    view.form().fire("submit");
+    await settle();
+    expect(view.heading()).toBe("Join a Test");
+    expect(view.text()).toContain("Check the Test join code and try again");
+    expect(visible(view.form())).toBe(true);
+    expect(visible(view.action("retry"))).toBe(false);
+    expect(visible(view.action("open-recovery"))).toBe(false);
+    expect(view.text()).not.toContain("Private re-admission code");
+    view.bridge.joinTest.mockResolvedValueOnce(state("active", 3));
+    view.input().value = "123456789ABD";
+    view.form().fire("submit");
+    await settle();
+    expect(view.bridge.joinTest.mock.calls).toEqual([
+      [{ code: "123456789ABC" }],
+      [{ code: "123456789ABD" }],
+    ]);
+    expect(view.bridge.beginTargetedReadmission).not.toHaveBeenCalled();
+    expect(view.bridge.retryStudentSession).not.toHaveBeenCalled();
+    expect(view.heading()).toBe("Session confirmed");
+  });
+
+  it("keeps exact retry visible after an uncertain attempt is denied without exposing fresh public entry", async () => {
+    const view = setup(state("unavailable", 2, { pendingOperation: "join" }));
+    await settle();
+    expect(view.text()).toContain("Retry that attempt or ask your teacher");
+    expect(visible(view.form())).toBe(false);
+    expect(visible(view.action("retry"))).toBe(true);
+    expect(visible(view.action("open-recovery"))).toBe(true);
+    view.bridge.retryStudentSession.mockResolvedValueOnce(
+      state("unconfirmed", 3, { pendingOperation: "join" }),
+    );
+    view.action("retry").fire("click");
+    await settle();
+    expect(view.bridge.retryStudentSession).toHaveBeenCalledTimes(1);
+    expect(view.bridge.joinTest).not.toHaveBeenCalled();
+    expect(view.bridge.beginTargetedReadmission).not.toHaveBeenCalled();
+    expect(view.heading()).toBe("Session result unconfirmed");
+  });
+
   it("does not let an older mutation result overwrite a newer unconfirmed projection", async () => {
     const view = setup();
     await settle();
@@ -836,6 +882,64 @@ describe("Student desktop session view", () => {
 });
 
 describe("Student desktop protection presentation", () => {
+  it.each(["unavailable", "unconfirmed"] as const)(
+    "idle protection guidance preserves the saved %s admission instead of suggesting a new join",
+    async (phase) => {
+      const view = setup(state(phase, 3, { pendingOperation: "join" }));
+      await settle();
+      expect(view.text()).toContain(
+        "Retry or recover your saved session admission, then choose Start assessment",
+      );
+      expect(view.text()).not.toContain(
+        "Join a Test, then choose Start assessment",
+      );
+      expect(visible(view.form())).toBe(false);
+      expect(visible(view.action("retry"))).toBe(true);
+      expect(view.action("start-assessment").disabled).toBe(true);
+      expect(view.bridge.joinTest).not.toHaveBeenCalled();
+      expect(view.bridge.startAssessment).not.toHaveBeenCalled();
+    },
+  );
+
+  it("idle protection guidance joins from entry and checks protection directly after admission", async () => {
+    const view = setup(state("entry", 1));
+    await settle();
+    expect(view.text()).toContain("Join a Test, then choose Start assessment");
+    expect(view.action("start-assessment").disabled).toBe(true);
+    view.publish(state("active", 2));
+    expect(view.text()).toContain(
+      "The calculator remains unavailable. Choose Start assessment to check protection.",
+    );
+    expect(view.text()).not.toContain(
+      "Join a Test, then choose Start assessment",
+    );
+    expect(view.action("start-assessment").disabled).toBe(false);
+    expect(view.bridge.startAssessment).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "recovery_required",
+      "The previous assessment’s end could not be confirmed",
+    ],
+    ["failed", "The attempt did not establish confirmed protection"],
+  ] as const)(
+    "%s protection guidance keeps native recovery ahead of uncertain admission guidance",
+    async (phase, copy) => {
+      const view = setup({
+        ...nativeState(phase, 3),
+        admission: state("unconfirmed", 3, { pendingOperation: "join" })
+          .admission,
+      });
+      await settle();
+      expect(view.text()).toContain(copy);
+      expect(view.text()).not.toContain(
+        "Retry or recover your saved session admission",
+      );
+      expect(view.action("start-assessment").disabled).toBe(true);
+    },
+  );
+
   it("adds no renderer timer or polling authority to passive protection publication", async () => {
     const interval = vi.spyOn(globalThis, "setInterval");
     const timeout = vi.spyOn(globalThis, "setTimeout");

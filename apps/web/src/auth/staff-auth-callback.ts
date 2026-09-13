@@ -39,7 +39,8 @@ export type StaffAuthCallbackReceipt =
       readonly status: "accepted";
     }
   | {
-      readonly code: "recovery_verification_started";
+      readonly code:
+        "email_verification_started" | "recovery_verification_started";
       readonly status: "redirecting";
     }
   | {
@@ -94,25 +95,81 @@ export function consumeStaffInvitationCallback(
   );
 }
 
-/**
- * Scrubs one SDK-owned email-verification PKCE callback before handing its
- * transient code and flow slot to Supabase Auth. The SDK owns and atomically
- * consumes the verifier stored for the exact flow ID.
- */
-export function consumeStaffEmailVerificationCallback(
+export type PreparedStaffEmailVerificationCallback =
+  | StaffAuthCallbackRejectedReceipt
+  | {
+      readonly confirm: () => Promise<StaffAuthCallbackReceipt>;
+      readonly status: "confirmation_required";
+    }
+  | {
+      readonly exchange: () => Promise<StaffAuthCallbackReceipt>;
+      readonly status: "exchange_required";
+    };
+
+/** Scrubs and captures either email hop without navigating or exchanging. */
+export function prepareStaffEmailVerificationCallback(
   callbackUrl: string,
   options: {
+    readonly backendOrigin?: string;
     readonly exchange: (input: {
       readonly authorizationCode: string;
       readonly flowId: string;
     }) => Promise<void>;
     readonly history: StaffAuthCallbackHistory;
+    readonly navigate?: (url: string) => void;
     readonly route: StaffAuthCallbackRoute;
   },
-): Promise<StaffAuthCallbackReceipt> {
-  const route = scrubAndParseRoute(callbackUrl, options);
-  if (route.status === "rejected") return Promise.resolve(route);
+): PreparedStaffEmailVerificationCallback {
+  const route = scrubAndParseRoute(callbackUrl, options, true);
+  if (route.status === "rejected") return route;
   const { url } = route;
+  const appOrigin = url.origin;
+  const flowId = url.searchParams.get("sb_flow_id");
+  if (url.hash !== "") {
+    const tokenHash = new URLSearchParams(url.hash.slice(1)).get("token_hash");
+    const backendOrigin =
+      options.backendOrigin === undefined
+        ? null
+        : parseTrustedOrigin(options.backendOrigin);
+    if (
+      backendOrigin === null ||
+      options.navigate === undefined ||
+      flowId === null ||
+      !/^[A-Za-z0-9_-]{8,64}$/u.test(flowId) ||
+      tokenHash === null ||
+      !isRecoveryVerificationToken(tokenHash) ||
+      url.search !== `?auth=email-verification&sb_flow_id=${flowId}` ||
+      url.hash !== `#token_hash=${tokenHash}&type=signup`
+    ) {
+      return rejected("malformed_callback");
+    }
+    let captured:
+      { readonly tokenHash: string; readonly flowId: string } | undefined = {
+      tokenHash,
+      flowId,
+    };
+    return {
+      status: "confirmation_required",
+      async confirm() {
+        const current = captured;
+        captured = undefined;
+        if (current === undefined) return rejected("callback_already_used");
+        const verification = new URL("/auth/v1/verify", backendOrigin);
+        verification.searchParams.append("token", current.tokenHash);
+        verification.searchParams.append("type", "signup");
+        verification.searchParams.append(
+          "redirect_to",
+          `${appOrigin}/?auth=email-verification&sb_flow_id=${current.flowId}`,
+        );
+        try {
+          options.navigate!(verification.href);
+        } catch {
+          return rejected("token_consumption_unavailable");
+        }
+        return { code: "email_verification_started", status: "redirecting" };
+      },
+    };
+  }
   const entries = [...url.searchParams.entries()];
   if (
     entries.length !== 3 ||
@@ -122,12 +179,14 @@ export function consumeStaffEmailVerificationCallback(
     entries.some(
       ([key]) => key !== "auth" && key !== "code" && key !== "sb_flow_id",
     ) ||
-    url.searchParams.get("auth") !== "email-verification"
+    url.searchParams.get("auth") !== "email-verification" ||
+    callbackUrl.includes("#") ||
+    !url.search.slice(1).split("&").includes("auth=email-verification") ||
+    !url.search.slice(1).split("&").includes(`sb_flow_id=${flowId}`)
   ) {
-    return Promise.resolve(rejected("malformed_callback"));
+    return rejected("malformed_callback");
   }
   const authorizationCode = url.searchParams.get("code");
-  const flowId = url.searchParams.get("sb_flow_id");
   if (
     authorizationCode === null ||
     authorizationCode.length === 0 ||
@@ -137,9 +196,40 @@ export function consumeStaffEmailVerificationCallback(
     flowId === null ||
     !/^[A-Za-z0-9_-]{8,64}$/u.test(flowId)
   ) {
-    return Promise.resolve(rejected("malformed_callback"));
+    return rejected("malformed_callback");
   }
-  return consumeEmailVerificationCode(authorizationCode, flowId, options);
+  let captured:
+    | { readonly authorizationCode: string; readonly flowId: string }
+    | undefined = {
+    authorizationCode,
+    flowId,
+  };
+  return {
+    status: "exchange_required",
+    async exchange() {
+      const current = captured;
+      captured = undefined;
+      return current === undefined
+        ? rejected("callback_already_used")
+        : consumeEmailVerificationCode(
+            current.authorizationCode,
+            current.flowId,
+            options,
+          );
+    },
+  };
+}
+
+/** Called only after the application's explicit confirmation; the SDK owns PKCE. */
+export function consumeStaffEmailVerificationCallback(
+  callbackUrl: string,
+  options: Parameters<typeof prepareStaffEmailVerificationCallback>[1],
+): Promise<StaffAuthCallbackReceipt> {
+  const prepared = prepareStaffEmailVerificationCallback(callbackUrl, options);
+  if (prepared.status === "rejected") return Promise.resolve(prepared);
+  return prepared.status === "confirmation_required"
+    ? prepared.confirm()
+    : prepared.exchange();
 }
 
 /**

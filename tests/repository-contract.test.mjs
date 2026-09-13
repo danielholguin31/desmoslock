@@ -47,6 +47,22 @@ function sha256(contents) {
   return crypto.createHash("sha256").update(contents).digest("hex");
 }
 
+test("signup confirmation mail uses the versioned inert application fragment", () => {
+  const config = readText("supabase/config.toml");
+  const template = readText("supabase/templates/confirmation-v1.html");
+  assert.match(
+    config,
+    /\[auth\.email\.template\.confirmation\]\s+subject = "Confirm your DesmosLock email"\s+content_path = "\.\/supabase\/templates\/confirmation-v1\.html"/u,
+  );
+  assert.deepEqual(
+    [...template.matchAll(/href="([^"]*)"/gu)].map((match) => match[1]),
+    ["{{ .RedirectTo }}#token_hash={{ .TokenHash }}&amp;type=signup"],
+  );
+  assert.equal(template.includes(".ConfirmationURL"), false);
+  assert.equal(template.includes("/auth/v1/verify"), false);
+  assert.match(template, /<meta name="referrer" content="no-referrer"/u);
+});
+
 function git(...arguments_) {
   return execFileSync("git", arguments_, {
     cwd: repositoryRoot,
@@ -1329,6 +1345,7 @@ test("source-reconciliation ledger exactly covers both evidence inputs", () => {
       "supabase/functions",
       "supabase/migrations",
       "supabase/seed.sql",
+      "supabase/templates",
       "supabase/tests/database",
     ],
     operations: ["scripts/synthetic-backup"],
@@ -1345,6 +1362,8 @@ test("source-reconciliation ledger exactly covers both evidence inputs", () => {
     "supabase/functions/account-recovery/index.ts",
     "supabase/functions/health/index.ts",
     "supabase/functions/staff-invitations/index.ts",
+    "supabase/templates/recovery-v1.html",
+    "supabase/templates/confirmation-v1.html",
   ]) {
     assert.equal(
       ledger.canonicalSource.canonicalPaths.product.some(

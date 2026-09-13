@@ -1,4 +1,4 @@
-import { createPublicKey, verify } from "node:crypto";
+import { createHash, createPublicKey, verify } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -30,6 +30,21 @@ const unavailable = {
   code: "STUDENT_SESSION_UNAVAILABLE",
 };
 
+function syntheticStoredRecord(value: object): Buffer {
+  const payload: Record<string, unknown> = { ...value };
+  delete payload.integritySha256;
+  const stored =
+    payload.version === 4
+      ? {
+          ...payload,
+          integritySha256: createHash("sha256")
+            .update(JSON.stringify(payload), "utf8")
+            .digest("hex"),
+        }
+      : payload;
+  return Buffer.from(`synthetic:${JSON.stringify(stored)}`);
+}
+
 function fixtureServer() {
   return {
     joins: new Map<string, Record<string, unknown>>(),
@@ -54,6 +69,8 @@ function harness(
   let failAfterPublication = false;
   let droppedJoin = false;
   let denied = false;
+  let denialRoute: string | null = null;
+  let joinReply: (() => Response) | null = null;
   let block: Promise<void> | null = null;
   let blockedFetch: Promise<Response> | null = null;
   let quarantineFailsOnce = false;
@@ -133,7 +150,7 @@ function harness(
     if (blockedFetch !== null) return blockedFetch;
     await beforeResponse?.(route);
     elapsed += fetchLatency;
-    if (denied)
+    if (denied && (denialRoute === null || denialRoute === route))
       return Response.json(
         { status: "denied", code: "STUDENT_SESSION_DENIED" },
         { status: 403 },
@@ -145,6 +162,7 @@ function harness(
         expiresAtMs: serverNowMs + 15_000,
       });
     if (route === "join") {
+      if (joinReply !== null) return joinReply();
       const pending = durable.pending;
       if (pending?.kind !== "join")
         throw new Error("pending join must precede HTTP");
@@ -377,11 +395,15 @@ function harness(
     dropJoinResponse() {
       droppedJoin = true;
     },
-    deny() {
+    deny(route?: string) {
       denied = true;
+      denialRoute = route ?? null;
     },
     allow() {
       denied = false;
+    },
+    replyToJoin(reply: () => Response) {
+      joinReply = reply;
     },
     evidenceResult(
       signer: string,
@@ -1563,17 +1585,15 @@ describe("single-writer evidence delivery", () => {
     await completeEvidenceAttempt(f);
     const { evidence, ...prior } = f.record();
     expect(evidence.origins).toHaveLength(1);
-    const bytes = Buffer.from(
-      `synthetic:${JSON.stringify({
-        ...prior,
-        version: 2,
-        device: f.options.crypto.createEnrollment(),
-        current: null,
-        pending: null,
-        terminal: true,
-        lastReservedCounter: 0,
-      })}`,
-    );
+    const bytes = syntheticStoredRecord({
+      ...prior,
+      version: 2,
+      device: f.options.crypto.createEnrollment(),
+      current: null,
+      pending: null,
+      terminal: true,
+      lastReservedCounter: 0,
+    });
     const restored = harness();
     restored.setBytes(bytes);
     await restored.coordinator.initialize();
@@ -2099,7 +2119,7 @@ describe("real desktop crypto/transport coordinator over synthetic private stora
   it("a failed promotion keeps original authority/pending or recovers the published successor without retrying the old join", async () => {
     const f = harness();
     await f.coordinator.initialize();
-    f.failAtWrite(3, true);
+    f.failAtWrite(4, true);
     await f.coordinator.joinInitial(code);
     expect(f.coordinator.readView().phase).toBe("unconfirmed");
     const device = f.record().device;
@@ -2114,11 +2134,226 @@ describe("real desktop crypto/transport coordinator over synthetic private stora
     expect(f.coordinator.readView().phase).toBe("active");
   });
 
-  it("generic denial exposes no invented end/removal/expiry reason and permits only explicit targeted recovery", async () => {
+  it.each(["challenge", "join"])(
+    "a first %s denial permits a corrected public code with the same enrollment and no protection authority",
+    async (route) => {
+      const f = harness();
+      await f.coordinator.initialize();
+      f.deny(route);
+      await f.coordinator.joinInitial(code);
+      const denied = f.record();
+      expect(f.coordinator.readView()).toMatchObject({
+        phase: "entry",
+        session: null,
+        pendingOperation: "join",
+        calculatorEligible: false,
+      });
+      expect(denied.pending).toMatchObject({
+        kind: "join",
+        admissionMode: "initial",
+        outcome: route === "join" ? "denied" : "not_dispatched",
+      });
+      expect(f.server.joins.size).toBe(0);
+      expect(f.coordinator.readProtectionContext().admission).toBeNull();
+      const before = f.requests.length;
+      f.allow();
+      await f.coordinator.joinInitial("0123456789AC");
+      expect(f.requests.slice(before).map((request) => request.route)).toEqual([
+        "challenge",
+        "join",
+      ]);
+      const corrected = f.requests.at(-1)!.durable;
+      expect(corrected.device).toEqual(denied.device);
+      expect(corrected.lastReservedCounter).toBe(0);
+      expect(corrected.nativeProtection).toBeNull();
+      expect(corrected.evidence).toEqual(denied.evidence);
+      expect(corrected.pending).toMatchObject({
+        kind: "join",
+        admissionMode: "initial",
+        joinCode: "0123456789AC",
+        outcome: "uncertain",
+      });
+      if (denied.pending?.kind !== "join" || corrected.pending?.kind !== "join")
+        throw new Error("Expected initial join records");
+      expect(corrected.pending.requestId).not.toBe(denied.pending.requestId);
+      expect(corrected.pending.candidates).not.toEqual(
+        denied.pending.candidates,
+      );
+      expect(f.preserved).toHaveLength(0);
+      expect(f.server.joins.size).toBe(1);
+      expect(f.coordinator.readView().phase).toBe("active");
+      expect(f.coordinator.readProtectionContext().freshAdmission).toBeNull();
+      expect(JSON.stringify(f.coordinator.readView())).not.toMatch(
+        /removed|ended|expired/,
+      );
+    },
+  );
+
+  it("a durably denied initial attempt remains replaceable after restart without replacing its device", async () => {
     const f = harness();
     await f.coordinator.initialize();
-    f.deny();
+    f.deny("join");
     await f.coordinator.joinInitial(code);
+    const denied = f.record();
+    expect(await f.coordinator.dispose()).toBe(true);
+    const restarted = harness(f.server);
+    restarted.setBytes(f.storedBytes()!);
+    await restarted.coordinator.initialize();
+    expect(restarted.coordinator.readView().phase).toBe("entry");
+    expect(restarted.requests).toHaveLength(0);
+    await restarted.coordinator.joinInitial("0123456789AC");
+    expect(restarted.record().device).toEqual(denied.device);
+    expect(restarted.record().current).not.toBeNull();
+    expect(restarted.preserved).toHaveLength(0);
+  });
+
+  it.each([false, true])(
+    "an uncertain pre-egress barrier emits no join and restart respects its possibly published marker: %s",
+    async (published) => {
+      const f = harness();
+      await f.coordinator.initialize();
+      f.failAtWrite(3, published);
+      await f.coordinator.joinInitial(code);
+      expect(f.requests.map((request) => request.route)).toEqual(["challenge"]);
+      expect(f.coordinator.readView().phase).toBe("unconfirmed");
+      const before = f.record();
+      expect(before.pending).toMatchObject({
+        outcome: published ? "uncertain" : "not_dispatched",
+      });
+      await f.coordinator.joinInitial("0123456789AC");
+      expect(f.requests).toHaveLength(1);
+      expect(await f.coordinator.dispose()).toBe(true);
+      const restarted = harness();
+      restarted.setBytes(f.storedBytes()!);
+      await restarted.coordinator.initialize();
+      expect(restarted.coordinator.readView().phase).toBe(
+        published ? "unconfirmed" : "entry",
+      );
+      await restarted.coordinator.joinInitial("0123456789AC");
+      if (published) {
+        expect(restarted.requests).toHaveLength(0);
+        restarted.deny("join");
+        await restarted.coordinator.retryPending();
+        expect(restarted.record().pending).toEqual(before.pending);
+        expect(restarted.coordinator.readView().phase).toBe("unavailable");
+      } else {
+        expect(restarted.record().device).toEqual(before.device);
+        expect(restarted.coordinator.readView().phase).toBe("active");
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "a failed denial publication never enables replacement until durable recovery: %s",
+    async (published) => {
+      const f = harness();
+      await f.coordinator.initialize();
+      f.deny("join");
+      f.beforeResponse(async (route) => {
+        if (route === "join") f.failNextWrite(published);
+      });
+      await f.coordinator.joinInitial(code);
+      expect(f.coordinator.readView().phase).toBe("unconfirmed");
+      expect(f.record().pending).toMatchObject({
+        outcome: published ? "denied" : "uncertain",
+      });
+      await f.coordinator.joinInitial("0123456789AC");
+      expect(f.requests.map((request) => request.route)).toEqual([
+        "challenge",
+        "join",
+      ]);
+      expect(await f.coordinator.dispose()).toBe(true);
+      const restarted = harness();
+      restarted.setBytes(f.storedBytes()!);
+      await restarted.coordinator.initialize();
+      expect(restarted.coordinator.readView().phase).toBe(
+        published ? "entry" : "unconfirmed",
+      );
+      await restarted.coordinator.joinInitial("0123456789AC");
+      expect(restarted.requests).toHaveLength(published ? 2 : 0);
+    },
+  );
+
+  it.each(["challenge", "join"])(
+    "a lost successful join followed by %s denial preserves the original uncertain intent across restart",
+    async (route) => {
+      const f = harness();
+      await f.coordinator.initialize();
+      f.dropJoinResponse();
+      await f.coordinator.joinInitial(code);
+      const pending = f.record();
+      expect(f.server.joins.size).toBe(1);
+      expect(pending.pending).toMatchObject({ outcome: "uncertain" });
+      f.deny(route);
+      await f.coordinator.retryPending();
+      expect(f.coordinator.readView()).toMatchObject({
+        phase: "unavailable",
+        pendingOperation: "join",
+      });
+      const before = f.requests.length;
+      await f.coordinator.joinInitial("0123456789AC");
+      expect(f.requests).toHaveLength(before);
+      expect(f.record().pending).toEqual(pending.pending);
+      expect(f.record().device).toEqual(pending.device);
+      expect(await f.coordinator.dispose()).toBe(true);
+      const restarted = harness(f.server);
+      restarted.setBytes(f.storedBytes()!);
+      await restarted.coordinator.initialize();
+      expect(restarted.coordinator.readView().phase).toBe("unconfirmed");
+      await restarted.coordinator.joinInitial("0123456789AC");
+      expect(restarted.requests).toHaveLength(0);
+      await restarted.coordinator.retryPending();
+      expect(restarted.requests.at(-1)?.durable.pending).toEqual(
+        pending.pending,
+      );
+      expect(restarted.record().device).toEqual(pending.device);
+      expect(restarted.coordinator.readView().phase).toBe("active");
+      expect(f.server.joins.size).toBe(1);
+    },
+  );
+
+  it("a malformed 403 remains uncertain and cannot authorize a corrected initial request", async () => {
+    const f = harness();
+    await f.coordinator.initialize();
+    f.replyToJoin(() =>
+      Response.json(
+        { status: "denied", code: "STUDENT_SESSION_DENIED", extra: true },
+        { status: 403 },
+      ),
+    );
+    await f.coordinator.joinInitial(code);
+    expect(f.coordinator.readView().phase).toBe("unconfirmed");
+    expect(f.record().pending).toMatchObject({ outcome: "uncertain" });
+    await f.coordinator.joinInitial("0123456789AC");
+    expect(f.requests).toHaveLength(2);
+  });
+
+  it("concurrent corrected-code commands retain one enrollment and admit only the first owned intent", async () => {
+    const f = harness();
+    await f.coordinator.initialize();
+    f.deny("join");
+    await f.coordinator.joinInitial(code);
+    const device = f.record().device;
+    f.allow();
+    await Promise.all([
+      f.coordinator.joinInitial("0123456789AC"),
+      f.coordinator.joinInitial("0123456789AD"),
+    ]);
+    expect(f.requests).toHaveLength(4);
+    expect(f.requests.at(-1)?.durable.pending).toMatchObject({
+      joinCode: "0123456789AC",
+    });
+    expect(f.record().device).toEqual(device);
+    expect(f.server.joins.size).toBe(1);
+  });
+
+  it("generic denial of admitted authority retains only explicit targeted recovery and exact retry", async () => {
+    const f = harness();
+    await f.coordinator.initialize();
+    await f.coordinator.joinInitial(code);
+    f.deny();
+    f.advance(15_000);
+    await f.coordinator.refresh();
     expect(f.coordinator.readView().phase).toBe("unavailable");
     const before = f.requests.length;
     await f.coordinator.joinInitial(code);
@@ -2176,6 +2411,113 @@ describe("real desktop crypto/transport coordinator over synthetic private stora
     );
     expect(restarted.storedBytes()).toEqual(original);
     expect(restarted.coordinator.readProtectionContext().admission).toBeNull();
+  });
+
+  it.each(["missing", "generation", "counter", "version"])(
+    "a v4 integrity failure (%s) preserves the original ciphertext and blocks every admission path",
+    async (mutation) => {
+      const f = harness();
+      await f.coordinator.initialize();
+      await f.coordinator.joinInitial(code);
+      const payload = JSON.parse(
+        f.storedBytes()!.toString().slice(10),
+      ) as Record<string, unknown>;
+      if (mutation === "missing") delete payload.integritySha256;
+      if (mutation === "generation")
+        payload.generation = Number(payload.generation) + 1;
+      if (mutation === "counter")
+        payload.lastReservedCounter = Number(payload.lastReservedCounter) + 1;
+      if (mutation === "version") payload.version = 3;
+      const corrupted = Buffer.from(`synthetic:${JSON.stringify(payload)}`);
+      expect(await f.coordinator.dispose()).toBe(true);
+      const restarted = harness();
+      restarted.setBytes(corrupted);
+      await restarted.coordinator.initialize();
+      expect(restarted.coordinator.readView().phase).toBe("recovery_required");
+      await restarted.coordinator.joinInitial("0123456789AC");
+      await restarted.coordinator.retryPending();
+      await restarted.coordinator.beginTargetedReadmission(
+        code,
+        restarted.coordinator.readView().revision,
+      );
+      await restarted.coordinator.refresh();
+      expect(restarted.requests).toHaveLength(0);
+      expect(restarted.preserved).toHaveLength(0);
+      expect(restarted.events.some((event) => event.startsWith("write:"))).toBe(
+        false,
+      );
+      expect(
+        restarted.coordinator.readProtectionContext().admission,
+      ).toBeNull();
+      expect(restarted.storedBytes()).toEqual(corrupted);
+      expect(await restarted.coordinator.dispose()).toBe(true);
+      expect(restarted.storedBytes()).toEqual(corrupted);
+    },
+  );
+
+  it("a same-process checksum failure after an uncertain write blocks targeted recovery without quarantining bytes", async () => {
+    const f = harness();
+    await f.coordinator.initialize();
+    await f.coordinator.joinInitial(code);
+    f.advance(15_000);
+    f.failNextWrite(true);
+    await f.coordinator.refresh();
+    const payload = JSON.parse(f.storedBytes()!.toString().slice(10)) as Record<
+      string,
+      unknown
+    >;
+    payload.generation = Number(payload.generation) + 1;
+    const corrupted = Buffer.from(`synthetic:${JSON.stringify(payload)}`);
+    f.setBytes(corrupted);
+    await f.coordinator.retryPending();
+    expect(f.coordinator.readView().phase).toBe("recovery_required");
+    const events = [...f.events];
+    const requests = f.requests.length;
+    await f.coordinator.beginTargetedReadmission(
+      code,
+      f.coordinator.readView().revision,
+    );
+    await f.coordinator.joinInitial("0123456789AC");
+    await f.coordinator.retryPending();
+    await f.coordinator.refresh();
+    expect(f.preserved).toHaveLength(0);
+    expect(f.events).toEqual(events);
+    expect(f.requests).toHaveLength(requests);
+    expect(f.storedBytes()).toEqual(corrupted);
+    expect(f.coordinator.readProtectionContext().admission).toBeNull();
+  });
+
+  it("targeted recovery rechecks integrity uncertainty discovered by its own reload before quarantine", async () => {
+    const f = harness();
+    await f.coordinator.initialize();
+    await f.coordinator.joinInitial(code);
+    await f.coordinator.forfeit(f.coordinator.readView().revision);
+    f.failQuarantineOnce();
+    await f.coordinator.beginTargetedReadmission(
+      code,
+      f.coordinator.readView().revision,
+    );
+    const payload = JSON.parse(f.storedBytes()!.toString().slice(10)) as Record<
+      string,
+      unknown
+    >;
+    payload.generation = Number(payload.generation) + 1;
+    const corrupted = Buffer.from(`synthetic:${JSON.stringify(payload)}`);
+    f.setBytes(corrupted);
+    const writes = f.events.filter((event) => event.startsWith("write:"));
+    const requests = f.requests.length;
+    await f.coordinator.beginTargetedReadmission(
+      code,
+      f.coordinator.readView().revision,
+    );
+    expect(f.coordinator.readView().phase).toBe("recovery_required");
+    expect(f.preserved).toHaveLength(0);
+    expect(f.events.filter((event) => event.startsWith("write:"))).toEqual(
+      writes,
+    );
+    expect(f.requests).toHaveLength(requests);
+    expect(f.storedBytes()).toEqual(corrupted);
+    expect(f.coordinator.readProtectionContext().admission).toBeNull();
   });
 
   it("forfeit is revision-reviewed and durable before HTTP; acknowledgment promotes a terminal local record", async () => {
@@ -2315,9 +2657,11 @@ describe("real desktop crypto/transport coordinator over synthetic private stora
     f.failNextWrite(true);
     await f.coordinator.refresh();
     f.setBytes(
-      Buffer.from(
-        `synthetic:${JSON.stringify({ ...previous, generation: previous.generation + 4, lastReservedCounter: 7 })}`,
-      ),
+      syntheticStoredRecord({
+        ...previous,
+        generation: previous.generation + 4,
+        lastReservedCounter: 7,
+      }),
     );
     await f.coordinator.retryPending();
     expect(f.coordinator.readView().phase).toBe("recovery_required");
