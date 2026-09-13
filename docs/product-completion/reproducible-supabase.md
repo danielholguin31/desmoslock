@@ -3,12 +3,12 @@
 ## Scope and safety boundary
 
 This is the generation-4 internal-release backend for local development and
-approved synthetic staging. Its twelve versioned migrations include the staff
+approved synthetic staging. Its thirteen versioned migrations include the staff
 authentication lifecycle, Membership administration, School display-name settings,
 the draft/open/ended Test workspace, and the accountless
 [StudentSession admission source contract](student-session-admission.md), plus
 authenticated historical native-protection evidence and its shared device proof counter.
-This twelve-migration source checkpoint supplies no new provider or SQL receipt. Native
+This thirteen-migration source checkpoint supplies no new provider or SQL receipt. Native
 assessment protection and protected calculator eligibility remain separate gates.
 
 Generation 4 preserves the synthetic fixture across these follow-on migrations.
@@ -66,6 +66,7 @@ health function, and operator modules in this repository are the authority.
 - `supabase/migrations/20260908000200_test_workspace.sql`
 - `supabase/migrations/20260908000300_student_session_admission.sql`
 - `supabase/migrations/20260908000400_student_protection_evidence.sql`
+- `supabase/migrations/20260908000500_student_preflight_evidence.sql`
 - `supabase/seed.sql`
 - `supabase/config.toml`
 - `supabase/functions/deno.json`
@@ -91,8 +92,8 @@ health function, and operator modules in this repository are the authority.
 The fixture contract is generation `4`, version `internal-baseline-v2`, with
 SHA-256
 `f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201`.
-The selected twelve-file candidate has normalized SHA-256
-`80c2720ff352c721298e5814715374bf9e2a9c1152bbf2d2761ad781265f8701`.
+The selected thirteen-file candidate has normalized SHA-256
+`2ef021e3db72d5d2ef2602d1288d24b8a0fa20805a839aa96e49d778ff3ca49b`.
 The published generation-3 migration retains its contemporaneous digest
 `06f171a1ac02819e947bbcc92ba8040eaf55fa63b3183a805f4bc3254897dc49`;
 the original generation-4 migration likewise retains
@@ -125,12 +126,16 @@ The StudentSession admission migration retains its eleven-file digest
 `aa32ed754c87e7987199dbd6c5f685ae65236ba3f94921157fc6cb07ce67b308`
 and raw SHA-256
 `448d7697885eae07f04cc3b89531b7b3711e71fa67d56d80ac891df63458fb06`.
-Only the native-protection evidence migration records the current aggregate.
-Its raw SHA-256 is
+The native-protection evidence migration retains its twelve-file digest
+`80c2720ff352c721298e5814715374bf9e2a9c1152bbf2d2761ad781265f8701` and raw SHA-256
 `1543ee8cf236c4c43aa9331ec228eac9f99c68d4460d3023f68ce3a196fa2633`.
+Only the additive preflight-evidence migration records the current aggregate.
+Its raw SHA-256 is
+`62ab37ff1ba85f475a64994645cfe9aaf17617e2f418400cd94d2161fc442d36`. It permits a finite failure-first report followed only by
+owned cleanup, without adding native engagement, admission, or release authority.
 The repository contract pins each attested migration's raw SHA-256 and literal
-independently, then zeroes only those ten delimited self-references when deriving
-the twelve-file aggregate. The follow-on migration updates the existing singleton
+independently, then zeroes only those eleven delimited self-references when deriving
+the thirteen-file aggregate. The follow-on migration updates the existing singleton
 attestation without changing schema generation `4` or the seven-table fixture;
 the upgrade path does not depend on rewriting or replaying historical migrations.
 The seed takes a transaction advisory lock, refuses altered or partial targets,
@@ -466,7 +471,7 @@ restored-target staff suite and 599 fresh SQL assertions on
 then merged as [`d8fadca`](https://github.com/danielholguin31/desmoslock/commit/d8fadcafe8aa5fbc7ef6ca6717d61899677b49fc).
 The ten-migration Test extension was runtime-pending at the inherited checkpoint;
 that historical status and the inherited eleven-migration StudentSession source
-checkpoint are not evidence for the current twelve-migration native-evidence
+checkpoint are not evidence for the current thirteen-migration native-evidence
 candidate. The current candidate requires its own exact-commit
 roundtrip and complete staff suite, including StudentSession and evidence acceptance, without
 reset/reseed. Source, restored-target and post-marker-retirement checks now

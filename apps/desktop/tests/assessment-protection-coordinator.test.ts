@@ -1,3 +1,8 @@
+import { createHash, createPublicKey, verify } from "node:crypto";
+import {
+  encodeStudentEvidenceProof,
+  parseStudentEvidenceRequest,
+} from "@desmoslock/contracts";
 import type {
   StudentSessionScope,
   StudentSessionViewState,
@@ -28,6 +33,7 @@ import type {
 import type {
   FreshAdmissionResult,
   FreshStudentAdmission,
+  PreflightReportReceipt,
   StudentAdmissionObservation,
   StudentAdmissionSnapshot,
   StudentSessionCoordinator,
@@ -74,6 +80,7 @@ function fakeStudent(events: string[], now: () => number) {
   let active = true;
   let observationSequence = 0;
   let receipt: FreshStudentAdmission | null = null;
+  let reportReceipt: PreflightReportReceipt | null = null;
   let protection: StoredNativeProtection | null = null;
   let delivery: "none" | "pending" | "acknowledged" | "blocked" = "none";
   let readGate: Promise<void> | null = null;
@@ -153,7 +160,8 @@ function fakeStudent(events: string[], now: () => number) {
           ? "engaging"
           : command.kind === "locked"
             ? "locked"
-            : command.kind === "disposed_without_terminal_observation"
+            : command.kind === "disposed_without_terminal_observation" ||
+                command.kind === "preflight_failure"
               ? "failed"
               : command.kind === "failure"
                 ? "recovery_required"
@@ -169,19 +177,23 @@ function fakeStudent(events: string[], now: () => number) {
       const nativeDisposition =
         command.kind === "disposed_without_terminal_observation"
           ? "disposed_without_terminal_observation"
-          : command.kind === "native_terminal"
-            ? command.event.type === "did_end"
-              ? "ended"
-              : "failed_to_begin"
-            : command.kind === "began" || command.kind === "locked"
-              ? "active"
-              : (previous?.nativeDisposition ?? "pending");
+          : command.kind === "preflight_failure"
+            ? "not_started"
+            : command.kind === "native_terminal"
+              ? command.event.type === "did_end"
+                ? "ended"
+                : "failed_to_begin"
+              : command.kind === "began" || command.kind === "locked"
+                ? "active"
+                : (previous?.nativeDisposition ?? "pending");
       const slot =
         command.kind === "ending"
           ? "end_requested"
           : command.kind === "disposed_without_terminal_observation"
             ? "cleanup"
-            : command.kind;
+            : command.kind === "preflight_failure"
+              ? "failure"
+              : command.kind;
       const fact: ProtectionFact = {
         sequence: facts.length + 1,
         eventId:
@@ -197,7 +209,10 @@ function fakeStudent(events: string[], now: () => number) {
             ? command.event.type
             : null,
         nativeSequence,
-        categories: "categories" in command ? command.categories : confirmed,
+        categories:
+          "categories" in command
+            ? command.categories
+            : (facts.at(-1)?.categories ?? confirmed),
         cause: "cause" in command ? command.cause : "none",
       };
       const successor: StoredNativeProtection = {
@@ -212,9 +227,11 @@ function fakeStudent(events: string[], now: () => number) {
           cleanup:
             command.kind === "disposed_without_terminal_observation"
               ? "complete"
-              : command.kind === "cleanup"
-                ? command.outcome
-                : (previous?.cleanup ?? "not_requested"),
+              : command.kind === "preflight_failure"
+                ? "pending"
+                : command.kind === "cleanup"
+                  ? command.outcome
+                  : (previous?.cleanup ?? "not_requested"),
           abandonment:
             command.kind === "abandoned"
               ? "requested"
@@ -224,6 +241,8 @@ function fakeStudent(events: string[], now: () => number) {
         facts: [...facts, fact],
       };
       protection = Object.freeze(successor);
+      if (command.kind === "engaging" || command.kind === "preflight_failure")
+        reportReceipt = null;
       events.push("commit:" + command.kind + ":durable");
       return {
         status: "committed" as const,
@@ -256,6 +275,18 @@ function fakeStudent(events: string[], now: () => number) {
       delivery,
     }),
     readFreshAdmission,
+    reservePreflightReport: vi.fn(
+      (authority: FreshStudentAdmission, attemptId: string) => {
+        if (authority !== receipt || !active || reportReceipt !== null)
+          return null;
+        reportReceipt = Object.freeze({ attemptId });
+        events.push("report.reserve");
+        return reportReceipt;
+      },
+    ),
+    releasePreflightReport: vi.fn((value: PreflightReportReceipt) => {
+      if (value === reportReceipt) reportReceipt = null;
+    }),
     isCurrentAdmission: (value: FreshStudentAdmission) =>
       active &&
       value === receipt &&
@@ -820,6 +851,297 @@ describe("assessment protection coordinator authority and containment", () => {
     },
   );
 
+  it.each([
+    "application-blocked",
+    "application-unavailable",
+    "application-throw",
+    "observer-throw",
+    "shortcut-denied",
+    "shortcut-throw",
+    "shortcut-check-throw",
+  ] as const)(
+    "durably reports %s before native invocation and appends only real disposal cleanup",
+    async (failure) => {
+      const h = harness();
+      if (failure === "application-blocked")
+        h.setApplication({
+          status: "blocked",
+          reason: "prohibited_application",
+        });
+      if (failure === "application-unavailable")
+        h.setApplication({
+          status: "unavailable",
+          reason: "observation_failed",
+        });
+      if (failure === "application-throw")
+        h.native.readApplicationStatus.mockImplementationOnce(() => {
+          throw new Error("synthetic scan fault");
+        });
+      if (failure === "observer-throw")
+        vi.spyOn(h.native, "observeApplicationStatus").mockImplementationOnce(
+          () => {
+            throw new Error("synthetic observer fault");
+          },
+        );
+      if (failure === "shortcut-denied") h.setRegisterAllowed(false);
+      if (failure === "shortcut-throw")
+        h.shortcuts.register.mockImplementationOnce(() => {
+          throw new Error("synthetic shortcut fault");
+        });
+      if (failure === "shortcut-check-throw")
+        h.shortcuts.isRegistered.mockImplementationOnce(() => {
+          throw new Error("synthetic shortcut observation fault");
+        });
+      await h.coordinator.start(h.coordinator.readView().revision, current);
+      await settle();
+      expect(h.fake.commands.map((command) => command.kind)).toEqual([
+        "preflight_failure",
+        "disposed_without_terminal_observation",
+      ]);
+      const journal = h.student.readProtectionContext().protection;
+      expect(journal?.facts.map((fact) => fact.slot)).toEqual([
+        "failure",
+        "cleanup",
+      ]);
+      expect(
+        journal?.facts.every(
+          (fact) =>
+            fact.nativeEvent === null &&
+            fact.nativeSequence === null &&
+            fact.phase === "failed" &&
+            fact.categories.aac.status === "pending",
+        ),
+      ).toBe(true);
+      expect(journal?.facts[0]?.cause).toBe(
+        failure.startsWith("shortcut")
+          ? "shortcut_unavailable"
+          : "application_policy",
+      );
+      expect(h.native.begin).not.toHaveBeenCalled();
+      expect(h.native.requestEnd).not.toHaveBeenCalled();
+      expect(h.surface.attach).not.toHaveBeenCalled();
+      expect(h.native.disposeAfterEnd).toHaveBeenCalledOnce();
+      expect(h.coordinator.readView().protection).toMatchObject({
+        phase: "failed",
+        cleanup: "complete",
+        nativeEndObserved: false,
+        evidence: "queued",
+      });
+      expect(h.events.indexOf("commit:preflight_failure:durable")).toBeLessThan(
+        h.events.indexOf("commit:disposed_without_terminal_observation:start"),
+      );
+      expect(parseDesktopStudentView(h.coordinator.readView())).not.toBeNull();
+    },
+  );
+
+  it("records the first synchronous application observation before publication or later invalidation", async () => {
+    const h = harness();
+    vi.spyOn(h.native, "observeApplicationStatus").mockImplementationOnce(
+      (listener) => {
+        listener({ status: "blocked", reason: "prohibited_application" });
+        expect(h.fake.commands.map((command) => command.kind)).toEqual([
+          "preflight_failure",
+        ]);
+        h.fake.invalidate();
+        return () => undefined;
+      },
+    );
+    await h.coordinator.start(h.coordinator.readView().revision, current);
+    await settle();
+    expect(h.fake.commands.map((command) => command.kind)).toEqual([
+      "preflight_failure",
+      "disposed_without_terminal_observation",
+    ]);
+    expect(h.fake.commands[0]).toMatchObject({
+      cause: "application_policy",
+      categories: {
+        applications: { status: "failed", code: "prohibited_application" },
+      },
+    });
+    expect(h.native.begin).not.toHaveBeenCalled();
+    expect(h.shortcuts.register).not.toHaveBeenCalled();
+  });
+
+  it("does not overwrite a synchronous failing observation with the older clear snapshot", async () => {
+    const h = harness();
+    h.native.readApplicationStatus.mockImplementationOnce(() => {
+      h.setApplication({ status: "blocked", reason: "prohibited_application" });
+      return { status: "clear", reason: "policy_clear" };
+    });
+    await h.coordinator.start(h.coordinator.readView().revision, current);
+    await settle();
+    expect(h.coordinator.readView().protection.categories.applications).toEqual(
+      { status: "failed", code: "prohibited_application" },
+    );
+    expect(h.fake.commands.map((command) => command.kind)).toEqual([
+      "preflight_failure",
+      "disposed_without_terminal_observation",
+    ]);
+    expect(h.shortcuts.register).not.toHaveBeenCalled();
+    expect(h.native.begin).not.toHaveBeenCalled();
+  });
+
+  it("retains a held first failure until durable acknowledgment and actual disposal; never duplicates it", async () => {
+    const h = harness();
+    const write = deferred();
+    h.fake.holdCommit("preflight_failure", write.promise);
+    h.setApplication({ status: "blocked", reason: "prohibited_application" });
+    await h.coordinator.start(h.coordinator.readView().revision, current);
+    await settle();
+    expect(h.coordinator.hasRetainedAttempt()).toBe(true);
+    expect(h.fake.commands.map((command) => command.kind)).toEqual([
+      "preflight_failure",
+    ]);
+    h.setApplication({ status: "unavailable", reason: "observation_failed" });
+    h.coordinator.requestLocalEnd("window_lost");
+    write.resolve();
+    await settle();
+    expect(h.fake.commands.map((command) => command.kind)).toEqual([
+      "preflight_failure",
+      "disposed_without_terminal_observation",
+    ]);
+    expect(h.coordinator.hasRetainedAttempt()).toBe(false);
+  });
+
+  it("retains a failed or uncertain first report and never fabricates cleanup completion", async () => {
+    const h = harness();
+    h.fake.denyCommit("preflight_failure");
+    h.setRegisterAllowed(false);
+    await h.coordinator.start(h.coordinator.readView().revision, current);
+    await settle();
+    expect(h.fake.commands.map((command) => command.kind)).toEqual([
+      "preflight_failure",
+    ]);
+    expect(h.coordinator.hasRetainedAttempt()).toBe(true);
+    expect(h.coordinator.readView().protection).toMatchObject({
+      cleanup: "unconfirmed",
+      evidence: "unconfirmed",
+      failure: "shortcut_unavailable",
+    });
+    expect(h.student.releasePreflightReport).not.toHaveBeenCalled();
+    expect(h.native.begin).not.toHaveBeenCalled();
+  });
+
+  it("keeps a failure-only report when native disposal is uncertain, and ignores retired observer callbacks", async () => {
+    const h = harness();
+    let observer: ((value: ApplicationObservation) => void) | null = null;
+    const original = h.native.observeApplicationStatus.bind(h.native);
+    vi.spyOn(h.native, "observeApplicationStatus").mockImplementation(
+      (listener) => {
+        observer = listener;
+        return original(listener);
+      },
+    );
+    h.setRegisterAllowed(false);
+    h.failNativeDisposal();
+    await h.coordinator.start(h.coordinator.readView().revision, current);
+    await settle();
+    expect(h.fake.commands.map((command) => command.kind)).toEqual([
+      "preflight_failure",
+    ]);
+    expect(h.coordinator.readView().protection).toMatchObject({
+      cleanup: "unconfirmed",
+      failure: "shortcut_unavailable",
+      nativeEndObserved: false,
+    });
+    const callback = observer as
+      ((value: ApplicationObservation) => void) | null;
+    callback?.({ status: "blocked", reason: "prohibited_application" });
+    await settle();
+    expect(h.fake.commands).toHaveLength(1);
+    expect(h.fake.commands[0]).toMatchObject({ cause: "shortcut_unavailable" });
+    const journal = h.student.readProtectionContext().protection;
+    if (journal === null) throw new Error("expected failure-only journal");
+    const restored = harness({ protection: journal });
+    expect(restored.coordinator.readView().protection).toMatchObject({
+      phase: "recovery_required",
+      failure: "shortcut_unavailable",
+      cleanup: "unconfirmed",
+      nativeEndObserved: false,
+    });
+    await restored.coordinator.start(
+      restored.coordinator.readView().revision,
+      current,
+    );
+    expect(restored.native.begin).not.toHaveBeenCalled();
+    expect(restored.fake.commands).toHaveLength(0);
+  });
+
+  it("reserves before scanning and does no scan or native invocation when report capacity is denied", async () => {
+    const h = harness();
+    h.fake.student.reservePreflightReport.mockReturnValueOnce(null);
+    await h.coordinator.start(h.coordinator.readView().revision, current);
+    await settle();
+    expect(h.native.readApplicationStatus).not.toHaveBeenCalled();
+    expect(h.shortcuts.register).not.toHaveBeenCalled();
+    expect(h.native.begin).not.toHaveBeenCalled();
+    expect(h.fake.commands).toHaveLength(0);
+  });
+
+  it("retries an uncertain report using exactly the first command rather than later categories or revision", async () => {
+    const h = harness();
+    const original =
+      h.fake.student.commitProtectionTransition.getMockImplementation()!;
+    h.fake.student.commitProtectionTransition.mockImplementationOnce(
+      async () => ({
+        status: "unavailable" as const,
+      }),
+    );
+    h.setRegisterAllowed(false);
+    await h.coordinator.start(h.coordinator.readView().revision, current);
+    await settle();
+    const first = h.fake.student.commitProtectionTransition.mock.calls[0]![0];
+    expect(h.coordinator.hasRetainedAttempt()).toBe(true);
+    h.fake.student.commitProtectionTransition.mockImplementation(original);
+    await h.coordinator.refresh();
+    await settle();
+    expect(h.fake.student.commitProtectionTransition.mock.calls[1]![0]).toBe(
+      first,
+    );
+    expect(h.fake.commands.map((command) => command.kind)).toEqual([
+      "preflight_failure",
+      "disposed_without_terminal_observation",
+    ]);
+    expect(h.coordinator.hasRetainedAttempt()).toBe(false);
+  });
+
+  it("does not turn an unrelated preflight failure or stale Start into a scan report", async () => {
+    const h = harness();
+    await h.coordinator.start(h.coordinator.readView().revision + 1, current);
+    expect(h.student.reservePreflightReport).not.toHaveBeenCalled();
+    h.setNativeAvailable(false);
+    await h.coordinator.start(h.coordinator.readView().revision, current);
+    await settle();
+    expect(h.fake.commands).toHaveLength(0);
+    expect(h.student.releasePreflightReport).toHaveBeenCalledOnce();
+  });
+
+  it("restores the saved failed cause after cleanup without restoring admission or native authority", async () => {
+    const h = harness();
+    h.setRegisterAllowed(false);
+    await h.coordinator.start(h.coordinator.readView().revision, current);
+    await settle();
+    const journal = h.student.readProtectionContext().protection;
+    expect(journal).not.toBeNull();
+    const restored = harness({ protection: journal! });
+    expect(restored.coordinator.readView().protection).toMatchObject({
+      phase: "failed",
+      failure: "shortcut_unavailable",
+      cleanup: "complete",
+      calculatorVisible: false,
+      nativeEndObserved: false,
+      categories: {
+        shortcuts: {
+          status: "unavailable",
+          code: "emergency_shortcut_unavailable",
+        },
+      },
+    });
+    expect(restored.coordinator.hasRetainedAttempt()).toBe(false);
+    expect(restored.native.begin).not.toHaveBeenCalled();
+    expect(restored.fake.commands).toHaveLength(0);
+  });
+
   it("fences an equal-time read started before did_begin and waits for the one newer issued read", async () => {
     const h = harness();
     void engaging(h);
@@ -1292,14 +1614,19 @@ describe("assessment protection coordinator authority and containment", () => {
 // This composition uses the real Student coordinator, durable store, request
 // signer and response decoder. The native record bytes and HTTP responses below
 // are synthetic in-memory boundaries: no platform module or network is invoked.
-function realStudent(options: { readonly latency?: number } = {}) {
+function realStudent(
+  options: { readonly latency?: number; readonly initialBytes?: Buffer } = {},
+) {
   const configuration = {
     environment: "local",
     url: "http://127.0.0.1:43175",
   } as const;
   const crypto = createStudentSessionCrypto(configuration);
   const latency = options.latency ?? 5;
-  let bytes: Buffer | null = null;
+  let bytes: Buffer | null =
+    options.initialBytes === undefined
+      ? null
+      : Buffer.from(options.initialBytes);
   let elapsed = 0;
   let denied = false;
   let heldWrite: {
@@ -1396,6 +1723,66 @@ function realStudent(options: { readonly latency?: number } = {}) {
         allowedIntents: ["state.read", "session.forfeit"],
       });
     }
+    if (route === "evidence") {
+      const request = parseStudentEvidenceRequest(body);
+      if (request === null)
+        throw new Error("invalid synthetic evidence request");
+      const signer = [
+        {
+          device: durable.device,
+          lastReservedCounter: durable.lastReservedCounter,
+        },
+        ...durable.evidence.retiredSigners,
+      ].find((entry) => entry.device.publicKey === request.publicKey);
+      if (signer === undefined)
+        throw new Error("missing durable original signer");
+      expect(request.deviceProof.counter).toBe(signer.lastReservedCounter);
+      expect(
+        durable.evidence.pendingBatches.find(
+          (entry) => entry.batchDigest === request.batchDigest,
+        ),
+      ).toBeDefined();
+      const proof = encodeStudentEvidenceProof({
+        apiOrigin: configuration.url,
+        originalKeyThumbprint: signer.device.keyThumbprint,
+        scope: request.scope,
+        batchDigest: request.batchDigest,
+        counter: request.deviceProof.counter,
+      });
+      if (proof === null) throw new Error("invalid synthetic proof bytes");
+      expect(
+        verify(
+          null,
+          proof,
+          createPublicKey({
+            key: Buffer.concat([
+              Buffer.from("302a300506032b6570032100", "hex"),
+              Buffer.from(request.publicKey, "base64url"),
+            ]),
+            format: "der",
+            type: "spki",
+          }),
+          Buffer.from(request.deviceProof.signature, "base64url"),
+        ),
+      ).toBe(true);
+      const digests = crypto.digestEvidence(signer.device, {
+        scope: request.scope,
+        originBuild: request.originBuild,
+        facts: request.facts,
+      });
+      return Response.json({
+        status: "accepted",
+        code: "STUDENT_EVIDENCE_ACCEPTED",
+        scope: request.scope,
+        batchDigest: request.batchDigest,
+        acceptedProofCounter: request.deviceProof.counter,
+        acknowledged: request.facts.map((fact, index) => ({
+          eventId: fact.eventId,
+          contentDigest: digests.contentDigests[index],
+          receivedAt: "2026-09-13T00:00:00.000000Z",
+        })),
+      });
+    }
     const currentAuthority = durable.current;
     if (currentAuthority === null)
       throw new Error("durable current authority required");
@@ -1466,6 +1853,7 @@ function realStudent(options: { readonly latency?: number } = {}) {
     requests,
     events,
     record: decode,
+    savedBytes: () => (bytes === null ? null : Buffer.from(bytes)),
     now: () => elapsed,
     async initialize() {
       await student.initialize();
@@ -1493,6 +1881,64 @@ function realStudent(options: { readonly latency?: number } = {}) {
 }
 
 describe("real Student and native coordinator composition", () => {
+  it("persists an original-signer failure and real disposal in v4, then reloads and acknowledges it without native authority", async () => {
+    const real = realStudent();
+    await real.initialize();
+    const h = harness({ student: real.student, now: real.now });
+    const original = real.record().device;
+    h.setApplication({ status: "blocked", reason: "prohibited_application" });
+    await h.coordinator.start(h.coordinator.readView().revision, current);
+    await settle();
+    const journal = real.record().nativeProtection;
+    expect(journal?.facts.map((fact) => fact.slot)).toEqual([
+      "failure",
+      "cleanup",
+    ]);
+    expect(real.record().evidence.origins).toMatchObject([
+      {
+        attemptId: attempt,
+        originalKeyThumbprint: original.keyThumbprint,
+        originBuild: { kind: "unverified_build" },
+      },
+    ]);
+    const saved = real.savedBytes();
+    if (saved === null) throw new Error("expected saved preflight evidence");
+    const envelope = JSON.parse(saved.toString().slice(10)) as Record<
+      string,
+      unknown
+    >;
+    expect(envelope.version).toBe(4);
+    const { integritySha256, ...payload } = envelope;
+    expect(integritySha256).toBe(
+      createHash("sha256")
+        .update(JSON.stringify(payload), "utf8")
+        .digest("hex"),
+    );
+    expect(h.native.begin).not.toHaveBeenCalled();
+    expect(h.native.requestEnd).not.toHaveBeenCalled();
+    expect(h.surface.attach).not.toHaveBeenCalled();
+    const restored = realStudent({ initialBytes: saved });
+    await restored.student.initialize();
+    const next = harness({ student: restored.student, now: restored.now });
+    expect(next.coordinator.readView().protection).toMatchObject({
+      phase: "failed",
+      failure: "application_policy",
+      cleanup: "complete",
+      nativeEndObserved: false,
+      calculatorVisible: false,
+    });
+    await restored.student.flushEvidence();
+    expect(
+      restored.requests.filter((request) => request.route === "evidence"),
+    ).toHaveLength(1);
+    expect(restored.student.readProtectionContext().delivery).toBe(
+      "acknowledged",
+    );
+    expect(restored.record().nativeProtection?.facts).toEqual(journal?.facts);
+    expect(next.native.begin).not.toHaveBeenCalled();
+    expect(next.fake.commands).toHaveLength(0);
+  });
+
   it("sustains one lock across three 15-second maintenance cycles with transport and durability latency", async () => {
     const real = realStudent({ latency: 7 });
     await real.initialize();

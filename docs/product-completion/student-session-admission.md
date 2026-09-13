@@ -119,12 +119,22 @@ aggregate remains
 `aa32ed754c87e7987199dbd6c5f685ae65236ba3f94921157fc6cb07ce67b308`.
 Its raw SHA-256 remains
 `448d7697885eae07f04cc3b89531b7b3711e71fa67d56d80ac891df63458fb06`.
-The current twelfth migration is
+The historical twelfth migration is
 `supabase/migrations/20260908000400_student_protection_evidence.sql`, with raw
 SHA-256 `1543ee8cf236c4c43aa9331ec228eac9f99c68d4460d3023f68ce3a196fa2633`
-and current normalized aggregate
+and historical normalized aggregate
 `80c2720ff352c721298e5814715374bf9e2a9c1152bbf2d2761ad781265f8701`.
-All eleven predecessors retain their bytes and historical pins; schema generation
+
+The current thirteenth migration is
+`supabase/migrations/20260908000500_student_preflight_evidence.sql`, with raw
+SHA-256 `62ab37ff1ba85f475a64994645cfe9aaf17617e2f418400cd94d2161fc442d36`.
+The current generation-4 migration-set digest is
+`2ef021e3db72d5d2ef2602d1288d24b8a0fa20805a839aa96e49d778ff3ca49b`.
+It adds only the exact failure-first preflight report prefix to the existing
+historical evidence validator. Existing endpoint, signing domains, proof counters,
+Teacher history and bounded retention remain unchanged. It does not grant admission
+or infer native engagement from a failure report.
+All twelve predecessors retain their bytes and historical pins; schema generation
 `4`, fixture digest and seven-table archive are unchanged. See the
 [exact inventory and normalization](reproducible-supabase.md#versioned-inputs).
 

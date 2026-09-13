@@ -15,7 +15,7 @@ export type BackendProbeTimeoutSignal = () => AbortSignal;
 const INTERNAL_BASELINE_FIXTURE_DIGEST =
   "f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201";
 const INTERNAL_MIGRATION_SET_SHA256 =
-  "80c2720ff352c721298e5814715374bf9e2a9c1152bbf2d2761ad781265f8701";
+  "2ef021e3db72d5d2ef2602d1288d24b8a0fa20805a839aa96e49d778ff3ca49b";
 
 const publicResponseHeaders = {
   "access-control-allow-origin": "*",

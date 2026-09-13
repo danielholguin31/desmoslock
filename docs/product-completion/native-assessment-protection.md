@@ -20,6 +20,23 @@ does not claim to enumerate every daemon or terminate other processes. The
 application observer is installed before its snapshot and remains owned through
 native cleanup. Support inspection alone never confirms AAC engagement.
 
+Before application checks or shortcut registration, the current fresh admission
+reserves one private reporting receipt for this attempt, original scope, signer
+and build. The receipt cannot authorize native begin, a locked commit or calculator
+attachment. A genuine prohibited/unavailable application check or unavailable
+emergency shortcut freezes a first `failure` fact before any writer wait. Its only
+permitted continuation is `cleanup`, after this process's actual owned disposal
+and restoration complete. Both facts have phase `failed`, AAC still pending,
+no native event and no native sequence. No engaging or native-end fact is invented.
+
+The first failure and original origin commit together through the same version-4
+writer and whole-payload checksum. A held write retains the attempt; uncertainty
+keeps the exact report for reconciliation. Later expiry, forfeit or renewal cannot
+relabel it or overwrite the latest counter. Identity replacement waits until the
+original origin is durable. Capacity uses the existing eight-slot reservation and
+32-fact ceiling; failure to reserve blocks checks and native begin without dropping
+older facts. Unrelated or stale callbacks do not create a preflight report.
+
 Main prepares the calculator in a fresh nonpersistent denied-network session,
 loads it while detached and durably records engaging before requesting native
 begin. After an actual `did_begin`, it requires an accepted signed backend read
@@ -92,6 +109,11 @@ An actual end remains distinct from the finite
 for this process's fresh attempt after a successful trusted disposal acknowledgment.
 It preserves the original failure and records no invented native event or end.
 
+A completed failure-first record restores the saved Student cause and categories
+as historical failed status. It does not restore admission or native authority.
+An incomplete failure-first record retains the existing prior-process recovery
+barrier, with the original failed category visible and no automatic reset.
+
 A prior-process unfinished record remains detached recovery with new Start
 disabled. Unreadable or unsupported original records also block targeted recovery
 before quarantine, writes or egress, preserving uncertainty across quit/restart.
@@ -101,7 +123,9 @@ unfinished native attempt retains its cleanup responsibility.
 
 ## Historical report delivery
 
-Engaging captures the original attempt's build identity and device signer. An
+A preflight report reservation or engaging captures the original attempt's build
+identity and device signer. A successful preflight persists that origin with engaging;
+a failed preflight persists it with its first failure. An
 ordinary build without a verified identity records `unverified_build`; imported
 older facts retain `legacy_unknown`. A later uploader never relabels either with
 its own build. Reports remain client statements about historical local events,

@@ -12,6 +12,7 @@ import {
   createStudentSessionStore,
   type NativeStudentRecordHandle,
   type ProtectionFact,
+  type ProtectionTransition,
   type StudentSessionRecord,
 } from "../src/main/student-session-store.js";
 import {
@@ -526,6 +527,691 @@ async function rebindEvidenceDevice(f: ReturnType<typeof harness>) {
 function evidenceRequests(f: ReturnType<typeof harness>) {
   return f.requests.filter((request) => request.route === "evidence");
 }
+
+describe("reserved preflight failure history", () => {
+  it("issues historical receipts only to a current grant and rejects forged receipt objects", async () => {
+    const f = harness();
+    const authority = await admitForProtection(f);
+    const before = f.storedBytes();
+    expect(
+      f.coordinator.reservePreflightReport({ ...authority }, attemptId),
+    ).toBeNull();
+    const receipt = f.coordinator.reservePreflightReport(authority, attemptId);
+    expect(receipt).toEqual({ attemptId });
+    expect(Object.isFrozen(receipt)).toBe(true);
+    expect(f.storedBytes()).toEqual(before);
+    const command = {
+      kind: "preflight_failure",
+      receipt: receipt!,
+      attemptId,
+      expectedProtectionRevision: 0,
+      cause: "application_policy",
+      categories: {
+        ...preflightCategories,
+        applications: { status: "failed", code: "prohibited_application" },
+      },
+    } as const;
+    expect(
+      await f.coordinator.commitProtectionTransition({
+        ...command,
+        receipt: { ...receipt! },
+      }),
+    ).toEqual({ status: "unavailable" });
+    expect(f.storedBytes()).toEqual(before);
+    const other = harness();
+    const otherAuthority = await admitForProtection(other);
+    expect(
+      await f.coordinator.commitProtectionTransition({
+        ...command,
+        receipt: other.coordinator.reservePreflightReport(
+          otherAuthority,
+          attemptId,
+        )!,
+      }),
+    ).toEqual({ status: "unavailable" });
+    expect(await f.coordinator.commitProtectionTransition(command)).toEqual({
+      status: "committed",
+      protectionRevision: 1,
+    });
+    expect(f.record().nativeProtection?.facts).toMatchObject([
+      {
+        attemptId,
+        slot: "failure",
+        phase: "failed",
+        nativeEvent: null,
+        nativeSequence: null,
+        cause: "application_policy",
+        scope: authority.scope,
+      },
+    ]);
+    expect(f.record().evidence.origins).toMatchObject([
+      {
+        attemptId,
+        originalKeyThumbprint: f.record().device.keyThumbprint,
+        originBuild: { kind: "unverified_build" },
+      },
+    ]);
+  });
+
+  it("bounds an unobserved receipt to one live reservation and releases only that issuer identity", async () => {
+    const f = harness();
+    const authority = await admitForProtection(f);
+    const before = f.storedBytes();
+    for (const id of ["invalid", attemptId.replace("4000", "1000")])
+      expect(f.coordinator.reservePreflightReport(authority, id)).toBeNull();
+    const receipt = f.coordinator.reservePreflightReport(authority, attemptId)!;
+    expect(
+      f.coordinator.reservePreflightReport(authority, attemptId),
+    ).toBeNull();
+    f.coordinator.releasePreflightReport({ ...receipt });
+    expect(
+      f.coordinator.reservePreflightReport(authority, attemptId),
+    ).toBeNull();
+    f.coordinator.releasePreflightReport(receipt);
+    const next = f.coordinator.reservePreflightReport(authority, attemptId)!;
+    expect(next).not.toBe(receipt);
+    f.coordinator.releasePreflightReport(next);
+    f.advance(30_000);
+    expect(
+      f.coordinator.reservePreflightReport(authority, attemptId),
+    ).toBeNull();
+    expect(f.storedBytes()).toEqual(before);
+  });
+
+  it.each([
+    ["application_policy", "applications", "failed", "prohibited_application"],
+    [
+      "application_policy",
+      "applications",
+      "unavailable",
+      "application_observation_unavailable",
+    ],
+    [
+      "shortcut_unavailable",
+      "shortcuts",
+      "failed",
+      "emergency_shortcut_unavailable",
+    ],
+    [
+      "shortcut_unavailable",
+      "shortcuts",
+      "unavailable",
+      "emergency_shortcut_unavailable",
+    ],
+  ] as const)(
+    "records only failure then owned cleanup for %s/%s/%s",
+    async (cause, key, status, failureCode) => {
+      const f = harness();
+      const authority = await admitForProtection(f);
+      const receipt = f.coordinator.reservePreflightReport(
+        authority,
+        attemptId,
+      )!;
+      const command = {
+        kind: "preflight_failure",
+        receipt,
+        attemptId,
+        expectedProtectionRevision: 0,
+        cause,
+        categories: {
+          ...preflightCategories,
+          [key]: { status, code: failureCode },
+        },
+      } as const;
+      expect(await f.coordinator.commitProtectionTransition(command)).toEqual({
+        status: "committed",
+        protectionRevision: 1,
+      });
+      const before = f.storedBytes();
+      const invalid: ProtectionTransition[] = [
+        {
+          kind: "began",
+          attemptId,
+          expectedProtectionRevision: 1,
+          event: { type: "did_begin", attemptId, sequence: 1, code: "none" },
+        },
+        {
+          kind: "native_terminal",
+          attemptId,
+          expectedProtectionRevision: 1,
+          event: { type: "did_end", attemptId, sequence: 1, code: "none" },
+        },
+        {
+          kind: "ending",
+          attemptId,
+          expectedProtectionRevision: 1,
+          cause: "application_policy",
+        },
+        {
+          kind: "failure",
+          attemptId,
+          expectedProtectionRevision: 1,
+          cause: "persistence_unavailable",
+        },
+        {
+          kind: "abandoned",
+          attemptId,
+          expectedProtectionRevision: 1,
+          cause: "emergency_abandonment",
+        },
+        {
+          kind: "cleanup",
+          attemptId,
+          expectedProtectionRevision: 1,
+          outcome: "unconfirmed",
+        },
+      ];
+      for (const value of invalid)
+        expect(await f.coordinator.commitProtectionTransition(value)).toEqual({
+          status: "unavailable",
+        });
+      expect(f.storedBytes()).toEqual(before);
+      expect(f.coordinator.isCurrentAdmission(authority)).toBe(true);
+      expect(
+        await f.coordinator.commitProtectionTransition({
+          kind: "disposed_without_terminal_observation",
+          attemptId,
+          expectedProtectionRevision: 1,
+        }),
+      ).toEqual({ status: "committed", protectionRevision: 2 });
+      expect(f.record().nativeProtection?.latestAttempt).toMatchObject({
+        phase: "failed",
+        nativeDisposition: "disposed_without_terminal_observation",
+        nativeSequence: null,
+        cleanup: "complete",
+        abandonment: "none",
+      });
+      expect(
+        f
+          .record()
+          .nativeProtection?.facts.map((fact) => [
+            fact.slot,
+            fact.nativeEvent,
+            fact.nativeSequence,
+            fact.cause,
+          ]),
+      ).toEqual([
+        ["failure", null, null, cause],
+        ["cleanup", null, null, "none"],
+      ]);
+      const completed = f.storedBytes();
+      expect(await f.coordinator.commitProtectionTransition(command)).toEqual({
+        status: "committed",
+        protectionRevision: 2,
+      });
+      expect(f.storedBytes()).toEqual(completed);
+    },
+  );
+
+  it.each(["expiry", "denied_read", "renewal", "forfeit"] as const)(
+    "preserves the latest writer counter and original scope after queued %s",
+    async (scenario) => {
+      const f = harness();
+      const authority = await admitForProtection(f);
+      const receipt = f.coordinator.reservePreflightReport(
+        authority,
+        attemptId,
+      )!;
+      const original = structuredClone(f.record());
+      const hold = deferred();
+      const entered = deferred();
+      f.beforeResponse(async (route) => {
+        if (
+          route ===
+          (scenario === "forfeit"
+            ? "forfeit"
+            : scenario === "renewal"
+              ? "reconnect"
+              : "read")
+        ) {
+          entered.resolve();
+          await hold.promise;
+        }
+      });
+      if (scenario === "renewal") f.advance(241_000);
+      else if (scenario !== "forfeit") f.advance(15_000);
+      const work =
+        scenario === "forfeit"
+          ? f.coordinator.forfeit(f.coordinator.readView().revision)
+          : f.coordinator.refresh();
+      await entered.promise;
+      const categories = {
+        ...preflightCategories,
+        applications: { status: "failed", code: "prohibited_application" },
+      } satisfies ProtectionCategories;
+      const command = {
+        kind: "preflight_failure",
+        receipt,
+        attemptId,
+        expectedProtectionRevision: 0,
+        cause: "application_policy",
+        categories,
+      } as const;
+      const report = f.coordinator.commitProtectionTransition(command);
+      // Neither release nor a changed command may overwrite the first observation.
+      f.coordinator.releasePreflightReport(receipt);
+      Object.assign(categories, {
+        applications: { status: "confirmed", code: "none" },
+      });
+      expect(
+        await f.coordinator.commitProtectionTransition({
+          ...command,
+          categories: {
+            ...preflightCategories,
+            shortcuts: {
+              status: "failed",
+              code: "emergency_shortcut_unavailable",
+            },
+          },
+          cause: "shortcut_unavailable",
+        }),
+      ).toEqual({ status: "unavailable" });
+      if (scenario === "expiry") f.advance(310_000);
+      if (scenario === "denied_read") f.deny("read");
+      expect(f.record().nativeProtection).toBeNull();
+      hold.resolve();
+      await work;
+      expect(await report).toEqual({
+        status: "committed",
+        protectionRevision: 1,
+      });
+      const current = f.record();
+      expect(current.lastReservedCounter).toBeGreaterThan(
+        original.lastReservedCounter,
+      );
+      expect(current.device).toEqual(original.device);
+      expect(current.nativeProtection?.facts[0]).toMatchObject({
+        scope: authority.scope,
+        categories: {
+          applications: { status: "failed", code: "prohibited_application" },
+        },
+      });
+      expect(current.evidence.origins[0]?.originalKeyThumbprint).toBe(
+        original.device.keyThumbprint,
+      );
+      expect(current.pending).toBeNull();
+      if (scenario === "forfeit") {
+        expect(current.current).toBeNull();
+        expect(current.terminal).toBe(true);
+      } else if (scenario === "renewal") {
+        expect(current.current?.sessionRevision).toBe(
+          original.current!.sessionRevision + 1,
+        );
+      } else {
+        expect(f.coordinator.readProtectionContext().freshAdmission).toBeNull();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "reconciles an uncertain first publication (%s) without a second fact, origin, or counter rewind",
+    async (published) => {
+      const f = harness();
+      const authority = await admitForProtection(f);
+      const receipt = f.coordinator.reservePreflightReport(
+        authority,
+        attemptId,
+      )!;
+      const command = {
+        kind: "preflight_failure",
+        receipt,
+        attemptId,
+        expectedProtectionRevision: 0,
+        cause: "shortcut_unavailable",
+        categories: {
+          ...preflightCategories,
+          shortcuts: {
+            status: "unavailable",
+            code: "emergency_shortcut_unavailable",
+          },
+        },
+      } as const;
+      f.failNextWrite(published);
+      expect(await f.coordinator.commitProtectionTransition(command)).toEqual({
+        status: "unavailable",
+      });
+      f.coordinator.releasePreflightReport(receipt);
+      const originalDevice = f.record().device;
+      await f.coordinator.beginTargetedReadmission(
+        code,
+        f.coordinator.readView().revision,
+      );
+      expect(f.record().device).toEqual(originalDevice);
+      expect(f.preserved).toEqual([]);
+      expect(await f.coordinator.commitProtectionTransition(command)).toEqual({
+        status: "committed",
+        protectionRevision: 1,
+      });
+      await f.coordinator.retryPending();
+      const durable = f.storedBytes();
+      const counter = f.record().lastReservedCounter;
+      expect(await f.coordinator.commitProtectionTransition(command)).toEqual({
+        status: "committed",
+        protectionRevision: 1,
+      });
+      expect(f.storedBytes()).toEqual(durable);
+      expect(f.record().lastReservedCounter).toBe(counter);
+      expect(f.record().nativeProtection?.facts).toHaveLength(1);
+      expect(f.record().evidence.origins).toHaveLength(1);
+      expect(
+        await f.coordinator.commitProtectionTransition({
+          ...command,
+          expectedProtectionRevision: 1,
+        }),
+      ).toEqual({ status: "unavailable" });
+    },
+  );
+
+  it("blocks replacement before the first origin and retains that signer after prefix ACK, cleanup, and rebind", async () => {
+    const f = harness();
+    const authority = await admitForProtection(f);
+    const receipt = f.coordinator.reservePreflightReport(authority, attemptId)!;
+    const original = structuredClone(f.record().device);
+    await f.coordinator.forfeit(f.coordinator.readView().revision);
+    await f.coordinator.beginTargetedReadmission(
+      code,
+      f.coordinator.readView().revision,
+    );
+    expect(f.record().device).toEqual(original);
+    expect(f.preserved).toEqual([]);
+    const hold = deferred();
+    f.blockWrite(hold.promise);
+    const command = {
+      kind: "preflight_failure",
+      receipt,
+      attemptId,
+      expectedProtectionRevision: 0,
+      cause: "application_policy",
+      categories: {
+        ...preflightCategories,
+        applications: { status: "failed", code: "prohibited_application" },
+      },
+    } as const;
+    const report = f.coordinator.commitProtectionTransition(command);
+    const rebind = f.coordinator.beginTargetedReadmission(
+      code,
+      f.coordinator.readView().revision,
+    );
+    f.coordinator.releasePreflightReport(receipt);
+    hold.resolve();
+    expect(await report).toEqual({
+      status: "committed",
+      protectionRevision: 1,
+    });
+    await rebind;
+    expect(f.record().device).toEqual(original);
+    await f.coordinator.flushEvidence();
+    const prefix = evidenceRequests(f).at(-1)!;
+    expect(prefix.body.facts).toHaveLength(1);
+    expect(f.record().evidence.acknowledgments).toHaveLength(1);
+    expect(
+      await f.coordinator.commitProtectionTransition({
+        kind: "disposed_without_terminal_observation",
+        attemptId,
+        expectedProtectionRevision: 1,
+      }),
+    ).toEqual({ status: "committed", protectionRevision: 2 });
+    await f.coordinator.beginTargetedReadmission(
+      code,
+      f.coordinator.readView().revision,
+    );
+    expect(f.record().device.keyThumbprint).not.toBe(original.keyThumbprint);
+    expect(
+      f
+        .record()
+        .evidence.retiredSigners.map((signer) => signer.device.keyThumbprint),
+    ).toContain(original.keyThumbprint);
+    f.advance(15_001);
+    await f.coordinator.refresh();
+    await f.coordinator.flushEvidence();
+    const complete = evidenceRequests(f).at(-1)!;
+    expect(complete.body.scope).toEqual(authority.scope);
+    expect(complete.body.facts).toHaveLength(2);
+    expect((complete.body.facts as readonly ProtectionFact[])[0]).toEqual(
+      (prefix.body.facts as readonly ProtectionFact[])[0],
+    );
+    expect(complete.body.originBuild).toEqual(prefix.body.originBuild);
+    expect(f.record().evidence.acknowledgments).toHaveLength(2);
+  });
+
+  it("consumes a normal engaging reservation only after its uncertain origin is reconciled", async () => {
+    const f = harness();
+    const authority = await admitForProtection(f);
+    const receipt = f.coordinator.reservePreflightReport(authority, attemptId)!;
+    f.failNextWrite(true);
+    expect(
+      await f.coordinator.commitProtectionTransition({
+        kind: "engaging",
+        authority,
+        attemptId,
+        expectedProtectionRevision: 0,
+        categories: preflightCategories,
+      }),
+    ).toEqual({ status: "unavailable" });
+    f.coordinator.releasePreflightReport(receipt);
+    await f.coordinator.retryPending();
+    expect(
+      await f.coordinator.commitProtectionTransition({
+        kind: "disposed_without_terminal_observation",
+        attemptId,
+        expectedProtectionRevision: 1,
+      }),
+    ).toEqual({ status: "committed", protectionRevision: 2 });
+    const nextAuthority = await f.coordinator.readFreshAdmission(
+      f.coordinator.readProtectionContext().admission!,
+    );
+    expect(nextAuthority.status).toBe("fresh");
+    if (nextAuthority.status !== "fresh")
+      throw new Error("Missing fresh admission");
+    expect(
+      f.coordinator.reservePreflightReport(
+        nextAuthority.authority,
+        "60000000-0000-4000-8000-000000000002",
+      ),
+    ).not.toBeNull();
+  });
+
+  it("refuses a prior-process receipt and keeps an unfinished failure uncertain across restart", async () => {
+    const f = harness();
+    const authority = await admitForProtection(f);
+    const receipt = f.coordinator.reservePreflightReport(authority, attemptId)!;
+    const command = {
+      kind: "preflight_failure",
+      receipt,
+      attemptId,
+      expectedProtectionRevision: 0,
+      cause: "application_policy",
+      categories: {
+        ...preflightCategories,
+        applications: { status: "failed", code: "prohibited_application" },
+      },
+    } as const;
+    await f.coordinator.commitProtectionTransition(command);
+    await f.coordinator.dispose();
+    const restarted = createStudentSessionCoordinator(f.options);
+    await restarted.initialize();
+    await restarted.retryPending();
+    expect(await restarted.commitProtectionTransition(command)).toEqual({
+      status: "unavailable",
+    });
+    expect(
+      await restarted.commitProtectionTransition({
+        kind: "disposed_without_terminal_observation",
+        attemptId,
+        expectedProtectionRevision: 1,
+      }),
+    ).toEqual({ status: "unavailable" });
+    const fresh = restarted.readProtectionContext().freshAdmission;
+    if (fresh !== null)
+      expect(
+        restarted.reservePreflightReport(
+          fresh,
+          "60000000-0000-4000-8000-000000000002",
+        ),
+      ).toBeNull();
+    await restarted.forfeit(restarted.readView().revision);
+    await restarted.beginTargetedReadmission(
+      code,
+      restarted.readView().revision,
+    );
+    expect(f.preserved).toEqual([]);
+    expect(f.record().nativeProtection?.facts).toHaveLength(1);
+  });
+
+  it("rejects malformed first observations without consuming an unobserved reservation", async () => {
+    const f = harness();
+    const authority = await admitForProtection(f);
+    const receipt = f.coordinator.reservePreflightReport(authority, attemptId)!;
+    const before = f.storedBytes();
+    for (const categories of [
+      {
+        ...preflightCategories,
+        applications: {
+          status: "failed",
+          code: "application_observation_unavailable",
+        },
+      },
+      {
+        ...preflightCategories,
+        applications: { status: "unavailable", code: "prohibited_application" },
+      },
+      {
+        ...preflightCategories,
+        aac: { status: "confirmed", code: "none" },
+        applications: { status: "failed", code: "prohibited_application" },
+      },
+    ] as const) {
+      expect(
+        await f.coordinator.commitProtectionTransition({
+          kind: "preflight_failure",
+          receipt,
+          attemptId,
+          expectedProtectionRevision: 0,
+          cause: "application_policy",
+          categories,
+        }),
+      ).toEqual({ status: "unavailable" });
+    }
+    f.coordinator.releasePreflightReport(receipt);
+    expect(
+      f.coordinator.reservePreflightReport(authority, attemptId),
+    ).not.toBeNull();
+    expect(f.storedBytes()).toEqual(before);
+  });
+
+  it("releases an unobserved reservation so intentional readmission can replace the identity", async () => {
+    const f = harness();
+    const authority = await admitForProtection(f);
+    const receipt = f.coordinator.reservePreflightReport(authority, attemptId)!;
+    const original = f.record().device.keyThumbprint;
+    await f.coordinator.forfeit(f.coordinator.readView().revision);
+    await f.coordinator.beginTargetedReadmission(
+      code,
+      f.coordinator.readView().revision,
+    );
+    expect(f.record().device.keyThumbprint).toBe(original);
+    f.coordinator.releasePreflightReport(receipt);
+    await f.coordinator.beginTargetedReadmission(
+      code,
+      f.coordinator.readView().revision,
+    );
+    expect(f.record().device.keyThumbprint).not.toBe(original);
+    expect(f.record().nativeProtection).toBeNull();
+    expect(
+      await f.coordinator.commitProtectionTransition({
+        kind: "preflight_failure",
+        receipt,
+        attemptId,
+        expectedProtectionRevision: 0,
+        cause: "shortcut_unavailable",
+        categories: {
+          ...preflightCategories,
+          shortcuts: {
+            status: "failed",
+            code: "emergency_shortcut_unavailable",
+          },
+        },
+      }),
+    ).toEqual({ status: "unavailable" });
+  });
+
+  it("keeps the actual held write owned through shutdown and refuses late receipt publication", async () => {
+    const f = harness();
+    const authority = await admitForProtection(f);
+    const receipt = f.coordinator.reservePreflightReport(authority, attemptId)!;
+    const command = {
+      kind: "preflight_failure",
+      receipt,
+      attemptId,
+      expectedProtectionRevision: 0,
+      cause: "application_policy",
+      categories: {
+        ...preflightCategories,
+        applications: { status: "failed", code: "prohibited_application" },
+      },
+    } as const;
+    const hold = deferred();
+    f.blockWrite(hold.promise);
+    const writes = f.events.filter((event) =>
+      event.startsWith("write:"),
+    ).length;
+    const report = f.coordinator.commitProtectionTransition(command);
+    await vi.waitFor(() =>
+      expect(
+        f.events.filter((event) => event.startsWith("write:")),
+      ).toHaveLength(writes + 1),
+    );
+    expect(await f.coordinator.dispose()).toBe(false);
+    expect(f.events).not.toContain("close");
+    hold.resolve();
+    expect(await report).toEqual({ status: "unavailable" });
+    expect(await f.coordinator.commitProtectionTransition(command)).toEqual({
+      status: "unavailable",
+    });
+    expect(f.events).not.toContain("close");
+  });
+
+  it("reserves eight existing slots and denies the next attempt without writing at capacity", async () => {
+    const f = harness();
+    for (let i = 0; i < 13; i += 1) {
+      const authority = await admitForProtection(f);
+      const id = `60000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`;
+      const receipt = f.coordinator.reservePreflightReport(authority, id)!;
+      expect(receipt).not.toBeNull();
+      expect(
+        await f.coordinator.commitProtectionTransition({
+          kind: "preflight_failure",
+          receipt,
+          attemptId: id,
+          expectedProtectionRevision: i * 2,
+          cause: "shortcut_unavailable",
+          categories: {
+            ...preflightCategories,
+            shortcuts: {
+              status: "failed",
+              code: "emergency_shortcut_unavailable",
+            },
+          },
+        }),
+      ).toEqual({ status: "committed", protectionRevision: i * 2 + 1 });
+      await f.coordinator.commitProtectionTransition({
+        kind: "disposed_without_terminal_observation",
+        attemptId: id,
+        expectedProtectionRevision: i * 2 + 1,
+      });
+    }
+    const authority = await admitForProtection(f);
+    const before = f.storedBytes();
+    expect(f.record().nativeProtection?.facts).toHaveLength(26);
+    expect(
+      f.coordinator.reservePreflightReport(
+        authority,
+        "60000000-0000-4000-8000-000000000014",
+      ),
+    ).toBeNull();
+    expect(f.storedBytes()).toEqual(before);
+  });
+});
 
 describe("single-writer native protection facts", () => {
   it("durably reserves an immutable evidence prefix before upload without issuing admission", async () => {

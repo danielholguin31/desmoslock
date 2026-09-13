@@ -645,9 +645,15 @@ test("generation-4 attests the exact normalized migration history", () => {
         "448d7697885eae07f04cc3b89531b7b3711e71fa67d56d80ac891df63458fb06",
     },
     "20260908000400_student_protection_evidence.sql": {
-      migrationSetSha256: expectedMigrationSetSha256,
+      migrationSetSha256:
+        "80c2720ff352c721298e5814715374bf9e2a9c1152bbf2d2761ad781265f8701",
       rawSha256:
         "1543ee8cf236c4c43aa9331ec228eac9f99c68d4460d3023f68ce3a196fa2633",
+    },
+    "20260908000500_student_preflight_evidence.sql": {
+      migrationSetSha256: expectedMigrationSetSha256,
+      rawSha256:
+        "62ab37ff1ba85f475a64994645cfe9aaf17617e2f418400cd94d2161fc442d36",
     },
   });
   assert.doesNotThrow(() => assertMigrationSetAttestation(migrations));
@@ -713,7 +719,7 @@ test("generation-4 attests the exact normalized migration history", () => {
       assertMigrationSetAttestation(
         migrations.map(([fileName, source]) => [
           fileName,
-          fileName === "20260908000400_student_protection_evidence.sql"
+          fileName === "20260908000500_student_preflight_evidence.sql"
             ? source.replace(expectedMigrationSetSha256, "0".repeat(64))
             : source,
         ]),

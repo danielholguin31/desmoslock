@@ -161,6 +161,67 @@ function protection(
   };
 }
 
+function preflightJournal(
+  scope: StoredNativeProtectionAttempt["scope"],
+  cause: "application_policy" | "shortcut_unavailable" = "application_policy",
+  status: "failed" | "unavailable" = "unavailable",
+  complete = false,
+): StoredNativeProtection {
+  const base = protection(scope);
+  const first: ProtectionFact = {
+    ...base.facts[0]!,
+    slot: "failure",
+    phase: "failed",
+    cause,
+    categories: {
+      ...engagingCategories,
+      ...(cause === "application_policy"
+        ? {
+            applications: {
+              status,
+              code:
+                status === "failed"
+                  ? "prohibited_application"
+                  : "application_observation_unavailable",
+            } as const,
+          }
+        : {
+            shortcuts: {
+              status,
+              code: "emergency_shortcut_unavailable",
+            } as const,
+          }),
+    },
+  };
+  const facts: ProtectionFact[] = [first];
+  if (complete)
+    facts.push({
+      ...first,
+      sequence: 2,
+      eventId: identifier(102),
+      slot: "cleanup",
+      cause: "none",
+      categories: {
+        ...first.categories,
+        persistence: { status: "unavailable", code: "durability_unavailable" },
+      },
+    });
+  return {
+    ...base,
+    revision: facts.length,
+    facts,
+    nextFactSequence: facts.length + 1,
+    latestAttempt: {
+      ...base.latestAttempt!,
+      phase: "failed",
+      nativeDisposition: complete
+        ? "disposed_without_terminal_observation"
+        : "not_started",
+      cleanup: complete ? "complete" : "pending",
+    },
+  };
+}
+
 function completeJournal(
   scope: StoredNativeProtectionAttempt["scope"],
   count = 1,
@@ -2632,6 +2693,13 @@ describe("private protection transition snapshots", () => {
       { ...base, kind: "cleanup", outcome: "complete" },
       { ...base, kind: "cleanup", outcome: "unconfirmed" },
       { ...base, kind: "disposed_without_terminal_observation" },
+      {
+        ...base,
+        kind: "preflight_failure",
+        receipt: Object.freeze({ attemptId: base.attemptId }),
+        cause: "application_policy",
+        categories: preflightJournal(record.current.scope).facts[0]!.categories,
+      },
     ];
   }
 
@@ -2649,6 +2717,11 @@ describe("private protection transition snapshots", () => {
       if ("event" in parsed && "event" in command) {
         expect(parsed.event).not.toBe(command.event);
         expect(Object.isFrozen(parsed.event)).toBe(true);
+      }
+      if ("receipt" in parsed && "receipt" in command) {
+        expect(parsed.receipt).toBe(command.receipt);
+        expect(parsed.categories).not.toBe(command.categories);
+        expect(Object.isFrozen(parsed.categories.aac)).toBe(true);
       }
     }
   });
@@ -2767,5 +2840,584 @@ describe("private protection transition snapshots", () => {
       ),
     ).toBeNull();
     expect(invoked).toBe(0);
+  });
+});
+
+describe("preflight failure history", () => {
+  it.each(["before", "after"] as const)(
+    "preserves the actual v4 publication after an uncertain %s first-failure write",
+    async (when) => {
+      const f = fixture();
+      await f.store.load();
+      const base = await f.store.commitDurably(0, admitted());
+      const journal = preflightJournal(base.current!.scope);
+      const successor = {
+        ...base,
+        nativeProtection: journal,
+        evidence: evidenceFor(base, journal),
+      };
+      f.fail(when);
+      await expect(
+        f.store.commitDurably(base.generation, successor),
+      ).rejects.toThrow();
+      const retained = f.getBytes();
+      f.fail("none");
+      await f.store.close();
+      const reopened = createStudentSessionStore(f.options);
+      const expected =
+        when === "before"
+          ? base
+          : { ...successor, generation: base.generation + 1 };
+      expect(await reopened.load()).toEqual({
+        kind: "ready",
+        record: expected,
+      });
+      expect(expected.evidence.acknowledgments).toEqual([]);
+      expect(expected.current).toEqual(base.current);
+      expect(f.getBytes()).toEqual(retained);
+    },
+  );
+
+  it("saves original-scope failure history after admission is cleared without restoring it", async () => {
+    const f = fixture();
+    await f.store.load();
+    const base = admitted();
+    const journal = preflightJournal(base.current!.scope);
+    const terminal = await f.store.commitDurably(0, {
+      ...base,
+      current: null,
+      pending: null,
+      terminal: true,
+      lastReservedCounter: 20,
+    });
+    const written = await f.store.commitDurably(terminal.generation, {
+      ...terminal,
+      nativeProtection: journal,
+      evidence: evidenceFor(terminal, journal),
+    });
+    expect(written.current).toBeNull();
+    expect(written.pending).toBeNull();
+    expect(written.terminal).toBe(true);
+    expect(written.lastReservedCounter).toBe(20);
+    expect(written.nativeProtection).toEqual(journal);
+    expect(await f.store.load()).toEqual({ kind: "ready", record: written });
+  });
+
+  it("fits 32 preflight facts and five signers under v4 bounds while refusing a 33rd fact before encryption", async () => {
+    const original = worstEvidenceRecord(16);
+    const journal = original.nativeProtection!;
+    const facts: ProtectionFact[] = journal.facts.map((fact) => ({
+      ...fact,
+      slot: fact.slot === "engaging" ? "failure" : "cleanup",
+      phase: "failed",
+      nativeEvent: null,
+      nativeSequence: null,
+      cause: fact.slot === "engaging" ? "application_policy" : "none",
+      categories: {
+        ...longestCategories,
+        aac: { status: "pending", code: "awaiting_native_begin" },
+      },
+    }));
+    let record: StudentSessionRecord = {
+      ...original,
+      generation: 7,
+      nativeProtection: {
+        ...journal,
+        facts,
+        latestAttempt: {
+          ...journal.latestAttempt!,
+          phase: "failed",
+          nativeDisposition: "disposed_without_terminal_observation",
+          nativeSequence: null,
+          cleanup: "complete",
+          abandonment: "none",
+        },
+      },
+      evidence: {
+        ...original.evidence,
+        pendingBatches: [],
+        acknowledgments: [],
+      },
+    };
+    const batches = record.evidence.origins.map((origin) =>
+      batchFor(record, origin.attemptId),
+    );
+    const digests = new Map(
+      batches.flatMap((batch) =>
+        batch.events.map(
+          (event) => [event.eventId, event.contentDigest] as const,
+        ),
+      ),
+    );
+    record = {
+      ...record,
+      evidence: {
+        ...record.evidence,
+        pendingBatches: original.evidence.pendingBatches.map((prior) =>
+          batches.find((batch) => batch.attemptId === prior.attemptId)!,
+        ),
+        acknowledgments: original.evidence.acknowledgments.map((ack) => ({
+          ...ack,
+          contentDigest: digests.get(ack.eventId)!,
+        })),
+      },
+    };
+    expect(record.nativeProtection?.facts).toHaveLength(32);
+    expect(record.evidence.origins).toHaveLength(16);
+    expect(record.evidence.retiredSigners).toHaveLength(4);
+    expect(protectionFactReservation).toBe(8);
+    const bytes = persisted(record);
+    expect(bytes.byteLength - Buffer.byteLength("synthetic:")).toBeLessThan(
+      48 * 1024,
+    );
+    expect(bytes.byteLength).toBeLessThan(64 * 1024);
+    const f = fixture();
+    f.setBytes(bytes);
+    expect(await f.store.load()).toEqual({ kind: "ready", record });
+    const next = preflightJournal(record.current!.scope);
+    const extra: ProtectionFact = {
+      ...next.facts[0]!,
+      sequence: 33,
+      attemptId: identifier(999),
+      eventId: identifier(9999),
+    };
+    const encryptions = f.events.filter((event) => event === "encrypt").length;
+    await expect(
+      f.store.commitDurably(record.generation, {
+        ...record,
+        nativeProtection: {
+          ...next,
+          revision: journal.revision + 1,
+          nextFactSequence: 34,
+          latestAttempt: { ...next.latestAttempt!, attemptId: extra.attemptId },
+          facts: [...facts, extra],
+        },
+        evidence: {
+          ...record.evidence,
+          origins: [
+            ...record.evidence.origins,
+            {
+              attemptId: extra.attemptId,
+              scope: extra.scope,
+              originalKeyThumbprint: record.device.keyThumbprint,
+              originBuild,
+            },
+          ],
+        },
+      }),
+    ).rejects.toThrow();
+    expect(f.events.filter((event) => event === "encrypt")).toHaveLength(
+      encryptions,
+    );
+    expect(f.getBytes()).toEqual(bytes);
+    expect(await f.store.load()).toEqual({ kind: "ready", record });
+  });
+
+  it("refuses cleanup when the next fact cursor would exceed the safe integer limit", async () => {
+    const f = fixture();
+    await f.store.load();
+    const record = admitted();
+    const journal = preflightJournal(record.current!.scope);
+    const first: ProtectionFact = {
+      ...journal.facts[0]!,
+      sequence: Number.MAX_SAFE_INTEGER - 1,
+    };
+    const written = await f.store.commitDurably(0, {
+      ...record,
+      nativeProtection: {
+        ...journal,
+        facts: [first],
+        nextFactSequence: Number.MAX_SAFE_INTEGER,
+      },
+      evidence: evidenceFor(record, journal),
+    });
+    const before = f.getBytes();
+    const complete = preflightJournal(
+      record.current!.scope,
+      "application_policy",
+      "unavailable",
+      true,
+    );
+    await expect(
+      f.store.commitDurably(written.generation, {
+        ...written,
+        nativeProtection: {
+          ...complete,
+          facts: [
+            first,
+            { ...complete.facts[1]!, sequence: Number.MAX_SAFE_INTEGER },
+          ],
+          nextFactSequence: Number.MAX_SAFE_INTEGER + 1,
+        },
+      }),
+    ).rejects.toThrow();
+    expect(f.getBytes()).toEqual(before);
+    expect(await f.store.load()).toEqual({ kind: "ready", record: written });
+  });
+
+  it("refuses unrelated causes, category pairs, extra fields and malformed report receipts without inspecting receipt contents", () => {
+    let inspected = 0;
+    const receipt = Object.defineProperty({}, "attemptId", {
+      get() {
+        inspected += 1;
+        throw new Error("opaque receipt field must not be read");
+      },
+    });
+    const categories = preflightJournal(admitted().current!.scope).facts[0]!
+      .categories;
+    const command = {
+      kind: "preflight_failure",
+      attemptId: identifier(10),
+      expectedProtectionRevision: 0,
+      receipt,
+      cause: "application_policy",
+      categories,
+    };
+    const parsed = parseProtectionTransition(command);
+    expect(parsed !== null && "receipt" in parsed ? parsed.receipt : null).toBe(
+      receipt,
+    );
+    for (const delta of [
+      { receipt: null },
+      { receipt: [] },
+      { receipt: "copied receipt" },
+      { cause: "native_failure" },
+      { cause: "none" },
+      { cause: "shortcut_unavailable" },
+      { categories: {} },
+      { nativeEvent: null },
+      { authority: {} },
+      {
+        categories: { ...categories, aac: { status: "pending", code: "none" } },
+      },
+      {
+        categories: {
+          ...categories,
+          aac: { status: "confirmed", code: "none" },
+        },
+      },
+      {
+        categories: {
+          ...categories,
+          applications: {
+            status: "failed",
+            code: "application_observation_unavailable",
+          },
+        },
+      },
+      {
+        categories: {
+          ...categories,
+          applications: {
+            status: "unavailable",
+            code: "prohibited_application",
+          },
+        },
+      },
+      {
+        categories: {
+          ...categories,
+          persistence: { status: "failed", code: "prohibited_application" },
+        },
+      },
+    ])
+      expect(parseProtectionTransition({ ...command, ...delta })).toBeNull();
+    const accessor = Object.defineProperty({ ...command }, "receipt", {
+      get() {
+        inspected += 1;
+        return receipt;
+      },
+    });
+    expect(parseProtectionTransition(accessor)).toBeNull();
+    expect(inspected).toBe(0);
+  });
+
+  it("rejects mixed prefixes and inconsistent summaries even with a valid v4 checksum", async () => {
+    const record = admitted();
+    const scope = record.current!.scope;
+    const pending = preflightJournal(scope);
+    const complete = preflightJournal(
+      scope,
+      "application_policy",
+      "unavailable",
+      true,
+    );
+    const first = pending.facts[0]!;
+    const cleanup = complete.facts[1]!;
+    const variants: StoredNativeProtection[] = [
+      ...["engaging", "recovery_required"].map(
+        (phase) =>
+          ({
+            ...pending,
+            latestAttempt: { ...pending.latestAttempt!, phase },
+          }) as StoredNativeProtection,
+      ),
+      ...["pending", "unknown", "active"].map(
+        (nativeDisposition) =>
+          ({
+            ...pending,
+            latestAttempt: { ...pending.latestAttempt!, nativeDisposition },
+          }) as StoredNativeProtection,
+      ),
+      ...["not_requested", "unconfirmed", "complete"].map(
+        (cleanup) =>
+          ({
+            ...pending,
+            latestAttempt: { ...pending.latestAttempt!, cleanup },
+          }) as StoredNativeProtection,
+      ),
+      {
+        ...pending,
+        latestAttempt: { ...pending.latestAttempt!, nativeSequence: 1 },
+      },
+      {
+        ...complete,
+        latestAttempt: { ...complete.latestAttempt!, cleanup: "pending" },
+      },
+      {
+        ...complete,
+        latestAttempt: {
+          ...complete.latestAttempt!,
+          nativeDisposition: "not_started",
+        },
+      },
+      ...completeJournal(scope, 1)
+        .facts.filter((fact) => fact.slot !== "cleanup")
+        .map((later) => ({
+          ...pending,
+          revision: 2,
+          nextFactSequence: 3,
+          facts: [
+            first,
+            {
+              ...later,
+              sequence: 2,
+              eventId: identifier(102),
+              attemptId: first.attemptId,
+              scope,
+            },
+          ],
+        })),
+      ...[
+        { phase: "ended" },
+        { cause: "application_policy" },
+        { nativeSequence: 1 },
+        {
+          categories: {
+            ...cleanup.categories,
+            aac: { status: "confirmed", code: "none" },
+          },
+        },
+      ].map(
+        (delta) =>
+          ({
+            ...complete,
+            facts: [first, { ...cleanup, ...delta }],
+          }) as StoredNativeProtection,
+      ),
+      {
+        ...complete,
+        revision: 3,
+        nextFactSequence: 4,
+        facts: [
+          first,
+          cleanup,
+          { ...cleanup, sequence: 3, eventId: identifier(103) },
+        ],
+      },
+      {
+        ...pending,
+        revision: 2,
+        nextFactSequence: 3,
+        latestAttempt: {
+          ...protection(scope).latestAttempt!,
+          attemptId: identifier(11),
+        },
+        facts: [
+          first,
+          {
+            ...protection(scope).facts[0]!,
+            sequence: 2,
+            eventId: identifier(102),
+            attemptId: identifier(11),
+          },
+        ],
+      },
+    ];
+    for (const nativeProtection of variants) {
+      const f = fixture();
+      const bytes = persisted({
+        ...record,
+        generation: 7,
+        nativeProtection,
+        evidence: evidenceFor(record, nativeProtection),
+      });
+      f.setBytes(bytes);
+      expect(await f.store.load()).toEqual({
+        kind: "recovery_required",
+        generation: 0,
+      });
+      expect(f.getBytes()).toEqual(bytes);
+      expect(f.events).not.toContain("write");
+      expect(f.events).not.toContain("quarantine");
+    }
+  });
+
+  it("keeps the original preflight signer and first fact through durable ACK, targeted replacement and late cleanup", async () => {
+    const f = fixture();
+    await f.store.load();
+    const base = admitted();
+    const journal = preflightJournal(base.current!.scope);
+    const initial = {
+      ...base,
+      nativeProtection: journal,
+      evidence: evidenceFor(base, journal),
+    };
+    const batch = batchFor(initial, journal.latestAttempt!.attemptId);
+    const first = await f.store.commitDurably(0, {
+      ...initial,
+      evidence: { ...initial.evidence, pendingBatches: [batch] },
+    });
+    const acknowledged = await f.store.commitDurably(first.generation, {
+      ...first,
+      evidence: {
+        ...first.evidence,
+        pendingBatches: [],
+        acknowledgments: batch.events.map((event) => ({
+          ...event,
+          receivedAt: "2026-09-08T12:34:56.000001Z",
+        })),
+      },
+    });
+    const evidence = retainNativeEvidenceSigner(acknowledged);
+    expect(evidence?.retiredSigners).toEqual([
+      { device: acknowledged.device, lastReservedCounter: 19 },
+    ]);
+    if (evidence === null)
+      throw new Error("Expected original signer retention");
+    const replacement = pending("uncertain");
+    if (replacement.pending?.kind !== "join") throw new Error("fixture");
+    const generation = await f.store.preserveForTargetedRecovery(
+      acknowledged.generation,
+    );
+    const replaced = await f.store.commitDurably(generation, {
+      ...replacement,
+      pending: { ...replacement.pending, admissionMode: "readmission" },
+      nativeProtection: acknowledged.nativeProtection,
+      evidence,
+    });
+    const completed = await f.store.commitDurably(replaced.generation, {
+      ...replaced,
+      nativeProtection: preflightJournal(
+        journal.latestAttempt!.scope,
+        "application_policy",
+        "unavailable",
+        true,
+      ),
+    });
+    expect(completed.nativeProtection?.facts[0]).toEqual(journal.facts[0]);
+    expect(completed.evidence.origins).toEqual(first.evidence.origins);
+    expect(completed.evidence.acknowledgments).toEqual(
+      acknowledged.evidence.acknowledgments,
+    );
+    expect(batchFor(completed, batch.attemptId).originalKeyThumbprint).toBe(
+      first.device.keyThumbprint,
+    );
+    expect(completed.device.keyThumbprint).not.toBe(first.device.keyThumbprint);
+    expect(pruneNativeEvidence(completed).nativeProtection?.facts).toEqual(
+      completed.nativeProtection?.facts,
+    );
+    const before = f.getBytes();
+    await expect(
+      f.store.commitDurably(completed.generation, {
+        ...completed,
+        evidence: {
+          ...completed.evidence,
+          origins: completed.evidence.origins.map((origin) => ({
+            ...origin,
+            originBuild: { kind: "unverified_build" },
+          })),
+        },
+      }),
+    ).rejects.toThrow();
+    expect(f.getBytes()).toEqual(before);
+    expect(await f.store.load()).toEqual({ kind: "ready", record: completed });
+  });
+
+  it.each([
+    ["application_policy", "failed"],
+    ["application_policy", "unavailable"],
+    ["shortcut_unavailable", "failed"],
+    ["shortcut_unavailable", "unavailable"],
+  ] as const)(
+    "persists %s/%s and later owned cleanup through exact v4 reloads without native claims",
+    async (cause, status) => {
+      const f = fixture();
+      await f.store.load();
+      const record = admitted();
+      const scope = record.current!.scope;
+      const journal = preflightJournal(scope, cause, status);
+      const first = await f.store.commitDurably(0, {
+        ...record,
+        nativeProtection: journal,
+        evidence: evidenceFor(record, journal),
+      });
+      expect(first.nativeProtection).toEqual(journal);
+      expect(f.getBytes()).toEqual(persisted(first));
+      await f.store.close();
+      const reopened = createStudentSessionStore(f.options);
+      expect(await reopened.load()).toEqual({ kind: "ready", record: first });
+      const finished = await reopened.commitDurably(first.generation, {
+        ...first,
+        nativeProtection: preflightJournal(scope, cause, status, true),
+      });
+      expect(finished.nativeProtection?.facts[0]).toEqual(journal.facts[0]);
+      expect(finished.evidence).toEqual(first.evidence);
+      expect(finished.current).toEqual(record.current);
+      expect(finished.lastReservedCounter).toBe(19);
+      expect(f.getBytes()).toEqual(persisted(finished));
+      await reopened.close();
+      expect(await createStudentSessionStore(f.options).load()).toEqual({
+        kind: "ready",
+        record: finished,
+      });
+    },
+  );
+
+  it("snapshots the selected failure while retaining the original opaque report receipt", () => {
+    const receipt = Object.freeze({ attemptId: identifier(10) });
+    const categories = {
+      ...engagingCategories,
+      applications: {
+        status: "unavailable",
+        code: "application_observation_unavailable",
+      },
+    };
+    const parsed = parseProtectionTransition({
+      kind: "preflight_failure",
+      attemptId: identifier(10),
+      expectedProtectionRevision: 0,
+      receipt,
+      cause: "application_policy",
+      categories,
+    });
+    expect(parsed).not.toBeNull();
+    expect(parsed?.kind).toBe("preflight_failure");
+    expect(parsed !== null && "receipt" in parsed ? parsed.receipt : null).toBe(
+      receipt,
+    );
+    expect(
+      parsed !== null && "categories" in parsed ? parsed.categories : null,
+    ).toEqual(categories);
+    expect(
+      parsed !== null && "categories" in parsed ? parsed.categories : null,
+    ).not.toBe(categories);
+    expect(Object.isFrozen(parsed)).toBe(true);
+    categories.applications.code = "prohibited_application";
+    expect(
+      parsed !== null && "categories" in parsed
+        ? parsed.categories.applications.code
+        : null,
+    ).toBe("application_observation_unavailable");
   });
 });

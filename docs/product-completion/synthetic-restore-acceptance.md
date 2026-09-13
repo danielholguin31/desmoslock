@@ -7,7 +7,7 @@ restore checks and full staff suite on both source `5b5722b` and merged main
 The nine-migration School extension also passed on source `6939c59`, merged as
 `d8fadca`. The ten-migration Test extension was runtime-pending at the inherited
 checkpoint. The eleven-migration StudentSession source checkpoint below remains
-historical. The current twelve-migration native-evidence candidate requires its
+historical. The current thirteen-migration native-evidence candidate requires its
 own exact-commit runtime run; this source-only update supplies no new test or
 runtime result.
 The existing hosted staging project and legacy deployment restrictions remain
@@ -28,11 +28,11 @@ template. Only the copied project ID and five ports differ. At the original
 integration checkpoint the source was the eight-migration Membership baseline,
 whose migration-set SHA256 was
 `7c3e7403b61d5c66123b15d2fe4de28ee2259d71a304ce8695d16630f5353a56`.
-The imported `CURRENT_MIGRATION_FILES` now propagates all twelve migrations.
+The imported `CURRENT_MIGRATION_FILES` now propagates all thirteen migrations.
 The selected current aggregate is
-`80c2720ff352c721298e5814715374bf9e2a9c1152bbf2d2761ad781265f8701`;
+`2ef021e3db72d5d2ef2602d1288d24b8a0fa20805a839aa96e49d778ff3ca49b`;
 the [versioned input contract](reproducible-supabase.md#versioned-inputs)
-retains all historical pins and the ten delimited self-reference normalization.
+retains all historical pins and the eleven delimited self-reference normalization.
 The eleventh migration preserves its historical aggregate
 `aa32ed754c87e7987199dbd6c5f685ae65236ba3f94921157fc6cb07ce67b308`
 and raw SHA-256
@@ -299,7 +299,7 @@ and complete restored-target staff/Student acceptance still unverified at that
 recorded checkpoint. Migration 12 adds two runtime-only tables,
 `student_device_proof_state` and `student_protection_events`, to every empty-source
 and target guard. The seven archived tables, COPY layouts, fixture framing and
-fixture digest remain unchanged. The twelve-migration candidate requires its own
+fixture digest remain unchanged. The thirteen-migration candidate requires its own
 real roundtrip and complete restored-target staff/Student/evidence suite.
 No historical receipt acquires new checks or Boolean fields retroactively.
 None of these local/source CI gates proves hosted staging

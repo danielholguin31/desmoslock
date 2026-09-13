@@ -683,6 +683,127 @@ export async function runStudentSessionInterop(t, runtime) {
       },
     );
 
+    for (const cause of ["application_policy", "shortcut_unavailable"]) {
+      await t.test(
+        `Evidence: ${cause} preflight report survives forfeit and reaches Teacher history without native claims`,
+        async () => {
+          const target = await harness.test();
+          const joined = await harness.join(await harness.issue(target));
+          accepted(joined.result);
+          const original = harness.evidence(joined, 1).request.facts[0];
+          const failure = {
+            ...original,
+            slot: "failure",
+            phase: "failed",
+            cause,
+            categories: {
+              ...original.categories,
+              ...(cause === "application_policy"
+                ? {
+                    applications: {
+                      status: "unavailable",
+                      code: "application_observation_unavailable",
+                    },
+                  }
+                : {
+                    shortcuts: {
+                      status: "unavailable",
+                      code: "emergency_shortcut_unavailable",
+                    },
+                  }),
+            },
+          };
+          const first = accepted(
+            await harness.sendEvidence(
+              harness.evidence(joined, 1, { facts: [failure] }),
+            ),
+            "STUDENT_EVIDENCE_ACCEPTED",
+          );
+          accepted(
+            await harness.send(
+              joined,
+              harness.maintenance(joined, "forfeit", 2),
+            ),
+            "STUDENT_SESSION_FORFEITED",
+          );
+          const cleanup = {
+            ...failure,
+            sequence: failure.sequence + 1,
+            eventId: randomUUID(),
+            slot: "cleanup",
+            cause: "none",
+          };
+          const facts = [failure, cleanup];
+          const appended = accepted(
+            await harness.sendEvidence(harness.evidence(joined, 3, { facts })),
+            "STUDENT_EVIDENCE_ACCEPTED",
+          );
+          same(
+            appended.acknowledged.find(
+              (ack) => ack.eventId === failure.eventId,
+            ),
+            first.acknowledged[0],
+            "Preflight cleanup rewrote the original failure receipt",
+          );
+          const replay = accepted(
+            await harness.sendEvidence(harness.evidence(joined, 4, { facts })),
+            "STUDENT_EVIDENCE_ACCEPTED",
+          );
+          same(
+            replay.acknowledged,
+            appended.acknowledged,
+            "Preflight retry changed exact acknowledged history",
+          );
+          const history = await rpcRows(
+            harness.teacher.client,
+            "current_student_protection_events",
+            {
+              workspace_id: target.schoolId,
+              test_id: target.testId,
+              student_session_id: joined.result.scope.studentSessionId,
+              before_received_at: null,
+              before_event_id: null,
+            },
+          );
+          check(
+            history.length === 2 &&
+              history.every(
+                (row) =>
+                  row.code === "ok" &&
+                  row.fact.phase === "failed" &&
+                  row.fact.nativeEvent === null &&
+                  row.fact.nativeSequence === null &&
+                  row.fact.categories.aac.status === "pending" &&
+                  row.fact.scope.epoch === joined.result.scope.epoch &&
+                  row.origin_build.kind === "unverified_build",
+              ),
+            "Teacher history acquired native or replacement-authority claims from a preflight report",
+          );
+          same(
+            history.find((row) => row.fact.slot === "failure")?.fact,
+            failure,
+            "Teacher history lost the actual preflight failure category or cause",
+          );
+          const roster = await rpcRows(
+            harness.teacher.client,
+            "current_test_student_sessions",
+            {
+              workspace_id: target.schoolId,
+              test_id: target.testId,
+              before_created_at: null,
+              before_session_id: null,
+            },
+          );
+          check(
+            roster[0]?.state === "forfeited" &&
+              roster[0]?.evidence_summary?.reportCount === 2 &&
+              roster[0]?.evidence_summary?.failureCount === 1,
+            "Preflight evidence reopened admission or failed Teacher summary accounting",
+          );
+        },
+      );
+    }
+
     await t.test(
       "Evidence: an actual committed lost HTTP response recovers exact receipts without retry inside the transport",
       async () => {

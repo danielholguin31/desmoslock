@@ -49,7 +49,7 @@ select results_eq(
     select id, schema_generation, migration_set_sha256
     from desmoslock_v2.internal_release_attestation
   $$,
-  $$values (1::smallint, 4, '80c2720ff352c721298e5814715374bf9e2a9c1152bbf2d2761ad781265f8701')$$,
+  $$values (1::smallint, 4, '2ef021e3db72d5d2ef2602d1288d24b8a0fa20805a839aa96e49d778ff3ca49b')$$,
   'the database records the exact versioned migration attestation'
 );
 select is_empty(
@@ -174,7 +174,7 @@ select results_eq(
     select schema_generation, fixture_version, fixture_digest, migration_set_sha256, fixture_valid
     from desmoslock_v2.internal_baseline_status()
   $$,
-  $$values (4, 'internal-baseline-v2', 'f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201', '80c2720ff352c721298e5814715374bf9e2a9c1152bbf2d2761ad781265f8701', true)$$,
+  $$values (4, 'internal-baseline-v2', 'f1ecc4d44ca04b3395b565dd2fe9f7887147e34f6196772f18bae00638244201', '2ef021e3db72d5d2ef2602d1288d24b8a0fa20805a839aa96e49d778ff3ca49b', true)$$,
   'service baseline status verifies the pinned fixture digest'
 );
 

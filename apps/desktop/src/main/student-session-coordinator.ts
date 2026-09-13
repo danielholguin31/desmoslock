@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   parseStudentJoinCode,
+  parseStudentUuid,
   parseNativeEvidenceOriginBuild,
   type NativeEvidenceOriginBuild,
   type StudentEvidenceRequest,
@@ -45,6 +46,10 @@ export interface FreshStudentAdmission extends StudentAdmissionSnapshot {
   readonly readStartedAt: number;
   readonly observationDeadline: number;
 }
+/** Issuer-owned permission to record one preflight result, never an admission. */
+export interface PreflightReportReceipt {
+  readonly attemptId: string;
+}
 export type FreshAdmissionResult =
   | { readonly status: "fresh"; readonly authority: FreshStudentAdmission }
   | { readonly status: "unavailable" };
@@ -67,6 +72,11 @@ export interface StudentProtectionAccess {
     receipt: FreshStudentAdmission,
     use?: "grant" | "sustain",
   ): boolean;
+  reservePreflightReport(
+    authority: FreshStudentAdmission,
+    attemptId: string,
+  ): PreflightReportReceipt | null;
+  releasePreflightReport(receipt: PreflightReportReceipt): void;
   subscribeAdmissionObservation(
     listener: (observation: StudentAdmissionObservation) => void,
   ): () => void;
@@ -161,6 +171,26 @@ export function createStudentSessionCoordinator(options: {
   let ownedRenewal = false;
   let nativeOwnershipUncertain = false;
   const ownedProtectionAttempts = new Set<string>();
+  type PreflightFailure = Extract<
+    ProtectionTransition,
+    { readonly kind: "preflight_failure" }
+  >;
+  type PreflightReservation = {
+    readonly receipt: PreflightReportReceipt;
+    readonly lifetime: number;
+    readonly scope: StudentSessionScope;
+    readonly deviceSessionId: string;
+    readonly publicKey: string;
+    readonly keyThumbprint: string;
+    readonly protectionRevision: number;
+    state: "reserved" | "observed" | "engaging" | "committed" | "released";
+    observed: PreflightFailure | null;
+  };
+  const preflightReceipts = new WeakMap<
+    PreflightReportReceipt,
+    PreflightReservation
+  >();
+  let activePreflight: PreflightReservation | null = null;
   type ReadOwner = {
     sequence: number | null;
     receipt: FreshStudentAdmission | null;
@@ -409,6 +439,7 @@ export function createStudentSessionCoordinator(options: {
       storeGeneration = committed.generation;
       attemptedWrite = null;
       needsReload = false;
+      settlePreflightReservation();
       return true;
     } catch {
       needsReload = true;
@@ -472,6 +503,7 @@ export function createStudentSessionCoordinator(options: {
         return false;
       }
     }
+    settlePreflightReservation();
     publish(
       record?.terminal === true
         ? "forfeited"
@@ -1306,6 +1338,153 @@ export function createStudentSessionCoordinator(options: {
     }
   }
 
+  function samePreflightDevice(reservation: PreflightReservation): boolean {
+    return (
+      record !== null &&
+      record.device.deviceSessionId === reservation.deviceSessionId &&
+      record.device.publicKey === reservation.publicKey &&
+      record.device.keyThumbprint === reservation.keyThumbprint
+    );
+  }
+
+  function hasDurablePreflightOrigin(
+    reservation: PreflightReservation,
+  ): boolean {
+    if (record === null || needsReload || recoveryLatched) return false;
+    const origin = record.evidence.origins.find(
+      (value) => value.attemptId === reservation.receipt.attemptId,
+    );
+    const first = record.nativeProtection?.facts.find(
+      (value) => value.attemptId === reservation.receipt.attemptId,
+    );
+    if (
+      origin === undefined ||
+      first === undefined ||
+      origin.originalKeyThumbprint !== reservation.keyThumbprint ||
+      !sameScope(origin.scope, reservation.scope) ||
+      !sameScope(first.scope, reservation.scope) ||
+      JSON.stringify(origin.originBuild) !== JSON.stringify(originBuild)
+    )
+      return false;
+    return reservation.observed === null
+      ? first.slot === "engaging"
+      : first.slot === "failure" &&
+          first.phase === "failed" &&
+          first.nativeEvent === null &&
+          first.nativeSequence === null &&
+          first.cause === reservation.observed.cause &&
+          JSON.stringify(first.categories) ===
+            JSON.stringify(reservation.observed.categories);
+  }
+
+  function settlePreflightReservation(): void {
+    if (
+      activePreflight !== null &&
+      (activePreflight.state === "observed" ||
+        activePreflight.state === "engaging") &&
+      hasDurablePreflightOrigin(activePreflight)
+    ) {
+      activePreflight.state = "committed";
+      activePreflight = null;
+    }
+  }
+
+  function canReserveProtectionAttempt(id: string): boolean {
+    const protection = record?.nativeProtection;
+    const attempt = protection?.latestAttempt;
+    return (
+      record !== null &&
+      !nativeOwnershipUncertain &&
+      !needsReload &&
+      !recoveryLatched &&
+      (protection?.revision ?? 0) < Number.MAX_SAFE_INTEGER &&
+      (protection?.nextFactSequence ?? 1) < Number.MAX_SAFE_INTEGER &&
+      (protection?.facts.length ?? 0) <=
+        protectionFactCapacity - protectionFactReservation &&
+      !(protection?.facts.some((fact) => fact.attemptId === id) ?? false) &&
+      (attempt == null ||
+        (attempt.cleanup === "complete" &&
+          (attempt.nativeDisposition === "ended" ||
+            attempt.nativeDisposition === "failed_to_begin" ||
+            attempt.nativeDisposition ===
+              "disposed_without_terminal_observation")))
+    );
+  }
+
+  function reservePreflightReport(
+    authority: FreshStudentAdmission,
+    id: string,
+  ): PreflightReportReceipt | null {
+    if (
+      parseStudentUuid(id) === null ||
+      id[14] !== "4" ||
+      !isCurrentAdmission(authority) ||
+      activePreflight !== null ||
+      !canReserveProtectionAttempt(id) ||
+      record === null
+    )
+      return null;
+    const receipt = Object.freeze({ attemptId: id });
+    const reservation: PreflightReservation = {
+      receipt,
+      lifetime,
+      scope: Object.freeze({ ...authority.scope }),
+      // Keep no extra private key. The existing owned record remains the only
+      // signing key store, and replacement is blocked until origin durability.
+      deviceSessionId: record.device.deviceSessionId,
+      publicKey: record.device.publicKey,
+      keyThumbprint: record.device.keyThumbprint,
+      protectionRevision: record.nativeProtection?.revision ?? 0,
+      state: "reserved",
+      observed: null,
+    };
+    preflightReceipts.set(receipt, reservation);
+    activePreflight = reservation;
+    return receipt;
+  }
+
+  function releasePreflightReport(receipt: PreflightReportReceipt): void {
+    const reservation = preflightReceipts.get(receipt);
+    if (
+      reservation === undefined ||
+      reservation !== activePreflight ||
+      reservation.lifetime !== lifetime ||
+      reservation.state !== "reserved"
+    )
+      return;
+    reservation.state = "released";
+    activePreflight = null;
+  }
+
+  function observePreflightFailure(
+    command: PreflightFailure,
+  ): PreflightReservation | null {
+    const reservation = preflightReceipts.get(command.receipt);
+    if (
+      reservation === undefined ||
+      reservation.lifetime !== lifetime ||
+      reservation.receipt.attemptId !== command.attemptId ||
+      reservation.protectionRevision !== command.expectedProtectionRevision
+    )
+      return null;
+    if (reservation.observed !== null) {
+      return (reservation.state === "observed" ||
+        reservation.state === "committed") &&
+        reservation.observed.cause === command.cause &&
+        JSON.stringify(reservation.observed.categories) ===
+          JSON.stringify(command.categories)
+        ? reservation
+        : null;
+    }
+    if (reservation !== activePreflight || reservation.state !== "reserved")
+      return null;
+    // Synchronous observation precedes every writer wait. Later admission loss
+    // can prevent protection, but cannot change this historical failure report.
+    reservation.observed = command;
+    reservation.state = "observed";
+    return reservation;
+  }
+
   function protectionSuccessor(
     command: ProtectionTransition,
   ): StoredNativeProtection | null {
@@ -1324,10 +1503,37 @@ export function createStudentSessionCoordinator(options: {
     let nativeEvent: ProtectionFact["nativeEvent"] = null;
     let cause: ProtectionFact["cause"] = "none";
     let categories = facts.at(-1)?.categories;
-    if (command.kind === "engaging") {
+    if (command.kind === "preflight_failure") {
+      const reservation = preflightReceipts.get(command.receipt);
+      if (
+        reservation === undefined ||
+        reservation !== activePreflight ||
+        reservation.state !== "observed" ||
+        !samePreflightDevice(reservation) ||
+        !canReserveProtectionAttempt(command.attemptId)
+      )
+        return null;
+      attempt = {
+        attemptId: command.attemptId,
+        scope: reservation.scope,
+        phase: "failed",
+        nativeDisposition: "not_started",
+        nativeSequence: null,
+        cleanup: "pending",
+        abandonment: "none",
+      };
+      categories = command.categories;
+      cause = command.cause;
+      slot = "failure";
+    } else if (command.kind === "engaging") {
       if (
         nativeOwnershipUncertain ||
         !isCurrentAdmission(command.authority) ||
+        (activePreflight !== null &&
+          (activePreflight.state !== "reserved" ||
+            activePreflight.receipt.attemptId !== command.attemptId ||
+            !sameScope(activePreflight.scope, command.authority.scope) ||
+            !samePreflightDevice(activePreflight))) ||
         facts.length > protectionFactCapacity - protectionFactReservation ||
         facts.some((fact) => fact.attemptId === command.attemptId) ||
         (attempt !== null &&
@@ -1360,6 +1566,13 @@ export function createStudentSessionCoordinator(options: {
           (fact) =>
             fact.attemptId === command.attemptId && fact.slot === wanted,
         );
+      // Failure-first attempts never entered native engagement. Their only
+      // continuation is this process's acknowledged disposal and cleanup.
+      if (
+        oldFact("engaging") === undefined &&
+        command.kind !== "disposed_without_terminal_observation"
+      )
+        return null;
       switch (command.kind) {
         case "locked":
           if (
@@ -1551,12 +1764,22 @@ export function createStudentSessionCoordinator(options: {
   ): ReturnType<StudentProtectionAccess["commitProtectionTransition"]> {
     const command = parseProtectionTransition(input);
     if (command === null || stopping) return { status: "unavailable" };
+    const preflight =
+      command.kind === "preflight_failure"
+        ? observePreflightFailure(command)
+        : null;
+    if (command.kind === "preflight_failure" && preflight === null)
+      return { status: "unavailable" };
     if (
       command.kind === "abandoned" &&
       command.cause === "emergency_abandonment" &&
       record?.nativeProtection?.latestAttempt?.attemptId ===
         command.attemptId &&
-      record.nativeProtection.revision === command.expectedProtectionRevision
+      record.nativeProtection.revision === command.expectedProtectionRevision &&
+      record.nativeProtection.facts.some(
+        (fact) =>
+          fact.attemptId === command.attemptId && fact.slot === "engaging",
+      )
     )
       invalidateAdmission();
     while (active !== null) await active;
@@ -1566,17 +1789,36 @@ export function createStudentSessionCoordinator(options: {
       ReturnType<StudentProtectionAccess["commitProtectionTransition"]>
     > = { status: "unavailable" };
     await run(async (generation) => {
+      if (preflight !== null) {
+        // Reuse the exact v4 uncertain-write reconciliation. Never construct a
+        // second first fact or overwrite a newer maintenance counter on retry.
+        if (needsReload && !(await load(generation))) return;
+        if (!alive(generation)) return;
+        if (hasDurablePreflightOrigin(preflight)) {
+          settlePreflightReservation();
+          result = {
+            status: "committed",
+            protectionRevision: record!.nativeProtection!.revision,
+          };
+          return;
+        }
+      }
       const next = protectionSuccessor(command);
       if (next === null || record === null) return;
       // Retain ownership even if the barrier outcome is uncertain. Only this
       // process can later prove disposal of the attempt it actually authored.
-      if (command.kind === "engaging")
+      if (command.kind === "engaging" || command.kind === "preflight_failure")
         ownedProtectionAttempts.add(command.attemptId);
+      if (command.kind === "engaging" && activePreflight !== null)
+        activePreflight.state = "engaging";
       let nextRecord: StudentSessionSuccessor = {
         ...successor(record),
         nativeProtection: next,
       };
-      if (command.kind === "engaging" && next !== record.nativeProtection) {
+      if (
+        (command.kind === "engaging" || command.kind === "preflight_failure") &&
+        next !== record.nativeProtection
+      ) {
         nextRecord = {
           ...nextRecord,
           evidence: {
@@ -1585,7 +1827,10 @@ export function createStudentSessionCoordinator(options: {
               ...nextRecord.evidence.origins,
               {
                 attemptId: command.attemptId,
-                scope: command.authority.scope,
+                scope:
+                  command.kind === "engaging"
+                    ? command.authority.scope
+                    : preflight!.scope,
                 originalKeyThumbprint: record.device.keyThumbprint,
                 originBuild,
               },
@@ -1634,6 +1879,7 @@ export function createStudentSessionCoordinator(options: {
           needsReload ||
           recoveryLatched ||
           nativeOwnershipUncertain ||
+          activePreflight !== null ||
           view.phase !== "entry" ||
           (record !== null && !canReplaceInitialJoin(record)) ||
           parsedCode === null
@@ -1667,6 +1913,7 @@ export function createStudentSessionCoordinator(options: {
         if (
           !initialized ||
           nativeOwnershipUncertain ||
+          activePreflight !== null ||
           view.revision !== snapshotRevision ||
           !["recovery_required", "unavailable", "forfeited"].includes(
             view.phase,
@@ -1688,6 +1935,7 @@ export function createStudentSessionCoordinator(options: {
           return;
         if (
           nativeOwnershipUncertain ||
+          activePreflight !== null ||
           (record?.nativeProtection?.latestAttempt != null &&
             record.nativeProtection.latestAttempt.cleanup !== "complete")
         )
@@ -1787,6 +2035,8 @@ export function createStudentSessionCoordinator(options: {
     },
     readFreshAdmission,
     isCurrentAdmission,
+    reservePreflightReport,
+    releasePreflightReport,
     subscribeAdmissionObservation(listener) {
       admissionListeners.add(listener);
       return () => {
