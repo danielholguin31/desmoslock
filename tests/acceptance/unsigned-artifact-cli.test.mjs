@@ -109,7 +109,7 @@ function descriptor() {
       tools: {
         node: { version: "24.20.0", sha256: "1".repeat(64) },
         npm: { version: "11.12.1", sha256: "2".repeat(64) },
-        electron: { version: "43.4.1", archiveSha256: "3".repeat(64) },
+        electron: { version: "43.7.0", archiveSha256: "3".repeat(64) },
         packager: { version: "20.3.0" },
         fuses: { version: "2.1.3" },
         compiler: {
