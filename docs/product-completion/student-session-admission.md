@@ -63,7 +63,7 @@ remains generic and cannot establish whether the Test ended or a grant expired.
 ## Desktop persistence and protection state
 
 Main owns the encrypted versioned record, committed authority, one exact pending
-mutation and reserved counter. Version 4 records whether an initial join has not
+mutation and reserved counter. Version 5 records whether an initial join has not
 been dispatched, may have committed, or was definitively denied. Before sending
 the join request, main durably records uncertainty. Only a first-known definitive
 denial can durably restore public-code entry; any earlier uncertain dispatch
@@ -74,21 +74,23 @@ Replacement requires no admitted authority, reserved counter, native protection
 or retained evidence. Uncertain attempts keep exact retry and explicit targeted
 re-admission; a generic denial never proves an earlier admission did not commit.
 
-Version-1, version-2 and version-3 records normalize in memory without writing;
-legacy pending joins are always uncertain. A successful version-4 write is a
-forward format transition: earlier version-3 readers reject it and must not be
-used for rollback. Rollback needs a version-4-compatible reader while preserving
+Version-1 through version-4 records retain their exact read formats and normalize
+in memory without writing. Version-1 through version-3 pending joins are always
+uncertain; version-4 join outcomes remain intact. A successful version-5 write is
+a forward format transition: version-4 and earlier readers reject it and must not
+be used for rollback. Rollback needs a version-5-compatible reader while preserving
 the current encrypted record, lock and counter history; restoring older ciphertext
 or clearing the record is not a recovery procedure.
 
-Each persisted version-4 record appends `integritySha256`, the SHA-256 digest of
+Each persisted version-4 or version-5 record appends `integritySha256`, the SHA-256 digest of
 the UTF-8 JSON serialization of the complete compact record before that field is
 added. It covers the version, generation, device material, pending intent,
-authority, counters, protection facts and compact evidence. Loading verifies the
+authority, counters, protection facts, compact evidence and version-5 local boot
+anchors and observations. Loading verifies the
 digest before semantic validation or legacy normalization. A missing or mismatched
 digest preserves the ciphertext and blocks admission and targeted recovery.
 The digest provides corruption detection, not authenticated integrity against a
-hostile host. The unchanged 48 KiB plaintext budget includes the checksum field;
+hostile host and provides no rollback protection. The unchanged 48 KiB plaintext budget includes the checksum field;
 the ciphertext ceiling remains 64 KiB.
 
 The selected macOS store uses a separate fixed
@@ -100,6 +102,33 @@ unsupported records retain their bytes and block targeted recovery because prior
 native ownership cannot be established. Known decoded terminal records retain
 the separate explicit targeted-recovery path. Electron's
 single-instance guard complements the native store lock.
+
+Version 5 records `localBootRecovery` inside native protection, outside the closed
+eight-slot report protocol. Every new engaging fact receives a canonical boot ID
+in the same durable successor as its original fact, signer and build association,
+before native begin. Legacy history receives a fixed cutoff at its existing next
+fact sequence when normalized; a later authorized write preserves that cutoff.
+An unfinished legacy attempt without an anchor cannot gain one retroactively.
+
+Only a valid prior-loaded unfinished anchored attempt can use a different valid
+current boot ID to record a local `boot_session_changed` observation. The writer
+preserves every historical fact, disposition, cleanup state, signer, counter, ACK,
+pending batch and admission field. It releases the old admission barrier only
+after a definite durable return or exact preimage/postimage reconciliation. A
+same, missing or malformed ID, failed or uncertain write, conflicting observation,
+or rejected record remains blocked. General rejected-record and mismatched-write
+latches cannot be cleared by a boot comparison.
+
+This observation proves only that the prior boot's owner cannot survive that boot
+change. It neither supplies a native end nor establishes current AAC availability.
+The current protection projection can return to idle while unresolved historical
+state stays unchanged. A new explicit Start still requires every ordinary fresh
+admission and protection gate. Recovery itself emits no network request, ninth
+fact, proof counter, cleanup or signer rotation. Recovered history without actual
+cleanup remains ineligible for pruning, and retains its original signer even
+after acknowledgment and later readmission. The 32-fact, eight-slot reservation,
+five-signer and byte ceilings remain fixed; exhausted capacity blocks progress
+without eviction.
 
 The renderer receives named admission/recovery actions and sanitized view
 snapshots, with trusted-frame/generation fencing. It receives no device key,

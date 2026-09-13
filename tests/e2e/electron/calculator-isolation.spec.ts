@@ -1,3 +1,4 @@
+import { AssertionError } from "node:assert";
 import dgram from "node:dgram";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -269,61 +270,141 @@ async function assertCapturedPlot(
   color: readonly [number, number, number],
   name: string,
 ): Promise<void> {
-  const captured = await application.evaluate(
-    async ({ nativeImage, webContents }, input) => {
-      const calculator = webContents
-        .getAllWebContents()
-        .find((contents) => contents.getURL() === input.calculatorUrl);
-      if (calculator === undefined) throw new Error("Calculator is missing");
-      const image = await calculator.capturePage();
-      const { width, height } = image.getSize(1);
-      const bitmap = image.toBitmap({ scaleFactor: 1 });
-      if (width <= 0 || height <= 0 || bitmap.length !== width * height * 4)
-        throw new Error("Unexpected capture bitmap");
-      const patches = input.points.map(([x, y]) => {
-        const pixelX = Math.round((x * width) / input.viewport[0]);
-        const pixelY = Math.round((y * height) / input.viewport[1]);
-        if (
-          pixelX < 3 ||
-          pixelY < 3 ||
-          pixelX + 3 >= width ||
-          pixelY + 3 >= height
-        )
-          throw new Error("Plot patch is outside capture");
-        const patch: number[] = [];
-        for (let dy = -3; dy <= 3; dy += 1)
-          for (let dx = -3; dx <= 3; dx += 1) {
-            const offset = ((pixelY + dy) * width + pixelX + dx) * 4;
-            patch.push(...bitmap.subarray(offset, offset + 4));
+  const capture = () =>
+    application.evaluate(
+      async ({ nativeImage, webContents }, input) => {
+        const calculator = webContents
+          .getAllWebContents()
+          .find((contents) => contents.getURL() === input.calculatorUrl);
+        if (calculator === undefined) throw new Error("Calculator is missing");
+        const image = await calculator.capturePage();
+        const { width, height } = image.getSize(1);
+        const bitmap = image.toBitmap({ scaleFactor: 1 });
+        if (width <= 0 || height <= 0 || bitmap.length !== width * height * 4)
+          throw new Error("Unexpected capture bitmap");
+        const patches = input.points.map(([x, y]) => {
+          const pixelX = Math.round((x * width) / input.viewport[0]);
+          const pixelY = Math.round((y * height) / input.viewport[1]);
+          if (
+            pixelX < 3 ||
+            pixelY < 3 ||
+            pixelX + 3 >= width ||
+            pixelY + 3 >= height
+          )
+            throw new Error("Plot patch is outside capture");
+          const patch: number[] = [];
+          for (let dy = -3; dy <= 3; dy += 1)
+            for (let dx = -3; dx <= 3; dx += 1) {
+              const offset = ((pixelY + dy) * width + pixelX + dx) * 4;
+              patch.push(...bitmap.subarray(offset, offset + 4));
+            }
+          return patch;
+        });
+        const blank = nativeImage.createFromBitmap(
+          Buffer.alloc(width * height * 4, 255),
+          { width, height, scaleFactor: 1 },
+        );
+        return {
+          patches,
+          png: image.toPNG({ scaleFactor: 1 }).toString("base64"),
+          blankPngBytes: blank.toPNG().byteLength,
+          blankPatch: [
+            ...blank.toBitmap({ scaleFactor: 1 }).subarray(0, 7 * 7 * 4),
+          ],
+        };
+      },
+      {
+        calculatorUrl,
+        points: points.map((point) => graphScreenPoint(snapshot, point)),
+        viewport: snapshot.viewport,
+      },
+    );
+  type Capture = Awaited<ReturnType<typeof capture>>;
+  const observed: {
+    first: Capture | null;
+    last: Capture | null;
+    attempted: number;
+    completed: number;
+  } = { first: null, last: null, attempted: 0, completed: 0 };
+  const startedAt = performance.now();
+  try {
+    // DOM geometry can precede compositor paint. Retry only absent plot pixels,
+    // requiring every unchanged oracle patch to pass in the same actual frame.
+    await expect
+      .poll(
+        async () => {
+          observed.attempted += 1;
+          const captured = await capture();
+          observed.completed += 1;
+          observed.first ??= captured;
+          observed.last = captured;
+          let painted = true;
+          for (const patch of captured.patches) {
+            try {
+              assertPlotPaint(patch, color);
+            } catch (error) {
+              if (
+                !(error instanceof AssertionError) ||
+                error.message !== "expected visible plot pixels are absent"
+              )
+                throw error;
+              painted = false;
+            }
           }
-        return patch;
+          return painted;
+        },
+        { timeout: 5_000, message: `${name}: expected visible plot pixels` },
+      )
+      .toBe(true);
+    const captured = observed.last;
+    if (captured === null) throw new Error("Plot polling produced no capture");
+    // A real, entirely white PNG also clears the old 1,000-byte threshold.
+    // Even with valid DOM geometry, it must fail the mandatory paint oracle.
+    expect(captured.blankPngBytes).toBeGreaterThan(1_000);
+    expect(() => assertPlotPaint(captured.blankPatch, color)).toThrow(
+      "plot pixels",
+    );
+  } catch (error) {
+    const attachments: Promise<void>[] = [
+      test.info().attach(`${name}-paint-failure`, {
+        body: JSON.stringify({
+          attemptedCaptures: observed.attempted,
+          completedCaptures: observed.completed,
+          elapsedMilliseconds: Math.round(performance.now() - startedAt),
+          expectedColor: color,
+          expectedPoints: points,
+          viewport: snapshot.viewport,
+          matrix: snapshot.matrix,
+          zoom: snapshot.zoom,
+          firstPatches: observed.first?.patches ?? null,
+          lastPatches: observed.last?.patches ?? null,
+        }),
+        contentType: "application/json",
+      }),
+    ];
+    for (const [label, captured] of [
+      ["first", observed.first],
+      ["last", observed.last],
+    ] as const) {
+      if (captured !== null)
+        attachments.push(
+          test.info().attach(`${name}-${label}-attempt`, {
+            body: Buffer.from(captured.png, "base64"),
+            contentType: "image/png",
+          }),
+        );
+    }
+    const retained = await Promise.allSettled(attachments);
+    if (retained.some((result) => result.status === "rejected")) {
+      test.info().annotations.push({
+        type: "plot-evidence-unavailable",
+        description: "A failed-capture attachment could not be retained.",
       });
-      const blank = nativeImage.createFromBitmap(
-        Buffer.alloc(width * height * 4, 255),
-        { width, height, scaleFactor: 1 },
-      );
-      return {
-        patches,
-        png: image.toPNG({ scaleFactor: 1 }).toString("base64"),
-        blankPngBytes: blank.toPNG().byteLength,
-        blankPatch: [
-          ...blank.toBitmap({ scaleFactor: 1 }).subarray(0, 7 * 7 * 4),
-        ],
-      };
-    },
-    {
-      calculatorUrl,
-      points: points.map((point) => graphScreenPoint(snapshot, point)),
-      viewport: snapshot.viewport,
-    },
-  );
-  for (const patch of captured.patches) assertPlotPaint(patch, color);
-  // A real, entirely white PNG also clears the old 1,000-byte threshold.
-  // Even with valid DOM geometry, it must fail the mandatory paint oracle.
-  expect(captured.blankPngBytes).toBeGreaterThan(1_000);
-  expect(() => assertPlotPaint(captured.blankPatch, color)).toThrow(
-    "plot pixels",
-  );
+    }
+    throw error;
+  }
+  const captured = observed.last;
+  if (captured === null) throw new Error("Plot polling produced no capture");
   await test.info().attach(name, {
     body: Buffer.from(captured.png, "base64"),
     contentType: "image/png",

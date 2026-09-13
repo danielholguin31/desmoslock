@@ -35,7 +35,7 @@ function syntheticStoredRecord(value: object): Buffer {
   const payload: Record<string, unknown> = { ...value };
   delete payload.integritySha256;
   const stored =
-    payload.version === 4
+    payload.version === 4 || payload.version === 5
       ? {
           ...payload,
           integritySha256: createHash("sha256")
@@ -452,6 +452,8 @@ const lockedCategories: ProtectionCategories = {
   aac: { status: "confirmed", code: "none" },
 };
 const attemptId = "60000000-0000-4000-8000-000000000001";
+const bootA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+const bootB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 async function admitForProtection(f: ReturnType<typeof harness>) {
   await f.coordinator.initialize();
   await f.coordinator.joinInitial(code);
@@ -473,6 +475,7 @@ async function beginEvidenceAttempt(
   expect(
     await f.coordinator.commitProtectionTransition({
       kind: "engaging",
+      engagingBootSessionId: bootA,
       attemptId: id,
       expectedProtectionRevision: revision,
       authority,
@@ -527,6 +530,554 @@ async function rebindEvidenceDevice(f: ReturnType<typeof harness>) {
 function evidenceRequests(f: ReturnType<typeof harness>) {
   return f.requests.filter((request) => request.route === "evidence");
 }
+
+async function anchoredPrior() {
+  const original = harness();
+  await beginEvidenceAttempt(original);
+  const bytes = original.storedBytes()!;
+  await original.coordinator.dispose();
+  const restored = harness(original.server);
+  restored.setBytes(bytes);
+  await restored.coordinator.initialize();
+  return restored;
+}
+
+const bootRecovery = {
+  attemptId,
+  expectedProtectionRevision: 1,
+  observedBootSessionId: bootB,
+};
+
+function unrelatedBootRecord(record: StudentSessionRecord): string {
+  const raw = { ...record } as Record<string, unknown>;
+  delete raw.generation;
+  delete raw.integritySha256;
+  const protection = { ...record.nativeProtection! } as Record<string, unknown>;
+  delete protection.revision;
+  delete protection.localBootRecovery;
+  return JSON.stringify({ ...raw, nativeProtection: protection });
+}
+
+describe("local prior-boot recovery", () => {
+  it("never converts a recovered prior-process terminal with pending cleanup into actual cleanup", async () => {
+    const first = harness();
+    await beginEvidenceAttempt(first);
+    await first.coordinator.commitProtectionTransition({
+      kind: "native_terminal",
+      attemptId,
+      expectedProtectionRevision: 1,
+      event: {
+        type: "failed_to_begin",
+        attemptId,
+        sequence: 1,
+        code: "native_failed_to_begin",
+      },
+    });
+    const saved = first.storedBytes()!;
+    await first.coordinator.dispose();
+    const f = harness(first.server);
+    f.setBytes(saved);
+    await f.coordinator.initialize();
+    expect(
+      await f.coordinator.commitBootRecovery({
+        ...bootRecovery,
+        expectedProtectionRevision: 2,
+      }),
+    ).toEqual({ status: "committed", protectionRevision: 3 });
+    const before = f.storedBytes();
+    expect(
+      await f.coordinator.commitProtectionTransition({
+        kind: "cleanup",
+        attemptId,
+        expectedProtectionRevision: 3,
+        outcome: "complete",
+      }),
+    ).toEqual({ status: "unavailable" });
+    expect(f.storedBytes()).toEqual(before);
+    expect(f.record().nativeProtection?.latestAttempt?.cleanup).toBe("pending");
+  });
+
+  it("queues local recovery behind evidence settlement and preserves the resulting ACK and reserved counter", async () => {
+    const f = await anchoredPrior();
+    const hold = deferred();
+    const entered = deferred();
+    f.beforeResponse(async (route) => {
+      if (route === "evidence") {
+        entered.resolve();
+        await hold.promise;
+      }
+    });
+    const delivery = f.coordinator.flushEvidence();
+    await entered.promise;
+    const pending = structuredClone(f.record());
+    const recovery = f.coordinator.commitBootRecovery(bootRecovery);
+    expect(f.coordinator.readProtectionContext().maySupersedeLatest).toBe(
+      false,
+    );
+    hold.resolve();
+    await delivery;
+    expect(await recovery).toEqual({
+      status: "committed",
+      protectionRevision: 2,
+    });
+    expect(f.record().lastReservedCounter).toBe(pending.lastReservedCounter);
+    expect(f.record().nativeProtection?.facts).toEqual(
+      pending.nativeProtection?.facts,
+    );
+    expect(f.record().evidence.pendingBatches).toHaveLength(0);
+    expect(f.record().evidence.acknowledgments).toHaveLength(1);
+    expect(f.requests.map((request) => request.route)).toEqual(["evidence"]);
+  });
+
+  it("keeps a held recovery owned through shutdown and never returns a late release", async () => {
+    const f = await anchoredPrior();
+    const hold = deferred();
+    f.blockWrite(hold.promise);
+    const recovery = f.coordinator.commitBootRecovery(bootRecovery);
+    await vi.waitFor(() =>
+      expect(f.events.some((event) => event.startsWith("write:"))).toBe(true),
+    );
+    expect(await f.coordinator.dispose()).toBe(false);
+    expect(f.events).not.toContain("close");
+    hold.resolve();
+    expect(await recovery).toEqual({ status: "unavailable" });
+    expect(f.coordinator.readProtectionContext().maySupersedeLatest).toBe(
+      false,
+    );
+    expect(f.events).not.toContain("close");
+    expect(f.requests).toEqual([]);
+  });
+
+  it("allows a fresh preflight after recovery while retaining the unresolved older attempt without cleanup", async () => {
+    const f = await anchoredPrior();
+    await f.coordinator.commitBootRecovery(bootRecovery);
+    const first = f.record().nativeProtection!.facts[0];
+    await f.coordinator.joinInitial(code);
+    expect(f.record().nativeProtection!.facts).toHaveLength(1);
+    await f.coordinator.retryPending();
+    const admission = f.coordinator.readProtectionContext().admission!;
+    const fresh = await f.coordinator.readFreshAdmission(admission);
+    if (fresh.status !== "fresh") throw new Error("Expected new fresh read");
+    const nextId = "60000000-0000-4000-8000-000000000002";
+    const receipt = f.coordinator.reservePreflightReport(
+      fresh.authority,
+      nextId,
+    );
+    expect(receipt).not.toBeNull();
+    expect(
+      await f.coordinator.commitProtectionTransition({
+        kind: "preflight_failure",
+        attemptId: nextId,
+        receipt: receipt!,
+        expectedProtectionRevision: 2,
+        cause: "shortcut_unavailable",
+        categories: {
+          ...preflightCategories,
+          shortcuts: {
+            status: "failed",
+            code: "emergency_shortcut_unavailable",
+          },
+        },
+      }),
+    ).toEqual({ status: "committed", protectionRevision: 3 });
+    expect(f.record().nativeProtection?.facts.map((fact) => fact.slot)).toEqual(
+      ["engaging", "failure"],
+    );
+    expect(f.record().nativeProtection?.facts[0]).toEqual(first);
+    expect(
+      f.record().nativeProtection?.localBootRecovery.anchors[0]?.observation
+        ?.observedBootSessionId,
+    ).toBe(bootB);
+    expect(f.coordinator.readProtectionContext().bootRecovery).toEqual({
+      status: "none",
+    });
+    expect(f.coordinator.readProtectionContext().maySupersedeLatest).toBe(
+      false,
+    );
+  });
+
+  it("retains a fully acknowledged recovered-unknown signer through targeted rebind and later engaging", async () => {
+    const f = await anchoredPrior();
+    await f.coordinator.commitBootRecovery(bootRecovery);
+    await f.coordinator.flushEvidence();
+    expect(f.record().evidence.acknowledgments).toHaveLength(1);
+    await f.coordinator.retryPending();
+    await f.coordinator.forfeit(f.coordinator.readView().revision);
+    const original = structuredClone(f.record());
+    await f.coordinator.beginTargetedReadmission(
+      code,
+      f.coordinator.readView().revision,
+    );
+    expect(f.coordinator.readView().phase).toBe("active");
+    const fresh = await f.coordinator.readFreshAdmission(
+      f.coordinator.readProtectionContext().admission!,
+    );
+    if (fresh.status !== "fresh") throw new Error("Expected rebound grant");
+    const nextId = "60000000-0000-4000-8000-000000000002";
+    expect(
+      await f.coordinator.commitProtectionTransition({
+        kind: "engaging",
+        attemptId: nextId,
+        authority: fresh.authority,
+        expectedProtectionRevision: 2,
+        engagingBootSessionId: bootB,
+        categories: preflightCategories,
+      }),
+    ).toEqual({ status: "committed", protectionRevision: 3 });
+    const next = f.record();
+    expect(next.nativeProtection?.facts.map((fact) => fact.slot)).toEqual([
+      "engaging",
+      "engaging",
+    ]);
+    expect(next.nativeProtection?.facts[0]).toEqual(
+      original.nativeProtection?.facts[0],
+    );
+    expect(next.evidence.origins[0]).toEqual(original.evidence.origins[0]);
+    expect(next.evidence.acknowledgments).toEqual(
+      original.evidence.acknowledgments,
+    );
+    expect(next.evidence.retiredSigners).toContainEqual({
+      device: original.device,
+      lastReservedCounter: original.lastReservedCounter,
+    });
+    expect(next.nativeProtection?.localBootRecovery.anchors).toHaveLength(2);
+    expect(f.coordinator.readProtectionContext().bootRecovery).toEqual({
+      status: "none",
+    });
+    expect(
+      await f.coordinator.commitBootRecovery({
+        attemptId: nextId,
+        expectedProtectionRevision: 3,
+        observedBootSessionId: bootA,
+      }),
+    ).toEqual({ status: "unavailable" });
+  });
+
+  it.each([
+    bootA,
+    "",
+    bootB.toUpperCase(),
+    "wrong",
+    bootB + "\n",
+    bootB + "\r",
+    null,
+    5,
+    {},
+  ])(
+    "refuses same or malformed observed boot %j without any write or egress",
+    async (observedBootSessionId) => {
+      const f = await anchoredPrior();
+      const before = f.storedBytes();
+      const events = [...f.events];
+      expect(
+        await f.coordinator.commitBootRecovery({
+          ...bootRecovery,
+          observedBootSessionId: observedBootSessionId as string,
+        }),
+      ).toEqual({ status: "unavailable" });
+      expect(f.storedBytes()).toEqual(before);
+      expect(f.events).toEqual(events);
+      expect(f.requests).toEqual([]);
+      expect(f.coordinator.readProtectionContext().maySupersedeLatest).toBe(
+        false,
+      );
+      expect(f.coordinator.readProtectionContext().bootRecovery.status).toBe(
+        "prior_process",
+      );
+    },
+  );
+
+  it("never uses boot recovery for an attempt authored by this process or a mismatched attempt/revision", async () => {
+    const own = harness();
+    await beginEvidenceAttempt(own);
+    const before = own.storedBytes();
+    expect(await own.coordinator.commitBootRecovery(bootRecovery)).toEqual({
+      status: "unavailable",
+    });
+    expect(own.storedBytes()).toEqual(before);
+    const f = await anchoredPrior();
+    const retained = f.storedBytes();
+    for (const delta of [
+      { attemptId: "60000000-0000-4000-8000-000000000002" },
+      { expectedProtectionRevision: 0 },
+      { expectedProtectionRevision: 2 },
+      { extra: true },
+    ]) {
+      expect(
+        await f.coordinator.commitBootRecovery({ ...bootRecovery, ...delta }),
+      ).toEqual({ status: "unavailable" });
+    }
+    expect(f.storedBytes()).toEqual(retained);
+    expect(f.requests).toEqual([]);
+  });
+
+  it("retains the prior barrier while the exact recovery write is held", async () => {
+    const f = await anchoredPrior();
+    const hold = deferred();
+    f.blockWrite(hold.promise);
+    let finished = false;
+    const recovery = f.coordinator
+      .commitBootRecovery(bootRecovery)
+      .then((result) => {
+        finished = true;
+        return result;
+      });
+    await vi.waitFor(() =>
+      expect(f.events.some((event) => event.startsWith("write:"))).toBe(true),
+    );
+    expect(finished).toBe(false);
+    expect(f.coordinator.readProtectionContext().bootRecovery.status).toBe(
+      "prior_process",
+    );
+    expect(f.coordinator.readProtectionContext().maySupersedeLatest).toBe(
+      false,
+    );
+    await f.coordinator.flushEvidence();
+    expect(f.requests).toEqual([]);
+    hold.resolve();
+    expect(await recovery).toEqual({
+      status: "committed",
+      protectionRevision: 2,
+    });
+    expect(f.coordinator.readProtectionContext().maySupersedeLatest).toBe(true);
+    expect(f.coordinator.readProtectionContext().admission).toBeNull();
+  });
+
+  it.each([false, true])(
+    "reconciles exact recovery publication (%s) without duplicate observation or an optimistic release",
+    async (published) => {
+      const f = await anchoredPrior();
+      const before = f.record();
+      f.failNextWrite(published);
+      expect(await f.coordinator.commitBootRecovery(bootRecovery)).toEqual({
+        status: "unavailable",
+      });
+      expect(f.coordinator.readProtectionContext().bootRecovery.status).toBe(
+        "write_uncertain",
+      );
+      expect(f.coordinator.readProtectionContext().maySupersedeLatest).toBe(
+        false,
+      );
+      expect(await f.coordinator.commitBootRecovery(bootRecovery)).toEqual({
+        status: "committed",
+        protectionRevision: 2,
+      });
+      const committed = f.storedBytes();
+      expect(unrelatedBootRecord(f.record())).toBe(unrelatedBootRecord(before));
+      expect(
+        f.record().nativeProtection?.localBootRecovery.nextObservationSequence,
+      ).toBe(2);
+      expect(await f.coordinator.commitBootRecovery(bootRecovery)).toEqual({
+        status: "committed",
+        protectionRevision: 2,
+      });
+      expect(f.storedBytes()).toEqual(committed);
+      expect(f.requests).toEqual([]);
+    },
+  );
+
+  it("keeps a third valid recovery image and every later exact image latched without rewriting or egress", async () => {
+    const f = await anchoredPrior();
+    f.failNextWrite(true);
+    expect(await f.coordinator.commitBootRecovery(bootRecovery)).toEqual({
+      status: "unavailable",
+    });
+    const exact = f.storedBytes()!;
+    const third = syntheticStoredRecord({
+      ...f.record(),
+      lastReservedCounter: f.record().lastReservedCounter + 1,
+    });
+    f.setBytes(third);
+    expect(await f.coordinator.commitBootRecovery(bootRecovery)).toEqual({
+      status: "unavailable",
+    });
+    expect(f.storedBytes()).toEqual(third);
+    expect(f.coordinator.readProtectionContext().maySupersedeLatest).toBe(
+      false,
+    );
+    f.setBytes(exact);
+    const events = [...f.events];
+    expect(await f.coordinator.commitBootRecovery(bootRecovery)).toEqual({
+      status: "unavailable",
+    });
+    await f.coordinator.retryPending();
+    await f.coordinator.refresh();
+    await f.coordinator.flushEvidence();
+    await f.coordinator.beginTargetedReadmission(
+      code,
+      f.coordinator.readView().revision,
+    );
+    expect(f.events).toEqual(events);
+    expect(f.requests).toEqual([]);
+    expect(f.preserved).toEqual([]);
+  });
+
+  it("keeps general rejected v5 data blocked even if valid anchored bytes later appear", async () => {
+    const prior = await anchoredPrior();
+    const valid = prior.storedBytes()!;
+    await prior.coordinator.dispose();
+    const f = harness(prior.server);
+    const damaged = { ...prior.record() } as Record<string, unknown>;
+    delete damaged.integritySha256;
+    f.setBytes(Buffer.from(`synthetic:${JSON.stringify(damaged)}`));
+    await f.coordinator.initialize();
+    expect(f.coordinator.readProtectionContext().bootRecovery).toEqual({
+      status: "record_rejected",
+    });
+    f.setBytes(valid);
+    const events = [...f.events];
+    expect(await f.coordinator.commitBootRecovery(bootRecovery)).toEqual({
+      status: "unavailable",
+    });
+    await f.coordinator.retryPending();
+    await f.coordinator.refresh();
+    await f.coordinator.joinInitial(code);
+    await f.coordinator.beginTargetedReadmission(
+      code,
+      f.coordinator.readView().revision,
+    );
+    await f.coordinator.flushEvidence();
+    expect(f.events).toEqual(events);
+    expect(f.storedBytes()).toEqual(valid);
+    expect(f.coordinator.readProtectionContext().bootRecovery.status).toBe(
+      "record_rejected",
+    );
+    expect(f.requests).toEqual([]);
+    expect(f.preserved).toEqual([]);
+  });
+
+  it("preserves readable unanchored legacy history and refuses retroactive recovery", async () => {
+    const original = await anchoredPrior();
+    const { localBootRecovery, ...protection } =
+      original.record().nativeProtection!;
+    expect(localBootRecovery.anchors).toHaveLength(1);
+    const legacy = syntheticStoredRecord({
+      ...original.record(),
+      version: 4,
+      nativeProtection: protection,
+    });
+    await original.coordinator.dispose();
+    const f = harness(original.server);
+    f.setBytes(legacy);
+    await f.coordinator.initialize();
+    expect(f.coordinator.readProtectionContext().bootRecovery).toEqual({
+      status: "unanchored_prior",
+      attemptId,
+    });
+    expect(await f.coordinator.commitBootRecovery(bootRecovery)).toEqual({
+      status: "unavailable",
+    });
+    expect(f.storedBytes()).toEqual(legacy);
+    expect(f.requests).toEqual([]);
+    expect(f.coordinator.readProtectionContext().maySupersedeLatest).toBe(
+      false,
+    );
+  });
+
+  it("preserves pending evidence, original signer and counter bytes through a local recovery after forfeit", async () => {
+    const f = await anchoredPrior();
+    await f.coordinator.retryPending();
+    await f.coordinator.forfeit(f.coordinator.readView().revision);
+    f.evidenceResult(f.record().device.keyThumbprint, "lost");
+    await f.coordinator.flushEvidence();
+    expect(f.record().evidence.pendingBatches).toHaveLength(1);
+    const before = f.record();
+    const requests = f.requests.length;
+    expect(await f.coordinator.commitBootRecovery(bootRecovery)).toEqual({
+      status: "committed",
+      protectionRevision: 2,
+    });
+    expect(unrelatedBootRecord(f.record())).toBe(unrelatedBootRecord(before));
+    expect(f.requests).toHaveLength(requests);
+    expect(f.record().terminal).toBe(true);
+    expect(f.record().current).toBeNull();
+  });
+
+  it("loads a committed observation as recovered but refuses same-process cleanup and conflicting observations", async () => {
+    const first = await anchoredPrior();
+    await first.coordinator.commitBootRecovery(bootRecovery);
+    const bytes = first.storedBytes()!;
+    await first.coordinator.dispose();
+    const f = harness(first.server);
+    f.setBytes(bytes);
+    await f.coordinator.initialize();
+    expect(f.coordinator.readProtectionContext().bootRecovery).toEqual({
+      status: "prior_boot_recovery_observed",
+      attemptId,
+    });
+    expect(await f.coordinator.commitBootRecovery(bootRecovery)).toEqual({
+      status: "committed",
+      protectionRevision: 2,
+    });
+    expect(
+      await f.coordinator.commitProtectionTransition({
+        kind: "disposed_without_terminal_observation",
+        attemptId,
+        expectedProtectionRevision: 2,
+      }),
+    ).toEqual({ status: "unavailable" });
+    expect(f.storedBytes()).toEqual(bytes);
+    expect(
+      await f.coordinator.commitBootRecovery({
+        ...bootRecovery,
+        observedBootSessionId: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+      }),
+    ).toEqual({ status: "unavailable" });
+    expect(f.coordinator.readView().phase).toBe("recovery_required");
+    expect(f.coordinator.readProtectionContext().maySupersedeLatest).toBe(
+      false,
+    );
+    expect(f.storedBytes()).toEqual(bytes);
+    expect(f.requests).toEqual([]);
+  });
+
+  it("atomically anchors engaging and recovers only a prior-loaded attempt without changing history", async () => {
+    const f = harness();
+    await beginEvidenceAttempt(f);
+    expect(f.coordinator.readProtectionContext().bootRecovery).toEqual({
+      status: "none",
+    });
+    expect(f.record().nativeProtection?.localBootRecovery.anchors).toEqual([
+      { attemptId, engagingBootSessionId: bootA, observation: null },
+    ]);
+    await f.coordinator.dispose();
+    const recovered = harness(f.server);
+    recovered.setBytes(f.storedBytes()!);
+    const restarted = recovered.coordinator;
+    await restarted.initialize();
+    expect(restarted.readProtectionContext().bootRecovery).toEqual({
+      status: "prior_process",
+      attemptId,
+      expectedProtectionRevision: 1,
+      engagingBootSessionId: bootA,
+    });
+    const before = structuredClone(f.record());
+    const requests = recovered.requests.length;
+    expect(
+      await restarted.commitBootRecovery({
+        attemptId,
+        expectedProtectionRevision: 1,
+        observedBootSessionId: bootB,
+      }),
+    ).toEqual({ status: "committed", protectionRevision: 2 });
+    expect(restarted.readProtectionContext().bootRecovery).toEqual({
+      status: "prior_boot_recovery_observed",
+      attemptId,
+    });
+    expect(restarted.readProtectionContext().maySupersedeLatest).toBe(true);
+    const after = recovered.record();
+    expect(after.nativeProtection?.facts).toEqual(
+      before.nativeProtection?.facts,
+    );
+    expect(after.nativeProtection?.latestAttempt).toEqual(
+      before.nativeProtection?.latestAttempt,
+    );
+    expect(after.evidence).toEqual(before.evidence);
+    expect(after.lastReservedCounter).toBe(before.lastReservedCounter);
+    expect(after.current).toEqual(before.current);
+    expect(recovered.requests).toHaveLength(requests);
+  });
+});
 
 describe("reserved preflight failure history", () => {
   it("issues historical receipts only to a current grant and rejects forged receipt objects", async () => {
@@ -982,6 +1533,7 @@ describe("reserved preflight failure history", () => {
     expect(
       await f.coordinator.commitProtectionTransition({
         kind: "engaging",
+        engagingBootSessionId: bootA,
         authority,
         attemptId,
         expectedProtectionRevision: 0,
@@ -1219,6 +1771,7 @@ describe("single-writer native protection facts", () => {
     const authority = await admitForProtection(f);
     await f.coordinator.commitProtectionTransition({
       kind: "engaging",
+      engagingBootSessionId: bootA,
       attemptId,
       expectedProtectionRevision: 0,
       authority,
@@ -1252,6 +1805,7 @@ describe("single-writer native protection facts", () => {
     const before = f.record();
     const start = {
       kind: "engaging",
+      engagingBootSessionId: bootA,
       attemptId,
       expectedProtectionRevision: 0,
       authority,
@@ -1324,6 +1878,7 @@ describe("single-writer native protection facts", () => {
     const authority = await admitForProtection(f);
     await f.coordinator.commitProtectionTransition({
       kind: "engaging",
+      engagingBootSessionId: bootA,
       attemptId,
       expectedProtectionRevision: 0,
       authority,
@@ -1375,6 +1930,7 @@ describe("single-writer native protection facts", () => {
     const authority = await admitForProtection(f);
     await f.coordinator.commitProtectionTransition({
       kind: "engaging",
+      engagingBootSessionId: bootA,
       attemptId,
       expectedProtectionRevision: 0,
       authority,
@@ -1424,6 +1980,7 @@ describe("single-writer native protection facts", () => {
     const authority = await admitForProtection(f);
     const command = {
       kind: "engaging",
+      engagingBootSessionId: bootA,
       attemptId,
       expectedProtectionRevision: 0,
       authority,
@@ -1449,6 +2006,7 @@ describe("single-writer native protection facts", () => {
     const authority = await admitForProtection(f);
     await f.coordinator.commitProtectionTransition({
       kind: "engaging",
+      engagingBootSessionId: bootA,
       attemptId,
       expectedProtectionRevision: 0,
       authority,
@@ -1475,6 +2033,7 @@ describe("single-writer native protection facts", () => {
     expect(
       await restored.commitProtectionTransition({
         kind: "engaging",
+        engagingBootSessionId: bootA,
         attemptId: "60000000-0000-4000-8000-000000000002",
         expectedProtectionRevision: 1,
         authority: fresh,
@@ -1489,6 +2048,7 @@ describe("single-writer native protection facts", () => {
     const authority = await admitForProtection(f);
     await f.coordinator.commitProtectionTransition({
       kind: "engaging",
+      engagingBootSessionId: bootA,
       attemptId,
       expectedProtectionRevision: 0,
       authority,
@@ -1539,6 +2099,7 @@ describe("single-writer native protection facts", () => {
     expect(
       await f.coordinator.commitProtectionTransition({
         kind: "engaging",
+        engagingBootSessionId: bootA,
         attemptId: "60000000-0000-4000-8000-000000000002",
         expectedProtectionRevision: 3,
         authority: fresh.authority,
@@ -1555,6 +2116,7 @@ describe("single-writer native protection facts", () => {
     const authority = await admitForProtection(f);
     await f.coordinator.commitProtectionTransition({
       kind: "engaging",
+      engagingBootSessionId: bootA,
       attemptId,
       expectedProtectionRevision: 0,
       authority,
@@ -1585,6 +2147,7 @@ describe("single-writer native protection facts", () => {
     expect(
       await f.coordinator.commitProtectionTransition({
         kind: "engaging",
+        engagingBootSessionId: bootA,
         attemptId: "60000000-0000-4000-8000-000000000002",
         expectedProtectionRevision: 1,
         authority,
@@ -1598,6 +2161,7 @@ describe("single-writer native protection facts", () => {
     const authority = await admitForProtection(f);
     await f.coordinator.commitProtectionTransition({
       kind: "engaging",
+      engagingBootSessionId: bootA,
       attemptId,
       expectedProtectionRevision: 0,
       authority,
@@ -1639,6 +2203,7 @@ describe("single-writer native protection facts", () => {
       const commands = [
         {
           kind: "engaging",
+          engagingBootSessionId: bootA,
           attemptId: id,
           authority,
           categories: preflightCategories,
@@ -1690,6 +2255,7 @@ describe("single-writer native protection facts", () => {
     expect(
       await f.coordinator.commitProtectionTransition({
         kind: "engaging",
+        engagingBootSessionId: bootA,
         attemptId: "60000000-0000-4000-8000-000000000005",
         expectedProtectionRevision: history.revision,
         authority: f.coordinator.readProtectionContext().freshAdmission!,
@@ -1712,6 +2278,7 @@ describe("single-writer native protection facts", () => {
     expect(
       await f.coordinator.commitProtectionTransition({
         kind: "engaging",
+        engagingBootSessionId: bootA,
         attemptId,
         expectedProtectionRevision: 0,
         authority,
@@ -2271,9 +2838,12 @@ describe("single-writer evidence delivery", () => {
     await completeEvidenceAttempt(f);
     const { evidence, ...prior } = f.record();
     expect(evidence.origins).toHaveLength(1);
+    const { localBootRecovery, ...legacyProtection } = prior.nativeProtection!;
+    expect(localBootRecovery.anchors).toHaveLength(1);
     const bytes = syntheticStoredRecord({
       ...prior,
       version: 2,
+      nativeProtection: legacyProtection,
       device: f.options.crypto.createEnrollment(),
       current: null,
       pending: null,
@@ -3100,7 +3670,7 @@ describe("real desktop crypto/transport coordinator over synthetic private stora
   });
 
   it.each(["missing", "generation", "counter", "version"])(
-    "a v4 integrity failure (%s) preserves the original ciphertext and blocks every admission path",
+    "a v5 integrity failure (%s) preserves the original ciphertext and blocks every admission path",
     async (mutation) => {
       const f = harness();
       await f.coordinator.initialize();

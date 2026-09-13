@@ -4,6 +4,8 @@
 #import <AppKit/AppKit.h>
 #import <AutomaticAssessmentConfiguration/AutomaticAssessmentConfiguration.h>
 #import <Foundation/Foundation.h>
+#include <IOKit/IOKitLib.h>
+#include <IOKit/pwr_mgt/IOPM.h>
 #include <dispatch/dispatch.h>
 #include <node_api.h>
 #include <atomic>
@@ -13,6 +15,7 @@
 #include <pthread.h>
 #include <string>
 #include "aac-protection-state.h"
+#include "aac-boot-session.h"
 
 using namespace desmoslock::aac;
 @class DLAssessmentOwner;
@@ -507,6 +510,37 @@ struct BusyGuard {
   }
   ~BusyGuard() { context->busy = false; }
 };
+struct BootSessionIO {
+  CFMutableDictionaryRef matching() { return IOServiceMatching("IOPMrootDomain"); }
+  io_service_t service(CFMutableDictionaryRef value) {
+    return IOServiceGetMatchingService(kIOMainPortDefault, value);
+  }
+  CFTypeRef property(io_service_t value) {
+    return IORegistryEntryCreateCFProperty(value, CFSTR(kIOPMBootSessionUUIDKey), kCFAllocatorDefault, 0);
+  }
+  bool isString(CFTypeRef value) { return CFGetTypeID(value) == CFStringGetTypeID(); }
+  CFIndex length(CFTypeRef value) { return CFStringGetLength(static_cast<CFStringRef>(value)); }
+  bool ascii(CFTypeRef value, char *output, size_t capacity) {
+    return CFStringGetCString(static_cast<CFStringRef>(value), output,
+                             static_cast<CFIndex>(capacity), kCFStringEncodingASCII);
+  }
+  void releaseService(io_service_t value) { (void)IOObjectRelease(value); }
+  void releaseProperty(CFTypeRef value) { CFRelease(value); }
+};
+static napi_value readBootSessionId(napi_env env, napi_callback_info info) {
+  try {
+    size_t count = 1;
+    napi_value ignored = nullptr;
+    checked(napi_get_cb_info(env, info, &count, &ignored, nullptr, nullptr));
+    if (count != 0 || !pthread_main_np() || processContext == nullptr ||
+        processContext->env != env) throw NapiFailure{};
+    BusyGuard guard(processContext);
+    BootSessionIO io;
+    std::array<char, 37> value{};
+    if (!readBootSession(io, value)) throw NapiFailure{};
+    return text(env, value.data());
+  } catch (...) { return exception(env, "AAC_BOOT_SESSION_UNAVAILABLE"); }
+}
 enum class Method { inspect, begin, requestEnd, subscribe, dispose, readApplications, observeApplications, isActive };
 static std::string attemptValue(napi_env env, napi_value value) {
   napi_valuetype type;
@@ -681,6 +715,9 @@ static napi_value initialize(napi_env env, napi_value exports) {
   try {
     if (!pthread_main_np() || processContext != nullptr || orphanedOwner != nil) throw NapiFailure{};
     std::unique_ptr<ModuleContext> context(new ModuleContext{env});
+    napi_value bootReader = nullptr;
+    checked(napi_create_function(env, "readBootSessionId", NAPI_AUTO_LENGTH, readBootSessionId, nullptr, &bootReader));
+    property(env, exports, "readBootSessionId", bootReader);
     const struct { const char *name; Method method; } methods[] = {
       {"inspectSupport", Method::inspect}, {"begin", Method::begin}, {"requestEnd", Method::requestEnd},
       {"subscribe", Method::subscribe}, {"disposeAfterEnd", Method::dispose},

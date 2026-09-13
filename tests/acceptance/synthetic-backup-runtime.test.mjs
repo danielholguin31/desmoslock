@@ -7,15 +7,18 @@ import { CURRENT_MIGRATION_FILES } from "../../scripts/synthetic-backup/operator
 import "./staff-suite-diagnostics-reporter.test.mjs";
 import {
   boundedCommand,
+  captureBackendCatalogPrefix,
   connectionFromStatus,
   FixtureFailure,
   isExpectedInvalidRootCertificate,
   materializeSourceFixture,
   nativeClientWrapper,
+  requireDisposableCi,
   requireRestoredWorkerReceipt,
   runStaffSuite,
   sourceConfiguration,
   StaffSuiteCommandFailure,
+  withRoundtripCleanup,
   withSessionTimezone,
 } from "./synthetic-backup-runtime.mjs";
 
@@ -24,6 +27,805 @@ const failure = (code) => (error) =>
   error instanceof FixtureFailure &&
   error.code === code &&
   error.message === code;
+
+const repositoryRoot = path.resolve(import.meta.dirname, "../..");
+const catalogRoot = path.join(repositoryRoot, "scripts/backend-catalog");
+const catalogCli = path.join(repositoryRoot, "node_modules/.bin/supabase");
+const catalogCommit = "7e351815" + "0".repeat(32);
+const catalogRoles = [
+  "anon",
+  "authenticated",
+  "service_role",
+  "supabase_admin",
+];
+
+// Artificial shape controls only: these rows are not a PostgreSQL observation.
+// The real pure validator checks the capture boundary using the pinned source
+// inventory, without starting a database or invoking an application routine.
+async function artificialCatalogProjection() {
+  const expectations = JSON.parse(
+    await fs.readFile(
+      path.join(catalogRoot, "catalog-source-expectations.json"),
+    ),
+  );
+  const records = [];
+  const add = (kind, id, data) => records.push({ kind, id, data });
+  const object = (kind, id, data) => {
+    add(kind, id, data);
+    add("acl", [kind, ...id], { is_null: false, entries: [] });
+    for (const role of [...catalogRoles, "public"])
+      add("effective_acl", [kind, ...id, role], {
+        privileges: [],
+        grant_options: [],
+      });
+  };
+  add("context", ["desmoslock_v2"], {
+    server_version_num: 170006,
+    database: "postgres",
+    query_role: "supabase_admin",
+    session_role: "supabase_admin",
+    search_path: "pg_catalog",
+    read_only: true,
+    required_roles_present: true,
+    default_acl_roles: ["supabase_admin"],
+  });
+  for (const role of catalogRoles)
+    add("role", [role], {
+      effective_probe: true,
+      superuser: role === "supabase_admin",
+      inherit: true,
+      bypass_rls: role === "service_role",
+      inherits_roles: [],
+      can_set_roles: [],
+    });
+  object("schema", ["desmoslock_v2"], { owner: "supabase_admin" });
+  for (const table of expectations.tables)
+    object("relation", ["desmoslock_v2", table.name], {
+      kind: "r",
+      owner: "supabase_admin",
+      persistence: "p",
+      is_partition: false,
+      rls: true,
+      force_rls: false,
+      replica_identity: "d",
+      has_rules: false,
+      has_triggers: false,
+      parents: [],
+      partition_hash: null,
+      options_hash: "0".repeat(64),
+    });
+  for (const routine of expectations.functions)
+    object(
+      "routine",
+      [
+        "desmoslock_v2",
+        routine.name,
+        routine.name === "internal_frame_text" ? "pg_catalog._text" : "",
+      ],
+      {
+        kind: "f",
+        owner: "supabase_admin",
+        language: "sql",
+        return_type: "pg_catalog.text",
+        returns_set: false,
+        all_argument_types: [],
+        argument_names: [],
+        argument_modes: [],
+        default_count: 0,
+        security_definer: false,
+        volatility: "s",
+        strict: false,
+        leakproof: false,
+        parallel: "u",
+        body_hash: routine.sourceDollarQuotedBodySha256,
+        binary_hash: null,
+        has_sql_body: false,
+        definition_hash: "1".repeat(64),
+        config_names: [],
+        config_hash: "0".repeat(64),
+        sole_empty_search_path: false,
+      },
+    );
+  return {
+    format_version: 1,
+    schema: "desmoslock_v2",
+    overflow: false,
+    records,
+  };
+}
+
+async function catalogHarness(t, rawProjection) {
+  const directory = await fs.mkdtemp(
+    path.join(os.tmpdir(), "catalog-control-"),
+  );
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const projection = await artificialCatalogProjection();
+  const raw = rawProjection ?? Buffer.from(`${JSON.stringify(projection)}\n`);
+  const calls = [];
+  const capture = {
+    repositoryRoot,
+    workspaceDirectory: directory,
+    cli: catalogCli,
+    run: async (executable, args, options) => {
+      calls.push({ operation: "run", executable, args, options });
+      if (executable === "/usr/bin/git")
+        return Buffer.from(`${catalogCommit}\n`);
+      if (executable === catalogCli) return Buffer.alloc(0);
+      assert.equal(executable, "/usr/bin/python3");
+      return boundedCommand(executable, args, options);
+    },
+    docker: async (args, options) => {
+      calls.push({ operation: "docker", args, options });
+      return raw;
+    },
+    readFile: async (file, ...options) => {
+      calls.push({ operation: "read", file });
+      return fs.readFile(file, ...options);
+    },
+    writeFile: async (file, bytes, options) => {
+      calls.push({ operation: "write", file, bytes, options });
+      return fs.writeFile(file, bytes, options);
+    },
+  };
+  return { capture, calls, directory, projection, raw };
+}
+
+function cleanupHarness(capture, calls, overrides = {}) {
+  const workspace = { directory: capture.workspaceDirectory, dev: 1, ino: 2 };
+  const tlsRoot = {
+    directory: "/synthetic-tmpfs/catalog-control",
+    dev: 3,
+    ino: 4,
+  };
+  const state = {
+    stage: "CATALOG_PREFIX",
+    ownsTool: false,
+    ownsSource: false,
+    ownsTarget: true,
+    workspace,
+    tlsRoot,
+  };
+  return {
+    state,
+    options: {
+      state: () => state,
+      run: async (executable, args, options) => {
+        calls.push({ operation: "cleanup-run", executable, args, options });
+        return Buffer.alloc(0);
+      },
+      docker: async () => assert.fail("an unowned tool must not be touched"),
+      cli: catalogCli,
+      toolContainer:
+        "desmoslock-restore-tools-0123456789abcdef0123456789abcdef",
+      removeDirectory: async (owned) => {
+        calls.push({ operation: "remove", owned });
+      },
+      detach: () => calls.push({ operation: "detach" }),
+      ...overrides,
+    },
+  };
+}
+
+test("disposable CI guard accepts only the pinned unprivileged Linux runner", () => {
+  const valid = Object.freeze({
+    platform: "linux",
+    nodeVersion: "v24.20.0",
+    githubActions: "true",
+    ci: "true",
+    uid: 1001,
+  });
+  assert.doesNotThrow(() => requireDisposableCi(valid));
+  for (const [field, values] of [
+    ["platform", ["darwin", "win32", undefined]],
+    ["nodeVersion", ["v24.19.0", "v24.20.1", "24.20.0", undefined]],
+    ["githubActions", [true, "false", "TRUE", undefined]],
+    ["ci", [true, "false", "TRUE", undefined]],
+  ])
+    for (const value of values)
+      assert.throws(
+        () => requireDisposableCi({ ...valid, [field]: value }),
+        failure("DISPOSABLE_CI_REQUIRED"),
+      );
+  for (const uid of [0, undefined, null, "1001", 1.5, NaN])
+    assert.throws(
+      () => requireDisposableCi({ ...valid, uid }),
+      failure("UNPRIVILEGED_CI_RUNNER_REQUIRED"),
+    );
+});
+
+test("catalog prefix capture fixes source pins, command arguments, SQL input, and bounded diagnostic", async (t) => {
+  const { capture, calls, projection, raw, directory } =
+    await catalogHarness(t);
+  const diagnostic = await captureBackendCatalogPrefix(capture);
+  assert.ok(Buffer.isBuffer(diagnostic));
+  assert.ok(diagnostic.length <= 1_104_096);
+  const text = diagnostic.toString("utf8");
+  assert.match(text, /^DESMOSLOCK_CATALOG_PREFIX_V1 \{[^\n]+\}\n$/u);
+  const observation = JSON.parse(
+    text.slice("DESMOSLOCK_CATALOG_PREFIX_V1 ".length),
+  );
+  const expectations = JSON.parse(
+    await fs.readFile(
+      path.join(catalogRoot, "catalog-source-expectations.json"),
+    ),
+  );
+  assert.deepEqual(observation, {
+    observation_version: 1,
+    query_sha256:
+      "d4c00e6330577e42aa0268f113f3d8a2b37e7e9b8f2c50b7c726bf2c0340c1d9",
+    source_commit: catalogCommit,
+    source_files: expectations.sourceFiles,
+    prefix_versions: ["20260824000100", "20260828000100"],
+    projection,
+  });
+  assert.equal(
+    text,
+    `DESMOSLOCK_CATALOG_PREFIX_V1 ${JSON.stringify(observation)}\n`,
+  );
+  assert.deepEqual(
+    calls
+      .filter((call) => call.operation === "read")
+      .map((call) => call.file)
+      .toSorted(),
+    [
+      path.join(catalogRoot, "catalog.sql"),
+      path.join(catalogRoot, "validate.py"),
+      path.join(catalogRoot, "catalog-source-expectations.json"),
+      ...expectations.sourceFiles.map((source) =>
+        path.join(repositoryRoot, source.path),
+      ),
+    ].toSorted(),
+  );
+  const observationPath = path.join(directory, "catalog-prefix.json");
+  assert.deepEqual(
+    calls.filter((call) => call.operation !== "read"),
+    [
+      {
+        operation: "run",
+        executable: "/usr/bin/git",
+        args: ["rev-parse", "HEAD"],
+        options: { timeoutMs: 10_000, maxBytes: 128 },
+      },
+      {
+        operation: "run",
+        executable: catalogCli,
+        args: [
+          "db",
+          "reset",
+          "--local",
+          "--version",
+          "20260828000100",
+          "--no-seed",
+        ],
+        options: { timeoutMs: 300_000 },
+      },
+      {
+        operation: "docker",
+        args: [
+          "exec",
+          "--user",
+          "postgres",
+          "--interactive",
+          "supabase_db_desmoslock-v2",
+          "/usr/lib/postgresql/bin/psql",
+          "--no-psqlrc",
+          "--quiet",
+          "--tuples-only",
+          "--no-align",
+          "--set",
+          "ON_ERROR_STOP=1",
+          "--host",
+          "/var/run/postgresql",
+          "--port",
+          "5432",
+          "--username",
+          "supabase_admin",
+          "--dbname",
+          "postgres",
+        ],
+        options: {
+          input:
+            "BEGIN READ ONLY;\nSET LOCAL search_path = pg_catalog;\n" +
+            "SET LOCAL statement_timeout = '10s';\nSET LOCAL lock_timeout = '1s';\n" +
+            (await fs.readFile(path.join(catalogRoot, "catalog.sql"), "utf8")) +
+            "\nROLLBACK;\n",
+          timeoutMs: 30_000,
+          maxBytes: 1_100_000,
+        },
+      },
+      {
+        operation: "write",
+        file: observationPath,
+        bytes: raw,
+        options: { mode: 0o600, flag: "wx" },
+      },
+      {
+        operation: "run",
+        executable: "/usr/bin/python3",
+        args: [
+          "-I",
+          "-B",
+          path.join(catalogRoot, "validate.py"),
+          "validate",
+          observationPath,
+          "--expectations",
+          path.join(catalogRoot, "catalog-source-expectations.json"),
+        ],
+        options: { timeoutMs: 10_000, maxBytes: 8192 },
+      },
+    ],
+  );
+  assert.deepEqual(await fs.readFile(observationPath), raw);
+  assert.equal((await fs.stat(observationPath)).mode & 0o777, 0o600);
+});
+
+test("catalog pin drift and invalid capture scope stop before command execution", async (t) => {
+  for (const relative of [
+    "scripts/backend-catalog/catalog.sql",
+    "scripts/backend-catalog/validate.py",
+    "scripts/backend-catalog/catalog-source-expectations.json",
+    "supabase/migrations/20260824000100_v2_foundation.sql",
+    "supabase/migrations/20260828000100_internal_release_backend.sql",
+  ]) {
+    const { capture, calls } = await catalogHarness(t);
+    const read = capture.readFile;
+    capture.readFile = async (file) => {
+      const bytes = await read(file);
+      return file === path.join(repositoryRoot, relative)
+        ? Buffer.concat([bytes, Buffer.from("\n")])
+        : bytes;
+    };
+    await assert.rejects(
+      captureBackendCatalogPrefix(capture),
+      failure("CATALOG_INPUT_INVALID"),
+    );
+    assert.equal(
+      calls.some((call) => call.operation !== "read"),
+      false,
+    );
+  }
+  for (const invalid of [
+    { repositoryRoot: "relative" },
+    { workspaceDirectory: "relative" },
+    { cli: "/unowned/supabase" },
+    { run: null },
+    { docker: null },
+  ]) {
+    const { capture, calls } = await catalogHarness(t);
+    await assert.rejects(
+      captureBackendCatalogPrefix({ ...capture, ...invalid }),
+      failure("CATALOG_SCOPE_INVALID"),
+    );
+    assert.deepEqual(calls, []);
+  }
+});
+
+test("catalog capture rejects malformed commit identity before resetting the target", async (t) => {
+  for (const commit of [
+    `${catalogCommit}`,
+    `${catalogCommit}\nextra\n`,
+    `${"A".repeat(40)}\n`,
+    "7e351815\n",
+    "synthetic-private-value\n",
+  ]) {
+    const { capture, calls } = await catalogHarness(t);
+    capture.run = async (executable, args) => {
+      calls.push({ operation: "run", executable, args });
+      assert.equal(executable, "/usr/bin/git");
+      return Buffer.from(commit);
+    };
+    await assert.rejects(
+      captureBackendCatalogPrefix(capture),
+      failure("CATALOG_COMMIT_INVALID"),
+    );
+    assert.equal(calls.filter((call) => call.operation === "run").length, 1);
+    assert.equal(
+      calls.some((call) => call.operation === "docker"),
+      false,
+    );
+  }
+});
+
+test("real catalog validator rejects malformed, missing, duplicate, and oversized projections with target cleanup", async (t) => {
+  const value = await artificialCatalogProjection();
+  const missing = structuredClone(value);
+  missing.records = missing.records.filter(
+    (record) => record.kind !== "context",
+  );
+  const duplicate = structuredClone(value);
+  duplicate.records.push(structuredClone(duplicate.records[0]));
+  const drift = structuredClone(value);
+  drift.records.find((record) => record.kind === "routine").data.body_hash =
+    "2".repeat(64);
+  const cases = [
+    ["invalid JSON", Buffer.from("{"), "FIXTURE_COMMAND_FAILED"],
+    [
+      "missing context",
+      Buffer.from(JSON.stringify(missing)),
+      "FIXTURE_COMMAND_FAILED",
+    ],
+    [
+      "duplicate record",
+      Buffer.from(JSON.stringify(duplicate)),
+      "FIXTURE_COMMAND_FAILED",
+    ],
+    [
+      "duplicate JSON field",
+      Buffer.from(
+        JSON.stringify(value).replace(
+          '"format_version":1',
+          '"format_version":1,"format_version":1',
+        ),
+      ),
+      "FIXTURE_COMMAND_FAILED",
+    ],
+    [
+      "source body drift",
+      Buffer.from(JSON.stringify(drift)),
+      "FIXTURE_COMMAND_FAILED",
+    ],
+    [
+      "server overflow",
+      Buffer.from(JSON.stringify({ ...value, overflow: true })),
+      "FIXTURE_COMMAND_FAILED",
+    ],
+    ["missing output", Buffer.alloc(0), "CATALOG_OUTPUT_INVALID"],
+    ["byte cap", Buffer.alloc(1_100_001, " "), "CATALOG_OUTPUT_INVALID"],
+  ];
+  for (const [name, raw, code] of cases)
+    await t.test(name, async (t) => {
+      const { capture, calls } = await catalogHarness(t, raw);
+      const cleanup = cleanupHarness(capture, calls);
+      await assert.rejects(
+        withRoundtripCleanup(async () => {
+          await captureBackendCatalogPrefix(capture);
+          assert.fail(
+            "a rejected catalog must not return a diagnostic or continue setup",
+          );
+        }, cleanup.options),
+        failure(`CATALOG_PREFIX_${code}`),
+      );
+      assert.deepEqual(
+        calls.filter((call) => call.operation === "cleanup-run"),
+        [
+          {
+            operation: "cleanup-run",
+            executable: catalogCli,
+            args: ["stop", "--no-backup"],
+            options: { signal: undefined, timeoutMs: 120_000 },
+          },
+        ],
+      );
+      assert.deepEqual(
+        calls
+          .filter((call) => call.operation === "remove")
+          .map((call) => call.owned),
+        [cleanup.state.tlsRoot, cleanup.state.workspace],
+      );
+      assert.equal(
+        calls.filter((call) => call.operation === "detach").length,
+        1,
+      );
+      if (code === "CATALOG_OUTPUT_INVALID")
+        assert.equal(
+          calls.some((call) => call.operation === "write"),
+          false,
+        );
+      else
+        assert.equal(
+          calls.filter((call) => call.executable === "/usr/bin/python3").length,
+          1,
+        );
+    });
+});
+
+test("prefix reset, query, and validator command failures use the real cleanup wrapper exactly once", async (t) => {
+  for (const command of ["prefix reset", "query", "validator"])
+    await t.test(command, async (t) => {
+      const { capture, calls } = await catalogHarness(t);
+      const run = capture.run;
+      const docker = capture.docker;
+      capture.docker = async (...args) => {
+        const output = await docker(...args);
+        if (command === "query")
+          throw new FixtureFailure("FIXTURE_COMMAND_FAILED");
+        return output;
+      };
+      capture.run = async (executable, args, options) => {
+        if (
+          (command === "prefix reset" && executable === catalogCli) ||
+          (command === "validator" && executable === "/usr/bin/python3")
+        ) {
+          calls.push({ operation: "run", executable, args, options });
+          throw new FixtureFailure("FIXTURE_COMMAND_FAILED");
+        }
+        return run(executable, args, options);
+      };
+      const cleanup = cleanupHarness(capture, calls);
+      await assert.rejects(
+        withRoundtripCleanup(async () => {
+          const diagnostic = await captureBackendCatalogPrefix(capture);
+          calls.push({ operation: "diagnostic", bytes: diagnostic });
+          await capture.run(catalogCli, ["db", "reset", "--no-seed"], {
+            timeoutMs: 300_000,
+          });
+          calls.push({ operation: "source-setup" });
+        }, cleanup.options),
+        failure("CATALOG_PREFIX_FIXTURE_COMMAND_FAILED"),
+      );
+      const stops = calls.filter((call) => call.operation === "cleanup-run");
+      assert.equal(stops.length, 1);
+      assert.deepEqual(stops[0].args, ["stop", "--no-backup"]);
+      assert.equal(Object.hasOwn(stops[0].options, "signal"), true);
+      assert.equal(stops[0].options.signal, undefined);
+      assert.equal(
+        calls.some((call) =>
+          ["diagnostic", "source-setup"].includes(call.operation),
+        ),
+        false,
+      );
+      assert.equal(
+        calls.some(
+          (call) =>
+            call.operation === "run" &&
+            call.executable === catalogCli &&
+            call.args.join(" ") === "db reset --no-seed",
+        ),
+        false,
+      );
+      if (command === "prefix reset") {
+        assert.equal(
+          calls.some(
+            (call) =>
+              ["docker", "write"].includes(call.operation) ||
+              call.executable === "/usr/bin/python3",
+          ),
+          false,
+        );
+        assert.deepEqual(
+          calls.filter((call) => call.operation === "run"),
+          [
+            {
+              operation: "run",
+              executable: "/usr/bin/git",
+              args: ["rev-parse", "HEAD"],
+              options: { timeoutMs: 10_000, maxBytes: 128 },
+            },
+            {
+              operation: "run",
+              executable: catalogCli,
+              args: [
+                "db",
+                "reset",
+                "--local",
+                "--version",
+                "20260828000100",
+                "--no-seed",
+              ],
+              options: { timeoutMs: 300_000 },
+            },
+          ],
+        );
+      }
+      assert.equal(
+        calls.filter((call) => call.operation === "detach").length,
+        1,
+      );
+    });
+});
+
+test("catalog capture requires an exact validator summary tied to the captured projection", async (t) => {
+  for (const [name, mutate, code = "CATALOG_VALIDATION_INVALID"] of [
+    [
+      "missing status",
+      (value) => {
+        delete value.status;
+      },
+    ],
+    [
+      "missing record count",
+      (value) => {
+        delete value.records;
+      },
+    ],
+    [
+      "missing digest",
+      (value) => {
+        delete value.sha256;
+      },
+    ],
+    [
+      "missing limit",
+      (value) => {
+        delete value.catalog_equivalence;
+      },
+    ],
+    [
+      "extra field",
+      (value) => {
+        value.extra = "synthetic-private-value";
+      },
+    ],
+    [
+      "rejected status",
+      (value) => {
+        value.status = "rejected";
+      },
+    ],
+    [
+      "equivalence claim",
+      (value) => {
+        value.catalog_equivalence = "established";
+      },
+    ],
+    [
+      "invalid record type",
+      (value) => {
+        value.records = String(value.records);
+      },
+    ],
+    [
+      "zero records",
+      (value) => {
+        value.records = 0;
+      },
+    ],
+    [
+      "record cap",
+      (value) => {
+        value.records = 2049;
+      },
+    ],
+    [
+      "invalid digest",
+      (value) => {
+        value.sha256 = "synthetic-private-value";
+      },
+    ],
+    [
+      "different record count",
+      (value) => {
+        value.records += 1;
+      },
+      "CATALOG_VALIDATION_MISMATCH",
+    ],
+    [
+      "different digest",
+      (value) => {
+        value.sha256 = "0".repeat(64);
+      },
+      "CATALOG_VALIDATION_MISMATCH",
+    ],
+  ])
+    await t.test(name, async (t) => {
+      const { capture } = await catalogHarness(t);
+      const run = capture.run;
+      capture.run = async (executable, ...args) => {
+        const bytes = await run(executable, ...args);
+        if (executable !== "/usr/bin/python3") return bytes;
+        const validation = JSON.parse(bytes);
+        mutate(validation);
+        return Buffer.from(JSON.stringify(validation));
+      };
+      await assert.rejects(captureBackendCatalogPrefix(capture), failure(code));
+    });
+});
+
+test("cleanup failure preserves recovery workspace and suffixes the original catalog failure", async (t) => {
+  const { capture, calls } = await catalogHarness(t);
+  capture.docker = async () => {
+    throw new FixtureFailure("FIXTURE_COMMAND_TIMEOUT");
+  };
+  const cleanup = cleanupHarness(capture, calls, {
+    run: async (executable, args, options) => {
+      calls.push({ operation: "cleanup-run", executable, args, options });
+      throw new FixtureFailure("FIXTURE_COMMAND_FAILED");
+    },
+  });
+  await assert.rejects(
+    withRoundtripCleanup(
+      () => captureBackendCatalogPrefix(capture),
+      cleanup.options,
+    ),
+    failure("CATALOG_PREFIX_FIXTURE_COMMAND_TIMEOUT_AND_CLEANUP_FAILED"),
+  );
+  assert.equal(
+    calls.filter((call) => call.operation === "cleanup-run").length,
+    1,
+  );
+  assert.deepEqual(
+    calls
+      .filter((call) => call.operation === "remove")
+      .map((call) => call.owned),
+    [cleanup.state.tlsRoot],
+  );
+  assert.equal(calls.filter((call) => call.operation === "detach").length, 1);
+});
+
+test("cancelled catalog work still stops the owned target with cancellation detached", async (t) => {
+  const { capture, calls } = await catalogHarness(t);
+  const cancellation = new AbortController();
+  cancellation.abort();
+  capture.docker = () =>
+    boundedCommand("/not-an-executable", [], { signal: cancellation.signal });
+  const cleanup = cleanupHarness(capture, calls);
+  await assert.rejects(
+    withRoundtripCleanup(
+      () => captureBackendCatalogPrefix(capture),
+      cleanup.options,
+    ),
+    failure("CATALOG_PREFIX_FIXTURE_COMMAND_ABORTED"),
+  );
+  const stops = calls.filter((call) => call.operation === "cleanup-run");
+  assert.equal(stops.length, 1);
+  assert.deepEqual(stops[0].args, ["stop", "--no-backup"]);
+  assert.equal(Object.hasOwn(stops[0].options, "signal"), true);
+  assert.equal(stops[0].options.signal, undefined);
+  assert.equal(calls.filter((call) => call.operation === "detach").length, 1);
+});
+
+test("inert roundtrip callback returns the validated diagnostic before full reset and source setup", async (t) => {
+  const { capture, calls } = await catalogHarness(t);
+  const cleanup = cleanupHarness(capture, calls);
+  const result = await withRoundtripCleanup(async () => {
+    const diagnostic = await captureBackendCatalogPrefix(capture);
+    calls.push({ operation: "diagnostic", bytes: diagnostic });
+    await capture.run(catalogCli, ["db", "reset", "--no-seed"], {
+      timeoutMs: 300_000,
+    });
+    cleanup.state.stage = "SOURCE_SETUP";
+    cleanup.state.ownsSource = true;
+    calls.push({ operation: "source-setup" });
+    return "synthetic-roundtrip-result";
+  }, cleanup.options);
+  assert.equal(result, "synthetic-roundtrip-result");
+  assert.deepEqual(
+    calls
+      .filter((call) =>
+        ["run", "docker", "diagnostic", "source-setup"].includes(
+          call.operation,
+        ),
+      )
+      .map((call) =>
+        call.operation === "run"
+          ? call.executable === catalogCli
+            ? call.args.join(" ")
+            : call.executable
+          : call.operation,
+      ),
+    [
+      "/usr/bin/git",
+      "db reset --local --version 20260828000100 --no-seed",
+      "docker",
+      "/usr/bin/python3",
+      "diagnostic",
+      "db reset --no-seed",
+      "source-setup",
+    ],
+  );
+  assert.deepEqual(
+    calls.filter((call) => call.operation === "cleanup-run"),
+    [
+      {
+        operation: "cleanup-run",
+        executable: catalogCli,
+        args: ["stop", "--no-backup"],
+        options: {
+          cwd: path.join(capture.workspaceDirectory, "source"),
+          signal: undefined,
+          timeoutMs: 120_000,
+        },
+      },
+      {
+        operation: "cleanup-run",
+        executable: catalogCli,
+        args: ["stop", "--no-backup"],
+        options: { signal: undefined, timeoutMs: 120_000 },
+      },
+    ],
+  );
+  assert.equal(calls.filter((call) => call.operation === "detach").length, 1);
+});
 
 test("worker receipt requires explicit metadata and empty authority-store evidence", () => {
   const receipt = Object.freeze({

@@ -10,6 +10,7 @@ import { createStudentSessionCrypto } from "../../../apps/desktop/src/main/stude
 import {
   createStudentSessionStore,
   openNativeStudentRecordStore,
+  type BootRecoveryCommand,
   type ProtectionTransition,
 } from "../../../apps/desktop/src/main/student-session-store.js";
 import { createStudentSessionTransport } from "../../../apps/desktop/src/main/student-session-transport.js";
@@ -22,6 +23,10 @@ export {
 } from "@desmoslock/contracts";
 
 export const syntheticPrefix = "SYNTHETIC_PRIVATE_BOUNDARY_ONLY:";
+export const syntheticBootSessionIds = {
+  prior: "00000000-0000-0000-0000-000000000000",
+  current: "abcdef01-2345-0123-4567-89abcdef0123",
+} as const;
 export const syntheticOriginBuild: NativeEvidenceOriginBuild = {
   kind: "build",
   identity: {
@@ -48,10 +53,13 @@ async function worker() {
     throw new Error("Synthetic worker arguments missing");
   const configuration = { environment: "local" as const, url };
   const ignoreAbort = process.argv[5] === "ignore-abort";
+  // Injected fixture observation only; this worker never reads IOKit or AAC.
+  const bootSessionId = process.argv[7] ?? syntheticBootSessionIds.prior;
   const crypto = createStudentSessionCrypto(configuration);
   let elapsed = 0;
   let writes = 0;
   let closes = 0;
+  let fetchAttempts = 0;
   let blockNextWrite = false;
   let failNextWrite = false;
   let releaseWrite: (() => void) | undefined;
@@ -101,9 +109,11 @@ async function worker() {
   });
   const transport = createStudentSessionTransport(
     configuration,
-    ignoreAbort
-      ? (input, init) => fetch(input, { ...init, signal: null })
-      : fetch,
+    (input, init) => {
+      // Count synchronously before real forwarding, including aborted requests.
+      fetchAttempts += 1;
+      return fetch(input, ignoreAbort ? { ...init, signal: null } : init);
+    },
   );
   const coordinator = createStudentSessionCoordinator({
     apiOrigin: configuration.url,
@@ -135,6 +145,7 @@ async function worker() {
     readonly expectedProtectionRevision: number;
     observed: PreflightFailureCommand | null;
   } | null = null;
+  let reservedBootRecovery: BootRecoveryCommand | null = null;
   const lines = createInterface({ input: process.stdin });
   lines.on("line", (line) => {
     void (async () => {
@@ -143,6 +154,7 @@ async function worker() {
         operation: string;
         code?: string;
         ms?: number;
+        observedBootSessionId?: string;
       };
       try {
         let result: unknown;
@@ -291,6 +303,7 @@ async function worker() {
               attemptId,
               ...(await coordinator.commitProtectionTransition({
                 kind: "engaging",
+                engagingBootSessionId: bootSessionId,
                 attemptId,
                 expectedProtectionRevision: context.protection?.revision ?? 0,
                 authority: read.authority,
@@ -300,6 +313,21 @@ async function worker() {
                 },
               })),
             };
+            break;
+          }
+          case "recover-boot": {
+            const protection = coordinator.readProtectionContext().protection;
+            const attempt = protection?.latestAttempt;
+            if (protection == null || attempt == null)
+              throw new Error("Synthetic prior protection unavailable");
+            reservedBootRecovery ??= {
+              attemptId: attempt.attemptId,
+              expectedProtectionRevision: protection.revision,
+              observedBootSessionId:
+                command.observedBootSessionId ?? bootSessionId,
+            };
+            // Retain the exact command through a lost native completion.
+            result = await coordinator.commitBootRecovery(reservedBootRecovery);
             break;
           }
           case "began":
@@ -387,8 +415,14 @@ async function worker() {
           view: coordinator.readView(),
           writes,
           closes,
+          fetchAttempts,
           idle: transport.isIdle(),
           protection: coordinator.readProtectionContext().protection,
+          bootRecovery: coordinator.readProtectionContext().bootRecovery,
+          maySupersedeLatest:
+            coordinator.readProtectionContext().maySupersedeLatest,
+          hasFreshAdmission:
+            coordinator.readProtectionContext().freshAdmission !== null,
           delivery: coordinator.readProtectionContext().delivery,
           observationSequence:
             coordinator.readProtectionContext().observationSequence,

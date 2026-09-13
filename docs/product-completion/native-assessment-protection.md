@@ -29,7 +29,7 @@ permitted continuation is `cleanup`, after this process's actual owned disposal
 and restoration complete. Both facts have phase `failed`, AAC still pending,
 no native event and no native sequence. No engaging or native-end fact is invented.
 
-The first failure and original origin commit together through the same version-4
+The first failure and original origin commit together through the same version-5
 writer and whole-payload checksum. A held write retains the attempt; uncertainty
 keeps the exact report for reconciliation. Later expiry, forfeit or renewal cannot
 relabel it or overwrite the latest counter. Identity replacement waits until the
@@ -38,8 +38,10 @@ original origin is durable. Capacity uses the existing eight-slot reservation an
 older facts. Unrelated or stale callbacks do not create a preflight report.
 
 Main prepares the calculator in a fresh nonpersistent denied-network session,
-loads it while detached and durably records engaging before requesting native
-begin. After an actual `did_begin`, it requires an accepted signed backend read
+loads it while detached, reads the canonical boot-session identifier once, and
+durably commits that anchor with engaging and its original origin before
+requesting native begin. A missing or invalid boot identifier, uncertain write,
+or stale post-commit gate prevents begin. After an actual `did_begin`, it requires an accepted signed backend read
 whose reserved read-start sequence is strictly later than the sequence captured
 at that event. Equal monotonic timestamps cannot satisfy this causal fence.
 Durable locked state, current issued admission, all local categories and the
@@ -87,16 +89,16 @@ receipt or native end when either result is unknown.
 
 ## Durable recovery
 
-The encrypted version-4 record retains one admission, counter and evidence writer.
-Exact version-1, version-2 and version-3 decoding normalizes in memory without an implicit
+The encrypted version-5 record retains one admission, counter and evidence writer.
+Exact version-1 through version-4 decoding normalizes in memory without an implicit
 write. Native facts occupy a bounded immutable journal of 32 slots, with eight
 reserved before engaging. Plaintext remains limited to 48 KiB and ciphertext to
 64 KiB. Unknown durability preserves possibly published bytes and blocks promotion.
 Version 4 also records initial-join uncertainty, as described in the
 [admission recovery contract](student-session-admission.md#desktop-persistence-and-protection-state).
-Earlier version-3 readers cannot read a version-4 write. A rollback must retain
-version-4 read support and the current ciphertext, lock and counter history.
-The whole compact version-4 payload carries an unkeyed SHA-256 checksum for
+Earlier readers cannot read a version-5 write. A rollback must retain
+version-5 read support and the current ciphertext, lock and counter history.
+The whole compact version-5 payload carries an unkeyed SHA-256 checksum for
 corruption detection, verified before accepting the record. The checksum is not
 hostile-host authentication, and its serialized field counts toward the existing
 plaintext ceiling. A failed check retains the original ciphertext and blocks
@@ -114,12 +116,37 @@ as historical failed status. It does not restore admission or native authority.
 An incomplete failure-first record retains the existing prior-process recovery
 barrier, with the original failed category visible and no automatic reset.
 
-A prior-process unfinished record remains detached recovery with new Start
-disabled. Unreadable or unsupported original records also block targeted recovery
-before quarantine, writes or egress, preserving uncertainty across quit/restart.
-No operator reset is implemented here. An ownerless process may quit after
-Student drain without clearing that barrier or claiming native end; an owned
-unfinished native attempt retains its cleanup responsibility.
+A prior-process unfinished record remains detached recovery until its exact
+valid saved boot anchor differs from the valid current boot-session identifier.
+During reconstruction or an explicit refresh/retry, with no current-process
+attempt, the Student writer may commit one separate local recovery observation.
+The coordinator retains the barrier through synchronous notifications and writer
+awaits; only a definite acknowledgment and matching current context, or a valid
+reloaded observation, permit a fresh idle projection. That view has pending
+categories, hidden calculator, no native end and cleanup `not_requested`.
+
+The old attempt's unknown disposition, facts, cleanup, origin, signer, counters,
+ACKs and queued bytes remain unchanged. The observation adds no reportable fact
+or network request, cannot enable pruning, and never starts an assessment. A
+verified boot change proves only that the prior-boot owner is gone; another app
+may own AAC now. Every new explicit Start must pass the ordinary fresh admission,
+capacity and local gates and obtain a real native begin.
+
+Same boot, unavailable or malformed current ID, unanchored legacy history,
+rejected records and uncertain writes remain blocked. A temporary first-load
+failure or uncertain publication may resume in the same process only after the
+Student writer reconciles the exact preimage/postimage and restores its local
+eligibility. Refresh/retry then reconstructs or releases the prior boot barrier;
+no Start, join or readmission is admitted while uncertainty remains. Corrupt and
+third-image rejection stays latched even if expected bytes later reappear.
+Delivery notifications
+cannot release the barrier or repeatedly retry a failed comparison. Unreadable
+or unsupported original records also block targeted recovery before quarantine,
+writes or egress. An ownerless process may quit after Student drain without
+clearing durable uncertainty or claiming native end; reopening remains blocked.
+Any actual retained native attempt keeps its cleanup responsibility. A recovery
+already in flight may finish durably during shutdown, but cannot admit a new
+Start after stopping.
 
 ## Historical report delivery
 
@@ -167,3 +194,7 @@ remain truthfully unavailable. Actual macOS AAC/KVO, shortcut ownership,
 fullscreen/zoom containment, native end/restoration, restart and packaged-device
 checks remain separate gates. The failed outer-Seatbelt macOS harness is preserved
 as failed evidence; it supplies no renderer or native protection acceptance.
+Boot recovery additionally requires exact signed Intel and Apple-silicon checks
+of public boot-property access, sleep/wake stability, reboot changes, crash-write
+reconciliation and refusal when another app owns AAC in the new boot. Synthetic
+boot identifiers and storage ports do not satisfy those physical gates.

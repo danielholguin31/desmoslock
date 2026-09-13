@@ -364,6 +364,8 @@ for (const selected of builders) {
               "AppKit",
               "-framework",
               "AutomaticAssessmentConfiguration",
+              "-framework",
+              "IOKit",
               "-lc++",
             ]
           : []),

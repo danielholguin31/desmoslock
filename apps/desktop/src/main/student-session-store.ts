@@ -80,12 +80,116 @@ export interface ProtectionFact {
   readonly cause: LocalEndCause | "none";
 }
 
+export interface StoredLocalBootRecovery {
+  readonly policyVersion: 1;
+  readonly requiredFromFactSequence: number;
+  readonly nextObservationSequence: number;
+  readonly anchors: readonly {
+    readonly attemptId: string;
+    readonly engagingBootSessionId: string;
+    readonly observation: null | {
+      readonly sequence: number;
+      readonly basis: "boot_session_changed";
+      readonly observedBootSessionId: string;
+    };
+  }[];
+}
+
+export interface BootRecoveryCommand {
+  readonly attemptId: string;
+  readonly expectedProtectionRevision: number;
+  readonly observedBootSessionId: string;
+}
+
+export function parseBootSessionId(value: unknown): string | null {
+  return typeof value === "string" &&
+    value.length === 36 &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
+    ? value
+    : null;
+}
+
+export function parseBootRecoveryCommand(
+  value: unknown,
+): BootRecoveryCommand | null {
+  try {
+    const row = object(value, [
+      "attemptId",
+      "expectedProtectionRevision",
+      "observedBootSessionId",
+    ]);
+    if (row === null || !natural(row.expectedProtectionRevision)) return null;
+    const attemptId = parseProtectionId(row.attemptId);
+    const observedBootSessionId = parseBootSessionId(row.observedBootSessionId);
+    return attemptId === null || observedBootSessionId === null
+      ? null
+      : Object.freeze({
+          attemptId,
+          expectedProtectionRevision: row.expectedProtectionRevision,
+          observedBootSessionId,
+        });
+  } catch {
+    return null;
+  }
+}
+
+export function emptyLocalBootRecovery(
+  requiredFromFactSequence = 1,
+): StoredLocalBootRecovery {
+  return Object.freeze({
+    policyVersion: 1,
+    requiredFromFactSequence,
+    nextObservationSequence: 1,
+    anchors: Object.freeze([]),
+  });
+}
+
+export function priorBootRecovered(
+  protection: StoredNativeProtection | null,
+  attemptId: string,
+): boolean {
+  if (protection === null) return false;
+  try {
+    const recovery = parseLocalBootRecovery(
+      protection.localBootRecovery,
+      protection.facts,
+      protection.nextFactSequence,
+    );
+    return (
+      recovery?.anchors.some(
+        (anchor) =>
+          anchor.attemptId === attemptId && anchor.observation !== null,
+      ) ?? false
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Local admission barrier only; a recovery observation never means cleanup. */
+export function maySupersedeLatest(
+  protection: StoredNativeProtection | null,
+): boolean {
+  const latest = protection?.latestAttempt;
+  return (
+    latest === null ||
+    latest === undefined ||
+    (latest.cleanup === "complete" &&
+      (latest.nativeDisposition === "ended" ||
+        latest.nativeDisposition === "failed_to_begin" ||
+        latest.nativeDisposition ===
+          "disposed_without_terminal_observation")) ||
+    priorBootRecovered(protection!, latest.attemptId)
+  );
+}
+
 export interface StoredNativeProtection {
   readonly policyVersion: 1;
   readonly revision: number;
   readonly latestAttempt: StoredNativeProtectionAttempt | null;
   readonly nextFactSequence: number;
   readonly facts: readonly ProtectionFact[];
+  readonly localBootRecovery: StoredLocalBootRecovery;
 }
 
 export type ProtectionTransition =
@@ -104,6 +208,7 @@ export type ProtectionTransition =
     }
   | {
       readonly kind: "engaging";
+      readonly engagingBootSessionId: string;
       readonly attemptId: string;
       readonly expectedProtectionRevision: number;
       readonly authority: FreshStudentAdmission;
@@ -179,7 +284,7 @@ export type PendingStudentIntent =
     };
 
 export interface StudentSessionRecord {
-  readonly version: 4;
+  readonly version: 5;
   readonly generation: number;
   readonly apiOrigin: string;
   readonly device: StudentSessionDevice;
@@ -357,7 +462,16 @@ function signerRequired(record: StudentSessionSuccessor, key: string): boolean {
   );
   const latest = record.nativeProtection?.latestAttempt?.attemptId;
   if (
-    origins.some((origin) => origin.attemptId === latest) ||
+    origins.some(
+      (origin) =>
+        origin.attemptId === latest ||
+        (record.nativeProtection !== null &&
+          priorBootRecovered(record.nativeProtection, origin.attemptId) &&
+          !record.nativeProtection.facts.some(
+            (fact) =>
+              fact.attemptId === origin.attemptId && fact.slot === "cleanup",
+          )),
+    ) ||
     record.evidence.pendingBatches.some(
       (batch) => batch.originalKeyThumbprint === key,
     )
@@ -440,7 +554,19 @@ export function pruneNativeEvidence(
   const kept = new Set(facts.map((fact) => fact.eventId));
   const pruned: StudentSessionSuccessor = {
     ...record,
-    nativeProtection: protection === null ? null : { ...protection, facts },
+    nativeProtection:
+      protection === null
+        ? null
+        : {
+            ...protection,
+            facts,
+            localBootRecovery: {
+              ...protection.localBootRecovery,
+              anchors: protection.localBootRecovery.anchors.filter(
+                (anchor) => !removable.has(anchor.attemptId),
+              ),
+            },
+          },
     evidence: {
       ...record.evidence,
       origins: record.evidence.origins.filter(
@@ -680,8 +806,97 @@ function parseFact(value: unknown): ProtectionFact | null {
   });
 }
 
+function parseLocalBootRecovery(
+  value: unknown,
+  facts: readonly ProtectionFact[],
+  nextFactSequence: number,
+): StoredLocalBootRecovery | null {
+  const row = object(value, [
+    "policyVersion",
+    "requiredFromFactSequence",
+    "nextObservationSequence",
+    "anchors",
+  ]);
+  if (
+    row === null ||
+    row.policyVersion !== 1 ||
+    parseStudentCounter(row.requiredFromFactSequence) === null ||
+    (row.requiredFromFactSequence as number) > nextFactSequence ||
+    parseStudentCounter(row.nextObservationSequence) === null
+  )
+    return null;
+  const entries = array(row.anchors, protectionFactCapacity);
+  const engaging = facts.filter(
+    (fact) =>
+      fact.slot === "engaging" &&
+      fact.sequence >= (row.requiredFromFactSequence as number),
+  );
+  if (entries === null || entries.length !== engaging.length) return null;
+  const anchors: StoredLocalBootRecovery["anchors"][number][] = [];
+  let previousObservationSequence = 0;
+  const attemptIds = new Set<string>();
+  for (let index = 0; index < entries.length; index += 1) {
+    const anchor = object(entries[index], [
+      "attemptId",
+      "engagingBootSessionId",
+      "observation",
+    ]);
+    if (anchor === null) return null;
+    const attemptId = parseProtectionId(anchor.attemptId);
+    const engagingBootSessionId = parseBootSessionId(
+      anchor.engagingBootSessionId,
+    );
+    if (
+      attemptId === null ||
+      engagingBootSessionId === null ||
+      attemptId !== engaging[index]?.attemptId ||
+      attemptIds.has(attemptId)
+    )
+      return null;
+    let observation: StoredLocalBootRecovery["anchors"][number]["observation"] =
+      null;
+    if (anchor.observation !== null) {
+      const item = object(anchor.observation, [
+        "sequence",
+        "basis",
+        "observedBootSessionId",
+      ]);
+      if (item === null || item.basis !== "boot_session_changed") return null;
+      const sequence = parseStudentCounter(item.sequence);
+      const observedBootSessionId = parseBootSessionId(
+        item.observedBootSessionId,
+      );
+      if (
+        sequence === null ||
+        sequence <= previousObservationSequence ||
+        sequence >= (row.nextObservationSequence as number) ||
+        observedBootSessionId === null ||
+        observedBootSessionId === engagingBootSessionId
+      )
+        return null;
+      observation = Object.freeze({
+        sequence,
+        basis: "boot_session_changed",
+        observedBootSessionId,
+      });
+      previousObservationSequence = sequence;
+    }
+    attemptIds.add(attemptId);
+    anchors.push(
+      Object.freeze({ attemptId, engagingBootSessionId, observation }),
+    );
+  }
+  return Object.freeze({
+    policyVersion: 1,
+    requiredFromFactSequence: row.requiredFromFactSequence as number,
+    nextObservationSequence: row.nextObservationSequence as number,
+    anchors: Object.freeze(anchors),
+  });
+}
+
 function parseStoredNativeProtection(
   value: unknown,
+  legacy = false,
 ): StoredNativeProtection | null {
   const row = object(value, [
     "policyVersion",
@@ -689,6 +904,7 @@ function parseStoredNativeProtection(
     "latestAttempt",
     "nextFactSequence",
     "facts",
+    ...(legacy ? [] : ["localBootRecovery"]),
   ]);
   if (
     row === null ||
@@ -705,6 +921,23 @@ function parseStoredNativeProtection(
   const latestAttempt =
     row.latestAttempt === null ? null : parseAttempt(row.latestAttempt);
   if (row.latestAttempt !== null && latestAttempt === null) return null;
+  const structuralFacts = array(row.facts, protectionFactCapacity)?.map(
+    parseFact,
+  );
+  if (
+    structuralFacts === undefined ||
+    structuralFacts === null ||
+    structuralFacts.some((fact) => fact === null)
+  )
+    return null;
+  const localBootRecovery = legacy
+    ? emptyLocalBootRecovery(row.nextFactSequence as number)
+    : parseLocalBootRecovery(
+        row.localBootRecovery,
+        structuralFacts as ProtectionFact[],
+        row.nextFactSequence as number,
+      );
+  if (localBootRecovery === null) return null;
   const facts: ProtectionFact[] = [];
   const eventIds = new Set<string>();
   const attempts = new Map<
@@ -743,7 +976,11 @@ function parseStoredNativeProtection(
         return null;
       if (
         latestAttemptId !== null &&
-        !attempts.get(latestAttemptId)?.slots.has("cleanup")
+        !attempts.get(latestAttemptId)?.slots.has("cleanup") &&
+        !localBootRecovery.anchors.some(
+          (anchor) =>
+            anchor.attemptId === latestAttemptId && anchor.observation !== null,
+        )
       )
         return null;
       attempts.set(fact.attemptId, {
@@ -836,6 +1073,7 @@ function parseStoredNativeProtection(
     latestAttempt,
     nextFactSequence: row.nextFactSequence as number,
     facts: Object.freeze(facts),
+    localBootRecovery,
   });
 }
 
@@ -855,7 +1093,7 @@ export function parseProtectionTransition(
       kind === "preflight_failure"
         ? ["receipt", "cause", "categories"]
         : kind === "engaging"
-          ? ["authority", "categories"]
+          ? ["authority", "categories", "engagingBootSessionId"]
           : kind === "locked"
             ? ["authority", "categories", "nativeSequence"]
             : kind === "began" || kind === "native_terminal"
@@ -927,8 +1165,20 @@ export function parseProtectionTransition(
       )
         return null;
       const authority = row.authority as FreshStudentAdmission;
-      if (kind === "engaging")
-        return Object.freeze({ ...base, kind, authority, categories });
+      if (kind === "engaging") {
+        const engagingBootSessionId = parseBootSessionId(
+          row.engagingBootSessionId,
+        );
+        return engagingBootSessionId === null
+          ? null
+          : Object.freeze({
+              ...base,
+              kind,
+              authority,
+              categories,
+              engagingBootSessionId,
+            });
+      }
       const nativeSequence = parseStudentCounter(row.nativeSequence);
       return nativeSequence === null
         ? null
@@ -1263,7 +1513,7 @@ export function createStudentSessionStore(options: {
           "integritySha256",
         ])
       : null;
-    if (stored?.version === 4) {
+    if (stored?.version === 4 || stored?.version === 5) {
       // Detect payload corruption, not forgery: this checksum is unkeyed.
       // Preserve the stored field order when removing only the checksum.
       const payload = Object.fromEntries(
@@ -1292,12 +1542,15 @@ export function createStudentSessionStore(options: {
           : object(value, [...keys, "nativeProtection", "evidence"]);
     if (
       row === null ||
-      (allowLegacy && row.version === 4 && stored === null) ||
+      (allowLegacy &&
+        (row.version === 4 || row.version === 5) &&
+        stored === null) ||
       (row === legacy
         ? row.version !== 1
         : row === v2
           ? row.version !== 2
-          : row.version !== 4 && !(allowLegacy && row.version === 3)) ||
+          : row.version !== 5 &&
+            !(allowLegacy && (row.version === 3 || row.version === 4))) ||
       parseStudentCounter(row.generation) === null ||
       row.apiOrigin !== options.apiOrigin ||
       !natural(row.lastReservedCounter) ||
@@ -1309,7 +1562,7 @@ export function createStudentSessionStore(options: {
     const nativeProtection =
       row === legacy || row.nativeProtection === null
         ? null
-        : parseStoredNativeProtection(row.nativeProtection);
+        : parseStoredNativeProtection(row.nativeProtection, row.version !== 5);
     if (
       row !== legacy &&
       row.nativeProtection !== null &&
@@ -1370,7 +1623,7 @@ export function createStudentSessionStore(options: {
       const join = object(row.pending, [
         "kind",
         "admissionMode",
-        ...(row.version === 4 ? ["outcome"] : []),
+        ...(row.version === 4 || row.version === 5 ? ["outcome"] : []),
         "requestId",
         "joinCode",
         "candidates",
@@ -1391,7 +1644,8 @@ export function createStudentSessionStore(options: {
         const joinCode = parseStudentJoinCode(join.joinCode);
         const candidates = options.validateCandidates(join.candidates);
         // Older records never established whether the join reached the server.
-        const outcome = row.version === 4 ? join.outcome : "uncertain";
+        const outcome =
+          row.version === 4 || row.version === 5 ? join.outcome : "uncertain";
         if (
           requestId === null ||
           joinCode === null ||
@@ -1484,7 +1738,7 @@ export function createStudentSessionStore(options: {
     );
     if (evidence === null) return null;
     const record: StudentSessionRecord = Object.freeze({
-      version: 4,
+      version: 5,
       generation: row.generation as number,
       apiOrigin: options.apiOrigin,
       device: Object.freeze(device),
@@ -1505,6 +1759,98 @@ export function createStudentSessionStore(options: {
     )
       return null;
     return record;
+  }
+
+  function validBootRecoverySuccessor(next: StudentSessionRecord): boolean {
+    const before = lastRecord;
+    const prior = before?.nativeProtection;
+    const following = next.nativeProtection;
+    if (prior === null || prior === undefined) {
+      return (
+        following === null ||
+        (following.localBootRecovery.requiredFromFactSequence === 1 &&
+          following.localBootRecovery.nextObservationSequence === 1 &&
+          following.localBootRecovery.anchors.every(
+            (anchor) => anchor.observation === null,
+          ))
+      );
+    }
+    if (following === null) return false;
+    const oldRecovery = prior.localBootRecovery;
+    const newRecovery = following.localBootRecovery;
+    if (
+      oldRecovery.requiredFromFactSequence !==
+      newRecovery.requiredFromFactSequence
+    )
+      return false;
+    const oldAnchors = new Map(
+      oldRecovery.anchors.map((anchor) => [anchor.attemptId, anchor]),
+    );
+    const newAnchors = new Map(
+      newRecovery.anchors.map((anchor) => [anchor.attemptId, anchor]),
+    );
+    const changed = oldRecovery.anchors.filter((anchor) => {
+      const replacement = newAnchors.get(anchor.attemptId);
+      return replacement !== undefined && !sameData(anchor, replacement);
+    });
+    if (changed.length > 0) {
+      if (changed.length !== 1 || before === null) return false;
+      const anchor = changed[0]!;
+      const replacement = newAnchors.get(anchor.attemptId)!;
+      if (
+        prior.latestAttempt?.attemptId !== anchor.attemptId ||
+        maySupersedeLatest(prior) ||
+        anchor.observation !== null ||
+        replacement.engagingBootSessionId !== anchor.engagingBootSessionId ||
+        replacement.observation?.sequence !==
+          oldRecovery.nextObservationSequence ||
+        newRecovery.nextObservationSequence !==
+          oldRecovery.nextObservationSequence + 1 ||
+        following.revision !== prior.revision + 1 ||
+        !sameData(
+          newRecovery.anchors.map((item) =>
+            item.attemptId === anchor.attemptId ? anchor : item,
+          ),
+          oldRecovery.anchors,
+        )
+      )
+        return false;
+      // Recovery creates no lifecycle fact or authority, and cannot advance
+      // delivery, counters, keys, fairness, or an unrelated pending command.
+      return sameData(
+        {
+          ...next,
+          generation: before.generation,
+          nativeProtection: {
+            ...following,
+            revision: prior.revision,
+            localBootRecovery: oldRecovery,
+          },
+        },
+        before,
+      );
+    }
+    if (
+      newRecovery.nextObservationSequence !==
+      oldRecovery.nextObservationSequence
+    )
+      return false;
+    for (const anchor of newRecovery.anchors) {
+      if (
+        !oldAnchors.has(anchor.attemptId) &&
+        (anchor.observation !== null ||
+          !following.facts.some(
+            (fact) =>
+              fact.attemptId === anchor.attemptId &&
+              fact.slot === "engaging" &&
+              fact.sequence >= prior.nextFactSequence,
+          ))
+      )
+        return false;
+    }
+    // Evidence successor validation below separately requires every removed
+    // anchor's fact/origin history to be an actual-cleanup whole-attempt prune.
+    return true;
   }
 
   function validEvidenceSuccessor(next: StudentSessionRecord): boolean {
@@ -1764,7 +2110,12 @@ export function createStudentSessionStore(options: {
           ...successor,
           generation: generation + 1,
         });
-        if (record === null || !validEvidenceSuccessor(record)) throw failure();
+        if (
+          record === null ||
+          !validBootRecoverySuccessor(record) ||
+          !validEvidenceSuccessor(record)
+        )
+          throw failure();
         if (
           targetedOnly &&
           (record.current !== null ||

@@ -9,6 +9,11 @@ import {
 import { createStudentSessionCrypto } from "../src/main/student-session-crypto.js";
 import {
   createStudentSessionStore,
+  emptyLocalBootRecovery,
+  parseBootSessionId,
+  parseBootRecoveryCommand,
+  priorBootRecovered,
+  maySupersedeLatest,
   canReplaceInitialJoin,
   emptyNativeEvidence,
   retainNativeEvidenceSigner,
@@ -20,6 +25,7 @@ import {
   type NativeStudentRecordHandle,
   type ProtectionFact,
   type ProtectionTransition,
+  type StoredLocalBootRecovery,
   type StoredNativeProtection,
   type StoredNativeProtectionAttempt,
   type StudentSessionSuccessor,
@@ -40,7 +46,7 @@ function pending(
   outcome: "not_dispatched" | "uncertain" | "denied" = "not_dispatched",
 ): StudentSessionSuccessor {
   return {
-    version: 4,
+    version: 5,
     apiOrigin: configuration.url,
     device: crypto.createEnrollment(),
     current: null,
@@ -158,6 +164,16 @@ function protection(
     },
     nextFactSequence: facts.length + 1,
     facts,
+    localBootRecovery: {
+      ...emptyLocalBootRecovery(),
+      anchors: facts
+        .filter((fact) => fact.slot === "engaging")
+        .map((fact) => ({
+          attemptId: fact.attemptId,
+          engagingBootSessionId: identifier(998),
+          observation: null,
+        })),
+    },
   };
 }
 
@@ -208,6 +224,7 @@ function preflightJournal(
     });
   return {
     ...base,
+    localBootRecovery: emptyLocalBootRecovery(),
     revision: facts.length,
     facts,
     nextFactSequence: facts.length + 1,
@@ -295,6 +312,16 @@ function completeJournal(
     latestAttempt,
     nextFactSequence: facts.length + 1,
     facts,
+    localBootRecovery: {
+      ...emptyLocalBootRecovery(),
+      anchors: facts
+        .filter((fact) => fact.slot === "engaging")
+        .map((fact) => ({
+          attemptId: fact.attemptId,
+          engagingBootSessionId: identifier(998),
+          observation: null,
+        })),
+    },
   };
 }
 
@@ -407,7 +434,7 @@ function persisted(value: unknown): Buffer {
     typeof value === "object" &&
     value !== null &&
     "version" in value &&
-    (value.version === 3 || value.version === 4) &&
+    (value.version === 3 || value.version === 4 || value.version === 5) &&
     "evidence" in value
   ) {
     const record = value as StudentSessionRecord;
@@ -427,7 +454,21 @@ function persisted(value: unknown): Buffer {
     typeof disk === "object" &&
     disk !== null &&
     "version" in disk &&
-    disk.version === 4
+    typeof disk.version === "number" &&
+    disk.version < 5 &&
+    "nativeProtection" in disk &&
+    disk.nativeProtection !== null
+  ) {
+    const { localBootRecovery: _local, ...nativeProtection } =
+      disk.nativeProtection as StoredNativeProtection;
+    void _local;
+    disk = { ...disk, nativeProtection };
+  }
+  if (
+    typeof disk === "object" &&
+    disk !== null &&
+    "version" in disk &&
+    (disk.version === 4 || disk.version === 5)
   )
     disk = checksumPayload(disk);
   return Buffer.from(`synthetic:${JSON.stringify(disk)}`);
@@ -640,6 +681,16 @@ function worstEvidenceRecord(attemptCount: number): StudentSessionRecord {
       latestAttempt: latest,
       nextFactSequence: Number.MAX_SAFE_INTEGER,
       facts,
+      localBootRecovery: {
+        ...emptyLocalBootRecovery(),
+        anchors: facts
+          .filter((fact) => fact.slot === "engaging")
+          .map((fact) => ({
+            attemptId: fact.attemptId,
+            engagingBootSessionId: identifier(998),
+            observation: null,
+          })),
+      },
     },
     evidence: {
       ...emptyNativeEvidence(),
@@ -677,7 +728,7 @@ function worstEvidenceRecord(attemptCount: number): StudentSessionRecord {
   return record;
 }
 
-describe("version 4 whole-payload corruption checksum", () => {
+describe("version 5 whole-payload corruption checksum", () => {
   it("stores the compact payload SHA-256 while keeping the in-memory record checksum-free", async () => {
     const f = fixture();
     await f.store.load();
@@ -818,7 +869,7 @@ describe("version 4 whole-payload corruption checksum", () => {
   });
 });
 
-describe("version 4 initial join outcome", () => {
+describe("version 5 initial join outcome", () => {
   it.each(["not_dispatched", "uncertain", "denied"] as const)(
     "round-trips initial outcome %s without changing the enrollment or stored payload",
     async (outcome) => {
@@ -868,7 +919,7 @@ describe("version 4 initial join outcome", () => {
         expect(f.events).toEqual(["lock", "load", "decrypt"]);
         expect(canReplaceInitialJoin(expected)).toBe(false);
         const written = await f.store.commitDurably(7, expected);
-        expect(written.version).toBe(4);
+        expect(written.version).toBe(5);
         expect(written.pending).toEqual(expected.pending);
         expect(f.getBytes()).toEqual(persisted(written));
       }
@@ -880,13 +931,24 @@ describe("version 4 initial join outcome", () => {
     const original = persisted({ ...record, version: 3 });
     const f = fixture();
     f.setBytes(original);
-    expect(await f.store.load()).toEqual({ kind: "ready", record });
+    expect(await f.store.load()).toEqual({
+      kind: "ready",
+      record: {
+        ...record,
+        nativeProtection: {
+          ...record.nativeProtection!,
+          localBootRecovery: emptyLocalBootRecovery(
+            record.nativeProtection!.nextFactSequence,
+          ),
+        },
+      },
+    });
     expect(f.getBytes()).toEqual(original);
     expect(f.events).toEqual(["lock", "load", "decrypt"]);
   });
 
   it.each([undefined, null, false, 0, "", "accepted", "DENIED", {}])(
-    "preserves v4 bytes and rejects malformed initial outcome %j before publication",
+    "preserves v5 bytes and rejects malformed initial outcome %j before publication",
     async (outcome) => {
       const record = pending();
       const malformed = {
@@ -918,6 +980,7 @@ describe("version 4 initial join outcome", () => {
         policyVersion: 1,
         revision: 0,
         latestAttempt: null,
+        localBootRecovery: emptyLocalBootRecovery(),
         nextFactSequence: 1,
         facts: [],
       };
@@ -977,8 +1040,8 @@ describe("version 4 initial join outcome", () => {
   });
 });
 
-describe("version 4 bounded native evidence retention", () => {
-  it("fits 32 facts, five signers/pending prefixes and all ACKs across worst origin-count shapes without raising byte limits", async () => {
+describe("version 5 bounded native evidence retention", () => {
+  it("round-trips fitting 32-fact histories and refuses maximal anchor overhead above the unchanged byte limit", async () => {
     const sizes: number[] = [];
     for (let attempts = 5; attempts <= 16; attempts += 1) {
       const f = fixture();
@@ -989,16 +1052,25 @@ describe("version 4 bounded native evidence retention", () => {
       expect(record.evidence.pendingBatches).toHaveLength(5);
       expect(record.evidence.retiredSigners).toHaveLength(4);
       expect(record.evidence.acknowledgments).toHaveLength(32);
-      expect(sizes.at(-1)).toBeLessThan(48 * 1024);
       expect(bytes.byteLength).toBeLessThan(64 * 1024);
       f.setBytes(bytes);
+      if (sizes.at(-1)! > 48 * 1024) {
+        expect(await f.store.load()).toEqual({
+          kind: "recovery_required",
+          generation: 0,
+        });
+        expect(f.getBytes()).toEqual(bytes);
+        expect(f.events).not.toContain("write");
+        continue;
+      }
       expect(await f.store.load()).toEqual({ kind: "ready", record });
       expect(f.events).not.toContain("write");
       const committed = await f.store.commitDurably(record.generation, record);
       expect(committed.generation).toBe(Number.MAX_SAFE_INTEGER);
       expect(f.getBytes()?.byteLength).toBeLessThan(64 * 1024);
     }
-    expect(Math.max(...sizes), JSON.stringify(sizes)).toBeLessThan(48 * 1024);
+    expect(Math.min(...sizes)).toBeLessThan(48 * 1024);
+    expect(Math.max(...sizes)).toBeGreaterThan(48 * 1024);
   });
 
   it.each([false, true])(
@@ -1023,8 +1095,13 @@ describe("version 4 bounded native evidence retention", () => {
       const loaded = await f.store.load();
       if (loaded.kind !== "ready")
         throw new Error("Expected legacy normalization");
-      expect(loaded.record.version).toBe(4);
-      expect(loaded.record.nativeProtection).toEqual(record.nativeProtection);
+      expect(loaded.record.version).toBe(5);
+      expect(loaded.record.nativeProtection).toEqual({
+        ...record.nativeProtection!,
+        localBootRecovery: emptyLocalBootRecovery(
+          record.nativeProtection!.nextFactSequence,
+        ),
+      });
       expect(loaded.record.lastReservedCounter).toBe(
         record.lastReservedCounter,
       );
@@ -1044,7 +1121,7 @@ describe("version 4 bounded native evidence retention", () => {
     },
   );
 
-  it("accepts only compact v4 disk origins and reconstructs exact immutable scope from retained facts", async () => {
+  it("accepts only compact v5 disk origins and reconstructs exact immutable scope from retained facts", async () => {
     const record = { ...withProtection(), generation: 7 };
     const f = fixture();
     const inflated = Buffer.from(
@@ -1056,7 +1133,7 @@ describe("version 4 bounded native evidence retention", () => {
     const valid = fixture();
     valid.setBytes(persisted(record));
     const loaded = await valid.store.load();
-    if (loaded.kind !== "ready") throw new Error("Expected compact v4 record");
+    if (loaded.kind !== "ready") throw new Error("Expected compact v5 record");
     expect(loaded.record).toEqual(record);
     expect(Object.isFrozen(loaded.record.evidence.origins[0]!.scope)).toBe(
       true,
@@ -1302,7 +1379,7 @@ describe("version 4 bounded native evidence retention", () => {
     "pending-accessor",
     "pending-sparse",
   ])(
-    "rejects malformed v3 %s without changing the retained encrypted record",
+    "rejects malformed v5 %s without changing the retained encrypted record",
     async (mutation) => {
       const record = worstEvidenceRecord(5);
       const evidence = structuredClone(record.evidence) as unknown as Record<
@@ -1587,7 +1664,16 @@ describe("version 4 bounded native evidence retention", () => {
       ...full,
       generation: 1,
       lastReservedCounter: 22,
-      nativeProtection: { ...full.nativeProtection!, facts },
+      nativeProtection: {
+        ...full.nativeProtection!,
+        facts,
+        localBootRecovery: {
+          ...full.nativeProtection!.localBootRecovery,
+          anchors: full.nativeProtection!.localBootRecovery.anchors.filter(
+            (anchor) => anchor.attemptId !== removedOrigin.attemptId,
+          ),
+        },
+      },
       evidence: {
         ...full.evidence,
         pendingBatches: [],
@@ -1794,7 +1880,7 @@ describe("private Student record durability adapter (synthetic codec/native)", (
       const base = { ...pending(), generation: 1 };
       const mutated =
         kind === "version"
-          ? { ...base, version: 5 }
+          ? { ...base, version: 6 }
           : kind === "origin"
             ? { ...base, apiOrigin: "https://other.example" }
             : kind === "key"
@@ -1917,7 +2003,7 @@ describe("versioned native protection record (synthetic codec/native)", () => {
         record.extra = false;
       }
       if (kind === "v2-missing-native") delete record.nativeProtection;
-      if (kind === "future") record.version = 5;
+      if (kind === "future") record.version = 6;
       const original = persisted(record);
       f.setBytes(original);
       expect(await f.store.load()).toEqual({
@@ -2100,6 +2186,7 @@ describe("versioned native protection record (synthetic codec/native)", () => {
       policyVersion: 1,
       revision: 0,
       latestAttempt: null,
+      localBootRecovery: emptyLocalBootRecovery(),
       nextFactSequence: 1,
       facts: [],
     };
@@ -2649,7 +2736,13 @@ describe("private protection transition snapshots", () => {
     });
     const base = { attemptId: identifier(10), expectedProtectionRevision: 0 };
     return [
-      { ...base, kind: "engaging", authority, categories: engagingCategories },
+      {
+        ...base,
+        kind: "engaging",
+        authority,
+        categories: engagingCategories,
+        engagingBootSessionId: identifier(998),
+      },
       {
         ...base,
         kind: "locked",
@@ -2845,7 +2938,7 @@ describe("private protection transition snapshots", () => {
 
 describe("preflight failure history", () => {
   it.each(["before", "after"] as const)(
-    "preserves the actual v4 publication after an uncertain %s first-failure write",
+    "preserves the actual v5 publication after an uncertain %s first-failure write",
     async (when) => {
       const f = fixture();
       await f.store.load();
@@ -2903,7 +2996,7 @@ describe("preflight failure history", () => {
     expect(await f.store.load()).toEqual({ kind: "ready", record: written });
   });
 
-  it("fits 32 preflight facts and five signers under v4 bounds while refusing a 33rd fact before encryption", async () => {
+  it("fits 32 preflight facts and five signers under v5 bounds while refusing a 33rd fact before encryption", async () => {
     const original = worstEvidenceRecord(16);
     const journal = original.nativeProtection!;
     const facts: ProtectionFact[] = journal.facts.map((fact) => ({
@@ -2924,6 +3017,7 @@ describe("preflight failure history", () => {
       nativeProtection: {
         ...journal,
         facts,
+        localBootRecovery: emptyLocalBootRecovery(),
         latestAttempt: {
           ...journal.latestAttempt!,
           phase: "failed",
@@ -3132,7 +3226,7 @@ describe("preflight failure history", () => {
     expect(inspected).toBe(0);
   });
 
-  it("rejects mixed prefixes and inconsistent summaries even with a valid v4 checksum", async () => {
+  it("rejects mixed prefixes and inconsistent summaries even with a valid v5 checksum", async () => {
     const record = admitted();
     const scope = record.current!.scope;
     const pending = preflightJournal(scope);
@@ -3350,7 +3444,7 @@ describe("preflight failure history", () => {
     ["shortcut_unavailable", "failed"],
     ["shortcut_unavailable", "unavailable"],
   ] as const)(
-    "persists %s/%s and later owned cleanup through exact v4 reloads without native claims",
+    "persists %s/%s and later owned cleanup through exact v5 reloads without native claims",
     async (cause, status) => {
       const f = fixture();
       await f.store.load();
@@ -3419,5 +3513,974 @@ describe("preflight failure history", () => {
         ? parsed.categories.applications.code
         : null,
     ).toBe("application_observation_unavailable");
+  });
+});
+
+describe("v5 local boot recovery", () => {
+  it.each(["\n", "\r", "\u2028", "\u2029"])(
+    "rejects a boot UUID with a trailing line terminator %j at command and saved-record boundaries",
+    async (suffix) => {
+      const canonical = "abcdef00-0000-0000-0000-000000000000";
+      const malformed = canonical + suffix;
+      expect(malformed).toHaveLength(37);
+      expect(parseBootSessionId(malformed)).toBeNull();
+      expect(
+        parseBootRecoveryCommand({
+          attemptId: identifier(10),
+          expectedProtectionRevision: 0,
+          observedBootSessionId: malformed,
+        }),
+      ).toBeNull();
+      for (const field of ["engaging", "observed"] as const) {
+        const base = withProtection();
+        const protection = base.nativeProtection!;
+        const anchor = protection.localBootRecovery.anchors[0]!;
+        const saved = {
+          ...base,
+          generation: 7,
+          nativeProtection: {
+            ...protection,
+            localBootRecovery: {
+              ...protection.localBootRecovery,
+              nextObservationSequence: field === "observed" ? 2 : 1,
+              anchors: [
+                {
+                  ...anchor,
+                  engagingBootSessionId:
+                    field === "engaging" ? malformed : canonical,
+                  observation:
+                    field === "observed"
+                      ? {
+                          sequence: 1,
+                          basis: "boot_session_changed",
+                          observedBootSessionId: malformed,
+                        }
+                      : null,
+                },
+              ],
+            },
+          },
+        };
+        const f = fixture();
+        const bytes = persisted(saved);
+        f.setBytes(bytes);
+        expect(await f.store.load()).toEqual({
+          kind: "recovery_required",
+          generation: 0,
+        });
+        expect(f.getBytes()).toEqual(bytes);
+        expect(f.events).not.toContain("write");
+        expect(f.events).not.toContain("quarantine");
+      }
+    },
+  );
+  it("accepts only primitive canonical boot UUIDs without a version or variant constraint", () => {
+    const canonical = "abcdef00-0000-0000-0000-000000000000";
+    expect(parseBootSessionId(canonical)).toBe(canonical);
+    for (const value of [
+      canonical.toUpperCase(),
+      "",
+      null,
+      1,
+      new String(canonical),
+      canonical + " ",
+      canonical.replace("-", ""),
+      "g" + canonical.slice(1),
+    ])
+      expect(parseBootSessionId(value)).toBeNull();
+  });
+
+  it("snapshots only the exact private boot recovery command without invoking getters", () => {
+    const command = {
+      attemptId: identifier(10),
+      expectedProtectionRevision: 0,
+      observedBootSessionId: identifier(999),
+    };
+    expect(parseBootRecoveryCommand(command)).toEqual(command);
+    expect(parseBootRecoveryCommand({ ...command, extra: true })).toBeNull();
+    expect(
+      parseBootRecoveryCommand({ ...command, expectedProtectionRevision: -0 }),
+    ).toBeNull();
+    let reads = 0;
+    expect(
+      parseBootRecoveryCommand({
+        ...command,
+        get observedBootSessionId() {
+          reads += 1;
+          return identifier(999);
+        },
+      }),
+    ).toBeNull();
+    expect(reads).toBe(0);
+  });
+
+  it("uses an exact valid recovery observation only as the supersession barrier exception", () => {
+    const record = withProtection();
+    const journal = record.nativeProtection!;
+    const localBootRecovery = {
+      ...emptyLocalBootRecovery(),
+      nextObservationSequence: 2,
+      anchors: [
+        {
+          attemptId: identifier(10),
+          engagingBootSessionId: identifier(998),
+          observation: {
+            sequence: 1,
+            basis: "boot_session_changed" as const,
+            observedBootSessionId: identifier(999),
+          },
+        },
+      ],
+    };
+    const recovered = { ...journal, localBootRecovery };
+    expect(maySupersedeLatest(null)).toBe(true);
+    expect(maySupersedeLatest(journal)).toBe(false);
+    expect(priorBootRecovered(recovered, identifier(10))).toBe(true);
+    expect(priorBootRecovered(recovered, identifier(11))).toBe(false);
+    expect(maySupersedeLatest(recovered)).toBe(true);
+    expect(recovered.latestAttempt?.cleanup).toBe("not_requested");
+    expect(recovered.latestAttempt?.nativeDisposition).toBe("pending");
+    expect(recovered.facts).toEqual(journal.facts);
+  });
+});
+
+function recoveredSuccessor(
+  record: StudentSessionSuccessor,
+): StudentSessionSuccessor {
+  const protection = record.nativeProtection!;
+  return {
+    ...record,
+    nativeProtection: {
+      ...protection,
+      revision: protection.revision + 1,
+      localBootRecovery: {
+        ...protection.localBootRecovery,
+        nextObservationSequence:
+          protection.localBootRecovery.nextObservationSequence + 1,
+        anchors: protection.localBootRecovery.anchors.map((anchor) =>
+          anchor.attemptId === protection.latestAttempt!.attemptId
+            ? {
+                ...anchor,
+                observation: {
+                  sequence:
+                    protection.localBootRecovery.nextObservationSequence,
+                  basis: "boot_session_changed",
+                  observedBootSessionId: identifier(999),
+                },
+              }
+            : anchor,
+        ),
+      },
+    },
+  };
+}
+
+function laterAttempt(
+  record: StudentSessionSuccessor,
+  preflight = false,
+): StudentSessionSuccessor {
+  const before = record.nativeProtection!;
+  const attemptId = identifier(11);
+  const fresh = preflight
+    ? preflightJournal(record.current!.scope)
+    : protection(record.current!.scope);
+  const fact = {
+    ...fresh.facts[0]!,
+    attemptId,
+    sequence: before.nextFactSequence,
+    eventId: identifier(199),
+  };
+  return {
+    ...record,
+    nativeProtection: {
+      ...fresh,
+      revision: before.revision + 1,
+      latestAttempt: { ...fresh.latestAttempt!, attemptId },
+      nextFactSequence: before.nextFactSequence + 1,
+      facts: [...before.facts, fact],
+      localBootRecovery: {
+        ...before.localBootRecovery,
+        anchors: [
+          ...before.localBootRecovery.anchors,
+          ...(preflight
+            ? []
+            : [
+                {
+                  attemptId,
+                  engagingBootSessionId: identifier(997),
+                  observation: null,
+                },
+              ]),
+        ],
+      },
+    },
+    evidence: {
+      ...record.evidence,
+      origins: [
+        ...record.evidence.origins,
+        {
+          attemptId,
+          scope: fact.scope,
+          originalKeyThumbprint: record.device.keyThumbprint,
+          originBuild,
+        },
+      ],
+    },
+  };
+}
+
+describe("v5 boot recovery durability", () => {
+  it.each([1, 2, 3, 4])(
+    "loads exact v%i history read-only with a fixed legacy cutoff and no boot recovery",
+    async (version) => {
+      const record = withProtection();
+      const legacy: Record<string, unknown> = {
+        ...record,
+        version,
+        generation: 7,
+      };
+      if (version === 1) delete legacy.nativeProtection;
+      if (version < 3) delete legacy.evidence;
+      const f = fixture();
+      const original = persisted(legacy);
+      f.setBytes(original);
+      const loaded = await f.store.load();
+      expect(loaded.kind).toBe("ready");
+      if (loaded.kind !== "ready") throw new Error("fixture");
+      expect(loaded.record.version).toBe(5);
+      if (version > 1) {
+        expect(loaded.record.nativeProtection?.localBootRecovery).toEqual(
+          emptyLocalBootRecovery(2),
+        );
+        expect(
+          priorBootRecovered(loaded.record.nativeProtection, identifier(10)),
+        ).toBe(false);
+        expect(maySupersedeLatest(loaded.record.nativeProtection)).toBe(false);
+        await expect(
+          f.store.commitDurably(7, {
+            ...loaded.record,
+            nativeProtection: {
+              ...loaded.record.nativeProtection!,
+              localBootRecovery: record.nativeProtection!.localBootRecovery,
+            },
+          }),
+        ).rejects.toThrow();
+      }
+      expect(f.getBytes()).toEqual(original);
+      expect(f.events).not.toContain("write");
+      const authorized = await f.store.commitDurably(7, loaded.record);
+      expect(authorized.version).toBe(5);
+      expect(authorized.nativeProtection?.localBootRecovery).toEqual(
+        loaded.record.nativeProtection?.localBootRecovery,
+      );
+    },
+  );
+
+  it.each([
+    "missing",
+    "wrong-policy",
+    "zero-cutoff",
+    "negative-zero",
+    "future-cutoff",
+    "unsafe-cutoff",
+    "missing-anchor",
+    "duplicate-anchor",
+    "wrong-attempt",
+    "uppercase-id",
+    "extra-member",
+    "same-boot",
+    "wrong-basis",
+    "zero-observation",
+    "future-observation",
+    "unsafe-next",
+    "over-cap",
+  ] as const)(
+    "preserves malformed strict v5 %s despite a valid full checksum",
+    async (mutation) => {
+      const record = withProtection();
+      const original = record.nativeProtection!.localBootRecovery;
+      const anchor = original.anchors[0]!;
+      let local: unknown = original;
+      if (mutation === "missing") local = undefined;
+      if (mutation === "wrong-policy")
+        local = { ...original, policyVersion: 2 };
+      if (mutation === "zero-cutoff")
+        local = { ...original, requiredFromFactSequence: 0 };
+      if (mutation === "negative-zero")
+        local = { ...original, requiredFromFactSequence: -0 };
+      if (mutation === "future-cutoff")
+        local = { ...original, requiredFromFactSequence: 3 };
+      if (mutation === "unsafe-cutoff")
+        local = {
+          ...original,
+          requiredFromFactSequence: Number.MAX_SAFE_INTEGER + 1,
+        };
+      if (mutation === "missing-anchor") local = { ...original, anchors: [] };
+      if (mutation === "duplicate-anchor")
+        local = { ...original, anchors: [anchor, anchor] };
+      if (mutation === "wrong-attempt")
+        local = {
+          ...original,
+          anchors: [{ ...anchor, attemptId: identifier(11) }],
+        };
+      if (mutation === "uppercase-id")
+        local = {
+          ...original,
+          anchors: [
+            {
+              ...anchor,
+              engagingBootSessionId: "ABCDEF00-0000-0000-0000-000000000000",
+            },
+          ],
+        };
+      if (mutation === "extra-member") local = { ...original, extra: false };
+      if (
+        mutation === "same-boot" ||
+        mutation === "wrong-basis" ||
+        mutation === "zero-observation" ||
+        mutation === "future-observation"
+      )
+        local = {
+          ...original,
+          nextObservationSequence: 2,
+          anchors: [
+            {
+              ...anchor,
+              observation: {
+                sequence:
+                  mutation === "zero-observation"
+                    ? 0
+                    : mutation === "future-observation"
+                      ? 2
+                      : 1,
+                basis:
+                  mutation === "wrong-basis"
+                    ? "native_ended"
+                    : "boot_session_changed",
+                observedBootSessionId:
+                  mutation === "same-boot"
+                    ? anchor.engagingBootSessionId
+                    : identifier(999),
+              },
+            },
+          ],
+        };
+      if (mutation === "unsafe-next")
+        local = {
+          ...original,
+          nextObservationSequence: Number.MAX_SAFE_INTEGER + 1,
+        };
+      if (mutation === "over-cap")
+        local = {
+          ...original,
+          anchors: Array.from({ length: 33 }, () => anchor),
+        };
+      const malformed = {
+        ...record,
+        generation: 7,
+        nativeProtection: {
+          ...record.nativeProtection,
+          localBootRecovery: local,
+        },
+      };
+      const bytes = persisted(malformed);
+      const f = fixture();
+      f.setBytes(bytes);
+      expect(await f.store.load()).toEqual({
+        kind: "recovery_required",
+        generation: 0,
+      });
+      expect(f.getBytes()).toEqual(bytes);
+      expect(f.events).not.toContain("write");
+      expect(f.events).not.toContain("quarantine");
+    },
+  );
+
+  it("commits the local observation while preserving exact evidence, queues, counter high-water and authority bytes", async () => {
+    const base = withProtection();
+    const batch = batchFor(base, identifier(10));
+    const record: StudentSessionSuccessor = {
+      ...base,
+      pending: {
+        kind: "reconnect",
+        requestId,
+        expectedSessionRevision: base.current!.sessionRevision,
+        candidates: crypto.createCandidates(),
+      },
+      evidence: {
+        ...base.evidence,
+        pendingBatches: [batch],
+        lastAttemptedSigner: base.device.keyThumbprint,
+      },
+    };
+    const f = fixture();
+    await f.store.load();
+    const before = await f.store.commitDurably(0, record);
+    const expected = recoveredSuccessor(before);
+    const after = await f.store.commitDurably(before.generation, expected);
+    expect(after.generation).toBe(before.generation + 1);
+    expect(after.nativeProtection?.revision).toBe(
+      before.nativeProtection!.revision + 1,
+    );
+    expect({
+      ...after,
+      generation: before.generation,
+      nativeProtection: {
+        ...after.nativeProtection!,
+        revision: before.nativeProtection!.revision,
+        localBootRecovery: before.nativeProtection!.localBootRecovery,
+      },
+    }).toEqual(before);
+    expect(JSON.stringify(after.evidence)).toBe(
+      JSON.stringify(before.evidence),
+    );
+    expect(JSON.stringify(after.pending)).toBe(JSON.stringify(before.pending));
+    expect(JSON.stringify(after.nativeProtection?.facts)).toBe(
+      JSON.stringify(before.nativeProtection?.facts),
+    );
+    expect(maySupersedeLatest(after.nativeProtection)).toBe(true);
+    expect(await f.store.load()).toEqual({ kind: "ready", record: after });
+  });
+
+  it.each([
+    "facts",
+    "phase",
+    "counter",
+    "device",
+    "authority",
+    "pending",
+    "terminal",
+    "cursor",
+    "origin",
+    "fact-sequence",
+    "revision",
+    "next-observation",
+    "new-attempt",
+  ] as const)(
+    "rejects a recovery observation bundled with an unrelated %s mutation before encryption",
+    async (mutation) => {
+      const f = fixture();
+      await f.store.load();
+      const before = await f.store.commitDurably(0, withProtection());
+      const recovered = recoveredSuccessor(before);
+      const protection = recovered.nativeProtection!;
+      let next: StudentSessionSuccessor = recovered;
+      if (mutation === "facts")
+        next = {
+          ...recovered,
+          nativeProtection: {
+            ...protection,
+            facts: [
+              { ...protection.facts[0]!, cause: "persistence_unavailable" },
+            ],
+          },
+        };
+      if (mutation === "phase")
+        next = {
+          ...recovered,
+          nativeProtection: {
+            ...protection,
+            latestAttempt: {
+              ...protection.latestAttempt!,
+              phase: "recovery_required",
+            },
+          },
+        };
+      if (mutation === "counter")
+        next = {
+          ...recovered,
+          lastReservedCounter: recovered.lastReservedCounter + 1,
+        };
+      if (mutation === "device")
+        next = {
+          ...recovered,
+          device: crypto.createEnrollment(),
+          current: null,
+        };
+      if (mutation === "authority")
+        next = {
+          ...recovered,
+          current: {
+            ...recovered.current!,
+            sessionRevision: recovered.current!.sessionRevision + 1,
+          },
+        };
+      if (mutation === "pending")
+        next = {
+          ...recovered,
+          pending: {
+            kind: "forfeit",
+            requestId,
+            expectedSessionRevision: recovered.current!.sessionRevision,
+          },
+        };
+      if (mutation === "terminal")
+        next = { ...recovered, terminal: true, current: null };
+      if (mutation === "cursor")
+        next = {
+          ...recovered,
+          evidence: {
+            ...recovered.evidence,
+            lastAttemptedSigner: recovered.device.keyThumbprint,
+          },
+        };
+      if (mutation === "origin")
+        next = {
+          ...recovered,
+          evidence: {
+            ...recovered.evidence,
+            origins: [
+              {
+                ...recovered.evidence.origins[0]!,
+                originBuild: {
+                  kind: "build",
+                  identity: {
+                    ...originBuild.identity!,
+                    sourceCommit: "e".repeat(40),
+                  },
+                },
+              },
+            ],
+          },
+        };
+      if (mutation === "fact-sequence")
+        next = {
+          ...recovered,
+          nativeProtection: {
+            ...protection,
+            nextFactSequence: protection.nextFactSequence + 1,
+          },
+        };
+      if (mutation === "revision")
+        next = {
+          ...recovered,
+          nativeProtection: {
+            ...protection,
+            revision: protection.revision + 1,
+          },
+        };
+      if (mutation === "next-observation")
+        next = {
+          ...recovered,
+          nativeProtection: {
+            ...protection,
+            localBootRecovery: {
+              ...protection.localBootRecovery,
+              nextObservationSequence: 3,
+            },
+          },
+        };
+      if (mutation === "new-attempt") next = laterAttempt(recovered);
+      const bytes = f.getBytes();
+      const encryptions = f.events.filter(
+        (event) => event === "encrypt",
+      ).length;
+      await expect(
+        f.store.commitDurably(before.generation, next),
+      ).rejects.toThrow();
+      expect(f.getBytes()).toEqual(bytes);
+      expect(f.events.filter((event) => event === "encrypt")).toHaveLength(
+        encryptions,
+      );
+    },
+  );
+
+  it.each([false, true])(
+    "admits a later separately committed preflight=%s attempt only after exact recovery while retaining unknown history",
+    async (preflight) => {
+      const f = fixture();
+      await f.store.load();
+      const before = await f.store.commitDurably(0, withProtection());
+      await expect(
+        f.store.commitDurably(
+          before.generation,
+          laterAttempt(before, preflight),
+        ),
+      ).rejects.toThrow();
+      const recovered = await f.store.commitDurably(
+        before.generation,
+        recoveredSuccessor(before),
+      );
+      const after = await f.store.commitDurably(
+        recovered.generation,
+        laterAttempt(recovered, preflight),
+      );
+      expect(after.nativeProtection?.latestAttempt?.attemptId).toBe(
+        identifier(11),
+      );
+      expect(
+        after.nativeProtection?.facts.filter(
+          (fact) => fact.attemptId === identifier(10),
+        ),
+      ).toEqual(before.nativeProtection?.facts);
+      expect(
+        after.nativeProtection?.facts.some((fact) => fact.slot === "cleanup"),
+      ).toBe(false);
+      expect(priorBootRecovered(after.nativeProtection, identifier(10))).toBe(
+        true,
+      );
+      expect(maySupersedeLatest(after.nativeProtection)).toBe(false);
+      expect(pruneNativeEvidence(after)).toEqual(after);
+      expect(await f.store.load()).toEqual({ kind: "ready", record: after });
+    },
+  );
+
+  it.each(["anchor", "fact", "origin"] as const)(
+    "requires the new engaging anchor, fact and origin atomically: missing %s",
+    async (missing) => {
+      const f = fixture();
+      await f.store.load();
+      const before = await f.store.commitDurably(0, withProtection());
+      const recovered = await f.store.commitDurably(
+        before.generation,
+        recoveredSuccessor(before),
+      );
+      const later = laterAttempt(recovered);
+      const next =
+        missing === "origin"
+          ? {
+              ...later,
+              evidence: {
+                ...later.evidence,
+                origins: recovered.evidence.origins,
+              },
+            }
+          : {
+              ...later,
+              nativeProtection: {
+                ...later.nativeProtection!,
+                ...(missing === "anchor"
+                  ? {
+                      localBootRecovery:
+                        recovered.nativeProtection!.localBootRecovery,
+                    }
+                  : { facts: recovered.nativeProtection!.facts }),
+              },
+            };
+      await expect(
+        f.store.commitDurably(recovered.generation, next),
+      ).rejects.toThrow();
+      expect(await f.store.load()).toEqual({
+        kind: "ready",
+        record: recovered,
+      });
+    },
+  );
+
+  it.each([
+    "boot",
+    "observation",
+    "remove-observation",
+    "next-observation",
+    "cutoff",
+    "prune",
+  ] as const)(
+    "keeps existing anchor and observation immutable under generic %s successors",
+    async (mutation) => {
+      const f = fixture();
+      await f.store.load();
+      const first = await f.store.commitDurably(0, withProtection());
+      const recovered = await f.store.commitDurably(
+        first.generation,
+        recoveredSuccessor(first),
+      );
+      const before = await f.store.commitDurably(
+        recovered.generation,
+        laterAttempt(recovered),
+      );
+      const protection = before.nativeProtection!;
+      const local = protection.localBootRecovery;
+      let nextLocal: StoredLocalBootRecovery = local;
+      if (mutation === "boot")
+        nextLocal = {
+          ...local,
+          anchors: local.anchors.map((anchor, index) =>
+            index === 0
+              ? { ...anchor, engagingBootSessionId: identifier(996) }
+              : anchor,
+          ),
+        };
+      if (mutation === "observation")
+        nextLocal = {
+          ...local,
+          anchors: local.anchors.map((anchor, index) =>
+            index === 0
+              ? {
+                  ...anchor,
+                  observation: {
+                    ...anchor.observation!,
+                    observedBootSessionId: identifier(996),
+                  },
+                }
+              : anchor,
+          ),
+        };
+      if (mutation === "remove-observation")
+        nextLocal = {
+          ...local,
+          anchors: local.anchors.map((anchor, index) =>
+            index === 0 ? { ...anchor, observation: null } : anchor,
+          ),
+        };
+      if (mutation === "next-observation")
+        nextLocal = {
+          ...local,
+          nextObservationSequence: local.nextObservationSequence + 1,
+        };
+      if (mutation === "cutoff")
+        nextLocal = {
+          ...local,
+          requiredFromFactSequence: 2,
+          anchors: local.anchors.slice(1),
+        };
+      let next: StudentSessionSuccessor = {
+        ...before,
+        nativeProtection: { ...protection, localBootRecovery: nextLocal },
+      };
+      if (mutation === "prune")
+        next = {
+          ...before,
+          nativeProtection: {
+            ...protection,
+            facts: protection.facts.slice(1),
+            localBootRecovery: { ...local, anchors: local.anchors.slice(1) },
+          },
+          evidence: {
+            ...before.evidence,
+            origins: before.evidence.origins.slice(1),
+          },
+        };
+      const bytes = f.getBytes();
+      await expect(
+        f.store.commitDurably(before.generation, next),
+      ).rejects.toThrow();
+      expect(f.getBytes()).toEqual(bytes);
+    },
+  );
+
+  it.each(["before", "after"] as const)(
+    "reopens an uncertain %s recovery publication to the exact saved image without inventing facts",
+    async (failure) => {
+      const f = fixture();
+      await f.store.load();
+      const before = await f.store.commitDurably(0, withProtection());
+      const successor = recoveredSuccessor(before);
+      f.fail(failure);
+      await expect(
+        f.store.commitDurably(before.generation, successor),
+      ).rejects.toThrow();
+      const loaded = await f.store.load();
+      expect(loaded).toEqual({
+        kind: "ready",
+        record:
+          failure === "before"
+            ? before
+            : { ...successor, generation: before.generation + 1 },
+      });
+      if (loaded.kind !== "ready") throw new Error("fixture");
+      expect(
+        priorBootRecovered(loaded.record.nativeProtection, identifier(10)),
+      ).toBe(failure === "after");
+      expect(loaded.record.nativeProtection?.facts).toEqual(
+        before.nativeProtection?.facts,
+      );
+    },
+  );
+});
+
+describe("v5 boot recovery retained limits", () => {
+  it("retains a fully acknowledged nonlatest recovered attempt and its retired signer counter", async () => {
+    const prior = withProtection();
+    const recovered = recoveredSuccessor(prior);
+    const freshDevice = crypto.createEnrollment();
+    const base = {
+      ...recovered,
+      device: freshDevice,
+      current: {
+        ...recovered.current!,
+        scope: {
+          ...recovered.current!.scope,
+          deviceSessionId: freshDevice.deviceSessionId,
+        },
+      },
+    };
+    const later = laterAttempt(base);
+    const batch = batchFor(prior, identifier(10));
+    const record: StudentSessionRecord = {
+      ...later,
+      generation: 7,
+      evidence: {
+        ...later.evidence,
+        acknowledgments: batch.events.map((event) => ({
+          ...event,
+          receivedAt: "2026-09-13T12:00:00.000000Z",
+        })),
+        retiredSigners: [{ device: prior.device, lastReservedCounter: 31 }],
+      },
+    };
+    const f = fixture();
+    f.setBytes(persisted(record));
+    expect(await f.store.load()).toEqual({ kind: "ready", record });
+    expect(pruneNativeEvidence(record)).toEqual(record);
+    await expect(
+      f.store.commitDurably(7, {
+        ...record,
+        evidence: { ...record.evidence, retiredSigners: [] },
+      }),
+    ).rejects.toThrow();
+    await expect(
+      f.store.commitDurably(7, {
+        ...record,
+        evidence: {
+          ...record.evidence,
+          retiredSigners: [{ device: prior.device, lastReservedCounter: 30 }],
+        },
+      }),
+    ).rejects.toThrow();
+    const unchanged = await f.store.commitDurably(
+      7,
+      pruneNativeEvidence(record),
+    );
+    expect(unchanged.evidence.retiredSigners).toEqual(
+      record.evidence.retiredSigners,
+    );
+    expect(unchanged.nativeProtection?.facts).toEqual(
+      record.nativeProtection?.facts,
+    );
+  });
+
+  it("removes anchors atomically only with an actual-cleanup whole-attempt prune", async () => {
+    const record = worstEvidenceRecord(5);
+    const before = {
+      ...record,
+      generation: 7,
+      evidence: { ...record.evidence, pendingBatches: [] },
+    };
+    const f = fixture();
+    f.setBytes(persisted(before));
+    expect((await f.store.load()).kind).toBe("ready");
+    const after = await f.store.commitDurably(7, pruneNativeEvidence(before));
+    expect(
+      after.nativeProtection?.facts.every(
+        (fact) =>
+          fact.attemptId === before.nativeProtection!.latestAttempt!.attemptId,
+      ),
+    ).toBe(true);
+    expect(after.nativeProtection?.localBootRecovery.anchors).toEqual(
+      before.nativeProtection!.localBootRecovery.anchors.slice(-1),
+    );
+    expect(
+      after.nativeProtection?.localBootRecovery.requiredFromFactSequence,
+    ).toBe(1);
+  });
+
+  it.each([
+    "anchor-order",
+    "observation-order",
+    "duplicate-observation",
+    "sequence-exhaustion",
+    "revision-exhaustion",
+  ] as const)(
+    "rejects invalid %s without recovery publication",
+    async (mutation) => {
+      const first = recoveredSuccessor(withProtection());
+      const second = laterAttempt(first);
+      const both = recoveredSuccessor(second);
+      const original = both.nativeProtection!;
+      const recovery = original.localBootRecovery;
+      let local = recovery;
+      if (mutation === "anchor-order")
+        local = { ...recovery, anchors: [...recovery.anchors].reverse() };
+      if (mutation === "observation-order")
+        local = {
+          ...recovery,
+          anchors: recovery.anchors.map((anchor, index) => ({
+            ...anchor,
+            observation: { ...anchor.observation!, sequence: 2 - index },
+          })),
+        };
+      if (mutation === "duplicate-observation")
+        local = {
+          ...recovery,
+          anchors: recovery.anchors.map((anchor) => ({
+            ...anchor,
+            observation: { ...anchor.observation!, sequence: 1 },
+          })),
+        };
+      const f = fixture();
+      if (
+        mutation === "sequence-exhaustion" ||
+        mutation === "revision-exhaustion"
+      ) {
+        const base = {
+          ...second,
+          generation: 7,
+          nativeProtection: {
+            ...second.nativeProtection!,
+            ...(mutation === "sequence-exhaustion"
+              ? {
+                  localBootRecovery: {
+                    ...second.nativeProtection!.localBootRecovery,
+                    nextObservationSequence: Number.MAX_SAFE_INTEGER,
+                  },
+                }
+              : { revision: Number.MAX_SAFE_INTEGER }),
+          },
+        };
+        const bytes = persisted(base);
+        f.setBytes(bytes);
+        expect((await f.store.load()).kind).toBe("ready");
+        await expect(
+          f.store.commitDurably(7, recoveredSuccessor(base)),
+        ).rejects.toThrow();
+        expect(f.getBytes()).toEqual(bytes);
+      } else {
+        const bytes = persisted({
+          ...both,
+          generation: 7,
+          nativeProtection: { ...original, localBootRecovery: local },
+        });
+        f.setBytes(bytes);
+        expect((await f.store.load()).kind).toBe("recovery_required");
+        expect(f.getBytes()).toEqual(bytes);
+      }
+      expect(f.events).not.toContain("write");
+    },
+  );
+
+  it("requires an engaging transition's exact boot ID without exposing it as a report slot", () => {
+    const command = {
+      kind: "engaging",
+      attemptId: identifier(10),
+      expectedProtectionRevision: 0,
+      authority: {},
+      categories: engagingCategories,
+      engagingBootSessionId: identifier(998),
+    };
+    expect(parseProtectionTransition(command)).toMatchObject({
+      engagingBootSessionId: identifier(998),
+    });
+    for (const engagingBootSessionId of [
+      undefined,
+      null,
+      "",
+      identifier(998) + "\n",
+      "ABCDEF00-0000-0000-0000-000000000000",
+      1,
+    ])
+      expect(
+        parseProtectionTransition({ ...command, engagingBootSessionId }),
+      ).toBeNull();
+    expect(
+      parseProtectionTransition({ ...command, kind: "boot_recovery" }),
+    ).toBeNull();
+    expect(
+      parseBootRecoveryCommand({
+        attemptId: identifier(10),
+        expectedProtectionRevision: 0,
+        observedBootSessionId: identifier(999),
+        kind: "boot_recovery",
+      }),
+    ).toBeNull();
   });
 });
