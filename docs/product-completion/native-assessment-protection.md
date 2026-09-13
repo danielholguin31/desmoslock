@@ -70,11 +70,20 @@ receipt or native end when either result is unknown.
 
 ## Durable recovery
 
-The encrypted version-3 record retains one admission, counter and evidence writer.
-Exact version-1 and version-2 decoding normalizes in memory without an implicit
+The encrypted version-4 record retains one admission, counter and evidence writer.
+Exact version-1, version-2 and version-3 decoding normalizes in memory without an implicit
 write. Native facts occupy a bounded immutable journal of 32 slots, with eight
 reserved before engaging. Plaintext remains limited to 48 KiB and ciphertext to
 64 KiB. Unknown durability preserves possibly published bytes and blocks promotion.
+Version 4 also records initial-join uncertainty, as described in the
+[admission recovery contract](student-session-admission.md#desktop-persistence-and-protection-state).
+Earlier version-3 readers cannot read a version-4 write. A rollback must retain
+version-4 read support and the current ciphertext, lock and counter history.
+The whole compact version-4 payload carries an unkeyed SHA-256 checksum for
+corruption detection, verified before accepting the record. The checksum is not
+hostile-host authentication, and its serialized field counts toward the existing
+plaintext ceiling. A failed check retains the original ciphertext and blocks
+recovery writes and egress.
 
 Cleanup completion requires confirmed native quiescence, detached/destroyed
 calculator content, owned window/shortcut restoration and durable completion.

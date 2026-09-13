@@ -477,6 +477,52 @@ describe("Student desktop session view", () => {
     expect(view.heading()).toBe("Session unavailable");
   });
 
+  it("returns a definitively unadmitted attempt to public code entry and submits the corrected code without private recovery", async () => {
+    const view = setup();
+    await settle();
+    view.bridge.joinTest.mockResolvedValueOnce(
+      state("entry", 2, { pendingOperation: "join" }),
+    );
+    view.input().value = "123456789ABC";
+    view.form().fire("submit");
+    await settle();
+    expect(view.heading()).toBe("Join a Test");
+    expect(view.text()).toContain("Check the Test join code and try again");
+    expect(visible(view.form())).toBe(true);
+    expect(visible(view.action("retry"))).toBe(false);
+    expect(visible(view.action("open-recovery"))).toBe(false);
+    expect(view.text()).not.toContain("Private re-admission code");
+    view.bridge.joinTest.mockResolvedValueOnce(state("active", 3));
+    view.input().value = "123456789ABD";
+    view.form().fire("submit");
+    await settle();
+    expect(view.bridge.joinTest.mock.calls).toEqual([
+      [{ code: "123456789ABC" }],
+      [{ code: "123456789ABD" }],
+    ]);
+    expect(view.bridge.beginTargetedReadmission).not.toHaveBeenCalled();
+    expect(view.bridge.retryStudentSession).not.toHaveBeenCalled();
+    expect(view.heading()).toBe("Session confirmed");
+  });
+
+  it("keeps exact retry visible after an uncertain attempt is denied without exposing fresh public entry", async () => {
+    const view = setup(state("unavailable", 2, { pendingOperation: "join" }));
+    await settle();
+    expect(view.text()).toContain("Retry that attempt or ask your teacher");
+    expect(visible(view.form())).toBe(false);
+    expect(visible(view.action("retry"))).toBe(true);
+    expect(visible(view.action("open-recovery"))).toBe(true);
+    view.bridge.retryStudentSession.mockResolvedValueOnce(
+      state("unconfirmed", 3, { pendingOperation: "join" }),
+    );
+    view.action("retry").fire("click");
+    await settle();
+    expect(view.bridge.retryStudentSession).toHaveBeenCalledTimes(1);
+    expect(view.bridge.joinTest).not.toHaveBeenCalled();
+    expect(view.bridge.beginTargetedReadmission).not.toHaveBeenCalled();
+    expect(view.heading()).toBe("Session result unconfirmed");
+  });
+
   it("does not let an older mutation result overwrite a newer unconfirmed projection", async () => {
     const view = setup();
     await settle();

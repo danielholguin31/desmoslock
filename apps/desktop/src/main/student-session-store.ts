@@ -149,6 +149,7 @@ export type PendingStudentIntent =
   | {
       readonly kind: "join";
       readonly admissionMode: StudentAdmissionMode;
+      readonly outcome: "not_dispatched" | "uncertain" | "denied";
       readonly requestId: string;
       readonly joinCode: string;
       readonly candidates: StudentSessionCandidates;
@@ -166,7 +167,7 @@ export type PendingStudentIntent =
     };
 
 export interface StudentSessionRecord {
-  readonly version: 3;
+  readonly version: 4;
   readonly generation: number;
   readonly apiOrigin: string;
   readonly device: StudentSessionDevice;
@@ -216,6 +217,29 @@ export function emptyNativeEvidence(): StoredNativeEvidence {
   });
 }
 export type StudentSessionSuccessor = Omit<StudentSessionRecord, "generation">;
+
+/** Eligibility only; replacing join material must retain the caller's enrollment. */
+export function canReplaceInitialJoin(
+  record: StudentSessionSuccessor | null,
+): boolean {
+  return (
+    record !== null &&
+    record.pending?.kind === "join" &&
+    record.pending.admissionMode === "initial" &&
+    (record.pending.outcome === "not_dispatched" ||
+      record.pending.outcome === "denied") &&
+    record.current === null &&
+    record.lastReservedCounter === 0 &&
+    !record.terminal &&
+    record.nativeProtection === null &&
+    record.evidence.origins.length === 0 &&
+    record.evidence.acknowledgments.length === 0 &&
+    record.evidence.pendingBatches.length === 0 &&
+    record.evidence.retiredSigners.length === 0 &&
+    record.evidence.lastAttemptedSigner === null
+  );
+}
+
 export type StudentSessionLoad =
   | { readonly kind: "empty"; readonly generation: number }
   | { readonly kind: "ready"; readonly record: StudentSessionRecord }
@@ -1154,6 +1178,31 @@ export function createStudentSessionStore(options: {
       "lastReservedCounter",
       "terminal",
     ];
+    const stored = allowLegacy
+      ? object(value, [
+          ...keys,
+          "nativeProtection",
+          "evidence",
+          "integritySha256",
+        ])
+      : null;
+    if (stored?.version === 4) {
+      // Detect payload corruption, not forgery: this checksum is unkeyed.
+      // Preserve the stored field order when removing only the checksum.
+      const payload = Object.fromEntries(
+        Object.keys(value as object)
+          .filter((key) => key !== "integritySha256")
+          .map((key) => [key, stored[key]]),
+      );
+      if (
+        parseStudentDigest(stored.integritySha256) === null ||
+        createHash("sha256")
+          .update(JSON.stringify(payload), "utf8")
+          .digest("hex") !== stored.integritySha256
+      )
+        return null;
+      value = payload;
+    }
     const legacy = allowLegacy ? object(value, keys) : null;
     const v2 = allowLegacy
       ? object(value, [...keys, "nativeProtection"])
@@ -1166,11 +1215,12 @@ export function createStudentSessionStore(options: {
           : object(value, [...keys, "nativeProtection", "evidence"]);
     if (
       row === null ||
+      (allowLegacy && row.version === 4 && stored === null) ||
       (row === legacy
         ? row.version !== 1
         : row === v2
           ? row.version !== 2
-          : row.version !== 3) ||
+          : row.version !== 4 && !(allowLegacy && row.version === 3)) ||
       parseStudentCounter(row.generation) === null ||
       row.apiOrigin !== options.apiOrigin ||
       !natural(row.lastReservedCounter) ||
@@ -1243,6 +1293,7 @@ export function createStudentSessionStore(options: {
       const join = object(row.pending, [
         "kind",
         "admissionMode",
+        ...(row.version === 4 ? ["outcome"] : []),
         "requestId",
         "joinCode",
         "candidates",
@@ -1262,12 +1313,18 @@ export function createStudentSessionStore(options: {
         const requestId = parseStudentUuid(join.requestId);
         const joinCode = parseStudentJoinCode(join.joinCode);
         const candidates = options.validateCandidates(join.candidates);
+        // Older records never established whether the join reached the server.
+        const outcome = row.version === 4 ? join.outcome : "uncertain";
         if (
           requestId === null ||
           joinCode === null ||
           candidates === null ||
           (join.admissionMode !== "initial" &&
             join.admissionMode !== "readmission") ||
+          (outcome !== "not_dispatched" &&
+            outcome !== "uncertain" &&
+            outcome !== "denied") ||
+          (join.admissionMode === "readmission" && outcome !== "uncertain") ||
           current !== null ||
           row.lastReservedCounter !== 0
         )
@@ -1275,6 +1332,7 @@ export function createStudentSessionStore(options: {
         pending = {
           kind: "join",
           admissionMode: join.admissionMode,
+          outcome,
           requestId,
           joinCode,
           candidates,
@@ -1348,8 +1406,8 @@ export function createStudentSessionStore(options: {
       allowLegacy && row !== legacy && row !== v2,
     );
     if (evidence === null) return null;
-    return Object.freeze({
-      version: 3,
+    const record: StudentSessionRecord = Object.freeze({
+      version: 4,
       generation: row.generation as number,
       apiOrigin: options.apiOrigin,
       device: Object.freeze(device),
@@ -1363,6 +1421,13 @@ export function createStudentSessionStore(options: {
       nativeProtection,
       evidence,
     });
+    if (
+      pending?.kind === "join" &&
+      pending.outcome !== "uncertain" &&
+      !canReplaceInitialJoin(record)
+    )
+      return null;
+    return record;
   }
 
   function validEvidenceSuccessor(next: StudentSessionRecord): boolean {
@@ -1632,7 +1697,7 @@ export function createStudentSessionStore(options: {
           throw failure();
         // The origin's exact scope already belongs to every immutable fact in
         // the attempt. Store that association once; reconstruct it on load.
-        const plaintext = JSON.stringify({
+        const payload = {
           ...record,
           evidence: {
             ...record.evidence,
@@ -1642,6 +1707,12 @@ export function createStudentSessionStore(options: {
               originBuild: origin.originBuild,
             })),
           },
+        };
+        const plaintext = JSON.stringify({
+          ...payload,
+          integritySha256: createHash("sha256")
+            .update(JSON.stringify(payload), "utf8")
+            .digest("hex"),
         });
         if (Buffer.byteLength(plaintext, "utf8") > maximumPlaintextBytes)
           throw failure();
