@@ -310,18 +310,128 @@ test("production Electron shell preserves Student isolation and denies protectio
         application.evaluate(({ app }) => app.listenerCount("activate")),
       )
       .toBeGreaterThan(0);
-    await application.evaluate(async ({ app, BrowserWindow }) => {
-      app.removeAllListeners("window-all-closed");
-      const [currentWindow] = BrowserWindow.getAllWindows();
-      if (currentWindow === undefined) {
-        throw new Error("Electron created no BrowserWindow");
-      }
-      await new Promise<void>((resolveClosed) => {
-        currentWindow.once("closed", resolveClosed);
-        currentWindow.close();
-      });
-      app.emit("activate");
+    const closeObservation = await application.evaluate(
+      async ({ app, BrowserWindow }, expectsOrdinaryClose) => {
+        app.removeAllListeners("window-all-closed");
+        const [currentWindow] = BrowserWindow.getAllWindows();
+        if (currentWindow === undefined) {
+          throw new Error("Electron created no BrowserWindow");
+        }
+        const windowId = currentWindow.id;
+        let defaultPrevented: boolean | null = null;
+        let closed = false;
+        await new Promise<void>((resolve, reject) => {
+          const finish = (error?: Error) => {
+            clearTimeout(timer);
+            currentWindow.removeListener("close", onClose);
+            currentWindow.removeListener("closed", onClosed);
+            if (error === undefined) resolve();
+            else reject(error);
+          };
+          const onClose = (event: { readonly defaultPrevented: boolean }) => {
+            defaultPrevented = event.defaultPrevented;
+            if (event.defaultPrevented === expectsOrdinaryClose) {
+              finish(
+                new Error(
+                  "Shell close policy differed from its expected state",
+                ),
+              );
+            } else if (!expectsOrdinaryClose) finish();
+          };
+          const onClosed = () => {
+            closed = true;
+            finish(
+              expectsOrdinaryClose && defaultPrevented === false
+                ? undefined
+                : new Error("Recovery shell closed without the expected veto"),
+            );
+          };
+          const timer = setTimeout(
+            () =>
+              finish(
+                new Error(
+                  expectsOrdinaryClose
+                    ? "Ordinary shell close did not emit closed within 5000ms"
+                    : "Recovery shell close did not emit close within 5000ms",
+                ),
+              ),
+            5_000,
+          );
+          currentWindow.once("close", onClose);
+          currentWindow.once("closed", onClosed);
+          try {
+            currentWindow.close();
+          } catch {
+            finish(new Error("Shell close invocation failed"));
+          }
+        });
+        return {
+          windowId,
+          defaultPrevented,
+          closed,
+          destroyed: currentWindow.isDestroyed(),
+        };
+      },
+      nativeStoreSupported,
+    );
+    expect(closeObservation).toEqual({
+      windowId: expect.any(Number),
+      defaultPrevented: !nativeStoreSupported,
+      closed: nativeStoreSupported,
+      destroyed: nativeStoreSupported,
     });
+    if (!nativeStoreSupported) await assertStudentBoundary(window);
+
+    await application.evaluate(
+      async ({ app, BrowserWindow }, { windowId, simulateUnexpectedLoss }) => {
+        if (simulateUnexpectedLoss) {
+          const currentWindow = BrowserWindow.getAllWindows().find(
+            (candidate) => candidate.id === windowId,
+          );
+          if (currentWindow === undefined || currentWindow.isDestroyed()) {
+            throw new Error(
+              "Recovery shell was lost before the explicit loss simulation",
+            );
+          }
+          // Only this test-owned, calculator-free shell is destroyed. This
+          // simulates unexpected window loss, not successful native cleanup.
+          await new Promise<void>((resolve, reject) => {
+            const finish = (error?: Error) => {
+              clearTimeout(timer);
+              currentWindow.removeListener("closed", onClosed);
+              if (error === undefined) resolve();
+              else reject(error);
+            };
+            const onClosed = () => finish();
+            const timer = setTimeout(
+              () =>
+                finish(
+                  new Error(
+                    "Simulated shell loss did not emit closed within 5000ms",
+                  ),
+                ),
+              5_000,
+            );
+            currentWindow.once("closed", onClosed);
+            try {
+              currentWindow.destroy();
+            } catch {
+              finish(new Error("Simulated shell loss invocation failed"));
+            }
+          });
+        }
+        if (BrowserWindow.getAllWindows().length !== 0) {
+          throw new Error(
+            "A shell remained before the fresh-generation activation",
+          );
+        }
+        app.emit("activate");
+      },
+      {
+        windowId: closeObservation.windowId,
+        simulateUnexpectedLoss: !nativeStoreSupported,
+      },
+    );
     await expect
       .poll(
         () =>
