@@ -46,6 +46,7 @@ test(
       "AutomaticAssessmentConfiguration",
       "AppKit",
       "Foundation",
+      "IOKit",
     ]) {
       assert.ok(
         stdout.includes(`/${framework}.framework/`),
@@ -56,68 +57,78 @@ test(
   },
 );
 
-test(
-  "shared native lifecycle driver exercises cancellation, ordering, stale delivery and policy without frameworks",
-  { skip: !enabled },
-  async (t) => {
-    const root = await fixture(t);
-    const compiler = process.env.DESMOSLOCK_NATIVE_CLANG;
-    const sdk = process.env.DESMOSLOCK_NATIVE_SDK;
-    assert.ok(
-      compiler && sdk,
-      "the frozen existing compiler and SDK are required",
-    );
-    assert.equal(process.versions.node, "24.20.0");
-    const output = path.join(root, "aac-lifecycle-driver");
-    const env = {
-      PATH: `${path.dirname(compiler)}:/usr/bin:/bin`,
-      LC_ALL: "C",
-      TMPDIR: root,
-      TMP: root,
-      TEMP: root,
-      CLANG_MODULE_CACHE_PATH: root,
-    };
-    await execute(
-      compiler,
-      [
-        "-std=c++17",
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-        "-fno-modules",
-        "-arch",
-        process.arch === "x64" ? "x86_64" : "arm64",
-        "-mmacosx-version-min=13.0",
-        "-isysroot",
-        sdk,
-        "-B",
-        path.dirname(compiler),
-        "-lc++",
-        path.join(repository, "tests/native/aac-protection-state.test.cpp"),
-        "-o",
-        output,
-      ],
-      { env, timeout: 30_000, maxBuffer: 1024 * 1024 },
-    );
-    const { stdout, stderr } = await execute(output, [], {
-      env,
-      timeout: 10_000,
-      maxBuffer: 65_536,
-    });
-    assert.equal(stderr, "");
-    const observations = stdout
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line));
-    const summary = observations.pop();
-    assert.deepEqual(summary, { passed: 13, frameworkCalls: 0 });
-    assert.equal(new Set(observations.map((value) => value.case)).size, 13);
-    for (const value of observations) {
-      assert.equal(value.passed, true, value.case);
-    }
-    t.diagnostic(JSON.stringify({ syntheticCoreCases: observations, summary }));
-  },
-);
+for (const driver of [
+  { name: "aac-protection-state", cases: 13 },
+  { name: "aac-boot-session", cases: 18 },
+]) {
+  test(
+    `shared native ${driver.name} driver exercises its pure core without frameworks`,
+    { skip: !enabled },
+    async (t) => {
+      const root = await fixture(t);
+      const compiler = process.env.DESMOSLOCK_NATIVE_CLANG;
+      const sdk = process.env.DESMOSLOCK_NATIVE_SDK;
+      assert.ok(
+        compiler && sdk,
+        "the frozen existing compiler and SDK are required",
+      );
+      assert.equal(process.versions.node, "24.20.0");
+      const output = path.join(root, driver.name + "-driver");
+      const env = {
+        PATH: `${path.dirname(compiler)}:/usr/bin:/bin`,
+        LC_ALL: "C",
+        TMPDIR: root,
+        TMP: root,
+        TEMP: root,
+        CLANG_MODULE_CACHE_PATH: root,
+      };
+      await execute(
+        compiler,
+        [
+          "-std=c++17",
+          "-Wall",
+          "-Wextra",
+          "-Werror",
+          "-fno-modules",
+          "-arch",
+          process.arch === "x64" ? "x86_64" : "arm64",
+          "-mmacosx-version-min=13.0",
+          "-isysroot",
+          sdk,
+          "-B",
+          path.dirname(compiler),
+          "-lc++",
+          path.join(repository, `tests/native/${driver.name}.test.cpp`),
+          "-o",
+          output,
+        ],
+        { env, timeout: 30_000, maxBuffer: 1024 * 1024 },
+      );
+      const { stdout, stderr } = await execute(output, [], {
+        env,
+        timeout: 10_000,
+        maxBuffer: 65_536,
+      });
+      assert.equal(stderr, "");
+      const observations = stdout
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      const summary = observations.pop();
+      assert.deepEqual(summary, { passed: driver.cases, frameworkCalls: 0 });
+      assert.equal(
+        new Set(observations.map((value) => value.case)).size,
+        driver.cases,
+      );
+      for (const value of observations) {
+        assert.equal(value.passed, true, value.case);
+      }
+      t.diagnostic(
+        JSON.stringify({ syntheticCoreCases: observations, summary }),
+      );
+    },
+  );
+}
 
 test(
   "native assessment builder rejects a redirected output ancestor",

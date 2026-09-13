@@ -36,6 +36,7 @@ function fixture() {
   const releaseLifecycle = vi.fn<() => unknown>(() => true);
   const releaseApplications = vi.fn<() => unknown>(() => true);
   const native = {
+    readBootSessionId: vi.fn<() => unknown>(() => id),
     inspectSupport: vi.fn<() => unknown>(() => support),
     subscribe: vi.fn<(listener: unknown) => unknown>((listener) => {
       if (typeof listener !== "function")
@@ -97,6 +98,73 @@ function expectFinite(body: () => unknown) {
 }
 
 describe("main-private native protection adapter with a synthetic module only", () => {
+  it("reads the captured boot method with no arguments and no UUID version constraint", () => {
+    const f = fixture();
+    const boot = "abcdef01-2345-0123-4567-89abcdef0123";
+    f.native.readBootSessionId.mockReturnValue(boot);
+    expect(f.adapter.readBootSessionId()).toBe(boot);
+    expect(f.native.readBootSessionId.mock.calls).toEqual([[]]);
+    f.native.readBootSessionId = vi.fn(() => {
+      throw new Error("replaced");
+    });
+    expect(f.adapter.readBootSessionId()).toBe(boot);
+    expect(f.load).toHaveBeenCalledTimes(1);
+    expect(f.native.begin).not.toHaveBeenCalled();
+    expect(f.native.subscribe).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    null,
+    undefined,
+    1,
+    {},
+    new String(id),
+    Promise.resolve(id),
+    "",
+    id.toUpperCase(),
+    id + "\n",
+    id + " ",
+    id.slice(1),
+    id.replace("-", "_"),
+    "g" + id.slice(1),
+    "é" + id.slice(1),
+    "\0" + id.slice(1),
+  ])(
+    "rejects malformed boot output without coercion and keeps failure sticky (%#)",
+    (value) => {
+      const f = fixture();
+      f.native.readBootSessionId.mockReturnValue(value);
+      expectFinite(() => f.adapter.readBootSessionId());
+      f.native.readBootSessionId.mockReturnValue(id);
+      expectFinite(() => f.adapter.readBootSessionId());
+      expect(f.native.readBootSessionId).toHaveBeenCalledTimes(1);
+      expect(f.adapter.inspectSupport().available).toBe(false);
+    },
+  );
+
+  it("collapses native boot exceptions and reentrant reads into sticky finite failure", () => {
+    for (const reentrant of [false, true]) {
+      const f = fixture();
+      f.native.readBootSessionId.mockImplementation(() => {
+        if (reentrant) {
+          expectFinite(() => f.adapter.readBootSessionId());
+          return id;
+        }
+        throw new Error("sensitive native details");
+      });
+      expectFinite(() => f.adapter.readBootSessionId());
+      expectFinite(() => f.adapter.readBootSessionId());
+      expect(f.native.readBootSessionId).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("requires a captured callable boot method without invoking accessors", () => {
+    const f = fixture();
+    const getter = vi.fn(() => id);
+    Object.defineProperty(f.native, "readBootSessionId", { get: getter });
+    expectFinite(() => f.adapter.readBootSessionId());
+    expect(getter).not.toHaveBeenCalled();
+  });
   it("loads lazily once, snapshots methods and never equates availability with engagement", () => {
     const f = fixture();
     expect(f.load).not.toHaveBeenCalled();

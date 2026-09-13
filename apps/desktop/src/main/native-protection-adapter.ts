@@ -27,6 +27,7 @@ export type ApplicationObservation =
         | "application_identity_unavailable";
     };
 export interface NativeProtectionAdapter {
+  readBootSessionId(): string;
   inspectSupport(): {
     readonly available: boolean;
     readonly reason:
@@ -52,6 +53,7 @@ export class NativeProtectionUnavailableError extends Error {
 }
 
 const methods = [
+  "readBootSessionId",
   "inspectSupport",
   "subscribe",
   "observeApplicationStatus",
@@ -467,6 +469,20 @@ export function createNativeProtectionAdapter(
   }
 
   return Object.freeze({
+    readBootSessionId() {
+      return operation(() => {
+        const value = invoke("readBootSessionId", []);
+        if (
+          typeof value !== "string" ||
+          value.length !== 36 ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+            value,
+          )
+        )
+          throw failure();
+        return value;
+      });
+    },
     inspectSupport() {
       try {
         return operation(() => decodeSupport(invoke("inspectSupport", [])));

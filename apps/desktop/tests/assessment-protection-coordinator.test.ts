@@ -13,6 +13,8 @@ import { createStudentSessionCoordinator } from "../src/main/student-session-coo
 import { createStudentSessionCrypto } from "../src/main/student-session-crypto.js";
 import {
   createStudentSessionStore,
+  emptyLocalBootRecovery,
+  type BootRecoveryCommand,
   type NativeStudentRecordHandle,
   type StudentSessionRecord,
 } from "../src/main/student-session-store.js";
@@ -47,6 +49,11 @@ import type {
 // Pure main-process logic tests use explicitly synthetic native/window ports.
 // They establish ordering and issuer fences, not Electron rendering or AAC proof.
 const attempt = "60000000-0000-4000-8000-000000000001";
+const bootSessionId = "abcdef01-2345-0123-4567-89abcdef0123";
+const previousBootSessionId = "abcdef02-2345-0123-4567-89abcdef0123";
+type BootRecoveryState = ReturnType<
+  StudentSessionCoordinator["readProtectionContext"]
+>["bootRecovery"];
 const scope: StudentSessionScope = Object.freeze({
   schoolId: "30000000-0000-4000-8000-000000000001",
   testId: "40000000-0000-4000-8000-000000000001",
@@ -82,6 +89,10 @@ function fakeStudent(events: string[], now: () => number) {
   let receipt: FreshStudentAdmission | null = null;
   let reportReceipt: PreflightReportReceipt | null = null;
   let protection: StoredNativeProtection | null = null;
+  let bootRecovery: BootRecoveryState = { status: "none" };
+  let maySupersedeLatest = true;
+  let bootRecoveryGate: Promise<void> | null = null;
+  let bootRecoveryDenied = false;
   let delivery: "none" | "pending" | "acknowledged" | "blocked" = "none";
   let readGate: Promise<void> | null = null;
   let externalRead: Promise<void> | null = null;
@@ -217,6 +228,9 @@ function fakeStudent(events: string[], now: () => number) {
       };
       const successor: StoredNativeProtection = {
         policyVersion: 1,
+        localBootRecovery:
+          protection?.localBootRecovery ??
+          emptyLocalBootRecovery(facts.length + 1),
         revision: (protection?.revision ?? 0) + 1,
         latestAttempt: {
           attemptId: command.attemptId,
@@ -241,6 +255,8 @@ function fakeStudent(events: string[], now: () => number) {
         facts: [...facts, fact],
       };
       protection = Object.freeze(successor);
+      bootRecovery = { status: "none" };
+      maySupersedeLatest = successor.latestAttempt?.cleanup === "complete";
       if (command.kind === "engaging" || command.kind === "preflight_failure")
         reportReceipt = null;
       events.push("commit:" + command.kind + ":durable");
@@ -250,6 +266,51 @@ function fakeStudent(events: string[], now: () => number) {
       };
     },
   );
+  const commitBootRecovery = vi.fn(async (command: BootRecoveryCommand) => {
+    events.push("boot.commit:start");
+    if (bootRecoveryGate !== null) await bootRecoveryGate;
+    if (
+      bootRecoveryDenied ||
+      protection === null ||
+      bootRecovery.status !== "prior_process" ||
+      command.attemptId !== bootRecovery.attemptId ||
+      command.expectedProtectionRevision !== protection.revision ||
+      command.observedBootSessionId === bootRecovery.engagingBootSessionId
+    )
+      return { status: "unavailable" as const };
+    const local = protection.localBootRecovery;
+    protection = {
+      ...protection,
+      revision: protection.revision + 1,
+      localBootRecovery: {
+        ...local,
+        nextObservationSequence: local.nextObservationSequence + 1,
+        anchors: local.anchors.map((anchor) =>
+          anchor.attemptId === command.attemptId
+            ? {
+                ...anchor,
+                observation: {
+                  sequence: local.nextObservationSequence,
+                  basis: "boot_session_changed" as const,
+                  observedBootSessionId: command.observedBootSessionId,
+                },
+              }
+            : anchor,
+        ),
+      },
+    };
+    bootRecovery = {
+      status: "prior_boot_recovery_observed",
+      attemptId: command.attemptId,
+    };
+    maySupersedeLatest = true;
+    for (const listener of publicListeners) listener(view);
+    events.push("boot.commit:durable");
+    return {
+      status: "committed" as const,
+      protectionRevision: protection.revision,
+    };
+  });
   const student = {
     initialize: vi.fn(async () => undefined),
     joinInitial: vi.fn<(code: string) => Promise<void>>(async () => undefined),
@@ -257,7 +318,7 @@ function fakeStudent(events: string[], now: () => number) {
       (code: string, revision: number) => Promise<void>
     >(async () => undefined),
     retryPending: vi.fn(async () => undefined),
-    refresh: vi.fn(async () => undefined),
+    refresh: vi.fn<() => Promise<void>>(async () => undefined),
     flushEvidence: vi.fn(async () => undefined),
     forfeit: vi.fn<(revision: number) => Promise<void>>(async () => {
       events.push("student.forfeit");
@@ -273,6 +334,8 @@ function fakeStudent(events: string[], now: () => number) {
       observationSequence,
       protection,
       delivery,
+      bootRecovery,
+      maySupersedeLatest,
     }),
     readFreshAdmission,
     reservePreflightReport: vi.fn(
@@ -308,13 +371,37 @@ function fakeStudent(events: string[], now: () => number) {
       };
     },
     commitProtectionTransition,
+    commitBootRecovery,
   } satisfies StudentSessionCoordinator;
   return {
     student,
     admission,
     commands,
-    setProtection(value: StoredNativeProtection) {
+    setProtection(value: StoredNativeProtection, recovery?: BootRecoveryState) {
       protection = value;
+      bootRecovery =
+        recovery ??
+        (value.latestAttempt !== null &&
+        value.latestAttempt.cleanup !== "complete"
+          ? {
+              status: "unanchored_prior",
+              attemptId: value.latestAttempt.attemptId,
+            }
+          : { status: "none" });
+      maySupersedeLatest =
+        value.latestAttempt === null ||
+        value.latestAttempt.cleanup === "complete" ||
+        bootRecovery.status === "prior_boot_recovery_observed";
+    },
+    setBootRecovery(value: BootRecoveryState, supersede = false) {
+      bootRecovery = value;
+      maySupersedeLatest = supersede;
+    },
+    holdBootRecovery(promise: Promise<void>) {
+      bootRecoveryGate = promise;
+    },
+    denyBootRecovery() {
+      bootRecoveryDenied = true;
     },
     setDelivery(value: typeof delivery) {
       delivery = value;
@@ -383,13 +470,15 @@ function harness(
     readonly student?: StudentSessionCoordinator;
     readonly now?: () => number;
     readonly protection?: StoredNativeProtection;
+    readonly bootRecovery?: BootRecoveryState;
   } = {},
 ) {
   const events: string[] = [];
   let elapsed = 0;
   const now = options.now ?? (() => elapsed);
   const fake = fakeStudent(events, now);
-  if (options.protection !== undefined) fake.setProtection(options.protection);
+  if (options.protection !== undefined)
+    fake.setProtection(options.protection, options.bootRecovery);
   const student = options.student ?? fake.student;
   const nativeListeners = new Set<(value: NativeAssessmentEvent) => void>();
   const appListeners = new Set<(value: ApplicationObservation) => void>();
@@ -413,6 +502,10 @@ function harness(
   let displayed = false;
   let emergency: (() => void) | null = null;
   const native = {
+    readBootSessionId: vi.fn(() => {
+      events.push("native.boot");
+      return bootSessionId;
+    }),
     inspectSupport: vi.fn(() => ({
       available: nativeAvailable,
       reason: nativeAvailable
@@ -655,6 +748,7 @@ function previousJournal(factCount: 24 | 25): StoredNativeProtection {
   }
   return {
     policyVersion: 1,
+    localBootRecovery: emptyLocalBootRecovery(factCount + 1),
     revision: factCount,
     nextFactSequence: factCount + 1,
     facts,
@@ -671,6 +765,60 @@ function previousJournal(factCount: 24 | 25): StoredNativeProtection {
 }
 
 type Harness = ReturnType<typeof harness>;
+function priorBootJournal(): StoredNativeProtection {
+  return {
+    policyVersion: 1,
+    revision: 1,
+    nextFactSequence: 2,
+    facts: [
+      {
+        sequence: 1,
+        eventId: "82000000-0000-4000-8000-000000000001",
+        attemptId: attempt,
+        scope,
+        policyVersion: 1,
+        slot: "engaging",
+        phase: "engaging",
+        nativeEvent: null,
+        nativeSequence: null,
+        categories: confirmed,
+        cause: "none",
+      },
+    ],
+    latestAttempt: {
+      attemptId: attempt,
+      scope,
+      phase: "engaging",
+      nativeDisposition: "pending",
+      nativeSequence: null,
+      cleanup: "not_requested",
+      abandonment: "none",
+    },
+    localBootRecovery: {
+      policyVersion: 1,
+      requiredFromFactSequence: 1,
+      nextObservationSequence: 1,
+      anchors: [
+        {
+          attemptId: attempt,
+          engagingBootSessionId: previousBootSessionId,
+          observation: null,
+        },
+      ],
+    },
+  };
+}
+function priorBootHarness() {
+  return harness({
+    protection: priorBootJournal(),
+    bootRecovery: {
+      status: "prior_process",
+      attemptId: attempt,
+      expectedProtectionRevision: 1,
+      engagingBootSessionId: previousBootSessionId,
+    },
+  });
+}
 async function engaging(h: Harness) {
   const operation = h.coordinator.start(
     h.coordinator.readView().revision,
@@ -700,6 +848,285 @@ afterEach(() => {
 });
 
 describe("assessment protection coordinator authority and containment", () => {
+  it("anchors one boot read in the durable engaging command before native begin", async () => {
+    const h = harness();
+    const gate = deferred();
+    h.fake.holdCommit("engaging", gate.promise);
+    const starting = h.coordinator.start(
+      h.coordinator.readView().revision,
+      current,
+    );
+    await settle();
+    expect(h.native.readBootSessionId).toHaveBeenCalledExactlyOnceWith();
+    expect(h.fake.commands[0]).toMatchObject({
+      kind: "engaging",
+      engagingBootSessionId: bootSessionId,
+    });
+    expect(h.native.begin).not.toHaveBeenCalled();
+    gate.resolve();
+    await starting;
+    expect(h.events.indexOf("native.boot")).toBeLessThan(
+      h.events.indexOf("commit:engaging:start"),
+    );
+    expect(h.events.indexOf("commit:engaging:durable")).toBeLessThan(
+      h.events.indexOf("native.begin"),
+    );
+  });
+
+  it.each([
+    "",
+    "bad",
+    bootSessionId.toUpperCase(),
+    `${bootSessionId}\n`,
+    "throw",
+  ])("refuses native begin on invalid boot read %s", async (value) => {
+    const h = harness();
+    h.native.readBootSessionId.mockImplementation(() => {
+      if (value === "throw") throw new Error("synthetic unavailable");
+      return value;
+    });
+    await h.coordinator.start(h.coordinator.readView().revision, current);
+    await settle();
+    expect(h.native.begin).not.toHaveBeenCalled();
+    expect(h.fake.commands.some((command) => command.kind === "engaging")).toBe(
+      false,
+    );
+    expect(h.surface.attach).not.toHaveBeenCalled();
+  });
+
+  it("holds prior boot recovery through reentrant publication until exact durable acknowledgment", async () => {
+    const h = priorBootHarness();
+    const gate = deferred();
+    const original = h.fake.student.commitBootRecovery.getMockImplementation()!;
+    h.fake.student.commitBootRecovery.mockImplementation(async (command) => {
+      const result = await original(command);
+      await gate.promise;
+      return result;
+    });
+    const historical = JSON.stringify({
+      facts: h.student.readProtectionContext().protection!.facts,
+      latestAttempt:
+        h.student.readProtectionContext().protection!.latestAttempt,
+    });
+    let earlyIdle = false;
+    const unsubscribe = h.coordinator.subscribe((value) => {
+      earlyIdle ||= value.protection.phase === "idle";
+      void h.coordinator.start(value.revision, current);
+    });
+    await settle();
+    expect(h.fake.student.commitBootRecovery).toHaveBeenCalledOnce();
+    expect(h.coordinator.hasRetainedAttempt()).toBe(true);
+    expect(earlyIdle).toBe(false);
+    expect(h.native.begin).not.toHaveBeenCalled();
+    const refreshing = h.coordinator.refresh();
+    const retrying = h.coordinator.retryPending(current);
+    await settle();
+    expect(h.fake.student.commitBootRecovery).toHaveBeenCalledOnce();
+    unsubscribe();
+    gate.resolve();
+    await Promise.all([refreshing, retrying]);
+    await settle();
+    expect(h.coordinator.readView().protection.phase).toBe("idle");
+    expect(h.events.indexOf("boot.commit:durable")).toBeGreaterThan(
+      h.events.indexOf("boot.commit:start"),
+    );
+    expect(
+      JSON.stringify({
+        facts: h.student.readProtectionContext().protection!.facts,
+        latestAttempt:
+          h.student.readProtectionContext().protection!.latestAttempt,
+      }),
+    ).toBe(historical);
+  });
+
+  it("recovers only prior ownership and requires all normal gates for a new explicit Start", async () => {
+    const h = priorBootHarness();
+    const before = h.student.readProtectionContext().protection!;
+    await settle();
+    expect(h.coordinator.readView().protection).toMatchObject({
+      phase: "idle",
+      failure: null,
+      calculatorVisible: false,
+      cleanup: "not_requested",
+      nativeEndObserved: false,
+      emergencyReview: false,
+    });
+    expect(h.coordinator.readView().protection.categories.aac.status).toBe(
+      "pending",
+    );
+    expect(h.coordinator.hasRetainedAttempt()).toBe(false);
+    expect(h.student.readProtectionContext().protection!.facts).toEqual(
+      before.facts,
+    );
+    expect(h.student.readProtectionContext().protection!.latestAttempt).toEqual(
+      before.latestAttempt,
+    );
+    expect(h.native.begin).not.toHaveBeenCalled();
+    expect(h.fake.student.readFreshAdmission).not.toHaveBeenCalled();
+    h.failNativeBegin();
+    await h.coordinator.start(h.coordinator.readView().revision, current);
+    await settle();
+    expect(h.fake.student.readFreshAdmission).toHaveBeenCalledOnce();
+    expect(h.native.begin).toHaveBeenCalledOnce();
+    expect(h.surface.attach).not.toHaveBeenCalled();
+    expect(h.coordinator.readView().protection.phase).not.toBe("locked");
+  });
+
+  it.each([previousBootSessionId, "bad", "throw"])(
+    "keeps the prior barrier for unavailable or same boot %s",
+    async (value) => {
+      const h = priorBootHarness();
+      h.native.readBootSessionId.mockImplementation(() => {
+        if (value === "throw") throw new Error("synthetic unavailable");
+        return value;
+      });
+      await settle();
+      h.fake.setDelivery("acknowledged");
+      await settle();
+      expect(h.native.readBootSessionId).toHaveBeenCalledOnce();
+      expect(h.fake.student.commitBootRecovery).not.toHaveBeenCalled();
+      expect(h.coordinator.readView().protection.phase).toBe(
+        "recovery_required",
+      );
+      expect(h.coordinator.hasRetainedAttempt()).toBe(true);
+    },
+  );
+
+  it.each(["record_rejected", "write_uncertain", "unanchored_prior"] as const)(
+    "never reads boot state to clear %s",
+    async (status) => {
+      const h = harness({
+        protection: priorBootJournal(),
+        bootRecovery:
+          status === "unanchored_prior"
+            ? { status, attemptId: attempt }
+            : { status },
+      });
+      await settle();
+      await h.coordinator.refresh();
+      expect(h.native.readBootSessionId).not.toHaveBeenCalled();
+      expect(h.fake.student.commitBootRecovery).not.toHaveBeenCalled();
+      expect(h.coordinator.hasRetainedAttempt()).toBe(true);
+    },
+  );
+
+  it("keeps failed or stale recovery acknowledgments blocked and permits an explicit retry", async () => {
+    const h = priorBootHarness();
+    h.fake.denyBootRecovery();
+    await settle();
+    h.fake.setDelivery("acknowledged");
+    await settle();
+    expect(h.coordinator.hasRetainedAttempt()).toBe(true);
+    expect(h.fake.student.commitBootRecovery).toHaveBeenCalledOnce();
+    await h.coordinator.refresh();
+    expect(h.fake.student.commitBootRecovery).toHaveBeenCalledTimes(2);
+    expect(h.coordinator.hasRetainedAttempt()).toBe(true);
+  });
+
+  it("loads an already recovered prior attempt as fresh idle without another boot read or write", async () => {
+    const journal = priorBootJournal();
+    const recovered: StoredNativeProtection = {
+      ...journal,
+      revision: 2,
+      localBootRecovery: {
+        ...journal.localBootRecovery,
+        nextObservationSequence: 2,
+        anchors: journal.localBootRecovery.anchors.map((anchor) => ({
+          ...anchor,
+          observation: {
+            sequence: 1,
+            basis: "boot_session_changed",
+            observedBootSessionId: bootSessionId,
+          },
+        })),
+      },
+    };
+    const h = harness({
+      protection: recovered,
+      bootRecovery: {
+        status: "prior_boot_recovery_observed",
+        attemptId: attempt,
+      },
+    });
+    await settle();
+    expect(h.coordinator.readView().protection).toMatchObject({
+      phase: "idle",
+      failure: null,
+      nativeEndObserved: false,
+      cleanup: "not_requested",
+      calculatorVisible: false,
+    });
+    expect(h.coordinator.hasRetainedAttempt()).toBe(false);
+    expect(h.native.readBootSessionId).not.toHaveBeenCalled();
+    expect(h.fake.student.commitBootRecovery).not.toHaveBeenCalled();
+    expect(h.student.readProtectionContext().protection).toBe(recovered);
+  });
+
+  it("does not start a recovery comparison after shutdown during an explicit refresh", async () => {
+    const h = priorBootHarness();
+    h.native.readBootSessionId.mockReturnValue(previousBootSessionId);
+    await settle();
+    const gate = deferred();
+    h.fake.student.refresh.mockImplementation(() => gate.promise);
+    const refreshing = h.coordinator.refresh();
+    await settle();
+    await expect(h.coordinator.shutdown()).resolves.toBe("retained");
+    gate.resolve();
+    await refreshing;
+    expect(h.native.readBootSessionId).toHaveBeenCalledOnce();
+    expect(h.fake.student.commitBootRecovery).not.toHaveBeenCalled();
+  });
+
+  it("never uses boot recovery for this process's actual retained attempt", async () => {
+    const h = harness();
+    await engaging(h);
+    h.fake.setBootRecovery({
+      status: "prior_process",
+      attemptId: attempt,
+      expectedProtectionRevision: 1,
+      engagingBootSessionId: previousBootSessionId,
+    });
+    await h.coordinator.refresh();
+    expect(h.native.readBootSessionId).toHaveBeenCalledOnce();
+    expect(h.fake.student.commitBootRecovery).not.toHaveBeenCalled();
+    expect(h.coordinator.hasRetainedAttempt()).toBe(true);
+  });
+
+  it("rechecks the exact prior context after a reentrant boot read before committing", async () => {
+    const h = priorBootHarness();
+    h.native.readBootSessionId.mockImplementation(() => {
+      h.fake.setBootRecovery({ status: "record_rejected" });
+      h.fake.publishPublic();
+      return bootSessionId;
+    });
+    await settle();
+    expect(h.fake.student.commitBootRecovery).not.toHaveBeenCalled();
+    expect(h.coordinator.hasRetainedAttempt()).toBe(true);
+    expect(h.native.begin).not.toHaveBeenCalled();
+  });
+
+  it("rejects stale recovery context and drains an acknowledged recovery during shutdown without restarting", async () => {
+    for (const stop of [false, true]) {
+      const h = priorBootHarness();
+      const gate = deferred();
+      h.fake.holdBootRecovery(gate.promise);
+      await settle();
+      if (stop)
+        await expect(h.coordinator.shutdown()).resolves.toBe("retained");
+      else h.fake.setBootRecovery({ status: "write_uncertain" });
+      gate.resolve();
+      await settle();
+      expect(h.coordinator.hasRetainedAttempt()).toBe(!stop);
+      expect(h.native.begin).not.toHaveBeenCalled();
+      expect(h.fake.student.dispose).not.toHaveBeenCalled();
+      if (stop) {
+        await h.coordinator.start(h.coordinator.readView().revision, current);
+        expect(h.native.begin).not.toHaveBeenCalled();
+        await expect(h.coordinator.shutdown()).resolves.toBe("complete");
+      }
+    }
+  });
+
   it("keeps Start capacity independent of an acknowledgment projection", async () => {
     const fake = fakeStudent([], () => 0);
     fake.setProtection(previousJournal(25));
@@ -739,18 +1166,15 @@ describe("assessment protection coordinator authority and containment", () => {
     const h = harness({ student: fake.student });
     expect(h.coordinator.readView().protection.phase).toBe("recovery_required");
     expect(parseDesktopStudentView(h.coordinator.readView())).not.toBeNull();
-    expect(h.coordinator.hasRetainedAttempt()).toBe(false);
+    expect(h.coordinator.hasRetainedAttempt()).toBe(true);
     await h.coordinator.start(h.coordinator.readView().revision, current);
     expect(fake.student.readFreshAdmission).not.toHaveBeenCalled();
-    const studentRevision = fake.student.readView().revision;
     await h.coordinator.beginTargetedReadmission(
       "0123456789AB",
       h.coordinator.readView().revision,
       current,
     );
-    expect(
-      fake.student.beginTargetedReadmission,
-    ).toHaveBeenCalledExactlyOnceWith("0123456789AB", studentRevision);
+    expect(fake.student.beginTargetedReadmission).not.toHaveBeenCalled();
     fake.setPhase("active");
     expect(h.coordinator.readView().admission.phase).toBe("active");
     expect(h.coordinator.readView().protection.phase).toBe("recovery_required");
@@ -1488,6 +1912,7 @@ describe("assessment protection coordinator authority and containment", () => {
     const historical = previousJournal(24);
     const protection: StoredNativeProtection = {
       policyVersion: 1,
+      localBootRecovery: emptyLocalBootRecovery(8),
       revision: 7,
       nextFactSequence: 8,
       facts: [
@@ -1615,7 +2040,11 @@ describe("assessment protection coordinator authority and containment", () => {
 // signer and response decoder. The native record bytes and HTTP responses below
 // are synthetic in-memory boundaries: no platform module or network is invoked.
 function realStudent(
-  options: { readonly latency?: number; readonly initialBytes?: Buffer } = {},
+  options: {
+    readonly latency?: number;
+    readonly initialBytes?: Buffer;
+    readonly unavailableOpens?: number;
+  } = {},
 ) {
   const configuration = {
     environment: "local",
@@ -1629,6 +2058,12 @@ function realStudent(
       : Buffer.from(options.initialBytes);
   let elapsed = 0;
   let denied = false;
+  let unavailableOpens = options.unavailableOpens ?? 0;
+  let failedWrite: {
+    predicate: (value: StudentSessionRecord) => boolean;
+    publication: "preimage" | "postimage" | Buffer;
+  } | null = null;
+  let attemptedBytes: Buffer | null = null;
   let heldWrite: {
     predicate: (value: StudentSessionRecord) => boolean;
     promise: Promise<void>;
@@ -1653,6 +2088,16 @@ function realStudent(
       events.push("write:start");
       if (heldWrite !== null && heldWrite.predicate(next))
         await heldWrite.promise;
+      if (failedWrite !== null && failedWrite.predicate(next)) {
+        const fault = failedWrite;
+        failedWrite = null;
+        attemptedBytes = Buffer.from(value);
+        if (fault.publication === "postimage") bytes = Buffer.from(value);
+        else if (Buffer.isBuffer(fault.publication))
+          bytes = Buffer.from(fault.publication);
+        events.push("write:uncertain");
+        throw new Error("synthetic uncertain publication");
+      }
       elapsed += latency;
       bytes = Buffer.from(value);
       events.push("write:durable");
@@ -1666,7 +2111,13 @@ function realStudent(
   };
   const store = createStudentSessionStore({
     apiOrigin: configuration.url,
-    openNativeStore: async () => recordHandle,
+    openNativeStore: async () => {
+      if (unavailableOpens > 0) {
+        unavailableOpens -= 1;
+        throw new Error("synthetic temporary store unavailable");
+      }
+      return recordHandle;
+    },
     codec: {
       isEncryptionAvailable: () => true,
       encryptString: (value) => Buffer.from("synthetic:" + value),
@@ -1873,6 +2324,16 @@ function realStudent(
     ) {
       heldWrite = { predicate, promise };
     },
+    failWrite(
+      predicate: (value: StudentSessionRecord) => boolean,
+      publication: "preimage" | "postimage" | Buffer,
+    ) {
+      failedWrite = { predicate, publication };
+    },
+    restoreAttemptedBytes() {
+      if (attemptedBytes === null) throw new Error("no attempted publication");
+      bytes = Buffer.from(attemptedBytes);
+    },
     gateResponses(route: string, ...gates: Promise<void>[]) {
       responseGates.set(route, gates);
     },
@@ -1880,8 +2341,267 @@ function realStudent(
   };
 }
 
+async function savedBootAttempt() {
+  const first = realStudent();
+  await first.initialize();
+  const initial = harness({ student: first.student, now: first.now });
+  await initial.coordinator.start(
+    initial.coordinator.readView().revision,
+    current,
+  );
+  return { first, saved: first.savedBytes()! };
+}
+
+function containsBootObservation(value: StudentSessionRecord): boolean {
+  return (
+    value.nativeProtection?.localBootRecovery.anchors.some(
+      (anchor) => anchor.observation !== null,
+    ) ?? false
+  );
+}
+
 describe("real Student and native coordinator composition", () => {
-  it("persists an original-signer failure and real disposal in v4, then reloads and acknowledges it without native authority", async () => {
+  it.each(["empty", "anchored"] as const)(
+    "reconciles transient first-load uncertainty for %s storage in the same process",
+    async (kind) => {
+      const initialBytes =
+        kind === "anchored" ? (await savedBootAttempt()).saved : undefined;
+      const real = realStudent({
+        ...(initialBytes === undefined ? {} : { initialBytes }),
+        unavailableOpens: 1,
+      });
+      await real.student.initialize();
+      expect(real.student.readProtectionContext().bootRecovery.status).toBe(
+        "write_uncertain",
+      );
+      const h = harness({ student: real.student, now: real.now });
+      h.native.readBootSessionId.mockReturnValue(previousBootSessionId);
+      expect(h.coordinator.hasRetainedAttempt()).toBe(true);
+      await h.coordinator.start(h.coordinator.readView().revision, current);
+      await h.coordinator.joinInitial("0123456789AB", current);
+      await h.coordinator.beginTargetedReadmission(
+        "0123456789AB",
+        h.coordinator.readView().revision,
+        current,
+      );
+      expect(real.requests).toHaveLength(0);
+      expect(h.native.begin).not.toHaveBeenCalled();
+      await h.coordinator.refresh();
+      await settle();
+      expect(real.student.readProtectionContext().maySupersedeLatest).toBe(
+        true,
+      );
+      expect(h.coordinator.hasRetainedAttempt()).toBe(false);
+      expect(h.coordinator.readView().protection).toMatchObject({
+        phase: "idle",
+        nativeEndObserved: false,
+        cleanup: "not_requested",
+        calculatorVisible: false,
+      });
+      expect(h.native.begin).not.toHaveBeenCalled();
+      // Explicit refresh retains its ordinary maintenance after successful
+      // reload; neither initial nor targeted join runs through the barrier.
+      expect(real.requests.map((request) => request.route)).toEqual(
+        kind === "empty" ? [] : ["reconnect", "read"],
+      );
+      if (kind === "empty") {
+        await h.coordinator.joinInitial("0123456789AB", current);
+        expect(real.student.readView().phase).toBe("active");
+      } else {
+        expect(h.native.readBootSessionId).toHaveBeenCalledOnce();
+        expect(
+          real.record().nativeProtection?.localBootRecovery.anchors[0]
+            ?.observation?.observedBootSessionId,
+        ).toBe(previousBootSessionId);
+      }
+    },
+  );
+
+  it.each(["preimage", "postimage"] as const)(
+    "reconciles an uncertain boot publication from the exact %s and releases only after durable retry",
+    async (publication) => {
+      const { saved } = await savedBootAttempt();
+      const real = realStudent({ initialBytes: saved });
+      await real.student.initialize();
+      const before = real.record().nativeProtection!;
+      real.failWrite(containsBootObservation, publication);
+      const h = harness({ student: real.student, now: real.now });
+      h.native.readBootSessionId.mockReturnValue(previousBootSessionId);
+      await settle();
+      expect(real.events).toContain("write:uncertain");
+      expect(real.student.readProtectionContext().bootRecovery.status).toBe(
+        "write_uncertain",
+      );
+      expect(h.coordinator.hasRetainedAttempt()).toBe(true);
+      expect(h.coordinator.readView().protection.phase).toBe(
+        "recovery_required",
+      );
+      const eventCount = real.events.length;
+      await h.coordinator.start(h.coordinator.readView().revision, current);
+      await h.coordinator.joinInitial("0123456789AB", current);
+      await h.coordinator.beginTargetedReadmission(
+        "0123456789AB",
+        h.coordinator.readView().revision,
+        current,
+      );
+      expect(real.events).toHaveLength(eventCount);
+      expect(real.requests).toHaveLength(0);
+      const gate = deferred();
+      if (publication === "preimage")
+        real.holdWrite(containsBootObservation, gate.promise);
+      const retry =
+        publication === "preimage"
+          ? h.coordinator.retryPending(current)
+          : h.coordinator.refresh();
+      if (publication === "preimage") {
+        await settle();
+        expect(h.coordinator.hasRetainedAttempt()).toBe(true);
+        expect(real.student.readProtectionContext().maySupersedeLatest).toBe(
+          false,
+        );
+        gate.resolve();
+      }
+      await retry;
+      await settle();
+      expect(real.student.readProtectionContext().bootRecovery.status).toBe(
+        "prior_boot_recovery_observed",
+      );
+      expect(h.coordinator.hasRetainedAttempt()).toBe(false);
+      expect(h.coordinator.readView().protection).toMatchObject({
+        phase: "idle",
+        cleanup: "not_requested",
+        nativeEndObserved: false,
+        calculatorVisible: false,
+      });
+      const after = real.record().nativeProtection!;
+      expect(after.revision).toBe(before.revision + 1);
+      expect(after.facts).toEqual(before.facts);
+      expect(after.latestAttempt).toEqual(before.latestAttempt);
+      expect(
+        after.localBootRecovery.anchors[0]?.observation?.observedBootSessionId,
+      ).toBe(previousBootSessionId);
+      expect(h.native.readBootSessionId).toHaveBeenCalledOnce();
+      expect(h.native.begin).not.toHaveBeenCalled();
+      expect(h.surface.attach).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["third-image", "corrupt"] as const)(
+    "retains the %s barrier even if the exact attempted boot postimage later reappears",
+    async (kind) => {
+      const { first, saved } = await savedBootAttempt();
+      const admission = first.student.readProtectionContext().admission;
+      if (admission === null) throw new Error("expected admitted fixture");
+      await first.student.readFreshAdmission(admission);
+      const thirdImage = first.savedBytes()!;
+      expect(thirdImage.equals(saved)).toBe(false);
+      const real = realStudent({ initialBytes: saved });
+      await real.student.initialize();
+      real.failWrite(
+        containsBootObservation,
+        kind === "third-image" ? thirdImage : Buffer.from("synthetic:corrupt"),
+      );
+      const h = harness({ student: real.student, now: real.now });
+      h.native.readBootSessionId.mockReturnValue(previousBootSessionId);
+      await settle();
+      await h.coordinator.refresh();
+      expect(real.student.readView().phase).toBe("recovery_required");
+      expect(real.student.readProtectionContext().bootRecovery.status).toBe(
+        kind === "third-image" ? "write_uncertain" : "record_rejected",
+      );
+      real.restoreAttemptedBytes();
+      const eventCount = real.events.length;
+      await h.coordinator.retryPending(current);
+      await h.coordinator.refresh();
+      await h.coordinator.start(h.coordinator.readView().revision, current);
+      await h.coordinator.joinInitial("0123456789AB", current);
+      await h.coordinator.beginTargetedReadmission(
+        "0123456789AB",
+        h.coordinator.readView().revision,
+        current,
+      );
+      expect(h.coordinator.hasRetainedAttempt()).toBe(true);
+      expect(h.coordinator.readView().protection.phase).toBe(
+        "recovery_required",
+      );
+      expect(real.student.readProtectionContext().maySupersedeLatest).toBe(
+        false,
+      );
+      expect(real.events).toHaveLength(eventCount);
+      expect(real.requests).toHaveLength(0);
+      expect(h.native.readBootSessionId).toHaveBeenCalledOnce();
+      expect(h.native.begin).not.toHaveBeenCalled();
+      expect(h.surface.attach).not.toHaveBeenCalled();
+    },
+  );
+
+  it("reconciles a prior boot through the actual Student writer without changing historical evidence or issuing HTTP", async () => {
+    const first = realStudent();
+    await first.initialize();
+    const initial = harness({ student: first.student, now: first.now });
+    await initial.coordinator.start(
+      initial.coordinator.readView().revision,
+      current,
+    );
+    const saved = first.savedBytes()!;
+    expect(
+      first.record().nativeProtection!.localBootRecovery.anchors[0]
+        ?.engagingBootSessionId,
+    ).toBe(bootSessionId);
+    const reloaded = realStudent({ initialBytes: saved });
+    await reloaded.student.initialize();
+    const before = reloaded.record();
+    const requests = reloaded.requests.length;
+    const gate = deferred();
+    reloaded.holdWrite(
+      (value) =>
+        value.nativeProtection!.localBootRecovery.anchors.some(
+          (anchor) => anchor.observation !== null,
+        ),
+      gate.promise,
+    );
+    const restored = harness({ student: reloaded.student, now: reloaded.now });
+    restored.native.readBootSessionId.mockReturnValue(previousBootSessionId);
+    await settle();
+    expect(restored.coordinator.hasRetainedAttempt()).toBe(true);
+    expect(reloaded.record()).toEqual(before);
+    gate.resolve();
+    await settle();
+    const after = reloaded.record();
+    expect(restored.coordinator.readView().protection).toMatchObject({
+      phase: "idle",
+      cleanup: "not_requested",
+      nativeEndObserved: false,
+      calculatorVisible: false,
+    });
+    expect(
+      after.nativeProtection!.localBootRecovery.anchors[0]?.observation,
+    ).toMatchObject({
+      observedBootSessionId: previousBootSessionId,
+      basis: "boot_session_changed",
+    });
+    for (const key of [
+      "apiOrigin",
+      "device",
+      "current",
+      "pending",
+      "lastReservedCounter",
+      "terminal",
+      "evidence",
+    ] as const)
+      expect(after[key]).toEqual(before[key]);
+    for (const key of ["facts", "latestAttempt", "nextFactSequence"] as const)
+      expect(after.nativeProtection![key]).toEqual(
+        before.nativeProtection![key],
+      );
+    expect(reloaded.requests).toHaveLength(requests);
+    expect(restored.native.begin).not.toHaveBeenCalled();
+    expect(restored.native.requestEnd).not.toHaveBeenCalled();
+    expect(restored.native.disposeAfterEnd).not.toHaveBeenCalled();
+    expect(restored.surface.attach).not.toHaveBeenCalled();
+  });
+
+  it("persists an original-signer failure and real disposal in v5, then reloads and acknowledges it without native authority", async () => {
     const real = realStudent();
     await real.initialize();
     const h = harness({ student: real.student, now: real.now });
@@ -1907,7 +2627,7 @@ describe("real Student and native coordinator composition", () => {
       string,
       unknown
     >;
-    expect(envelope.version).toBe(4);
+    expect(envelope.version).toBe(5);
     const { integritySha256, ...payload } = envelope;
     expect(integritySha256).toBe(
       createHash("sha256")

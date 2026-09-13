@@ -595,10 +595,22 @@ async function fixture(t) {
     environment: "local",
     url: origin,
   });
-  async function launch(mode = "normal", buildIdentity = "original-build") {
+  async function launch(
+    mode = "normal",
+    buildIdentity = "original-build",
+    bootSessionId = api.syntheticBootSessionIds.prior,
+  ) {
     const processChild = spawn(
       process.execPath,
-      [bundle, "--worker", directory, origin, mode, buildIdentity],
+      [
+        bundle,
+        "--worker",
+        directory,
+        origin,
+        mode,
+        buildIdentity,
+        bootSessionId,
+      ],
       {
         stdio: ["pipe", "pipe", "pipe"],
         env: {
@@ -668,8 +680,28 @@ async function fixture(t) {
     receipts,
     evidenceReceipts,
     failures,
+    syntheticBootSessionIds: api.syntheticBootSessionIds,
     readRecord,
     launch,
+    async legacyV4() {
+      const { integritySha256, ...payload } = await readRecord();
+      assert.equal(payload.version, 5);
+      assert.equal(fingerprint(payload), integritySha256);
+      const { localBootRecovery, ...nativeProtection } =
+        payload.nativeProtection;
+      assert.equal(localBootRecovery.policyVersion, 1);
+      assert.equal(localBootRecovery.anchors.length, 1);
+      const legacy = { ...payload, version: 4, nativeProtection };
+      const bytes = Buffer.from(
+        api.syntheticPrefix +
+          JSON.stringify({ ...legacy, integritySha256: fingerprint(legacy) }),
+      );
+      check(bytes.length <= 65_536, "Synthetic legacy record exceeded bound");
+      await fs.writeFile(path.join(directory, recordName), bytes, {
+        mode: 0o600,
+      });
+      return JSON.parse(bytes.toString().slice(api.syntheticPrefix.length));
+    },
     drop: (route) => drops.add(route),
     hold: (route) => holds.add(route),
     release: () => held.splice(0).forEach((respond) => respond()),
@@ -912,15 +944,21 @@ test(
 );
 
 function checkPreflightHistory(record, slots, cause) {
-  assert.equal(record.version, 4);
+  assert.equal(record.version, 5);
   const { integritySha256, ...payload } = record;
   assert.match(integritySha256, /^[0-9a-f]{64}$/);
   assert.equal(
     fingerprint(payload),
     integritySha256,
-    "Preflight record did not retain the actual v4 payload checksum",
+    "Preflight record did not retain the actual v5 payload checksum",
   );
   const protection = record.nativeProtection;
+  assert.deepEqual(protection.localBootRecovery, {
+    policyVersion: 1,
+    requiredFromFactSequence: 1,
+    nextObservationSequence: 1,
+    anchors: [],
+  });
   assert.deepEqual(
     protection.facts.map((fact) => fact.slot),
     slots,
@@ -1250,6 +1288,276 @@ async function engageEvidence(child) {
   assert.equal((await child.command("failure")).result.status, "committed");
   return start.result.attemptId;
 }
+
+function checkBootObservation(before, after, attemptId, bootSessionId) {
+  assert.equal(before.version, 5);
+  const { integritySha256, ...payload } = before;
+  assert.equal(fingerprint(payload), integritySha256);
+  const protection = before.nativeProtection;
+  const local = protection.localBootRecovery;
+  assert.equal(local.anchors.length, 1);
+  assert.equal(local.anchors[0].attemptId, attemptId);
+  assert.equal(local.anchors[0].observation, null);
+  assert.notEqual(local.anchors[0].engagingBootSessionId, bootSessionId);
+  const expected = {
+    ...payload,
+    generation: before.generation + 1,
+    nativeProtection: {
+      ...protection,
+      revision: protection.revision + 1,
+      localBootRecovery: {
+        ...local,
+        nextObservationSequence: local.nextObservationSequence + 1,
+        anchors: [
+          {
+            ...local.anchors[0],
+            observation: {
+              sequence: local.nextObservationSequence,
+              basis: "boot_session_changed",
+              observedBootSessionId: bootSessionId,
+            },
+          },
+        ],
+      },
+    },
+  };
+  same(
+    after,
+    { ...expected, integritySha256: fingerprint(expected) },
+    "Local boot observation changed history, signer, admission, proof counter or another field",
+  );
+}
+
+test(
+  "real durable boot recovery waits for the native return and reloads only the local observation",
+  macOnly,
+  async (t) => {
+    const f = await fixture(t);
+    let child = await f.launch();
+    await child.command("initialize");
+    await child.command("join", { code });
+    const attemptId = await engageEvidence(child);
+    const original = await f.readRecord();
+    assert.equal(
+      original.nativeProtection.localBootRecovery.anchors[0]
+        .engagingBootSessionId,
+      f.syntheticBootSessionIds.prior,
+    );
+    const owned = await child.command("state");
+    check(
+      owned.fetchAttempts > 0,
+      "Real admission did not exercise the fetch-attempt counter",
+    );
+    const ownedRefused = await child.command("recover-boot", {
+      observedBootSessionId: f.syntheticBootSessionIds.current,
+    });
+    assert.equal(
+      ownedRefused.result.status,
+      "unavailable",
+      "The current process must not recover its own attempt",
+    );
+    assert.equal(ownedRefused.writes, owned.writes);
+    assert.equal(ownedRefused.fetchAttempts, owned.fetchAttempts);
+    same(
+      await f.readRecord(),
+      original,
+      "Changed-ID current-owner refusal changed the journal",
+    );
+    await child.kill();
+    child = await f.launch();
+    const sameBoot = await child.command("initialize");
+    assert.equal(sameBoot.bootRecovery.status, "prior_process");
+    assert.equal(sameBoot.fetchAttempts, 0);
+    const sameBootRefused = await child.command("recover-boot");
+    assert.equal(sameBootRefused.result.status, "unavailable");
+    assert.equal(sameBootRefused.writes, sameBoot.writes);
+    assert.equal(sameBootRefused.fetchAttempts, 0);
+    same(
+      await f.readRecord(),
+      original,
+      "Same boot manufactured a local observation",
+    );
+    await child.kill();
+    child = await f.launch(
+      "normal",
+      "original-build",
+      f.syntheticBootSessionIds.current,
+    );
+    const before = await child.command("initialize");
+    assert.equal(before.bootRecovery.status, "prior_process");
+    assert.equal(before.maySupersedeLatest, false);
+    assert.equal(before.fetchAttempts, 0);
+    const requestCount = f.requests.length;
+    await child.command("block-next-write");
+    let settled = false;
+    const recovery = child.command("recover-boot").then((value) => {
+      settled = true;
+      return value;
+    });
+    await child.event("published-return-blocked");
+    const published = await f.readRecord();
+    checkBootObservation(
+      original,
+      published,
+      attemptId,
+      f.syntheticBootSessionIds.current,
+    );
+    const held = await child.command("state");
+    assert.equal(settled, false);
+    assert.equal(held.maySupersedeLatest, false);
+    assert.equal(held.hasFreshAdmission, false);
+    assert.equal(held.fetchAttempts, 0);
+    same(
+      held.protection,
+      original.nativeProtection,
+      "Physical publication prematurely promoted the local recovery",
+    );
+    assert.equal(f.requests.length, requestCount);
+    const contender = await f.launch();
+    const contended = await contender.command("initialize");
+    assert.equal(contended.view.phase, "unavailable");
+    assert.equal(contended.fetchAttempts, 0);
+    await child.command("release-write");
+    const accepted = await recovery;
+    assert.equal(accepted.result.status, "committed");
+    assert.equal(accepted.bootRecovery.status, "prior_boot_recovery_observed");
+    assert.equal(accepted.maySupersedeLatest, true);
+    assert.equal(accepted.hasFreshAdmission, false);
+    assert.equal(accepted.fetchAttempts, 0);
+    assert.equal(accepted.writes, before.writes + 1);
+    assert.equal(f.requests.length, requestCount);
+    await child.kill();
+    child = await f.launch(
+      "normal",
+      "original-build",
+      f.syntheticBootSessionIds.current,
+    );
+    const restored = await child.command("initialize");
+    assert.equal(restored.bootRecovery.status, "prior_boot_recovery_observed");
+    assert.equal(restored.hasFreshAdmission, false);
+    assert.equal(restored.fetchAttempts, 0);
+    assert.equal(restored.writes, 0);
+    same(
+      await f.readRecord(),
+      published,
+      "Restart rewrote the exact local observation",
+    );
+    assert.equal(f.requests.length, requestCount);
+    assert.deepEqual(f.failures, []);
+  },
+);
+
+test(
+  "real durable boot recovery reconciles a lost completion without another write or egress",
+  macOnly,
+  async (t) => {
+    const f = await fixture(t);
+    let child = await f.launch();
+    await child.command("initialize");
+    await child.command("join", { code });
+    const attemptId = await engageEvidence(child);
+    const original = await f.readRecord();
+    await child.kill();
+    child = await f.launch(
+      "normal",
+      "original-build",
+      f.syntheticBootSessionIds.current,
+    );
+    const before = await child.command("initialize");
+    assert.equal(before.fetchAttempts, 0);
+    const requestCount = f.requests.length;
+    await child.command("fail-next-write");
+    const uncertain = await child.command("recover-boot");
+    assert.equal(uncertain.result.status, "unavailable");
+    assert.equal(uncertain.bootRecovery.status, "write_uncertain");
+    assert.equal(uncertain.maySupersedeLatest, false);
+    assert.equal(uncertain.hasFreshAdmission, false);
+    assert.equal(uncertain.fetchAttempts, 0);
+    const published = await f.readRecord();
+    checkBootObservation(
+      original,
+      published,
+      attemptId,
+      f.syntheticBootSessionIds.current,
+    );
+    assert.equal(uncertain.writes, before.writes + 1);
+    assert.equal(f.requests.length, requestCount);
+    const reconciled = await child.command("recover-boot");
+    assert.equal(reconciled.result.status, "committed");
+    assert.equal(
+      reconciled.bootRecovery.status,
+      "prior_boot_recovery_observed",
+    );
+    assert.equal(reconciled.hasFreshAdmission, false);
+    assert.equal(reconciled.fetchAttempts, 0);
+    assert.equal(reconciled.writes, uncertain.writes);
+    same(
+      await f.readRecord(),
+      published,
+      "Exact-postimage retry rewrote the journal",
+    );
+    assert.equal(f.requests.length, requestCount);
+    await child.kill();
+    child = await f.launch(
+      "normal",
+      "original-build",
+      f.syntheticBootSessionIds.current,
+    );
+    const restored = await child.command("initialize");
+    assert.equal(restored.fetchAttempts, 0);
+    assert.equal(restored.bootRecovery.status, "prior_boot_recovery_observed");
+    assert.equal(restored.writes, 0);
+    same(
+      await f.readRecord(),
+      published,
+      "Reload changed the acknowledged postimage",
+    );
+    assert.equal(f.requests.length, requestCount);
+    assert.deepEqual(f.failures, []);
+  },
+);
+
+test(
+  "real durable legacy v4 history remains unanchored and cannot gain a reboot observation",
+  macOnly,
+  async (t) => {
+    const f = await fixture(t);
+    let child = await f.launch();
+    await child.command("initialize");
+    await child.command("join", { code });
+    await engageEvidence(child);
+    await child.kill();
+    const legacy = await f.legacyV4();
+    assert.equal(legacy.version, 4);
+    const requestCount = f.requests.length;
+    child = await f.launch(
+      "normal",
+      "original-build",
+      f.syntheticBootSessionIds.current,
+    );
+    const restored = await child.command("initialize");
+    assert.equal(restored.fetchAttempts, 0);
+    assert.equal(restored.bootRecovery.status, "unanchored_prior");
+    assert.equal(restored.maySupersedeLatest, false);
+    assert.equal(restored.hasFreshAdmission, false);
+    same(
+      restored.protection.facts,
+      legacy.nativeProtection.facts,
+      "Legacy normalization changed original facts",
+    );
+    const refused = await child.command("recover-boot");
+    assert.equal(refused.result.status, "unavailable");
+    assert.equal(refused.fetchAttempts, 0);
+    assert.equal(refused.writes, 0);
+    same(
+      await f.readRecord(),
+      legacy,
+      "Legacy read or refusal stamped a new v5 anchor",
+    );
+    assert.equal(f.requests.length, requestCount);
+    assert.deepEqual(f.failures, []);
+  },
+);
 
 test(
   "real native evidence survives lost reply and restart with original content, signer, receipts and greater shared counter",

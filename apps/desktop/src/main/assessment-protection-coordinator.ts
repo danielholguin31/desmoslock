@@ -21,6 +21,7 @@ import type {
 import {
   protectionFactCapacity,
   protectionFactReservation,
+  parseBootSessionId,
   type ProtectionTransition,
   type StoredNativeProtection,
 } from "./student-session-store.js";
@@ -169,6 +170,8 @@ export function createAssessmentProtectionCoordinator(
   let protection: Readonly<StoredNativeProtection> | null = null;
   let delivery: "none" | "pending" | "acknowledged" | "blocked" = "none";
   let unreadableRecovery = false;
+  let writeUncertain = false;
+  let bootRecoveryWork: Promise<void> | null = null;
   let attempt: Attempt | null = null;
   let review: {
     readonly attempt: Attempt;
@@ -199,6 +202,9 @@ export function createAssessmentProtectionCoordinator(
     protection: lastProtection,
   });
 
+  function localRecoveryBlocked(): boolean {
+    return unreadableRecovery || writeUncertain;
+  }
   function publish(): void {
     if (disposed) return;
     const t = attempt;
@@ -215,7 +221,7 @@ export function createAssessmentProtectionCoordinator(
             : "none";
     const projected: DesktopStudentView["protection"] =
       t === null
-        ? unreadableRecovery
+        ? localRecoveryBlocked()
           ? {
               phase: "recovery_required",
               categories: Object.freeze({
@@ -369,6 +375,9 @@ export function createAssessmentProtectionCoordinator(
     publish();
   }
   function enqueue(t: Attempt, command: () => Command): Promise<boolean> {
+    // A reconstructed attempt owns no local lifecycle callbacks. Its history
+    // can change only through the separate boot-recovery writer command.
+    if (t.priorProcess) return Promise.resolve(false);
     let result = false;
     const work = transitionTail.then(async () => {
       if (attempt !== t || disposed) return;
@@ -944,24 +953,56 @@ export function createAssessmentProtectionCoordinator(
       finalCommitStarted: false,
     };
   }
-  function synchronizeContext(): void {
+  function synchronizeContext(releasePriorBoot = false): void {
     const context = options.student.readProtectionContext();
     protection = context.protection;
     delivery = context.delivery;
-    // An unreadable journal cannot prove prior native cleanup. Targeted repair
-    // and a new protection attempt remain blocked until operator recovery.
+    // Student owns exact preimage/postimage reconciliation. Temporary load or
+    // write unavailability blocks only while that uncertainty remains current;
+    // rejected or mismatched records retain an irreversible local barrier.
+    writeUncertain = context.bootRecovery.status === "write_uncertain";
     if (
-      attempt === null &&
-      studentView.phase === "recovery_required" &&
-      protection === null
+      context.bootRecovery.status === "record_rejected" ||
+      (studentView.phase === "recovery_required" && protection === null)
     )
       unreadableRecovery = true;
     const latest = protection?.latestAttempt;
+    const recovered =
+      !localRecoveryBlocked() &&
+      context.maySupersedeLatest &&
+      context.bootRecovery.status === "prior_boot_recovery_observed" &&
+      context.bootRecovery.attemptId === latest?.attemptId;
+    if (
+      releasePriorBoot &&
+      bootRecoveryWork === null &&
+      recovered &&
+      attempt?.priorProcess &&
+      attempt.id === latest?.attemptId
+    ) {
+      attempt = null;
+      review = null;
+    }
     const first =
       latest === undefined || latest === null
         ? undefined
         : protection?.facts.find((fact) => fact.attemptId === latest.attemptId);
-    if (attempt === null && latest != null && latest.cleanup !== "complete") {
+    if (attempt === null && recovered) {
+      // This is current eligibility, never historical cleanup or an AAC end.
+      lastProtection = Object.freeze({
+        phase: "idle",
+        categories: initialCategories(),
+        failure: null,
+        calculatorVisible: false,
+        nativeEndObserved: false,
+        cleanup: "not_requested",
+        evidence: "queued",
+        emergencyReview: false,
+      });
+    } else if (
+      attempt === null &&
+      latest != null &&
+      latest.cleanup !== "complete"
+    ) {
       attempt = makeAttempt(
         latest.attemptId,
         context.admission,
@@ -972,6 +1013,9 @@ export function createAssessmentProtectionCoordinator(
         attempt.categories = first.categories;
         attempt.failure = first.cause;
       }
+      // Only reconstruction starts an automatic comparison. Delivery-only
+      // publications cannot repeatedly retry a retained prior-process attempt.
+      void recoverPriorBoot();
     } else if (
       attempt === null &&
       latest?.cleanup === "complete" &&
@@ -991,6 +1035,96 @@ export function createAssessmentProtectionCoordinator(
         emergencyReview: false,
       });
     }
+  }
+  function recoverPriorBoot(): Promise<void> {
+    if (bootRecoveryWork !== null) return bootRecoveryWork;
+    let recoveredAttempt: Attempt | null = null;
+    // Reserve before invoking Student: its durable commit may synchronously
+    // publish the new context before the returned promise acknowledges it.
+    bootRecoveryWork = Promise.resolve()
+      .then(async () => {
+        const t = attempt;
+        if (
+          disposed ||
+          stopping ||
+          localRecoveryBlocked() ||
+          t === null ||
+          !t.priorProcess
+        )
+          return;
+        const context = options.student.readProtectionContext();
+        const recovery = context.bootRecovery;
+        if (
+          recovery.status === "prior_boot_recovery_observed" &&
+          recovery.attemptId === t.id &&
+          context.maySupersedeLatest
+        ) {
+          recoveredAttempt = t;
+          return;
+        }
+        if (
+          recovery.status !== "prior_process" ||
+          recovery.attemptId !== t.id ||
+          context.protection?.latestAttempt?.attemptId !== t.id ||
+          context.protection.revision !== recovery.expectedProtectionRevision ||
+          parseBootSessionId(recovery.engagingBootSessionId) === null
+        )
+          return;
+        const observedBootSessionId = parseBootSessionId(
+          options.native.readBootSessionId(),
+        );
+        if (
+          observedBootSessionId === null ||
+          observedBootSessionId === recovery.engagingBootSessionId
+        )
+          return;
+        const current = options.student.readProtectionContext().bootRecovery;
+        if (
+          disposed ||
+          stopping ||
+          localRecoveryBlocked() ||
+          attempt !== t ||
+          current.status !== "prior_process" ||
+          current.attemptId !== recovery.attemptId ||
+          current.expectedProtectionRevision !==
+            recovery.expectedProtectionRevision ||
+          current.engagingBootSessionId !== recovery.engagingBootSessionId
+        )
+          return;
+        const outcome = await options.student.commitBootRecovery({
+          attemptId: recovery.attemptId,
+          expectedProtectionRevision: recovery.expectedProtectionRevision,
+          observedBootSessionId,
+        });
+        const after = options.student.readProtectionContext();
+        if (
+          outcome.status === "committed" &&
+          after.maySupersedeLatest &&
+          after.protection?.revision === outcome.protectionRevision &&
+          after.bootRecovery.status === "prior_boot_recovery_observed" &&
+          after.bootRecovery.attemptId === t.id
+        )
+          recoveredAttempt = t;
+      })
+      .catch(() => {
+        // An unavailable read or write retains exactly the existing barrier.
+      })
+      .finally(() => {
+        bootRecoveryWork = null;
+        if (
+          !disposed &&
+          recoveredAttempt !== null &&
+          attempt === recoveredAttempt
+        ) {
+          try {
+            synchronizeContext(true);
+          } catch {
+            unreadableRecovery = true;
+          }
+          publish();
+        }
+      });
+    return bootRecoveryWork;
   }
   const unsubscribeObservation = options.student.subscribeAdmissionObservation(
     (observation) => {
@@ -1031,7 +1165,11 @@ export function createAssessmentProtectionCoordinator(
     revision: number,
     isCurrent: () => boolean,
   ): Promise<void> {
-    if (!trusted(revision, isCurrent) || attempt !== null || unreadableRecovery)
+    if (
+      !trusted(revision, isCurrent) ||
+      attempt !== null ||
+      localRecoveryBlocked()
+    )
       return;
     const context = options.student.readProtectionContext();
     const admission = context.admission;
@@ -1039,6 +1177,7 @@ export function createAssessmentProtectionCoordinator(
     if (
       !trusted(revision, isCurrent) ||
       admission === null ||
+      !context.maySupersedeLatest ||
       studentView.phase !== "active" ||
       (protection?.facts.length ?? 0) >
         protectionFactCapacity - protectionFactReservation
@@ -1133,11 +1272,18 @@ export function createAssessmentProtectionCoordinator(
         return;
       }
       if (!localGate(t, fresh.authority, false)) return;
+      const engagingBootSessionId = parseBootSessionId(
+        options.native.readBootSessionId(),
+      );
+      if (engagingBootSessionId === null)
+        throw new Error("Boot session unavailable");
+      if (!localGate(t, fresh.authority, false)) return;
       setCategory(t, "persistence", confirmed);
       t.engagingAttempted = true;
       if (
         !(await enqueue(t, () => ({
           kind: "engaging",
+          engagingBootSessionId,
           authority: fresh.authority,
           categories: t.categories,
         })))
@@ -1231,7 +1377,8 @@ export function createAssessmentProtectionCoordinator(
         listeners.delete(listener);
       };
     },
-    hasRetainedAttempt: () => attempt !== null,
+    hasRetainedAttempt: () =>
+      attempt !== null || localRecoveryBlocked() || bootRecoveryWork !== null,
     start,
     reviewEmergency,
     confirmEmergency,
@@ -1243,11 +1390,20 @@ export function createAssessmentProtectionCoordinator(
       }
     },
     async joinInitial(code: string, isCurrent: () => boolean) {
-      if (stopping || attempt !== null || !callCurrent(isCurrent)) return;
+      if (
+        stopping ||
+        localRecoveryBlocked() ||
+        attempt !== null ||
+        !callCurrent(isCurrent) ||
+        !options.student.readProtectionContext().maySupersedeLatest
+      )
+        return;
       const capturedRevision = options.student.readView().revision;
       if (
         !callCurrent(isCurrent) ||
         attempt !== null ||
+        localRecoveryBlocked() ||
+        !options.student.readProtectionContext().maySupersedeLatest ||
         capturedRevision !== options.student.readView().revision
       )
         return;
@@ -1258,13 +1414,21 @@ export function createAssessmentProtectionCoordinator(
       revision: number,
       isCurrent: () => boolean,
     ) {
-      if (!trusted(revision, isCurrent) || attempt !== null) return;
+      if (
+        !trusted(revision, isCurrent) ||
+        localRecoveryBlocked() ||
+        attempt !== null ||
+        !options.student.readProtectionContext().maySupersedeLatest
+      )
+        return;
       const capturedRevision = options.student.readView().revision;
       const capturedAdmission =
         options.student.readProtectionContext().admission;
       if (
         !trusted(revision, isCurrent) ||
         attempt !== null ||
+        localRecoveryBlocked() ||
+        !options.student.readProtectionContext().maySupersedeLatest ||
         options.student.readView().revision !== capturedRevision ||
         capturedAdmission !== options.student.readProtectionContext().admission
       )
@@ -1273,6 +1437,8 @@ export function createAssessmentProtectionCoordinator(
     },
     async retryPending(isCurrent: () => boolean) {
       if (stopping || !callCurrent(isCurrent)) return;
+      await recoverPriorBoot();
+      if (stopping || disposed || !callCurrent(isCurrent)) return;
       const capturedRevision = options.student.readView().revision;
       if (attempt?.live) requestLocalEnd("admission_changed");
       if (
@@ -1281,6 +1447,7 @@ export function createAssessmentProtectionCoordinator(
       )
         return;
       await options.student.retryPending();
+      if (!stopping && !disposed) await recoverPriorBoot();
       if (attempt !== null && !attempt.live) {
         writePreflightFailure(attempt);
         void finalize(attempt);
@@ -1305,6 +1472,7 @@ export function createAssessmentProtectionCoordinator(
       } catch {
         requestLocalEnd("backend_unavailable");
       }
+      if (!stopping && !disposed) await recoverPriorBoot();
       if (
         attempt !== null &&
         !attempt.live &&

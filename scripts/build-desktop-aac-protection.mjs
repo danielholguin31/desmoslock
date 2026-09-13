@@ -304,6 +304,8 @@ export async function buildDesktopAACProtection(options) {
         "AppKit",
         "-framework",
         "AutomaticAssessmentConfiguration",
+        "-framework",
+        "IOKit",
         "-lc++",
         path.join(actualRepository, "apps/desktop/native/aac-protection.mm"),
         "-o",

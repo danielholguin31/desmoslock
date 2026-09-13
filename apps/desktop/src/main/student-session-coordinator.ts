@@ -16,6 +16,11 @@ import type { StudentSessionCrypto } from "./student-session-crypto.js";
 import type { StudentSessionTransport } from "./student-session-transport.js";
 import {
   parseProtectionTransition,
+  parseBootRecoveryCommand,
+  emptyLocalBootRecovery,
+  maySupersedeLatest,
+  priorBootRecovered,
+  type BootRecoveryCommand,
   protectionFactCapacity,
   protectionFactReservation,
   type ProtectionTransition,
@@ -56,6 +61,21 @@ export type FreshAdmissionResult =
 export type StudentAdmissionObservation =
   | { readonly status: "fresh"; readonly authority: FreshStudentAdmission }
   | { readonly status: "invalidated" };
+export type StudentBootRecoveryState =
+  | { readonly status: "none" }
+  | { readonly status: "record_rejected" }
+  | { readonly status: "write_uncertain" }
+  | { readonly status: "unanchored_prior"; readonly attemptId: string }
+  | {
+      readonly status: "prior_process";
+      readonly attemptId: string;
+      readonly expectedProtectionRevision: number;
+      readonly engagingBootSessionId: string;
+    }
+  | {
+      readonly status: "prior_boot_recovery_observed";
+      readonly attemptId: string;
+    };
 export interface StudentProtectionAccess {
   readProtectionContext(): {
     readonly admission: StudentAdmissionSnapshot | null;
@@ -63,6 +83,8 @@ export interface StudentProtectionAccess {
     readonly observationSequence: number;
     readonly protection: Readonly<StoredNativeProtection> | null;
     readonly delivery: "none" | "pending" | "acknowledged" | "blocked";
+    readonly bootRecovery: StudentBootRecoveryState;
+    readonly maySupersedeLatest: boolean;
   };
   readFreshAdmission(
     expected: StudentAdmissionSnapshot,
@@ -82,6 +104,12 @@ export interface StudentProtectionAccess {
   ): () => void;
   commitProtectionTransition(
     command: ProtectionTransition,
+  ): Promise<
+    | { readonly status: "committed"; readonly protectionRevision: number }
+    | { readonly status: "unavailable" }
+  >;
+  commitBootRecovery(
+    command: BootRecoveryCommand,
   ): Promise<
     | { readonly status: "committed"; readonly protectionRevision: number }
     | { readonly status: "unavailable" }
@@ -146,6 +174,7 @@ export function createStudentSessionCoordinator(options: {
   let record: StudentSessionRecord | null = null;
   let storeGeneration = 0;
   let initialized = false;
+  let firstRecordLoaded = false;
   let needsReload = false;
   let recoveryLatched = false;
   let stopping = false;
@@ -170,6 +199,9 @@ export function createStudentSessionCoordinator(options: {
   let observationSequence = 0;
   let ownedRenewal = false;
   let nativeOwnershipUncertain = false;
+  let recordRecoveryRejected = false;
+  let unanchoredPriorBarrier = false;
+  let priorProcessAttemptId: string | null = null;
   const ownedProtectionAttempts = new Set<string>();
   type PreflightFailure = Extract<
     ProtectionTransition,
@@ -250,6 +282,7 @@ export function createStudentSessionCoordinator(options: {
       !stopping &&
       !needsReload &&
       !recoveryLatched &&
+      !recordRecoveryRejected &&
       admissionAvailable &&
       record?.current != null &&
       !record.terminal &&
@@ -278,6 +311,7 @@ export function createStudentSessionCoordinator(options: {
       stopping ||
       needsReload ||
       recoveryLatched ||
+      recordRecoveryRejected ||
       record?.current == null ||
       record.terminal ||
       capabilityDeadline <= now() ||
@@ -365,6 +399,74 @@ export function createStudentSessionCoordinator(options: {
     return !stopping && generation === lifetime;
   }
 
+  function refreshPriorOwnership(): void {
+    const protection = record?.nativeProtection ?? null;
+    const latest = protection?.latestAttempt;
+    nativeOwnershipUncertain = false;
+    unanchoredPriorBarrier = false;
+    if (
+      latest == null ||
+      latest.attemptId !== priorProcessAttemptId ||
+      maySupersedeLatest(protection)
+    )
+      return;
+    const anchor = protection?.localBootRecovery.anchors.find(
+      (value) => value.attemptId === latest.attemptId,
+    );
+    if (anchor === undefined) unanchoredPriorBarrier = true;
+    else nativeOwnershipUncertain = true;
+  }
+
+  function canSupersedeLatest(): boolean {
+    return (
+      initialized &&
+      firstRecordLoaded &&
+      !stopping &&
+      !recordRecoveryRejected &&
+      !recoveryLatched &&
+      !needsReload &&
+      !nativeOwnershipUncertain &&
+      !unanchoredPriorBarrier &&
+      maySupersedeLatest(record?.nativeProtection ?? null)
+    );
+  }
+
+  function bootRecoveryState(): StudentBootRecoveryState {
+    if (recordRecoveryRejected)
+      return Object.freeze({ status: "record_rejected" });
+    if (!firstRecordLoaded || needsReload || recoveryLatched)
+      return Object.freeze({ status: "write_uncertain" });
+    const protection = record?.nativeProtection ?? null;
+    const latest = protection?.latestAttempt;
+    if (latest == null) return Object.freeze({ status: "none" });
+    if (priorBootRecovered(protection, latest.attemptId))
+      return Object.freeze({
+        status: "prior_boot_recovery_observed",
+        attemptId: latest.attemptId,
+      });
+    if (unanchoredPriorBarrier)
+      return Object.freeze({
+        status: "unanchored_prior",
+        attemptId: latest.attemptId,
+      });
+    if (
+      nativeOwnershipUncertain &&
+      latest.attemptId === priorProcessAttemptId
+    ) {
+      const anchor = protection!.localBootRecovery.anchors.find(
+        (value) => value.attemptId === latest.attemptId,
+      );
+      if (anchor !== undefined && anchor.observation === null)
+        return Object.freeze({
+          status: "prior_process",
+          attemptId: latest.attemptId,
+          expectedProtectionRevision: protection!.revision,
+          engagingBootSessionId: anchor.engagingBootSessionId,
+        });
+    }
+    return Object.freeze({ status: "none" });
+  }
+
   function run(
     work: (generation: number, signal: AbortSignal) => Promise<void>,
     readOwner: ReadOwner | null = null,
@@ -439,6 +541,7 @@ export function createStudentSessionCoordinator(options: {
       storeGeneration = committed.generation;
       attemptedWrite = null;
       needsReload = false;
+      refreshPriorOwnership();
       settlePreflightReservation();
       return true;
     } catch {
@@ -449,19 +552,20 @@ export function createStudentSessionCoordinator(options: {
   }
 
   async function load(generation: number): Promise<boolean> {
-    const firstLoad = !initialized;
+    if (recordRecoveryRejected || recoveryLatched) return false;
     invalidateAdmission();
     const loaded = await options.store.load();
     if (!alive(generation)) return false;
     initialized = true;
     if (loaded.kind === "unavailable") {
+      needsReload = true;
       publish("unavailable");
       return false;
     }
     if (loaded.kind === "recovery_required") {
       // A rejected record cannot establish native ownership, even when this
       // process previously read a valid record before an uncertain write.
-      nativeOwnershipUncertain = true;
+      recordRecoveryRejected = true;
       storeGeneration = loaded.generation;
       needsReload = false;
       record = null;
@@ -474,19 +578,18 @@ export function createStudentSessionCoordinator(options: {
       (found?.generation ?? (loaded.kind === "empty" && loaded.generation)) ||
       0;
     record = found;
-    if (firstLoad) {
+    if (!firstRecordLoaded) {
+      firstRecordLoaded = true;
       const attempt = found?.nativeProtection?.latestAttempt;
       if (
         attempt != null &&
-        !(
-          attempt.cleanup === "complete" &&
-          (attempt.nativeDisposition === "ended" ||
-            attempt.nativeDisposition === "failed_to_begin" ||
-            attempt.nativeDisposition ===
-              "disposed_without_terminal_observation")
-        )
+        (!maySupersedeLatest(found?.nativeProtection ?? null) ||
+          priorBootRecovered(
+            found?.nativeProtection ?? null,
+            attempt.attemptId,
+          ))
       )
-        nativeOwnershipUncertain = true;
+        priorProcessAttemptId = attempt.attemptId;
     }
     needsReload = false;
     capabilityDeadline = 0; // A process restart cannot inherit a monotonic lease.
@@ -503,6 +606,7 @@ export function createStudentSessionCoordinator(options: {
         return false;
       }
     }
+    refreshPriorOwnership();
     settlePreflightReservation();
     publish(
       record?.terminal === true
@@ -846,6 +950,7 @@ export function createStudentSessionCoordinator(options: {
       !initialized ||
       needsReload ||
       recoveryLatched ||
+      recordRecoveryRejected ||
       record === null
     )
       return;
@@ -854,6 +959,7 @@ export function createStudentSessionCoordinator(options: {
         record === null ||
         needsReload ||
         recoveryLatched ||
+        recordRecoveryRejected ||
         priorityWaiters !== 0
       )
         return;
@@ -1270,7 +1376,7 @@ export function createStudentSessionCoordinator(options: {
   }
 
   async function retry(generation: number, signal: AbortSignal): Promise<void> {
-    if (recoveryLatched) return;
+    if (recoveryLatched || recordRecoveryRejected) return;
     if ((!initialized || needsReload) && !(await load(generation))) return;
     if (record?.pending?.kind === "join") await attemptJoin(generation, signal);
     else await attemptMaintenance(generation, signal, true);
@@ -1391,23 +1497,14 @@ export function createStudentSessionCoordinator(options: {
 
   function canReserveProtectionAttempt(id: string): boolean {
     const protection = record?.nativeProtection;
-    const attempt = protection?.latestAttempt;
     return (
       record !== null &&
-      !nativeOwnershipUncertain &&
-      !needsReload &&
-      !recoveryLatched &&
+      canSupersedeLatest() &&
       (protection?.revision ?? 0) < Number.MAX_SAFE_INTEGER &&
       (protection?.nextFactSequence ?? 1) < Number.MAX_SAFE_INTEGER &&
       (protection?.facts.length ?? 0) <=
         protectionFactCapacity - protectionFactReservation &&
-      !(protection?.facts.some((fact) => fact.attemptId === id) ?? false) &&
-      (attempt == null ||
-        (attempt.cleanup === "complete" &&
-          (attempt.nativeDisposition === "ended" ||
-            attempt.nativeDisposition === "failed_to_begin" ||
-            attempt.nativeDisposition ===
-              "disposed_without_terminal_observation")))
+      !(protection?.facts.some((fact) => fact.attemptId === id) ?? false)
     );
   }
 
@@ -1493,6 +1590,8 @@ export function createStudentSessionCoordinator(options: {
     if (
       record === null ||
       needsReload ||
+      recordRecoveryRejected ||
+      recoveryLatched ||
       command.expectedProtectionRevision !== revision ||
       revision === Number.MAX_SAFE_INTEGER
     )
@@ -1527,7 +1626,7 @@ export function createStudentSessionCoordinator(options: {
       slot = "failure";
     } else if (command.kind === "engaging") {
       if (
-        nativeOwnershipUncertain ||
+        !canSupersedeLatest() ||
         !isCurrentAdmission(command.authority) ||
         (activePreflight !== null &&
           (activePreflight.state !== "reserved" ||
@@ -1535,15 +1634,7 @@ export function createStudentSessionCoordinator(options: {
             !sameScope(activePreflight.scope, command.authority.scope) ||
             !samePreflightDevice(activePreflight))) ||
         facts.length > protectionFactCapacity - protectionFactReservation ||
-        facts.some((fact) => fact.attemptId === command.attemptId) ||
-        (attempt !== null &&
-          !(
-            attempt.cleanup === "complete" &&
-            (attempt.nativeDisposition === "ended" ||
-              attempt.nativeDisposition === "failed_to_begin" ||
-              attempt.nativeDisposition ===
-                "disposed_without_terminal_observation")
-          ))
+        facts.some((fact) => fact.attemptId === command.attemptId)
       )
         return null;
       if (command.categories.aac.status === "confirmed") return null;
@@ -1559,7 +1650,13 @@ export function createStudentSessionCoordinator(options: {
       categories = command.categories;
       slot = "engaging";
     } else {
-      if (attempt === null || attempt.attemptId !== command.attemptId)
+      // A recovered prior owner is historical. This process cannot turn its
+      // old terminal or unknown disposition into a new lifecycle/cleanup fact.
+      if (
+        attempt === null ||
+        attempt.attemptId !== command.attemptId ||
+        priorBootRecovered(protection ?? null, command.attemptId)
+      )
         return null;
       const oldFact = (wanted: ProtectionFact["slot"]) =>
         facts.find(
@@ -1756,6 +1853,20 @@ export function createStudentSessionCoordinator(options: {
       latestAttempt: attempt,
       nextFactSequence: fact.sequence + 1,
       facts: [...facts, fact],
+      localBootRecovery:
+        command.kind === "engaging"
+          ? {
+              ...(protection?.localBootRecovery ?? emptyLocalBootRecovery()),
+              anchors: [
+                ...(protection?.localBootRecovery.anchors ?? []),
+                {
+                  attemptId: command.attemptId,
+                  engagingBootSessionId: command.engagingBootSessionId,
+                  observation: null,
+                },
+              ],
+            }
+          : (protection?.localBootRecovery ?? emptyLocalBootRecovery()),
     };
   }
 
@@ -1776,6 +1887,7 @@ export function createStudentSessionCoordinator(options: {
       record?.nativeProtection?.latestAttempt?.attemptId ===
         command.attemptId &&
       record.nativeProtection.revision === command.expectedProtectionRevision &&
+      !priorBootRecovered(record.nativeProtection, command.attemptId) &&
       record.nativeProtection.facts.some(
         (fact) =>
           fact.attemptId === command.attemptId && fact.slot === "engaging",
@@ -1866,6 +1978,116 @@ export function createStudentSessionCoordinator(options: {
     }
   }
 
+  async function commitBootRecovery(
+    input: BootRecoveryCommand,
+  ): ReturnType<StudentProtectionAccess["commitBootRecovery"]> {
+    const command = parseBootRecoveryCommand(input);
+    if (
+      command === null ||
+      stopping ||
+      recordRecoveryRejected ||
+      recoveryLatched
+    )
+      return { status: "unavailable" };
+    let result: Awaited<
+      ReturnType<StudentProtectionAccess["commitBootRecovery"]>
+    > = {
+      status: "unavailable",
+    };
+    await runPriority(async (generation) => {
+      if (recordRecoveryRejected || recoveryLatched) return;
+      // Reuse the writer's exact preimage/postimage reconciliation before
+      // considering the local proof. A third image never becomes a new baseline.
+      if ((!firstRecordLoaded || needsReload) && !(await load(generation)))
+        return;
+      if (
+        !alive(generation) ||
+        record === null ||
+        recordRecoveryRejected ||
+        recoveryLatched
+      )
+        return;
+      const protection = record.nativeProtection;
+      const latest = protection?.latestAttempt;
+      if (
+        protection === null ||
+        latest == null ||
+        latest.attemptId !== command.attemptId ||
+        latest.attemptId !== priorProcessAttemptId ||
+        ownedProtectionAttempts.has(command.attemptId)
+      )
+        return;
+      const local = protection.localBootRecovery;
+      const anchor = local.anchors.find(
+        (value) => value.attemptId === command.attemptId,
+      );
+      if (anchor === undefined) return;
+      if (anchor.observation !== null) {
+        if (
+          anchor.observation.observedBootSessionId !==
+          command.observedBootSessionId
+        ) {
+          recoveryLatched = true;
+          invalidateAdmission();
+          publish("recovery_required");
+          return;
+        }
+        if (
+          command.expectedProtectionRevision < Number.MAX_SAFE_INTEGER &&
+          protection.revision === command.expectedProtectionRevision + 1
+        )
+          result = {
+            status: "committed",
+            protectionRevision: protection.revision,
+          };
+        return;
+      }
+      if (
+        !nativeOwnershipUncertain ||
+        unanchoredPriorBarrier ||
+        canSupersedeLatest() ||
+        anchor.engagingBootSessionId === command.observedBootSessionId ||
+        protection.revision !== command.expectedProtectionRevision ||
+        protection.revision === Number.MAX_SAFE_INTEGER ||
+        local.nextObservationSequence === Number.MAX_SAFE_INTEGER
+      )
+        return;
+      const next: StudentSessionSuccessor = {
+        ...successor(record),
+        nativeProtection: {
+          ...protection,
+          revision: protection.revision + 1,
+          localBootRecovery: {
+            ...local,
+            nextObservationSequence: local.nextObservationSequence + 1,
+            anchors: local.anchors.map((value) =>
+              value !== anchor
+                ? value
+                : {
+                    ...value,
+                    observation: {
+                      sequence: local.nextObservationSequence,
+                      basis: "boot_session_changed",
+                      observedBootSessionId: command.observedBootSessionId,
+                    },
+                  },
+            ),
+          },
+        },
+      };
+      if (!(await write(next, generation)) || !alive(generation)) return;
+      // No historical fact, counter, disposition or cleanup changed. Publishing
+      // only lets main reconstruct the exact local barrier after durability.
+      publish(view.phase);
+      if (alive(generation))
+        result = {
+          status: "committed",
+          protectionRevision: protection.revision + 1,
+        };
+    });
+    return result;
+  }
+
   return {
     initialize: () =>
       runPriority(async (generation) => {
@@ -1878,7 +2100,7 @@ export function createStudentSessionCoordinator(options: {
           !initialized ||
           needsReload ||
           recoveryLatched ||
-          nativeOwnershipUncertain ||
+          !canSupersedeLatest() ||
           activePreflight !== null ||
           view.phase !== "entry" ||
           (record !== null && !canReplaceInitialJoin(record)) ||
@@ -1886,7 +2108,7 @@ export function createStudentSessionCoordinator(options: {
         )
           return;
         const next: StudentSessionSuccessor = {
-          version: 4,
+          version: 5,
           apiOrigin: options.apiOrigin,
           device: record?.device ?? options.crypto.createEnrollment(),
           current: null,
@@ -1912,7 +2134,10 @@ export function createStudentSessionCoordinator(options: {
         const parsedCode = parseStudentJoinCode(code);
         if (
           !initialized ||
+          recordRecoveryRejected ||
+          recoveryLatched ||
           nativeOwnershipUncertain ||
+          unanchoredPriorBarrier ||
           activePreflight !== null ||
           view.revision !== snapshotRevision ||
           !["recovery_required", "unavailable", "forfeited"].includes(
@@ -1921,11 +2146,7 @@ export function createStudentSessionCoordinator(options: {
           parsedCode === null
         )
           return;
-        if (
-          record?.nativeProtection?.latestAttempt != null &&
-          record.nativeProtection.latestAttempt.cleanup !== "complete"
-        )
-          return;
+        if (!maySupersedeLatest(record?.nativeProtection ?? null)) return;
         invalidateAdmission();
         if (
           needsReload &&
@@ -1934,10 +2155,9 @@ export function createStudentSessionCoordinator(options: {
         )
           return;
         if (
-          nativeOwnershipUncertain ||
+          !canSupersedeLatest() ||
           activePreflight !== null ||
-          (record?.nativeProtection?.latestAttempt != null &&
-            record.nativeProtection.latestAttempt.cleanup !== "complete")
+          !maySupersedeLatest(record?.nativeProtection ?? null)
         )
           return;
         const retainedProtection = record?.nativeProtection ?? null;
@@ -1961,11 +2181,10 @@ export function createStudentSessionCoordinator(options: {
         }
         if (!alive(generation)) return;
         record = null;
-        recoveryLatched = false;
         attemptedWrite = null;
         capabilityDeadline = 0;
         const next: StudentSessionSuccessor = {
-          version: 4,
+          version: 5,
           apiOrigin: options.apiOrigin,
           device: options.crypto.createEnrollment(),
           current: null,
@@ -1990,7 +2209,7 @@ export function createStudentSessionCoordinator(options: {
     refresh: () =>
       runPriority(
         async (generation, signal) => {
-          if (recoveryLatched) return;
+          if (recoveryLatched || recordRecoveryRejected) return;
           if ((!initialized || needsReload) && !(await load(generation)))
             return;
           if (record?.pending != null) return; // Only explicit retry resubmits intent.
@@ -2031,6 +2250,8 @@ export function createStudentSessionCoordinator(options: {
         observationSequence,
         protection: record?.nativeProtection ?? null,
         delivery: deliveryState(),
+        bootRecovery: bootRecoveryState(),
+        maySupersedeLatest: canSupersedeLatest(),
       });
     },
     readFreshAdmission,
@@ -2044,6 +2265,7 @@ export function createStudentSessionCoordinator(options: {
       };
     },
     commitProtectionTransition,
+    commitBootRecovery,
     subscribe(listener) {
       listeners.add(listener);
       return () => {
