@@ -170,6 +170,18 @@ jobs:
       - run: xvfb-run -a npm run test:electron
         env:
           ELECTRON_DISABLE_SANDBOX: "1"
+      - name: Retain failed Electron screenshots and traces
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: electron-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-results/**/*.png
+            test-results/**/trace.zip
+            test-results/**/error-context.md
+          if-no-files-found: warn
+          retention-days: 7
+          include-hidden-files: false
 
   supply-chain:
     name: Dependency, secret, SBOM, and package checks
