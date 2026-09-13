@@ -8,6 +8,7 @@ import {
   test,
   type Page,
 } from "@playwright/test";
+import type { BrowserWindow } from "electron";
 
 import type { TrustedDesktopBridge } from "../../../apps/desktop/src/trusted-bridge.js";
 
@@ -383,7 +384,7 @@ test("production Electron shell preserves Student isolation and denies protectio
     if (!nativeStoreSupported) await assertStudentBoundary(window);
 
     await application.evaluate(
-      async ({ app, BrowserWindow }, { windowId, simulateUnexpectedLoss }) => {
+      async ({ BrowserWindow }, { windowId, simulateUnexpectedLoss }) => {
         if (simulateUnexpectedLoss) {
           const currentWindow = BrowserWindow.getAllWindows().find(
             (candidate) => candidate.id === windowId,
@@ -425,34 +426,43 @@ test("production Electron shell preserves Student isolation and denies protectio
             "A shell remained before the fresh-generation activation",
           );
         }
-        app.emit("activate");
       },
       {
         windowId: closeObservation.windowId,
         simulateUnexpectedLoss: !nativeStoreSupported,
       },
     );
-    await expect
-      .poll(
-        () =>
-          application
-            .windows()
-            .filter(
-              (candidate) =>
-                !candidate.isClosed() &&
-                candidate.url() === "desmoslock-app://shell/index.html",
-            ).length,
-      )
-      .toBe(1);
-    const reopenedWindow = application
-      .windows()
-      .find(
-        (candidate) =>
-          !candidate.isClosed() &&
-          candidate.url() === "desmoslock-app://shell/index.html",
+    // Native closed does not acknowledge Playwright's separate Page.Close.
+    // Bind the newly emitted Page instead of inspecting its stale window set.
+    const nextWindow = application.waitForEvent("window", {
+      timeout: 5_000,
+    });
+    const [reopenedWindow] = await Promise.all([
+      nextWindow,
+      application.evaluate(({ app }) => {
+        app.emit("activate");
+      }),
+    ]);
+    expect(reopenedWindow).not.toBe(window);
+    await expect(reopenedWindow).toHaveURL("desmoslock-app://shell/index.html");
+    const reopenedNativeWindow =
+      await application.browserWindow(reopenedWindow);
+    try {
+      const identity = await reopenedNativeWindow.evaluate(
+        (candidate: BrowserWindow) => ({
+          id: candidate.id,
+          destroyed: candidate.isDestroyed(),
+          url: candidate.webContents.getURL(),
+        }),
       );
-    if (reopenedWindow === undefined) {
-      throw new Error("Electron did not reopen the trusted shell window");
+      expect(identity).toEqual({
+        id: expect.any(Number),
+        destroyed: false,
+        url: "desmoslock-app://shell/index.html",
+      });
+      expect(identity.id).not.toBe(closeObservation.windowId);
+    } finally {
+      await reopenedNativeWindow.dispose();
     }
     await expect(
       reopenedWindow.getByRole("heading", {
