@@ -32,7 +32,7 @@ const inputs = {
   tools: {
     node: { version: "24.20.0", sha256: hex("1") },
     npm: { version: "11.12.1", sha256: hex("2") },
-    electron: { version: "43.4.1", archiveSha256: hex("3") },
+    electron: { version: "43.7.0", archiveSha256: hex("3") },
     packager: { version: "19.0.1" },
     fuses: { version: "2.0.0" },
     compiler: {
@@ -163,7 +163,7 @@ describe("universal build input canonical grammar", () => {
         .update("desmoslock:universal-build:v1\0")
         .update(canonical)
         .digest("hex"),
-    ).toBe("0889c7ae2aafa83beeb0159fa790881fa435b25076c6c05df4ab38d4d22d45c3");
+    ).toBe("678520489f24251f87603ac10aa7af1c5a5d81708978049bbbb09b3edf5e3c9d");
     expect(canonical).not.toContain("buildId");
     expect(canonical).not.toContain("artifactSha256");
   });
@@ -276,7 +276,7 @@ describe("client build input canonical grammar", () => {
     expect(canonical.endsWith("\n")).toBe(false);
     // Independently reproduced with Python sorted-key compact UTF-8 JSON.
     expect(createHash("sha256").update(canonical).digest("hex")).toBe(
-      "2392d03253a7e0564798707b7801dd9f987af2ccc07125211f505c403580650a",
+      "cb3a92dd09ee727331a72053a1ef87f20fcd33a2d599d6325c557897190be244",
     );
     expect(createHash("sha256").update(canonical).digest("hex")).not.toBe(
       createHash("sha256")

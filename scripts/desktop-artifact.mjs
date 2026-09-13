@@ -1662,7 +1662,7 @@ export async function selectExistingElectronArchive({
 }) {
   assert.equal(
     electronVersion,
-    "43.4.1",
+    "43.7.0",
     "Packaging requires the reviewed Electron version",
   );
   assert.ok(
@@ -1755,9 +1755,9 @@ export async function selectExistingElectronArchive({
   if (platform === "darwin" && architecture === "arm64") {
     assert.equal(
       sha256,
-      "fe3cac8cbfd9ba1739fac6c69166cf30848741f93cbe251d800ae6ef7cebb64b",
+      "a658b04dc0ad4e9f66abb1f297678a73cd639390c4c74ba1449bc4e85d0ecebf",
     );
-    assert.equal(bytes, 122_238_952);
+    assert.equal(bytes, 123_418_720);
   }
   return { directory: await fs.realpath(directory), filename, sha256, bytes };
 }
@@ -2737,7 +2737,7 @@ async function readUniversalArchives(value, repositoryRoot) {
       "Electron archive",
     );
     await assertDirectory(row.directory);
-    assert.equal(row.filename, `electron-v43.4.1-darwin-${architecture}.zip`);
+    assert.equal(row.filename, `electron-v43.7.0-darwin-${architecture}.zip`);
     const measurement = measuredFields(row);
     assert.deepEqual(
       await measureRegularFile(path.join(row.directory, row.filename)),
@@ -3454,7 +3454,7 @@ export async function packageUnsignedUniversalDesktop({
   );
   assert.equal(
     electronVersion,
-    "43.4.1",
+    "43.7.0",
     "Universal packaging requires the reviewed Electron version",
   );
   const version = await readWorkspaceVersion(repositoryRoot);

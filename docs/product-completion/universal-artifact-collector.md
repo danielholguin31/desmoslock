@@ -28,9 +28,15 @@ The nine descriptor keys are `schemaVersion`, `inputs`, `review`,
 and `nativeHelperSha256`. `inputs` is the exact `ClientUniversalBuildInputs`
 grammar. `paths` retains the native descriptor's seven explicit paths and adds
 the exact `lipo` and `codesign` executable paths. The Electron archive directory
-must contain both selected official Electron 43.4.1 Darwin ZIPs; the collector
+must contain both selected official Electron 43.7.0 Darwin ZIPs; the collector
 does not download them. Each ZIP must match the installed checksum metadata and
 its architecture-specific input hash.
+
+Electron 43.7.0 was [released September 10, 2026](https://releases.electronjs.org/release/v43.7.0).
+It is the reviewed 43.x minor for this collector; Electron supports only the
+[latest minor in each supported major](https://www.electronjs.org/docs/latest/tutorial/electron-timelines#version-support-policy).
+The build toolchain remains Node 24.20.0, separate from Electron's embedded Node
+24.21.0. Snapshot names and bytes are verified from the selected official ZIPs.
 
 The common identity keeps the existing six `ClientBuildIdentity` fields. Its
 `buildId` is SHA-256 of the UTF-8 prefix `desmoslock:universal-build:v1`, one NUL

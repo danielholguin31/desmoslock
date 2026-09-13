@@ -448,7 +448,7 @@ async function fixture(root, { format = {}, packageOnly = false } = {}) {
       { name: snapshotPaths[architecture], contents: snapshot },
     ]);
     const directory = path.join(root, "archives");
-    const filename = `electron-v43.4.1-darwin-${architecture}.zip`;
+    const filename = `electron-v43.7.0-darwin-${architecture}.zip`;
     await write(directory, filename, zip);
     current.electronArchives[architecture] = {
       directory,
@@ -629,7 +629,7 @@ function packageOptions(current) {
     stageRoot: current.stageRoot,
     outputRoot: current.outputRoot,
     temporaryRoot: current.temporaryRoot,
-    electronVersion: "43.4.1",
+    electronVersion: "43.7.0",
     expectedBuildIdentity: knownIdentity,
   };
 }
@@ -651,7 +651,7 @@ async function mockPackager(options) {
   current.packageCalls += 1;
   assert.equal(options.arch, "universal");
   assert.equal(options.platform, "darwin");
-  assert.equal(options.electronVersion, "43.4.1");
+  assert.equal(options.electronVersion, "43.7.0");
   assert.equal(
     options.electronZipDir,
     current.electronArchives.arm64.directory,
@@ -689,7 +689,7 @@ async function mockPackager(options) {
     });
     const hook = {
       buildPath,
-      electronVersion: "43.4.1",
+      electronVersion: "43.7.0",
       platform: "darwin",
       arch: "arm64",
     };
@@ -723,7 +723,7 @@ async function mockPackager(options) {
     try {
       await options.afterCopy[0]({
         buildPath,
-        electronVersion: "43.4.1",
+        electronVersion: "43.7.0",
         platform: "darwin",
         arch: architecture,
       });
@@ -1080,6 +1080,29 @@ await test("universal composition uses synthetic files and mocked packager, ASAR
           inspectUniversalDesktop(inspectOptions(current)),
           /Compiler output/,
         );
+      },
+    );
+    await t.test(
+      "rejects the superseded Electron minor before packaging or output creation",
+      async () => {
+        const current = await make({ packageOnly: true });
+        const before = await fs.readdir(current.root);
+        await assert.rejects(
+          packageUnsignedUniversalDesktop({
+            ...packageOptions(current),
+            electronVersion: "43.4.1",
+          }),
+          /Universal packaging requires the reviewed Electron version/,
+        );
+        assert.equal(current.packageCalls, 0);
+        assert.equal(current.hardenCalls, 0);
+        assert.deepEqual(await fs.readdir(current.root), before);
+        for (const directory of [
+          current.stageRoot,
+          current.outputRoot,
+          current.temporaryRoot,
+        ])
+          await assert.rejects(fs.lstat(directory), { code: "ENOENT" });
       },
     );
     await t.test(
