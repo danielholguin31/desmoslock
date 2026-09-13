@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -19,6 +19,28 @@ const MAX_COMMAND_BYTES = 2 * 1024 * 1024;
 const PG_BINARY_ROOT = "/usr/lib/postgresql/bin";
 const DOCKER_BINARY = "/usr/bin/docker";
 const STAFF_SUITE_DIAGNOSTICS = Symbol("staff-suite-diagnostics");
+const CATALOG_MAX_BYTES = 1_100_000;
+const CATALOG_QUERY_SHA256 =
+  "d4c00e6330577e42aa0268f113f3d8a2b37e7e9b8f2c50b7c726bf2c0340c1d9";
+const CATALOG_INPUTS = Object.freeze([
+  ["scripts/backend-catalog/catalog.sql", CATALOG_QUERY_SHA256],
+  [
+    "scripts/backend-catalog/validate.py",
+    "fd326031c53815b51d8ac56202ec320f505323f1629daa74d4b8d718a9fb4e54",
+  ],
+  [
+    "scripts/backend-catalog/catalog-source-expectations.json",
+    "1dd57f0e6a35529a30aa9f1f25c6c44d9c98778ae8ab054c7b47b90c40a584d9",
+  ],
+  [
+    "supabase/migrations/20260824000100_v2_foundation.sql",
+    "03cc111602a4dc8bc196b5bfb53b87ab1ae902096642af3fd7f45ad9428e951d",
+  ],
+  [
+    "supabase/migrations/20260828000100_internal_release_backend.sql",
+    "1a60d2fb308a8e2cfad102f9c218c319bacd95c33a40801d5b0b731119434f2f",
+  ],
+]);
 
 export class FixtureFailure extends Error {
   constructor(code) {
@@ -68,6 +90,169 @@ function decodeJson(bytes) {
   } catch {
     throw new FixtureFailure("FIXTURE_JSON_INVALID");
   }
+}
+
+function canonicalCatalogJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalCatalogJson);
+  if (value !== null && typeof value === "object")
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, canonicalCatalogJson(value[key])]),
+    );
+  return value;
+}
+
+// Called only inside the owned disposable target lifecycle. Effects are explicit
+// so unit controls can exercise the exact path without a database or Docker.
+export async function captureBackendCatalogPrefix({
+  repositoryRoot,
+  workspaceDirectory,
+  cli,
+  run,
+  docker,
+  readFile = fs.readFile,
+  writeFile = fs.writeFile,
+}) {
+  requireFixture(
+    path.isAbsolute(repositoryRoot) &&
+      path.isAbsolute(workspaceDirectory) &&
+      cli === path.join(repositoryRoot, "node_modules/.bin/supabase") &&
+      typeof run === "function" &&
+      typeof docker === "function",
+    "CATALOG_SCOPE_INVALID",
+  );
+  const inputs = await Promise.all(
+    CATALOG_INPUTS.map(async ([relative, expected]) => {
+      const bytes = await readFile(path.join(repositoryRoot, relative));
+      requireFixture(
+        Buffer.isBuffer(bytes) &&
+          bytes.length <= 100_000 &&
+          createHash("sha256").update(bytes).digest("hex") === expected,
+        "CATALOG_INPUT_INVALID",
+      );
+      return bytes;
+    }),
+  );
+  const commitBytes = await run("/usr/bin/git", ["rev-parse", "HEAD"], {
+    timeoutMs: 10_000,
+    maxBytes: 128,
+  });
+  requireFixture(
+    Buffer.isBuffer(commitBytes) &&
+      /^[a-f0-9]{40}\n$/u.test(commitBytes.toString("utf8")),
+    "CATALOG_COMMIT_INVALID",
+  );
+  await run(
+    cli,
+    ["db", "reset", "--local", "--version", "20260828000100", "--no-seed"],
+    { timeoutMs: 300_000 },
+  );
+  const bytes = await docker(
+    [
+      "exec",
+      "--user",
+      "postgres",
+      "--interactive",
+      `supabase_db_${TARGET_PROJECT}`,
+      `${PG_BINARY_ROOT}/psql`,
+      "--no-psqlrc",
+      "--quiet",
+      "--tuples-only",
+      "--no-align",
+      "--set",
+      "ON_ERROR_STOP=1",
+      "--host",
+      "/var/run/postgresql",
+      "--port",
+      "5432",
+      "--username",
+      "supabase_admin",
+      "--dbname",
+      "postgres",
+    ],
+    {
+      input:
+        "BEGIN READ ONLY;\nSET LOCAL search_path = pg_catalog;\n" +
+        "SET LOCAL statement_timeout = '10s';\nSET LOCAL lock_timeout = '1s';\n" +
+        inputs[0].toString("utf8") +
+        "\nROLLBACK;\n",
+      timeoutMs: 30_000,
+      maxBytes: CATALOG_MAX_BYTES,
+    },
+  );
+  requireFixture(
+    Buffer.isBuffer(bytes) &&
+      bytes.length > 0 &&
+      bytes.length <= CATALOG_MAX_BYTES,
+    "CATALOG_OUTPUT_INVALID",
+  );
+  const observationPath = path.join(workspaceDirectory, "catalog-prefix.json");
+  await writeFile(observationPath, bytes, { mode: 0o600, flag: "wx" });
+  const validationBytes = await run(
+    "/usr/bin/python3",
+    [
+      "-I",
+      "-B",
+      path.join(repositoryRoot, "scripts/backend-catalog/validate.py"),
+      "validate",
+      observationPath,
+      "--expectations",
+      path.join(
+        repositoryRoot,
+        "scripts/backend-catalog/catalog-source-expectations.json",
+      ),
+    ],
+    { timeoutMs: 10_000, maxBytes: 8192 },
+  );
+  requireFixture(
+    Buffer.isBuffer(validationBytes) && validationBytes.length <= 8192,
+    "CATALOG_VALIDATION_INVALID",
+  );
+  const validation = decodeJson(validationBytes);
+  requireFixture(
+    validation !== null &&
+      typeof validation === "object" &&
+      !Array.isArray(validation) &&
+      isDeepStrictEqual(Object.keys(validation).sort(), [
+        "catalog_equivalence",
+        "records",
+        "sha256",
+        "status",
+      ]) &&
+      validation.status === "valid" &&
+      validation.catalog_equivalence === "not_established" &&
+      Number.isSafeInteger(validation.records) &&
+      validation.records > 0 &&
+      validation.records <= 2048 &&
+      /^[a-f0-9]{64}$/u.test(validation.sha256),
+    "CATALOG_VALIDATION_INVALID",
+  );
+  // The pinned Python parser rejects duplicate JSON keys before this parse.
+  const projection = decodeJson(bytes);
+  requireFixture(
+    projection?.records?.length === validation.records &&
+      createHash("sha256")
+        .update(JSON.stringify(canonicalCatalogJson(projection)))
+        .digest("hex") === validation.sha256,
+    "CATALOG_VALIDATION_MISMATCH",
+  );
+  const observation = {
+    observation_version: 1,
+    query_sha256: CATALOG_QUERY_SHA256,
+    source_commit: commitBytes.toString("utf8").slice(0, -1),
+    source_files: CATALOG_INPUTS.slice(3).map(([relative, sha256]) => ({
+      path: relative,
+      sha256,
+    })),
+    prefix_versions: ["20260824000100", "20260828000100"],
+    projection,
+  };
+  const diagnostic = Buffer.from(
+    `DESMOSLOCK_CATALOG_PREFIX_V1 ${JSON.stringify(observation)}\n`,
+  );
+  requireFixture(diagnostic.length <= 1_104_096, "CATALOG_DIAGNOSTIC_OVERFLOW");
+  return diagnostic;
 }
 
 // Deliberately narrow: this fixture supplies an existing empty /dev/null file.
@@ -402,19 +587,115 @@ async function removeOwnedDirectory(owned) {
   await fs.rm(owned.directory, { recursive: true });
 }
 
-/** Owns the complete target lifecycle; invoke only on a fresh dedicated CI job. */
-export async function runBackupRoundtrip(repositoryRoot, testSignal) {
+export function requireDisposableCi({
+  platform,
+  githubActions,
+  ci,
+  nodeVersion,
+  uid,
+}) {
   requireFixture(
-    process.platform === "linux" &&
-      process.env.GITHUB_ACTIONS === "true" &&
-      process.env.CI === "true" &&
-      process.version === "v24.20.0",
+    platform === "linux" &&
+      githubActions === "true" &&
+      ci === "true" &&
+      nodeVersion === "v24.20.0",
     "DISPOSABLE_CI_REQUIRED",
   );
   requireFixture(
-    Number.isInteger(process.getuid?.()) && process.getuid() !== 0,
+    Number.isInteger(uid) && uid !== 0,
     "UNPRIVILEGED_CI_RUNNER_REQUIRED",
   );
+}
+
+// The production lifecycle and pure controls share the same failure/cleanup path.
+export async function withRoundtripCleanup(
+  work,
+  { state, run, docker, cli, toolContainer, removeDirectory, detach },
+) {
+  let primaryFailure, result;
+  const cleanupFailures = [];
+  try {
+    result = await work();
+  } catch (error) {
+    const { stage } = state();
+    primaryFailure =
+      error instanceof FixtureFailure
+        ? error.withCode(`${stage}_${error.code}`)
+        : new FixtureFailure(`${stage}_FAILED`);
+  } finally {
+    const { ownsTool, ownsSource, ownsTarget, workspace, tlsRoot } = state();
+    const cleanup = async (action) => {
+      try {
+        await action();
+      } catch {
+        cleanupFailures.push("CLEANUP_FAILED");
+      }
+    };
+    if (ownsTool)
+      await cleanup(async () => {
+        const found = (
+          await docker(
+            [
+              "ps",
+              "--all",
+              "--filter",
+              `name=^/${toolContainer}$`,
+              "--format",
+              "{{.Names}}",
+            ],
+            { signal: undefined },
+          )
+        )
+          .toString()
+          .trim();
+        if (found === "") return;
+        requireFixture(
+          found === toolContainer,
+          "TOOL_CLEANUP_IDENTITY_CHANGED",
+        );
+        await docker(["rm", "--force", toolContainer], { signal: undefined });
+      });
+    if (ownsSource)
+      await cleanup(() =>
+        run(cli, ["stop", "--no-backup"], {
+          cwd: path.join(workspace.directory, "source"),
+          signal: undefined,
+          timeoutMs: 120_000,
+        }),
+      );
+    if (ownsTarget)
+      await cleanup(() =>
+        run(cli, ["stop", "--no-backup"], {
+          signal: undefined,
+          timeoutMs: 120_000,
+        }),
+      );
+    await cleanup(() => removeDirectory(tlsRoot));
+    // Preserve the nonsecret source configuration if stack cleanup failed.
+    // The ephemeral CI runner owns final destruction; never erase recovery paths.
+    if (cleanupFailures.length === 0)
+      await cleanup(() => removeDirectory(workspace));
+    detach();
+  }
+  if (primaryFailure)
+    throw primaryFailure.withCode(
+      cleanupFailures.length
+        ? `${primaryFailure.code}_AND_CLEANUP_FAILED`
+        : primaryFailure.code,
+    );
+  requireFixture(cleanupFailures.length === 0, "CLEANUP_FAILED");
+  return result;
+}
+
+/** Owns the complete target lifecycle; invoke only on a fresh dedicated CI job. */
+export async function runBackupRoundtrip(repositoryRoot, testSignal) {
+  requireDisposableCi({
+    platform: process.platform,
+    githubActions: process.env.GITHUB_ACTIONS,
+    ci: process.env.CI,
+    nodeVersion: process.version,
+    uid: process.getuid?.(),
+  });
   repositoryRoot = await fs.realpath(repositoryRoot);
   const cli = path.join(repositoryRoot, "node_modules/.bin/supabase");
   const node = await fs.realpath(process.execPath);
@@ -460,10 +741,9 @@ export async function runBackupRoundtrip(repositoryRoot, testSignal) {
   let ownsTarget = false,
     ownsSource = false,
     ownsTool = false;
-  let primaryFailure, receipt;
+  let receipt;
   let stage = "PREFLIGHT";
-  const cleanupFailures = [];
-  try {
+  const work = async () => {
     const endpoint = (
       await docker([
         "context",
@@ -516,6 +796,17 @@ export async function runBackupRoundtrip(repositoryRoot, testSignal) {
       timeoutMs: 600_000,
       maxBytes: 16 * 1024 * 1024,
     });
+    stage = "FOUNDATION_CATALOG";
+    process.stdout.write(
+      await captureBackendCatalogPrefix({
+        repositoryRoot,
+        workspaceDirectory: workspace.directory,
+        cli,
+        run,
+        docker,
+      }),
+    );
+    stage = "TARGET_SETUP";
     await run(cli, ["db", "reset", "--no-seed"], { timeoutMs: 300_000 });
     stage = "SOURCE_SETUP";
     ownsSource = true;
@@ -733,74 +1024,27 @@ export async function runBackupRoundtrip(repositoryRoot, testSignal) {
       timeoutMs: 600_000,
     });
     receipt = { ...receipt, staffAuthSuiteOnRestoredTarget: true };
-  } catch (error) {
-    primaryFailure =
-      error instanceof FixtureFailure
-        ? error.withCode(`${stage}_${error.code}`)
-        : new FixtureFailure(`${stage}_FAILED`);
-  } finally {
-    const cleanup = async (action) => {
-      try {
-        await action();
-      } catch {
-        cleanupFailures.push("CLEANUP_FAILED");
-      }
-    };
-    if (ownsTool)
-      await cleanup(async () => {
-        const found = (
-          await docker(
-            [
-              "ps",
-              "--all",
-              "--filter",
-              `name=^/${toolContainer}$`,
-              "--format",
-              "{{.Names}}",
-            ],
-            { signal: undefined },
-          )
-        )
-          .toString()
-          .trim();
-        if (found === "") return;
-        requireFixture(
-          found === toolContainer,
-          "TOOL_CLEANUP_IDENTITY_CHANGED",
-        );
-        await docker(["rm", "--force", toolContainer], { signal: undefined });
-      });
-    if (ownsSource)
-      await cleanup(() =>
-        run(cli, ["stop", "--no-backup"], {
-          cwd: path.join(workspace.directory, "source"),
-          signal: undefined,
-          timeoutMs: 120_000,
-        }),
-      );
-    if (ownsTarget)
-      await cleanup(() =>
-        run(cli, ["stop", "--no-backup"], {
-          signal: undefined,
-          timeoutMs: 120_000,
-        }),
-      );
-    await cleanup(() => removeOwnedDirectory(tlsRoot));
-    // Preserve the nonsecret source configuration if stack cleanup failed.
-    // The ephemeral CI runner owns final destruction; never erase recovery paths.
-    if (cleanupFailures.length === 0)
-      await cleanup(() => removeOwnedDirectory(workspace));
-    process.removeListener("SIGTERM", interrupt);
-    process.removeListener("SIGINT", interrupt);
-  }
-  if (primaryFailure)
-    throw primaryFailure.withCode(
-      cleanupFailures.length
-        ? `${primaryFailure.code}_AND_CLEANUP_FAILED`
-        : primaryFailure.code,
-    );
-  requireFixture(cleanupFailures.length === 0, "CLEANUP_FAILED");
-  return receipt;
+    return receipt;
+  };
+  return withRoundtripCleanup(work, {
+    state: () => ({
+      stage,
+      ownsTool,
+      ownsSource,
+      ownsTarget,
+      workspace,
+      tlsRoot,
+    }),
+    run,
+    docker,
+    cli,
+    toolContainer,
+    removeDirectory: removeOwnedDirectory,
+    detach: () => {
+      process.removeListener("SIGTERM", interrupt);
+      process.removeListener("SIGINT", interrupt);
+    },
+  });
 }
 
 function pgEnvironment(connection, sslMode, sslRootCert) {

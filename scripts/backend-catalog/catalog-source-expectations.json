@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "publishedComparisonCommit": "76e339e7ffeb8ae650e9000b53e4e7e0b0388f5e",
+  "observedHistoryPrefixVersions": ["20260824000100", "20260828000100"],
+  "sourceFiles": [
+    {
+      "path": "supabase/migrations/20260824000100_v2_foundation.sql",
+      "sha256": "03cc111602a4dc8bc196b5bfb53b87ab1ae902096642af3fd7f45ad9428e951d"
+    },
+    {
+      "path": "supabase/migrations/20260828000100_internal_release_backend.sql",
+      "sha256": "1a60d2fb308a8e2cfad102f9c218c319bacd95c33a40801d5b0b731119434f2f"
+    }
+  ],
+  "schema": "desmoslock_v2",
+  "tables": [
+    {
+      "schema": "desmoslock_v2",
+      "name": "foundation_seed",
+      "kind": "table",
+      "source": "supabase/migrations/20260824000100_v2_foundation.sql",
+      "line": 11
+    },
+    {
+      "schema": "desmoslock_v2",
+      "name": "internal_release_attestation",
+      "kind": "table",
+      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
+      "line": 20
+    },
+    {
+      "schema": "desmoslock_v2",
+      "name": "local_restore_target_attestation",
+      "kind": "table",
+      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
+      "line": 38
+    },
+    {
+      "schema": "desmoslock_v2",
+      "name": "workspaces",
+      "kind": "table",
+      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
+      "line": 55
+    },
+    {
+      "schema": "desmoslock_v2",
+      "name": "profiles",
+      "kind": "table",
+      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
+      "line": 65
+    },
+    {
+      "schema": "desmoslock_v2",
+      "name": "memberships",
+      "kind": "table",
+      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
+      "line": 72
+    },
+    {
+      "schema": "desmoslock_v2",
+      "name": "tests",
+      "kind": "table",
+      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
+      "line": 82
+    },
+    {
+      "schema": "desmoslock_v2",
+      "name": "student_sessions",
+      "kind": "table",
+      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
+      "line": 94
+    },
+    {
+      "schema": "desmoslock_v2",
+      "name": "baseline_fixture_state",
+      "kind": "table",
+      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
+      "line": 106
+    }
+  ],
+  "functions": [
+    {
+      "schema": "desmoslock_v2",
+      "name": "expected_migration_set_sha256",
+      "sourceArguments": "",
+      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
+      "line": 7,
+      "sourceDollarQuotedBodySha256": "6de09e0a6b6f7db2196412e0c3d1912efd17146df79011cccd4757590d870f0e",
+      "bodyHashIsServerCatalogObservation": false
+    },
+    {
+      "schema": "desmoslock_v2",
+      "name": "current_school_summary",
+      "sourceArguments": "",
+      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
+      "line": 150,
+      "sourceDollarQuotedBodySha256": "0747cea89aab06e87ce6a0297054baae239f7c2f36f8fdf50e06fe5e0daa13d0",
+      "bodyHashIsServerCatalogObservation": false
+    },
+    {
+      "schema": "desmoslock_v2",
+      "name": "internal_frame_text",
+      "sourceArguments": "parts text[]",
+      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
+      "line": 190,
+      "sourceDollarQuotedBodySha256": "73503956b51f119e83d6f5b573ef0f58eca037b78ffc9716c8a3c63890f9ba04",
+      "bodyHashIsServerCatalogObservation": false
+    },
+    {
+      "schema": "desmoslock_v2",
+      "name": "internal_baseline_status",
+      "sourceArguments": "",
+      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
+      "line": 211,
+      "sourceDollarQuotedBodySha256": "98a49da66cc31a5c9a6cf3fe3f22465bb3f360df4d1059f4a030a7e9259fe2d7",
+      "bodyHashIsServerCatalogObservation": false
+    }
+  ],
+  "expectedRlsEveryTable": true,
+  "expectedUserPolicies": 0,
+  "expectedUserTriggers": 0,
+  "expectedCustomSequencesViewsEnumsDomains": 0,
+  "limits": "Names and exact source body digests are source-derived expectations, not a generated PostgreSQL catalog baseline or observed hosted schema. Implicit object owners/default ACLs require comparison under the actual migration role; do not erase such differences."
+}
