@@ -109,42 +109,28 @@ function assertDetachedStudentView(
     session: null,
     pendingOperation: null,
   });
-  assert.deepEqual(Object.keys(view.protection).sort(), [
-    "calculatorVisible",
-    "categories",
-    "cleanup",
-    "emergencyReview",
-    "evidence",
-    "failure",
-    "nativeEndObserved",
-    "phase",
-  ]);
-  assert.equal(view.protection.phase, expectedProtectionPhase);
-  assert.equal(view.protection.calculatorVisible, false);
-  assert.equal(view.protection.nativeEndObserved, false);
-  assert.equal(view.protection.emergencyReview, false);
-  assert.deepEqual(Object.keys(view.protection.categories).sort(), [
-    "aac",
-    "applications",
-    "persistence",
-    "shortcuts",
-    "windowNetwork",
-  ]);
-  for (const category of Object.values(view.protection.categories)) {
-    assert.deepEqual(Object.keys(category).sort(), ["code", "status"]);
-    assert.ok(
-      ["pending", "confirmed", "failed", "unavailable"].includes(
-        category.status,
-      ),
-    );
-    assert.equal(typeof category.code, "string");
-  }
-  assert.notEqual(view.protection.categories.aac.status, "confirmed");
-  if (expectedProtectionPhase === "idle") {
-    assert.equal(view.protection.failure, null);
-    assert.equal(view.protection.cleanup, "not_requested");
-    assert.equal(view.protection.evidence, "none");
-  }
+  assert.ok(["idle", "recovery_required"].includes(expectedProtectionPhase));
+  const recoveryBlocked = expectedProtectionPhase === "recovery_required";
+  // Both an unreadable record and an unavailable native store leave this
+  // process unable to confirm an empty journal. Neither proves a native end.
+  assert.deepEqual(view.protection, {
+    phase: expectedProtectionPhase,
+    categories: {
+      aac: { status: "pending", code: "awaiting_native_begin" },
+      shortcuts: { status: "pending", code: "none" },
+      applications: { status: "pending", code: "none" },
+      persistence: recoveryBlocked
+        ? { status: "unavailable", code: "durability_unavailable" }
+        : { status: "pending", code: "none" },
+      windowNetwork: { status: "pending", code: "none" },
+    },
+    calculatorVisible: false,
+    failure: recoveryBlocked ? "persistence_unavailable" : null,
+    nativeEndObserved: false,
+    cleanup: recoveryBlocked ? "unconfirmed" : "not_requested",
+    evidence: recoveryBlocked ? "unconfirmed" : "none",
+    emergencyReview: false,
+  });
 }
 
 async function run(command, arguments_, options = {}) {
@@ -417,7 +403,7 @@ async function launchSyntheticCalculatorBuild(userDataDirectory, fixturePath) {
 async function inspectProductionShell(
   application,
   expectedPhase,
-  expectedProtectionPhase = "idle",
+  expectedProtectionPhase,
 ) {
   const shell = await application.firstWindow();
   await shell.waitForFunction(
@@ -460,20 +446,13 @@ async function inspectProductionShell(
     expectedPhase,
     expectedProtectionPhase,
   );
-  if (expectedProtectionPhase === "idle") {
-    const start = shell.locator('[data-action="start-assessment"]');
-    assert.equal(await start.isVisible(), true);
-    assert.equal(await start.isDisabled(), true);
-    assert.equal(
-      await shell.locator('[data-action="review-emergency"]').isVisible(),
-      false,
-    );
-  } else {
-    assert.equal(
-      await shell.locator('[data-action="start-assessment"]').isVisible(),
-      false,
-    );
-  }
+  const recoveryBlocked = expectedProtectionPhase === "recovery_required";
+  const start = shell.locator('[data-action="start-assessment"]');
+  const emergency = shell.locator('[data-action="review-emergency"]');
+  assert.equal(await start.isVisible(), !recoveryBlocked);
+  assert.equal(await start.isDisabled(), true);
+  assert.equal(await emergency.isVisible(), recoveryBlocked);
+  if (recoveryBlocked) assert.equal(await emergency.isDisabled(), false);
   const boundary = await application.evaluate(
     ({ BrowserWindow, webContents }, url) => ({
       calculators: webContents
@@ -533,10 +512,31 @@ async function inspectProductionShell(
         layout.width >= 500,
     );
     assert.equal(layout.overflow, false);
-    if (expectedPhase === "entry" || expectedPhase === "recovery_required") {
-      const input = shell.locator("#student-session-code");
+    const input = shell.locator("#student-session-code");
+    const submit = shell.locator('[data-action="submit-code"]');
+    if (recoveryBlocked) {
+      assert.equal(
+        await shell.locator(".student-session__code-form").isVisible(),
+        false,
+      );
+      assert.equal(await input.isVisible(), false);
+      for (const action of [
+        submit,
+        shell.locator('[data-action="open-recovery"]'),
+        shell.locator('[data-action="cancel-recovery"]'),
+      ]) {
+        assert.equal(await action.isVisible(), false);
+        assert.equal(await action.isDisabled(), true);
+      }
+      assert.equal(await emergency.isVisible(), true);
+      assert.equal(await emergency.isDisabled(), false);
+    } else {
+      assert.equal(expectedPhase, "entry");
       await input.scrollIntoViewIfNeeded();
       assert.equal(await input.isVisible(), true);
+      assert.equal(await input.isEditable(), true);
+      assert.equal(await submit.isVisible(), true);
+      assert.equal(await submit.isDisabled(), false);
       const usable = await input.evaluate((element) => {
         const box = element.getBoundingClientRect();
         return (
@@ -549,21 +549,9 @@ async function inspectProductionShell(
       assert.equal(
         usable,
         true,
-        "The detached calculator must not occlude join or recovery",
+        "The detached calculator must not occlude joining",
       );
     }
-  }
-  if (expectedPhase === "unavailable") {
-    await shell.locator('[data-action="open-recovery"]').click();
-    assert.equal(
-      await shell.locator("#student-session-code").isVisible(),
-      true,
-    );
-    assert.equal(
-      await shell.locator('label[for="student-session-code"]').textContent(),
-      "Private re-admission code",
-    );
-    await shell.locator('[data-action="cancel-recovery"]').click();
   }
   return { shellBoundary, boundary };
 }
@@ -1001,6 +989,7 @@ await runWithIndependentCleanup(async () => {
   const productionShell = await inspectProductionShell(
     application,
     process.platform === "darwin" ? "entry" : "unavailable",
+    process.platform === "darwin" ? "idle" : "recovery_required",
   );
   assert.deepEqual(await runInternalShellDenialProbe(application), {
     download: { count: 1, deniedByProductionPolicy: true },
