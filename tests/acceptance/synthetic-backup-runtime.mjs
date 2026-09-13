@@ -239,6 +239,49 @@ export function sourceConfiguration(text, project) {
   return output;
 }
 
+// This finite fixture inventory must stay closed over the versioned config's
+// template references; never copy arbitrary config-selected paths or directories.
+export async function materializeSourceFixture(
+  repositoryRoot,
+  sourceRoot,
+  sourceProject,
+  migrationFiles,
+) {
+  await fs.mkdir(path.join(sourceRoot, "supabase/migrations"), {
+    recursive: true,
+    mode: 0o700,
+  });
+  await fs.mkdir(path.join(sourceRoot, "supabase/templates"), {
+    recursive: true,
+    mode: 0o700,
+  });
+  const allowedInputs = [
+    "supabase/seed.sql",
+    "supabase/templates/recovery-v1.html",
+    "supabase/templates/confirmation-v1.html",
+    ...migrationFiles.map((file) => `supabase/migrations/${file}`),
+  ];
+  for (const relative of allowedInputs) {
+    requireFixture(
+      !relative.includes("..") && !relative.includes(".env"),
+      "VERSIONED_INPUT_INVALID",
+    );
+    await fs.copyFile(
+      path.join(repositoryRoot, relative),
+      path.join(sourceRoot, relative),
+    );
+  }
+  const config = await fs.readFile(
+    path.join(repositoryRoot, "supabase/config.toml"),
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(sourceRoot, "supabase/config.toml"),
+    sourceConfiguration(config, sourceProject),
+    { mode: 0o600 },
+  );
+}
+
 export function connectionFromStatus(status, expectedPort) {
   let url;
   try {
@@ -460,38 +503,12 @@ export async function runBackupRoundtrip(repositoryRoot, testSignal) {
     );
     const sourceRoot = path.join(workspace.directory, "source");
     const backupRoot = path.join(workspace.directory, "backup");
-    await fs.mkdir(path.join(sourceRoot, "supabase/migrations"), {
-      recursive: true,
-      mode: 0o700,
-    });
-    await fs.mkdir(path.join(sourceRoot, "supabase/templates"), {
-      recursive: true,
-      mode: 0o700,
-    });
     await fs.mkdir(backupRoot, { mode: 0o700 });
-    const allowedInputs = [
-      "supabase/seed.sql",
-      "supabase/templates/recovery-v1.html",
-      ...CURRENT_MIGRATION_FILES.map((file) => `supabase/migrations/${file}`),
-    ];
-    for (const relative of allowedInputs) {
-      requireFixture(
-        !relative.includes("..") && !relative.includes(".env"),
-        "VERSIONED_INPUT_INVALID",
-      );
-      await fs.copyFile(
-        path.join(repositoryRoot, relative),
-        path.join(sourceRoot, relative),
-      );
-    }
-    const config = await fs.readFile(
-      path.join(repositoryRoot, "supabase/config.toml"),
-      "utf8",
-    );
-    await fs.writeFile(
-      path.join(sourceRoot, "supabase/config.toml"),
-      sourceConfiguration(config, sourceProject),
-      { mode: 0o600 },
+    await materializeSourceFixture(
+      repositoryRoot,
+      sourceRoot,
+      sourceProject,
+      CURRENT_MIGRATION_FILES,
     );
     stage = "TARGET_SETUP";
     ownsTarget = true;
