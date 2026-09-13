@@ -279,6 +279,11 @@ select is((select revision from desmoslock_v2.student_sessions where device_sess
 insert into student_results select 'preflight-retry',pg_temp.evidence_ingest(jsonb_build_array(failure),2,repeat('E',42)||'A') from preflight_runtime;
 select is((select result->'acknowledged' from student_results where label='preflight-retry'),
   (select result->'acknowledged' from student_results where label='preflight-first'),'failure-first lost ACK returns exact original content and receipt');
+select is((select jsonb_build_object('reportCount',evidence_summary->'reportCount','failureCount',evidence_summary->'failureCount')
+  from desmoslock_v2.current_test_student_sessions(
+    '16000000-0000-4000-8000-000000000001','36000000-0000-4000-8000-000000000001',null,null)
+  where session_id=(select (result->>'student_session_id')::uuid from student_results where label='preflight-joined')),
+  '{"reportCount":1,"failureCount":1}'::jsonb,'Teacher summary counts the exact failure-only retry once');
 insert into student_results values ('preflight-before-denial',pg_temp.evidence_snapshot());
 select is(pg_temp.evidence_ingest(jsonb_build_array(cleanup),3,repeat('E',42)||'A')->>'code','student_session_denied',
   'cleanup cannot omit the committed initial failure') from preflight_runtime;
@@ -297,10 +302,17 @@ insert into student_results select 'preflight-cleanup',pg_temp.evidence_ingest(j
 select is((select result->>'code' from student_results where label='preflight-cleanup'),'ok','unchanged failure prefix appends cleanup');
 select is((select result->'acknowledged'->0 from student_results where label='preflight-cleanup'),
   (select result->'acknowledged'->0 from student_results where label='preflight-first'),'cleanup append preserves the original first receipt');
-select is((select evidence_summary->>'failureCount' from desmoslock_v2.current_test_student_sessions(
-  '16000000-0000-4000-8000-000000000001','36000000-0000-4000-8000-000000000001',null,null)
+-- Both immutable reports retain a failed application category. The summary
+-- counts failure-bearing reports, not distinct attempts or failure slots.
+select is((select jsonb_build_object('reportCount',evidence_summary->'reportCount','failureCount',evidence_summary->'failureCount')
+  from desmoslock_v2.current_test_student_sessions(
+    '16000000-0000-4000-8000-000000000001','36000000-0000-4000-8000-000000000001',null,null)
   where session_id=(select (result->>'student_session_id')::uuid from student_results where label='preflight-joined')),
-  '1','Teacher summary counts admitted preflight failure exactly once');
+  '{"reportCount":2,"failureCount":2}'::jsonb,'Teacher summary counts the failed initial and cleanup reports once each');
+select is((select count(*) from desmoslock_v2.current_student_protection_events(
+  '16000000-0000-4000-8000-000000000001','36000000-0000-4000-8000-000000000001',
+  (select (result->>'student_session_id')::uuid from student_results where label='preflight-joined'),null,null)
+  where fact->>'slot'='failure'),1::bigint,'Teacher history retains exactly one initiating failure after retry and cleanup');
 select ok((select bool_and(fact->>'phase'='failed' and fact->'nativeEvent'='null'::jsonb and fact->'nativeSequence'='null'::jsonb)
   from desmoslock_v2.current_student_protection_events('16000000-0000-4000-8000-000000000001','36000000-0000-4000-8000-000000000001',
     (select (result->>'student_session_id')::uuid from student_results where label='preflight-joined'),null,null)),
