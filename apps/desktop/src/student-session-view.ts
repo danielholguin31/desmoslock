@@ -501,6 +501,17 @@ export function bindStudentSessionView(
           failed: "Protection unavailable",
           recovery_required: "Assessment recovery required",
         }[state!.phase];
+    const admission = value?.admission;
+    const idleSummary =
+      admission?.phase === "entry"
+        ? "The calculator remains unavailable. Join a Test, then choose Start assessment to check protection."
+        : admission?.phase === "active"
+          ? "The calculator remains unavailable. Choose Start assessment to check protection."
+          : (admission?.phase === "unavailable" ||
+                admission?.phase === "unconfirmed") &&
+              admission.pendingOperation !== null
+            ? "The calculator remains unavailable. Retry or recover your saved session admission, then choose Start assessment to check protection."
+            : "The calculator remains unavailable. Follow the session guidance to confirm or recover admission before choosing Start assessment.";
     protectionSummary.textContent = !known
       ? "The calculator remains unavailable. Protection could not be checked. Follow your teacher’s instructions."
       : state!.phase === "recovery_required"
@@ -517,7 +528,9 @@ export function bindStudentSessionView(
               ? "The attempt did not establish confirmed protection. Local cleanup is complete. A new Start checks protection again."
               : state!.phase === "preflight" || state!.phase === "engaging"
                 ? "The calculator remains unavailable until native confirmation and all five checks are confirmed."
-                : "The calculator remains unavailable. Join a Test, then choose Start assessment to check protection.";
+                : state!.phase === "idle"
+                  ? idleSummary
+                  : "The calculator remains unavailable. Join a Test, then choose Start assessment to check protection.";
     type Code =
       DesktopStudentView["protection"]["categories"][Category]["code"];
     const categoryCopy: Record<Code, string> = {
