@@ -280,6 +280,7 @@ function createHarness(
     };
     readonly observeHealth?: () => Promise<BackendObservation>;
     readonly nextOperationId?: () => string;
+    readonly navigate?: (url: string) => void;
     readonly storage?: ReturnType<typeof createStorage>;
   } = {},
 ) {
@@ -343,6 +344,7 @@ function createHarness(
         },
       },
       operationIds: { next: options.nextOperationId ?? (() => operationId) },
+      ...(options.navigate === undefined ? {} : { navigate: options.navigate }),
       recoveryCrypto: globalThis.crypto,
       runtimeOrigin: "http://localhost:43173",
       storage: options.storage ?? createStorage(),
@@ -637,6 +639,97 @@ describe("staff auth application composition", () => {
     expect(harness.bindView).toHaveBeenCalledOnce();
     expect(harness.observeHealth).toHaveBeenCalledOnce();
   });
+
+  it("scrubs a mailed signup link and waits for a single explicit provider navigation", async () => {
+    const perform = vi.fn();
+    const read = vi.fn(async () => ({ kind: "signed_out" as const }));
+    const { adapter } = createAdapter({ perform, read });
+    const history = { replaceState: vi.fn() };
+    const navigate = vi.fn();
+    const flowId = "0123456789abcdef0123456789abcdef";
+    const token = `pkce_${"a".repeat(56)}`;
+    const harness = createHarness({
+      adapter,
+      history,
+      navigate,
+      callbackUrl: `http://localhost:43173/?auth=email-verification&sb_flow_id=${flowId}#token_hash=${token}&type=signup`,
+    });
+    expect(history.replaceState).toHaveBeenCalledWith(
+      staffAuthCallbackHistoryMarker,
+      "",
+      "/",
+    );
+    expect(navigate).not.toHaveBeenCalled();
+    await harness.application.ready;
+    const controller = harness.bindView.mock.calls[0]?.[1];
+    expect(controller?.getSnapshot()).toMatchObject({
+      kind: "callback_confirmation_required",
+    });
+    await harness.application.refreshMembership();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+    expect(perform).not.toHaveBeenCalled();
+    await controller?.dispatch({ type: "confirm_callback" });
+    expect(navigate).toHaveBeenCalledOnce();
+    const target = new URL(navigate.mock.calls[0]?.[0] as string);
+    expect(target.origin).toBe(configuration.url);
+    expect(target.pathname).toBe("/auth/v1/verify");
+    expect([...target.searchParams]).toEqual([
+      ["token", token],
+      ["type", "signup"],
+      [
+        "redirect_to",
+        `http://localhost:43173/?auth=email-verification&sb_flow_id=${flowId}`,
+      ],
+    ]);
+    expect(controller?.getSnapshot()).toMatchObject({
+      kind: "processing_email_verification_callback",
+    });
+    expect(JSON.stringify(controller?.getSnapshot())).not.toContain(token);
+    await controller?.dispatch({ type: "confirm_callback" });
+    expect(navigate).toHaveBeenCalledOnce();
+    expect(perform).not.toHaveBeenCalled();
+  });
+
+  it.each(["back", "navigation failure"])(
+    "discards mailed confirmation after %s",
+    async (scenario) => {
+      const perform = vi.fn(async (request: StaffAuthMutation) => {
+        if (request.type !== "reset_to_sign_in")
+          throw new Error("unexpected provider mutation");
+        return {
+          operationId: request.operationId,
+          result: { kind: "reset_to_sign_in_complete" as const },
+        };
+      });
+      const navigate = vi.fn(() => {
+        if (scenario === "navigation failure")
+          throw new Error("navigation failed");
+      });
+      const harness = createHarness({
+        adapter: createAdapter({ perform }).adapter,
+        navigate,
+        callbackUrl: `http://localhost:43173/?auth=email-verification&sb_flow_id=0123456789abcdef0123456789abcdef#token_hash=pkce_${"a".repeat(56)}&type=signup`,
+      });
+      await harness.application.ready;
+      const controller = harness.bindView.mock.calls[0]?.[1];
+      if (scenario === "back") {
+        await controller?.dispatch({ type: "back_to_sign_in" });
+        expect(controller?.getSnapshot()).toMatchObject({ kind: "signed_out" });
+      } else {
+        await controller?.dispatch({ type: "confirm_callback" });
+        expect(controller?.getSnapshot()).toMatchObject({
+          kind: "callback_rejected",
+          code: "token_consumption_unavailable",
+        });
+      }
+      await controller?.dispatch({ type: "confirm_callback" });
+      expect(navigate).toHaveBeenCalledTimes(scenario === "back" ? 0 : 1);
+      expect(perform.mock.calls.map(([request]) => request.type)).toEqual(
+        scenario === "back" ? ["reset_to_sign_in"] : [],
+      );
+    },
+  );
 
   it("waits for explicit confirmation before exchanging an email-verification callback", async () => {
     let resolveMutation:

@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -17,7 +17,10 @@ import {
   parseUpdateSchoolDisplayNameRpcResult,
 } from "@desmoslock/contracts";
 
-import { prepareStaffRecoveryCallback } from "../../apps/web/src/auth/staff-auth-callback.ts";
+import {
+  prepareStaffEmailVerificationCallback,
+  prepareStaffRecoveryCallback,
+} from "../../apps/web/src/auth/staff-auth-callback.ts";
 import { createBackendProbe } from "../../supabase/functions/health/index.ts";
 
 export const API_ORIGIN = "http://127.0.0.1:54321";
@@ -669,6 +672,372 @@ function exactRecipient(message, recipient) {
     (message.Cc?.length ?? 0) === 0 &&
     (message.Bcc?.length ?? 0) === 0
   );
+}
+
+async function mailedConfirmationCallback(recipient, resend) {
+  check(
+    /^composed-confirmation-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}@example\.invalid$/u.test(
+      recipient,
+    ),
+    "Confirmation capture requires the run-owned synthetic recipient",
+  );
+  const search = new URL("/api/v1/search", MAILPIT_ORIGIN);
+  search.searchParams.set("query", `to:${recipient}`);
+  search.searchParams.set("start", "0");
+  search.searchParams.set("limit", "2");
+  const initial = await mailpitJson(search);
+  check(
+    initial.messages_count === 0 &&
+      Array.isArray(initial.messages) &&
+      initial.messages.length === 0,
+    "Confirmation capture requires an unused synthetic recipient mailbox",
+  );
+  await resend();
+  const deadline = Date.now() + 15_000;
+  let summary;
+  while (Date.now() < deadline) {
+    const result = await mailpitJson(search);
+    check(
+      Array.isArray(result.messages) &&
+        Number.isInteger(result.messages_count) &&
+        result.messages_count >= 0 &&
+        result.messages_count <= 1 &&
+        result.messages.length === result.messages_count,
+      "Confirmation capture returned an ambiguous mailbox result",
+    );
+    if (result.messages_count === 1) {
+      summary = result.messages[0];
+      break;
+    }
+    await delay(200);
+  }
+  check(
+    exactRecipient(summary, recipient) &&
+      typeof summary.ID === "string" &&
+      /^[A-Za-z0-9_-]{1,80}$/u.test(summary.ID),
+    "Confirmation mail was not captured for the exact synthetic recipient",
+  );
+  const message = await mailpitJson(
+    new URL(`/api/v1/message/${summary.ID}`, MAILPIT_ORIGIN),
+  );
+  check(
+    message.ID === summary.ID &&
+      exactRecipient(message, recipient) &&
+      typeof message.HTML === "string" &&
+      message.HTML.length < 100_000,
+    "Confirmation mail detail did not match its synthetic recipient",
+  );
+  const links = [
+    ...message.HTML.matchAll(
+      /<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')[^>]*>/giu,
+    ),
+  ];
+  check(
+    links.length === 1,
+    "Confirmation mail omitted its unique application action",
+  );
+  // Decode HTML escaping only; never fetch the inert callback or alter its token.
+  return (links[0][1] ?? links[0][2]).replaceAll("&amp;", "&");
+}
+
+// Genuine local SMTP signup resend, using the same production callback parser
+// and SDK PKCE exchange as the app. Browser and hosted delivery are separate gates.
+export async function confirmationSession(recipient, publishableKey) {
+  let sdkRequests = 0;
+  let verificationRequests = 0;
+  let redirectTo;
+  let challenge;
+  let authorizationCode;
+  let action;
+  let installed;
+  let scrubs = 0;
+  let exchanges = 0;
+  const supabase = createClient(API_ORIGIN, publishableKey, {
+    auth: {
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+      persistSession: false,
+      debug: false,
+      flowType: "pkce",
+      experimental: { appendPkceFlowIdToRedirects: true },
+    },
+    global: {
+      async fetch(input, init) {
+        const endpoint = new URL(input instanceof Request ? input.url : input);
+        if (endpoint.pathname === "/auth/v1/resend") {
+          const body = json(init?.body);
+          redirectTo = endpoint.searchParams.get("redirect_to");
+          challenge = body.code_challenge;
+          check(
+            sdkRequests === 0 &&
+              init?.method === "POST" &&
+              body.email === recipient &&
+              body.type === "signup" &&
+              body.code_challenge_method === "s256" &&
+              /^[A-Za-z0-9_-]{43}$/u.test(challenge ?? ""),
+            "Real signup resend did not use its exact recipient and S256 challenge",
+          );
+        } else if (
+          endpoint.pathname === "/auth/v1/token" &&
+          endpoint.searchParams.get("grant_type") === "pkce"
+        ) {
+          const body = json(init?.body);
+          check(
+            sdkRequests === 1 &&
+              verificationRequests === 1 &&
+              init?.method === "POST" &&
+              typeof authorizationCode === "string" &&
+              body.auth_code === authorizationCode &&
+              typeof body.code_verifier === "string" &&
+              createHash("sha256")
+                .update(body.code_verifier)
+                .digest("base64url") === challenge,
+            "Confirmation exchange did not bind the real code to its SDK verifier",
+          );
+        } else {
+          check(
+            installed !== undefined,
+            "Confirmation attempted unexpected provider egress before completion",
+          );
+        }
+        sdkRequests += 1;
+        return loopbackFetch(input, init);
+      },
+    },
+  });
+  const mailedCallback = await mailedConfirmationCallback(recipient, () =>
+    auth(() =>
+      supabase.auth.resend({
+        type: "signup",
+        email: recipient,
+        options: { emailRedirectTo: `${WEB_ORIGIN}/?auth=email-verification` },
+      }),
+    ),
+  );
+  let callback;
+  try {
+    callback = new URL(mailedCallback);
+  } catch {
+    throw new Error("Invalid mailed confirmation callback; details redacted");
+  }
+  const tokenHash = new URLSearchParams(callback.hash.slice(1)).get(
+    "token_hash",
+  );
+  const flowId = callback.searchParams.get("sb_flow_id");
+  check(
+    typeof redirectTo === "string" &&
+      /^[A-Za-z0-9_-]{8,64}$/u.test(flowId ?? "") &&
+      /^pkce_[0-9a-f]{56}$/u.test(tokenHash ?? "") &&
+      redirectTo ===
+        `${WEB_ORIGIN}/?auth=email-verification&sb_flow_id=${flowId}` &&
+      mailedCallback === `${redirectTo}#token_hash=${tokenHash}&type=signup` &&
+      callback.href === mailedCallback &&
+      callback.origin === WEB_ORIGIN &&
+      !callback.username &&
+      !callback.password,
+    "Mailed confirmation changed the SDK flow ID, token, or inert template route",
+  );
+  const callbackOptions = {
+    backendOrigin: API_ORIGIN,
+    route: { origin: WEB_ORIGIN, pathname: "/" },
+    history: {
+      replaceState(data, unused, url) {
+        check(
+          data === null && unused === "" && url === "/",
+          "Confirmation callback did not synchronously scrub its sensitive route",
+        );
+        scrubs += 1;
+      },
+    },
+    navigate(url) {
+      let parsed;
+      try {
+        parsed = new URL(url);
+      } catch {
+        throw new Error("Invalid confirmation navigation; details redacted");
+      }
+      check(
+        action === undefined &&
+          parsed.href === url &&
+          parsed.origin === API_ORIGIN &&
+          parsed.pathname === "/auth/v1/verify" &&
+          !parsed.username &&
+          !parsed.password &&
+          !parsed.hash &&
+          [...parsed.searchParams].length === 3 &&
+          parsed.searchParams.get("token") === tokenHash &&
+          parsed.searchParams.get("type") === "signup" &&
+          parsed.searchParams.get("redirect_to") === redirectTo,
+        "Confirmation navigation altered its credential or loopback provider route",
+      );
+      action = parsed;
+    },
+    async exchange(input) {
+      check(
+        installed === undefined &&
+          input.flowId === flowId &&
+          input.authorizationCode === authorizationCode,
+        "Confirmation callback changed the real provider code or SDK flow ID",
+      );
+      exchanges += 1;
+      installed = await auth(() =>
+        supabase.auth.exchangeCodeForSession(input.authorizationCode, {
+          flowId: input.flowId,
+        }),
+      );
+    },
+  };
+  const rejectForeignRoutes = (url) => {
+    for (const foreign of [
+      url.replace(WEB_ORIGIN, "https://foreign.example.invalid"),
+      url.replace(`${WEB_ORIGIN}/?`, `${WEB_ORIGIN}/foreign?`),
+    ]) {
+      const before = [sdkRequests, verificationRequests, exchanges, scrubs];
+      const rejected = prepareStaffEmailVerificationCallback(
+        foreign,
+        callbackOptions,
+      );
+      check(
+        rejected.status === "rejected" &&
+          sdkRequests === before[0] &&
+          verificationRequests === before[1] &&
+          exchanges === before[2] &&
+          scrubs === before[3] + 1,
+        "Foreign confirmation route was not scrubbed and rejected without egress",
+      );
+    }
+  };
+  rejectForeignRoutes(mailedCallback);
+  const beforePrepare = scrubs;
+  const prepared = prepareStaffEmailVerificationCallback(
+    mailedCallback,
+    callbackOptions,
+  );
+  check(
+    prepared.status === "confirmation_required" &&
+      scrubs === beforePrepare + 1 &&
+      action === undefined &&
+      installed === undefined &&
+      sdkRequests === 1 &&
+      verificationRequests === 0 &&
+      exchanges === 0,
+    "Opening confirmation mail did not scrub synchronously without provider egress",
+  );
+  const confirmed = await prepared.confirm();
+  check(
+    confirmed.status === "redirecting" &&
+      action !== undefined &&
+      sdkRequests === 1 &&
+      verificationRequests === 0,
+    "Explicit email confirmation did not prepare its guarded verification hop",
+  );
+  const confirmReplay = await prepared.confirm();
+  check(
+    confirmReplay.status === "rejected" &&
+      confirmReplay.code === "callback_already_used" &&
+      sdkRequests === 1 &&
+      verificationRequests === 0,
+    "Confirmation command replay was not rejected before transport",
+  );
+  const verify = async () => {
+    // The navigation seam above checked the complete request, including the
+    // untouched pkce_ token. Only this guarded loopback GET may return a redirect.
+    verificationRequests += 1;
+    let response;
+    try {
+      response = await fetch(action, {
+        redirect: "manual",
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch {
+      throw new Error(
+        "Confirmation verification did not complete; details redacted",
+      );
+    }
+    const redirect = response.headers.get("location");
+    await response.body?.cancel();
+    check(
+      response.status === 303 && typeof redirect === "string",
+      "Provider signup verification GET did not return its redirect",
+    );
+    return redirect;
+  };
+  const returned = await verify();
+  let returnedUrl;
+  try {
+    returnedUrl = new URL(returned);
+  } catch {
+    throw new Error("Invalid confirmation code redirect; details redacted");
+  }
+  authorizationCode = returnedUrl.searchParams.get("code");
+  check(
+    returnedUrl.origin === WEB_ORIGIN &&
+      returnedUrl.pathname === "/" &&
+      returnedUrl.hash === "" &&
+      returnedUrl.searchParams.get("auth") === "email-verification" &&
+      returnedUrl.searchParams.get("sb_flow_id") === flowId &&
+      typeof authorizationCode === "string" &&
+      authorizationCode.length > 0,
+    "Provider signup verification did not return its real query code and SDK flow ID",
+  );
+  // Inspect and scrub the real return; never fetch the inert application origin.
+  rejectForeignRoutes(returned);
+  const beforeReturn = scrubs;
+  const completed = prepareStaffEmailVerificationCallback(
+    returned,
+    callbackOptions,
+  );
+  check(
+    completed.status === "exchange_required" &&
+      scrubs === beforeReturn + 1 &&
+      installed === undefined &&
+      sdkRequests === 1 &&
+      exchanges === 0,
+    "Provider code callback exchanged before its synchronous scrub completed",
+  );
+  const exchanged = await completed.exchange();
+  check(
+    exchanged.status === "accepted" &&
+      installed?.session != null &&
+      sdkRequests === 2 &&
+      exchanges === 1,
+    "Production confirmation callback did not exchange the real SDK PKCE flow",
+  );
+  const exchangeReplay = await completed.exchange();
+  check(
+    exchangeReplay.status === "rejected" &&
+      exchangeReplay.code === "callback_already_used" &&
+      sdkRequests === 2 &&
+      exchanges === 1,
+    "Confirmation code command replay reached the provider",
+  );
+  const providerReplay = await verify();
+  const beforeReplay = scrubs;
+  const replay = prepareStaffEmailVerificationCallback(
+    providerReplay,
+    callbackOptions,
+  );
+  let replayUrl;
+  try {
+    replayUrl = new URL(providerReplay);
+  } catch {
+    throw new Error("Invalid confirmation replay redirect; details redacted");
+  }
+  const replayError =
+    replayUrl.searchParams.get("error_code") ??
+    new URLSearchParams(replayUrl.hash.slice(1)).get("error_code");
+  check(
+    replayUrl.origin === WEB_ORIGIN &&
+      replayUrl.pathname === "/" &&
+      replayError === "otp_expired" &&
+      replay.status === "rejected" &&
+      scrubs === beforeReplay + 1 &&
+      sdkRequests === 2 &&
+      verificationRequests === 2 &&
+      exchanges === 1,
+    "Real provider confirmation-token replay was not expired and inert",
+  );
+  return { session: installed.session, supabase };
 }
 
 async function mailedRecoveryCallback(recipient, supabase, redirectTo) {

@@ -18,6 +18,10 @@ invitations, completed callbacks, and cross-browser session revocation require
 separate runtime evidence; health and the local schema verification lane do not
 claim those journeys.
 
+Signup-confirmation resend uses the versioned inert application link described in
+[signup-confirmation-resend.md](signup-confirmation-resend.md). Its template is
+canonical product source; a hosted template rollout is a separate operation.
+
 Membership administration enforces authority separately for each School.
 Owners can invite and revoke Admins or Teachers and change those Membership
 roles; Admins can invite and revoke Teachers; Teachers cannot administer staff.
