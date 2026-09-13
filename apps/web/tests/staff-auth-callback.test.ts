@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   consumeStaffEmailVerificationCallback,
   consumeStaffInvitationCallback,
+  prepareStaffEmailVerificationCallback,
   prepareStaffRecoveryCallback,
 } from "../src/auth/staff-auth-callback.js";
 
@@ -265,6 +266,198 @@ describe("staff email-verification callback", () => {
     });
     expect(JSON.stringify(receipt)).not.toContain(authorizationCode);
     expect(JSON.stringify(receipt)).not.toContain(sdkFlowId);
+  });
+});
+
+describe("mailed signup confirmation", () => {
+  const token = `pkce_${tokenHash}`;
+  const firstHop = `${origin}/?auth=email-verification&sb_flow_id=${sdkFlowId}#token_hash=${token}&type=signup`;
+
+  it("scrubs an inert link and navigates only once after explicit confirmation", async () => {
+    const order: string[] = [];
+    const exchange = vi.fn(async () => undefined);
+    const navigate = vi.fn();
+    const prepared = prepareStaffEmailVerificationCallback(firstHop, {
+      backendOrigin,
+      exchange,
+      history: history(order),
+      navigate,
+      route,
+    });
+    expect(order).toEqual(["scrub:/"]);
+    await Promise.resolve();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(exchange).not.toHaveBeenCalled();
+    expect(JSON.stringify(prepared)).not.toContain(token);
+    expect(JSON.stringify(prepared)).not.toContain(sdkFlowId);
+    expect(prepared.status).toBe("confirmation_required");
+    if (prepared.status !== "confirmation_required")
+      throw new Error("missing confirmation");
+    await expect(prepared.confirm()).resolves.toEqual({
+      code: "email_verification_started",
+      status: "redirecting",
+    });
+    expect(navigate).toHaveBeenCalledOnce();
+    const expected = new URL("/auth/v1/verify", backendOrigin);
+    expected.searchParams.set("token", token);
+    expected.searchParams.set("type", "signup");
+    expected.searchParams.set(
+      "redirect_to",
+      `${origin}/?auth=email-verification&sb_flow_id=${sdkFlowId}`,
+    );
+    expect(navigate).toHaveBeenCalledWith(expected.href);
+    await expect(prepared.confirm()).resolves.toEqual({
+      code: "callback_already_used",
+      status: "rejected",
+    });
+    expect(navigate).toHaveBeenCalledOnce();
+    expect(exchange).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["foreign origin", firstHop.replace(origin, "https://foreign.example")],
+    ["credentials", firstHop.replace("https://", "https://user@")],
+    ["wrong path", firstHop.replace("/?auth", "/callback?auth")],
+    [
+      "direct provider link",
+      `${backendOrigin}/auth/v1/verify?token=${token}&type=signup`,
+    ],
+    ["non-PKCE token", firstHop.replace(token, tokenHash)],
+    ["encoded token", firstHop.replace(token, `%70${token.slice(1)}`)],
+    ["duplicate token", `${firstHop}&token_hash=${token}`],
+    ["duplicate type", `${firstHop}&type=signup`],
+    ["wrong type", firstHop.replace("type=signup", "type=recovery")],
+    ["query token", firstHop.replace("#token_hash", "&token_hash")],
+    ["encoded auth", firstHop.replace("auth=", "a%75th=")],
+    ["encoded flow", firstHop.replace("sb_flow_id=", "sb%5fflow_id=")],
+    [
+      "duplicate auth",
+      firstHop.replace("&sb_flow_id", "&auth=email-verification&sb_flow_id"),
+    ],
+    [
+      "duplicate flow",
+      firstHop.replace("#token_hash", `&sb_flow_id=${sdkFlowId}#token_hash`),
+    ],
+    ["missing flow", firstHop.replace(`&sb_flow_id=${sdkFlowId}`, "")],
+    ["short flow", firstHop.replace(sdkFlowId, "short")],
+    ["mixed code", firstHop.replace("#token_hash", "&code=code#token_hash")],
+    [
+      "unknown routing",
+      firstHop.replace("#token_hash", "&next=/school#token_hash"),
+    ],
+    ["unknown fragment", `${firstHop}&next=/school`],
+    [
+      "empty fragment",
+      `${origin}/?auth=email-verification&sb_flow_id=${sdkFlowId}&code=code#`,
+    ],
+  ])(
+    "rejects %s without navigation or exchange",
+    async (_label, callbackUrl) => {
+      const order: string[] = [];
+      const navigate = vi.fn();
+      const exchange = vi.fn(async () => undefined);
+      const prepared = prepareStaffEmailVerificationCallback(callbackUrl, {
+        backendOrigin,
+        exchange,
+        history: history(order),
+        navigate,
+        route,
+      });
+      expect(order).toEqual(["scrub:/"]);
+      expect(prepared.status).toBe("rejected");
+      expect(navigate).not.toHaveBeenCalled();
+      expect(exchange).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    undefined,
+    "https://user@project.supabase.co",
+    "https://project.supabase.co/path",
+    "https://project.supabase.co?x=1",
+    "https://project.supabase.co#x",
+    "http://project.supabase.co",
+  ])(
+    "rejects an absent or noncanonical provider origin %s",
+    (configuredOrigin) => {
+      const navigate = vi.fn();
+      expect(
+        prepareStaffEmailVerificationCallback(firstHop, {
+          ...(configuredOrigin === undefined
+            ? {}
+            : { backendOrigin: configuredOrigin }),
+          exchange: vi.fn(),
+          history: history(),
+          navigate,
+          route,
+        }).status,
+      ).toBe("rejected");
+      expect(navigate).not.toHaveBeenCalled();
+    },
+  );
+
+  it("requires a navigation boundary and consumes a failed confirmation without leaking it", async () => {
+    expect(
+      prepareStaffEmailVerificationCallback(firstHop, {
+        backendOrigin,
+        exchange: vi.fn(),
+        history: history(),
+        route,
+      }).status,
+    ).toBe("rejected");
+    const navigate = vi.fn(() => {
+      throw new Error(token);
+    });
+    const prepared = prepareStaffEmailVerificationCallback(firstHop, {
+      backendOrigin,
+      exchange: vi.fn(),
+      history: history(),
+      navigate,
+      route,
+    });
+    if (prepared.status !== "confirmation_required")
+      throw new Error("missing confirmation");
+    await expect(prepared.confirm()).resolves.toEqual({
+      code: "token_consumption_unavailable",
+      status: "rejected",
+    });
+    await expect(prepared.confirm()).resolves.toEqual({
+      code: "callback_already_used",
+      status: "rejected",
+    });
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the returned opaque code and SDK flow bound to one explicit exchange", async () => {
+    const code = "opaque+code/with=padding";
+    const exchange = vi.fn(async () => undefined);
+    const navigate = vi.fn();
+    const prepared = prepareStaffEmailVerificationCallback(
+      `${origin}/?auth=email-verification&sb_flow_id=${sdkFlowId}&code=${encodeURIComponent(code)}`,
+      {
+        backendOrigin,
+        exchange,
+        history: history(),
+        navigate,
+        route,
+      },
+    );
+    expect(exchange).not.toHaveBeenCalled();
+    if (prepared.status !== "exchange_required")
+      throw new Error("missing exchange");
+    expect(JSON.stringify(prepared)).not.toContain(code);
+    await expect(prepared.exchange()).resolves.toMatchObject({
+      status: "accepted",
+    });
+    expect(exchange).toHaveBeenCalledExactlyOnceWith({
+      authorizationCode: code,
+      flowId: sdkFlowId,
+    });
+    await expect(prepared.exchange()).resolves.toMatchObject({
+      code: "callback_already_used",
+    });
+    expect(exchange).toHaveBeenCalledOnce();
+    expect(navigate).not.toHaveBeenCalled();
   });
 });
 

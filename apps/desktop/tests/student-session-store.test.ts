@@ -9,6 +9,7 @@ import {
 import { createStudentSessionCrypto } from "../src/main/student-session-crypto.js";
 import {
   createStudentSessionStore,
+  canReplaceInitialJoin,
   emptyNativeEvidence,
   retainNativeEvidenceSigner,
   pruneNativeEvidence,
@@ -35,15 +36,18 @@ const configuration = {
 const crypto = createStudentSessionCrypto(configuration);
 const requestId = "10000000-0000-4000-8000-000000000001";
 
-function pending(): StudentSessionSuccessor {
+function pending(
+  outcome: "not_dispatched" | "uncertain" | "denied" = "not_dispatched",
+): StudentSessionSuccessor {
   return {
-    version: 3,
+    version: 4,
     apiOrigin: configuration.url,
     device: crypto.createEnrollment(),
     current: null,
     pending: {
       kind: "join",
       admissionMode: "initial",
+      outcome,
       requestId,
       joinCode: "0123456789AB",
       candidates: crypto.createCandidates(),
@@ -327,13 +331,22 @@ function batchFor(
   };
 }
 
+function checksumPayload(payload: object): object {
+  return {
+    ...payload,
+    integritySha256: createHash("sha256")
+      .update(JSON.stringify(payload), "utf8")
+      .digest("hex"),
+  };
+}
+
 function persisted(value: unknown): Buffer {
   let disk = value;
   if (
     typeof value === "object" &&
     value !== null &&
     "version" in value &&
-    value.version === 3 &&
+    (value.version === 3 || value.version === 4) &&
     "evidence" in value
   ) {
     const record = value as StudentSessionRecord;
@@ -349,6 +362,13 @@ function persisted(value: unknown): Buffer {
       },
     };
   }
+  if (
+    typeof disk === "object" &&
+    disk !== null &&
+    "version" in disk &&
+    disk.version === 4
+  )
+    disk = checksumPayload(disk);
   return Buffer.from(`synthetic:${JSON.stringify(disk)}`);
 }
 
@@ -596,7 +616,307 @@ function worstEvidenceRecord(attemptCount: number): StudentSessionRecord {
   return record;
 }
 
-describe("version 3 bounded native evidence retention", () => {
+describe("version 4 whole-payload corruption checksum", () => {
+  it("stores the compact payload SHA-256 while keeping the in-memory record checksum-free", async () => {
+    const f = fixture();
+    await f.store.load();
+    const record = await f.store.commitDurably(0, withProtection());
+    const disk = JSON.parse(f.getBytes()!.toString().slice(10)) as Record<
+      string,
+      unknown
+    >;
+    const digest = disk.integritySha256;
+    delete disk.integritySha256;
+    expect(digest).toBe(
+      createHash("sha256").update(JSON.stringify(disk), "utf8").digest("hex"),
+    );
+    expect(record).not.toHaveProperty("integritySha256");
+    expect(Object.keys(disk)).toEqual(Object.keys(record));
+    expect(await createStudentSessionStore(f.options).load()).toEqual({
+      kind: "ready",
+      record,
+    });
+  });
+
+  it.each(["generation", "device", "counter", "outcome", "native", "evidence"])(
+    "rejects schema-valid %s corruption with the original checksum and retains all bytes",
+    async (field) => {
+      const base: StudentSessionRecord = {
+        ...(field === "device" || field === "outcome"
+          ? pending("uncertain")
+          : withProtection()),
+        generation: 5,
+      };
+      let changed: StudentSessionRecord = base;
+      if (field === "generation") changed = { ...base, generation: 6 };
+      if (field === "device")
+        changed = { ...base, device: crypto.createEnrollment() };
+      if (field === "counter") changed = { ...base, lastReservedCounter: 20 };
+      if (field === "outcome") {
+        if (base.pending?.kind !== "join") throw new Error("fixture");
+        changed = { ...base, pending: { ...base.pending, outcome: "denied" } };
+      }
+      if (field === "native") {
+        if (base.nativeProtection === null) throw new Error("fixture");
+        changed = {
+          ...base,
+          nativeProtection: {
+            ...base.nativeProtection,
+            revision: base.nativeProtection.revision + 1,
+          },
+        };
+      }
+      if (field === "evidence")
+        changed = {
+          ...base,
+          evidence: {
+            ...base.evidence,
+            lastAttemptedSigner: base.device.keyThumbprint,
+          },
+        };
+      const valid = fixture();
+      valid.setBytes(persisted(changed));
+      expect(await valid.store.load()).toEqual({
+        kind: "ready",
+        record: changed,
+      });
+      const originalDisk = JSON.parse(
+        persisted(base).toString().slice(10),
+      ) as Record<string, unknown>;
+      const corruptDisk = JSON.parse(
+        persisted(changed).toString().slice(10),
+      ) as Record<string, unknown>;
+      corruptDisk.integritySha256 = originalDisk.integritySha256;
+      const corruptBytes = Buffer.from(
+        `synthetic:${JSON.stringify(corruptDisk)}`,
+      );
+      const f = fixture();
+      f.setBytes(corruptBytes);
+      expect(await f.store.load()).toEqual({
+        kind: "recovery_required",
+        generation: 0,
+      });
+      await expect(f.store.commitDurably(0, changed)).rejects.toThrow();
+      expect(f.events).toEqual(["lock", "load", "decrypt"]);
+      expect(f.getBytes()).toEqual(corruptBytes);
+      expect(f.preserved).toEqual([]);
+    },
+  );
+
+  it.each([
+    undefined,
+    null,
+    0,
+    "",
+    "a".repeat(63),
+    "A".repeat(64),
+    "0".repeat(64),
+    "a".repeat(64) + "\n",
+  ])(
+    "rejects missing, malformed or mismatched checksum %j without rewriting or quarantining",
+    async (integritySha256) => {
+      const disk = JSON.parse(
+        persisted({ ...admitted(), generation: 1 })
+          .toString()
+          .slice(10),
+      ) as Record<string, unknown>;
+      disk.integritySha256 = integritySha256;
+      const bytes = Buffer.from(`synthetic:${JSON.stringify(disk)}`);
+      const f = fixture();
+      f.setBytes(bytes);
+      expect(await f.store.load()).toEqual({
+        kind: "recovery_required",
+        generation: 0,
+      });
+      expect(f.getBytes()).toEqual(bytes);
+      expect(f.events).toEqual(["lock", "load", "decrypt"]);
+      expect(f.preserved).toEqual([]);
+    },
+  );
+
+  it("rejects a version downgrade retaining the checksum and extra fields even with a recomputed checksum", async () => {
+    const disk = JSON.parse(
+      persisted({ ...admitted(), generation: 1 })
+        .toString()
+        .slice(10),
+    ) as Record<string, unknown>;
+    const downgraded = { ...disk, version: 3 };
+    delete disk.integritySha256;
+    const extra = checksumPayload({ ...disk, unexpected: false });
+    for (const payload of [downgraded, extra]) {
+      const bytes = Buffer.from(`synthetic:${JSON.stringify(payload)}`);
+      const f = fixture();
+      f.setBytes(bytes);
+      expect(await f.store.load()).toEqual({
+        kind: "recovery_required",
+        generation: 0,
+      });
+      expect(f.getBytes()).toEqual(bytes);
+      expect(f.events).toEqual(["lock", "load", "decrypt"]);
+    }
+  });
+});
+
+describe("version 4 initial join outcome", () => {
+  it.each(["not_dispatched", "uncertain", "denied"] as const)(
+    "round-trips initial outcome %s without changing the enrollment or stored payload",
+    async (outcome) => {
+      const f = fixture();
+      const record = pending(outcome);
+      await f.store.load();
+      const written = await f.store.commitDurably(0, record);
+      expect(written).toEqual({ ...record, generation: 1 });
+      expect(f.getBytes()).toEqual(persisted(written));
+      expect(await createStudentSessionStore(f.options).load()).toEqual({
+        kind: "ready",
+        record: written,
+      });
+      expect(written.device).toEqual(record.device);
+      expect(Object.isFrozen(written.pending)).toBe(true);
+    },
+  );
+
+  it.each([1, 2, 3])(
+    "normalizes v%i initial and readmission joins as uncertain without rewriting bytes",
+    async (version) => {
+      for (const admissionMode of ["initial", "readmission"] as const) {
+        const record = pending("uncertain");
+        if (record.pending?.kind !== "join") throw new Error("fixture");
+        const expected = {
+          ...record,
+          generation: 7,
+          pending: { ...record.pending, admissionMode },
+        };
+        const oldJoin: Record<string, unknown> = { ...expected.pending };
+        delete oldJoin.outcome;
+        const legacy: Record<string, unknown> = {
+          ...expected,
+          version,
+          pending: oldJoin,
+        };
+        if (version < 3) delete legacy.evidence;
+        if (version === 1) delete legacy.nativeProtection;
+        const original = persisted(legacy);
+        const f = fixture();
+        f.setBytes(original);
+        expect(await f.store.load()).toEqual({
+          kind: "ready",
+          record: expected,
+        });
+        expect(f.getBytes()).toEqual(original);
+        expect(f.events).toEqual(["lock", "load", "decrypt"]);
+        expect(canReplaceInitialJoin(expected)).toBe(false);
+        const written = await f.store.commitDurably(7, expected);
+        expect(written.version).toBe(4);
+        expect(written.pending).toEqual(expected.pending);
+        expect(f.getBytes()).toEqual(persisted(written));
+      }
+    },
+  );
+
+  it("normalizes compact v3 evidence without rewriting origins, counters or bytes", async () => {
+    const record = worstEvidenceRecord(5);
+    const original = persisted({ ...record, version: 3 });
+    const f = fixture();
+    f.setBytes(original);
+    expect(await f.store.load()).toEqual({ kind: "ready", record });
+    expect(f.getBytes()).toEqual(original);
+    expect(f.events).toEqual(["lock", "load", "decrypt"]);
+  });
+
+  it.each([undefined, null, false, 0, "", "accepted", "DENIED", {}])(
+    "preserves v4 bytes and rejects malformed initial outcome %j before publication",
+    async (outcome) => {
+      const record = pending();
+      const malformed = {
+        ...record,
+        pending: { ...record.pending, outcome },
+      };
+      const f = fixture();
+      await f.store.load();
+      await expect(
+        f.store.commitDurably(0, malformed as StudentSessionSuccessor),
+      ).rejects.toThrow();
+      expect(f.events).toEqual(["lock", "load"]);
+      const original = persisted({ ...malformed, generation: 1 });
+      f.setBytes(original);
+      expect(await f.store.load()).toEqual({
+        kind: "recovery_required",
+        generation: 0,
+      });
+      expect(f.getBytes()).toEqual(original);
+    },
+  );
+
+  it.each(["not_dispatched", "denied"] as const)(
+    "requires no prior state for replaceable outcome %s",
+    async (outcome) => {
+      const base = pending(outcome);
+      const history = worstEvidenceRecord(5);
+      const emptyJournal: StoredNativeProtection = {
+        policyVersion: 1,
+        revision: 0,
+        latestAttempt: null,
+        nextFactSequence: 1,
+        facts: [],
+      };
+      const evidenceVariants: StoredNativeEvidence[] = [
+        { ...base.evidence, origins: history.evidence.origins },
+        { ...base.evidence, acknowledgments: history.evidence.acknowledgments },
+        { ...base.evidence, pendingBatches: history.evidence.pendingBatches },
+        { ...base.evidence, retiredSigners: history.evidence.retiredSigners },
+        { ...base.evidence, lastAttemptedSigner: base.device.keyThumbprint },
+      ];
+      const variants: StudentSessionSuccessor[] = [
+        { ...base, current: admitted().current },
+        { ...base, lastReservedCounter: 1 },
+        { ...base, terminal: true },
+        { ...base, nativeProtection: emptyJournal },
+        ...evidenceVariants.map((evidence) => ({ ...base, evidence })),
+      ];
+      if (base.pending?.kind !== "join") throw new Error("fixture");
+      variants.push({
+        ...base,
+        pending: { ...base.pending, admissionMode: "readmission" },
+      });
+      expect(canReplaceInitialJoin(base)).toBe(true);
+      for (const variant of variants) {
+        expect(canReplaceInitialJoin(variant)).toBe(false);
+        const f = fixture();
+        await f.store.load();
+        await expect(f.store.commitDurably(0, variant)).rejects.toThrow();
+        expect(f.events).toEqual(["lock", "load"]);
+        const original = persisted({ ...variant, generation: 1 });
+        f.setBytes(original);
+        expect((await f.store.load()).kind).toBe("recovery_required");
+        expect(f.getBytes()).toEqual(original);
+      }
+    },
+  );
+
+  it("never marks absent, uncertain, admitted, terminal or targeted records as replaceable", async () => {
+    const initial = pending("uncertain");
+    if (initial.pending?.kind !== "join") throw new Error("fixture");
+    const targeted: StudentSessionSuccessor = {
+      ...initial,
+      pending: { ...initial.pending, admissionMode: "readmission" },
+    };
+    for (const record of [
+      null,
+      initial,
+      admitted(),
+      { ...initial, current: null, pending: null, terminal: true },
+      targeted,
+    ])
+      expect(canReplaceInitialJoin(record)).toBe(false);
+    const f = fixture();
+    await f.store.load();
+    const written = await f.store.commitDurably(0, targeted);
+    expect(await f.store.load()).toEqual({ kind: "ready", record: written });
+  });
+});
+
+describe("version 4 bounded native evidence retention", () => {
   it("fits 32 facts, five signers/pending prefixes and all ACKs across worst origin-count shapes without raising byte limits", async () => {
     const sizes: number[] = [];
     for (let attempts = 5; attempts <= 16; attempts += 1) {
@@ -642,7 +962,7 @@ describe("version 3 bounded native evidence retention", () => {
       const loaded = await f.store.load();
       if (loaded.kind !== "ready")
         throw new Error("Expected legacy normalization");
-      expect(loaded.record.version).toBe(3);
+      expect(loaded.record.version).toBe(4);
       expect(loaded.record.nativeProtection).toEqual(record.nativeProtection);
       expect(loaded.record.lastReservedCounter).toBe(
         record.lastReservedCounter,
@@ -663,17 +983,19 @@ describe("version 3 bounded native evidence retention", () => {
     },
   );
 
-  it("accepts only compact v3 disk origins and reconstructs exact immutable scope from retained facts", async () => {
+  it("accepts only compact v4 disk origins and reconstructs exact immutable scope from retained facts", async () => {
     const record = { ...withProtection(), generation: 7 };
     const f = fixture();
-    const inflated = Buffer.from(`synthetic:${JSON.stringify(record)}`);
+    const inflated = Buffer.from(
+      `synthetic:${JSON.stringify(checksumPayload(record))}`,
+    );
     f.setBytes(inflated);
     expect((await f.store.load()).kind).toBe("recovery_required");
     expect(f.getBytes()).toEqual(inflated);
     const valid = fixture();
     valid.setBytes(persisted(record));
     const loaded = await valid.store.load();
-    if (loaded.kind !== "ready") throw new Error("Expected compact v3 record");
+    if (loaded.kind !== "ready") throw new Error("Expected compact v4 record");
     expect(loaded.record).toEqual(record);
     expect(Object.isFrozen(loaded.record.evidence.origins[0]!.scope)).toBe(
       true,
@@ -1081,7 +1403,7 @@ describe("version 3 bounded native evidence retention", () => {
       { device: accepted.device, lastReservedCounter: 19 },
     ]);
     if (evidence === null) throw new Error("Expected signer retention");
-    const replacement = pending();
+    const replacement = pending("uncertain");
     if (replacement.pending?.kind !== "join") throw new Error("fixture");
     const generation = await f.store.preserveForTargetedRecovery(2);
     const replaced = await f.store.commitDurably(generation, {
@@ -1228,7 +1550,7 @@ describe("version 3 bounded native evidence retention", () => {
     const retained = retainNativeEvidenceSigner(loaded.record);
     expect(retained?.retiredSigners.at(-1)?.lastReservedCounter).toBe(22);
     if (retained === null) throw new Error("Expected available retention slot");
-    const replacement = pending();
+    const replacement = pending("uncertain");
     if (replacement.pending?.kind !== "join") throw new Error("fixture");
     const generation = await f.store.preserveForTargetedRecovery(1);
     const next = {
@@ -1361,7 +1683,7 @@ describe("private Student record durability adapter (synthetic codec/native)", (
     await expect(
       f.store.commitDurably(nextGeneration, pending()),
     ).rejects.toThrow();
-    const next = pending();
+    const next = pending("uncertain");
     if (next.pending?.kind !== "join") throw new Error("fixture");
     const targeted = {
       ...next,
@@ -1411,7 +1733,7 @@ describe("private Student record durability adapter (synthetic codec/native)", (
       const base = { ...pending(), generation: 1 };
       const mutated =
         kind === "version"
-          ? { ...base, version: 4 }
+          ? { ...base, version: 5 }
           : kind === "origin"
             ? { ...base, apiOrigin: "https://other.example" }
             : kind === "key"
@@ -1441,7 +1763,7 @@ describe("private Student record durability adapter (synthetic codec/native)", (
                         },
                       }
                     : { ...base, extra: true };
-      const original = Buffer.from(`synthetic:${JSON.stringify(mutated)}`);
+      const original = persisted(mutated);
       f.setBytes(original);
       expect((await f.store.load()).kind).toBe("recovery_required");
       expect(f.getBytes()).toEqual(original);
@@ -1472,7 +1794,7 @@ describe("versioned native protection record (synthetic codec/native)", () => {
     "normalizes exact v1 %s without writing or changing identity, pending material or counters",
     async (kind) => {
       const f = fixture();
-      let record = kind === "join" ? pending() : admitted();
+      let record = kind === "join" ? pending("uncertain") : admitted();
       if (kind === "reconnect")
         record = {
           ...record,
@@ -1501,6 +1823,11 @@ describe("versioned native protection record (synthetic codec/native)", () => {
       };
       delete legacy.nativeProtection;
       delete legacy.evidence;
+      if (record.pending?.kind === "join") {
+        const legacyJoin: Record<string, unknown> = { ...record.pending };
+        delete legacyJoin.outcome;
+        legacy.pending = legacyJoin;
+      }
       const original = persisted(legacy);
       f.setBytes(original);
       const loaded = await f.store.load();
@@ -1529,7 +1856,7 @@ describe("versioned native protection record (synthetic codec/native)", () => {
         record.extra = false;
       }
       if (kind === "v2-missing-native") delete record.nativeProtection;
-      if (kind === "future") record.version = 4;
+      if (kind === "future") record.version = 5;
       const original = persisted(record);
       f.setBytes(original);
       expect(await f.store.load()).toEqual({
@@ -1716,7 +2043,7 @@ describe("versioned native protection record (synthetic codec/native)", () => {
       facts: [],
     };
     const written = await f.store.commitDurably(0, {
-      ...pending(),
+      ...pending("uncertain"),
       nativeProtection,
     });
     expect(await f.store.load()).toEqual({ kind: "ready", record: written });

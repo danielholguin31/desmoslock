@@ -18,6 +18,7 @@ import {
   check,
   client,
   code,
+  confirmationSession,
   createRuntimeHealthCheck,
   directSchoolTableDenied,
   directTestTableDenied,
@@ -45,7 +46,7 @@ import { runStudentSessionInterop } from "./student-session-interop.test.mjs";
 import { runStudentSessionLocks } from "./student-session-locks.test.mjs";
 
 // Source-handler integration with real GoTrue/PostgREST. Invitation mail uses an
-// in-memory transport; PKCE recovery mail reaches the disposable local SMTP sink.
+// in-memory transport; PKCE recovery and signup resend reach the local SMTP sink.
 // The final Membership group also runs School settings in the production browser. This
 // does not attest deployed Edge, external email delivery or hosted configuration.
 test(
@@ -139,6 +140,67 @@ commit;`);
         email: outsiderEmail,
         password: outsiderPassword,
       }),
+    );
+
+    await t.test(
+      "real signup resend confirms only the run-owned identity after explicit confirmation, without Membership",
+      async () => {
+        const recipient = `composed-confirmation-${randomUUID()}@example.invalid`;
+        const secret = password();
+        // Provision an unconfirmed account without initial signup mail. The
+        // actual resend below must create and deliver its own provider PKCE flow.
+        const created = await auth(() =>
+          admin.auth.admin.createUser({
+            email: recipient,
+            password: secret,
+            email_confirm: false,
+          }),
+        );
+        const userId = requireUuid(created.user?.id);
+        check(
+          created.user.email === recipient && !created.user.email_confirmed_at,
+          "Signup resend fixture was not an unconfirmed run-owned identity",
+        );
+        await authDenied(
+          () =>
+            client(publishableKey).auth.signInWithPassword({
+              email: recipient,
+              password: secret,
+            }),
+          "email_not_confirmed",
+        );
+        const { session, supabase } = await confirmationSession(
+          recipient,
+          publishableKey,
+        );
+        const verified = await auth(() => supabase.auth.getUser());
+        const persisted = await auth(() =>
+          admin.auth.admin.getUserById(userId),
+        );
+        check(
+          session.user.id === userId &&
+            verified.user.id === userId &&
+            verified.user.email === recipient &&
+            typeof verified.user.email_confirmed_at === "string" &&
+            persisted.user.id === userId &&
+            persisted.user.email === recipient &&
+            typeof persisted.user.email_confirmed_at === "string",
+          "Real signup confirmation did not verify the exact persisted identity",
+        );
+        code(
+          await rpc(supabase, "current_staff_context"),
+          "membership_inactive",
+        );
+        check(
+          sql(
+            `select not exists (select 1 from desmoslock_v2.profiles where auth_user_id=${sqlUuid(userId)});`,
+          ) === "t",
+          "Email confirmation unexpectedly bound a staff profile or Membership",
+        );
+        await checkRuntimeHealth(
+          "after real signup resend confirmation and replay",
+        );
+      },
     );
 
     await t.test(

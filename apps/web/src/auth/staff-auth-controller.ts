@@ -2641,6 +2641,12 @@ export function createStaffAuthController(dependencies: {
         const callbackWork = consumeStaffEmailVerificationCallback(
           action.callbackUrl,
           {
+            ...(dependencies.callback.backendOrigin === undefined
+              ? {}
+              : { backendOrigin: dependencies.callback.backendOrigin }),
+            ...(dependencies.callback.navigate === undefined
+              ? {}
+              : { navigate: dependencies.callback.navigate }),
             exchange: async ({ authorizationCode, flowId }) => {
               const allocatedOperationId =
                 allocateOperationId("email_verification");
@@ -2676,6 +2682,10 @@ export function createStaffAuthController(dependencies: {
         if (receipt.status === "rejected") {
           if (operationAllocationFailed) return snapshot;
           transition({ code: receipt.code, kind: "callback_rejected" });
+          return snapshot;
+        }
+        if (receipt.status === "redirecting") {
+          transition({ kind: "processing_email_verification_callback" });
           return snapshot;
         }
         if (operationId === null) {

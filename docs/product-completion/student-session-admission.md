@@ -63,7 +63,35 @@ remains generic and cannot establish whether the Test ended or a grant expired.
 ## Desktop persistence and protection state
 
 Main owns the encrypted versioned record, committed authority, one exact pending
-mutation and reserved counter. The selected macOS store uses a separate fixed
+mutation and reserved counter. Version 4 records whether an initial join has not
+been dispatched, may have committed, or was definitively denied. Before sending
+the join request, main durably records uncertainty. Only a first-known definitive
+denial can durably restore public-code entry; any earlier uncertain dispatch
+remains uncertain even if a later request is denied. Challenge failures before
+any join dispatch can also return to entry. A corrected code retains the same
+device enrollment and replaces only the pending request and credential candidates.
+Replacement requires no admitted authority, reserved counter, native protection
+or retained evidence. Uncertain attempts keep exact retry and explicit targeted
+re-admission; a generic denial never proves an earlier admission did not commit.
+
+Version-1, version-2 and version-3 records normalize in memory without writing;
+legacy pending joins are always uncertain. A successful version-4 write is a
+forward format transition: earlier version-3 readers reject it and must not be
+used for rollback. Rollback needs a version-4-compatible reader while preserving
+the current encrypted record, lock and counter history; restoring older ciphertext
+or clearing the record is not a recovery procedure.
+
+Each persisted version-4 record appends `integritySha256`, the SHA-256 digest of
+the UTF-8 JSON serialization of the complete compact record before that field is
+added. It covers the version, generation, device material, pending intent,
+authority, counters, protection facts and compact evidence. Loading verifies the
+digest before semantic validation or legacy normalization. A missing or mismatched
+digest preserves the ciphertext and blocks admission and targeted recovery.
+The digest provides corruption detection, not authenticated integrity against a
+hostile host. The unchanged 48 KiB plaintext budget includes the checksum field;
+the ciphertext ceiling remains 64 KiB.
+
+The selected macOS store uses a separate fixed
 process-lifetime advisory-lock inode, exclusive temporary writes, exact
 `F_FULLFSYNC` file and parent-directory barriers, and atomic replacement. It
 retains possibly published bytes on uncertain durability; no failed barrier may
