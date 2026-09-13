@@ -153,12 +153,454 @@ function candidate(value, expectedKind) {
     inventory: reference(row.inventory),
   };
 }
+// A closed CLI profile, not a caller-defined workflow. Artifact identity remains
+// the original unsigned build; tooling provenance is a separate immutable pin.
+export const signedEvidenceStageIds = Object.freeze([
+  "input-validation",
+  "custody-copies",
+  "sign-code",
+  "signed-app-verification",
+  "dmg-create",
+  "dmg-sign",
+  "notary-submit",
+  "notary-reconcile",
+  "dmg-staple",
+  "dmg-verification",
+  "inspection-copy-mount",
+  "checkpoint-readback",
+]);
+const signedEvidence = Object.freeze({
+  checkpointKind: "desmoslock-signed-artifact-evidence",
+  runDirectory: "signed-artifact-runs",
+});
+const signedCompletionReferences = 4;
+const signedReservedAttempts = 2;
+const submissionId =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const outputStages = new Set([
+  "input-validation",
+  "custody-copies",
+  "sign-code",
+  "signed-app-verification",
+  "dmg-create",
+  "dmg-sign",
+  "dmg-staple",
+]);
+function signedPlan(value) {
+  const row = exact(value, [
+    "sha256",
+    "policySha256",
+    "unsignedCheckpointSha256",
+    "unsignedAppTreeSha256",
+    "unsignedAppInventorySha256",
+    "toolingProvenanceSha256",
+    "signingStepSha256s",
+  ]);
+  const { signingStepSha256s, ...pins } = row;
+  if (
+    Object.values(pins).some(
+      (pin) => typeof pin !== "string" || !digest.test(pin),
+    )
+  )
+    fail();
+  const steps = dense(signingStepSha256s, unsignedEvidenceLimits.attempts);
+  if (
+    steps.length === 0 ||
+    steps.some((pin) => typeof pin !== "string" || !digest.test(pin)) ||
+    new Set(steps).size !== steps.length
+  )
+    fail();
+  // sha256 identifies separately defined canonical full signing-plan bytes. It
+  // is deliberately not a self-hash of this compact immutable binding object.
+  return frozen({ ...pins, signingStepSha256s: steps });
+}
+function signedArtifact(value, output = false) {
+  const kind = Object.getOwnPropertyDescriptor(value ?? {}, "kind")?.value;
+  const keys =
+    kind === "app-tree" ? ["kind", "treeSha256"] : ["kind", "sha256", "bytes"];
+  const row = exact(value, output ? [...keys, "inventory"] : keys);
+  if (kind === "app-tree") {
+    if (typeof row.treeSha256 !== "string" || !digest.test(row.treeSha256))
+      fail();
+  } else if (kind === "dmg-file") {
+    // Whole image bytes are metadata, not a sidecar: the CLI has its own fixed
+    // image budget. Never call a DMG hash an app tree or apply the sidecar cap.
+    if (
+      typeof row.sha256 !== "string" ||
+      !digest.test(row.sha256) ||
+      !Number.isSafeInteger(row.bytes) ||
+      row.bytes < 1
+    )
+      fail();
+  } else fail();
+  return { ...row, ...(output ? { inventory: reference(row.inventory) } : {}) };
+}
+function artifactInput(output) {
+  if (output === null) return null;
+  return output.kind === "app-tree"
+    ? { kind: "app-tree", treeSha256: output.treeSha256 }
+    : { kind: "dmg-file", sha256: output.sha256, bytes: output.bytes };
+}
+function signingSchedule(plan) {
+  return signedEvidenceStageIds.flatMap((stageId) =>
+    stageId === "sign-code"
+      ? plan.signingStepSha256s.map((_, signingIndex) => ({
+          stageId,
+          signingIndex,
+        }))
+      : [{ stageId, signingIndex: null }],
+  );
+}
+function signedHistory(plan) {
+  return {
+    cursor: 0,
+    blocked: false,
+    current: { kind: "app-tree", treeSha256: plan.unsignedAppTreeSha256 },
+    candidates: { signedApp: null, submittedDmg: null, finalDmg: null },
+    submission: null,
+    notaryStatus: null,
+  };
+}
+function stageInput(history, stageId) {
+  if (["notary-reconcile", "dmg-staple"].includes(stageId))
+    return artifactInput(history.candidates.submittedDmg);
+  if (["dmg-verification", "inspection-copy-mount"].includes(stageId))
+    return artifactInput(history.candidates.finalDmg);
+  return artifactInput(history.current);
+}
+function stageAllowed(history, plan, attempt) {
+  const scheduled = signingSchedule(plan)[history.cursor];
+  const readback = attempt.stageId === "checkpoint-readback";
+  const reconcile =
+    attempt.stageId === "notary-reconcile" &&
+    history.submission !== null &&
+    history.notaryStatus !== "rejected";
+  if (
+    !signedEvidenceStageIds.includes(attempt.stageId) ||
+    (attempt.stageId === "sign-code"
+      ? !Number.isSafeInteger(attempt.signingIndex) ||
+        attempt.signingIndex < 0 ||
+        attempt.signingIndex >= plan.signingStepSha256s.length
+      : attempt.signingIndex !== null) ||
+    attempt.signingStepSha256 !==
+      (attempt.signingIndex === null
+        ? null
+        : plan.signingStepSha256s[attempt.signingIndex]) ||
+    (!readback &&
+      !reconcile &&
+      (history.blocked ||
+        !scheduled ||
+        attempt.stageId !== scheduled.stageId ||
+        attempt.signingIndex !== scheduled.signingIndex)) ||
+    (attempt.stageId === "notary-reconcile" && !reconcile) ||
+    (attempt.stageId === "dmg-staple" && history.notaryStatus !== "accepted") ||
+    !same(attempt.inputArtifact, stageInput(history, attempt.stageId))
+  )
+    fail("STAGE_INVALID");
+}
+function signedOutcome(attempt, history, plan) {
+  const pass = attempt.state === "observed-pass";
+  const observed =
+    pass ||
+    (attempt.state === "observed-fail" &&
+      attempt.failure === "observation_failed");
+  if (
+    (!observed || !pass || !outputStages.has(attempt.stageId)) &&
+    attempt.outputArtifact !== null
+  )
+    fail();
+  if (pass && outputStages.has(attempt.stageId)) {
+    const output = attempt.outputArtifact;
+    if (
+      output === null ||
+      !attempt.evidence.some((ref) => same(ref, output.inventory))
+    )
+      fail();
+    const app = [
+      "input-validation",
+      "custody-copies",
+      "sign-code",
+      "signed-app-verification",
+    ].includes(attempt.stageId);
+    if (output.kind !== (app ? "app-tree" : "dmg-file")) fail();
+    if (
+      [
+        "input-validation",
+        "custody-copies",
+        "signed-app-verification",
+      ].includes(attempt.stageId) &&
+      !same(artifactInput(output), attempt.inputArtifact)
+    )
+      fail();
+    if (
+      attempt.stageId === "input-validation" &&
+      output.inventory.sha256 !== plan.unsignedAppInventorySha256
+    )
+      fail();
+  }
+  if (attempt.stageId === "notary-submit" && pass) {
+    const row = exact(attempt.submission, ["id", "submittedDmgSha256"]);
+    if (
+      typeof row.id !== "string" ||
+      !submissionId.test(row.id) ||
+      row.submittedDmgSha256 !== attempt.inputArtifact.sha256
+    )
+      fail();
+  } else if (attempt.submission !== null) fail();
+  if (attempt.stageId === "notary-reconcile" && observed) {
+    const invalidObservation = !pass && attempt.notaryStatus === null;
+    if (
+      !invalidObservation &&
+      (!["in-progress", "accepted", "rejected"].includes(
+        attempt.notaryStatus,
+      ) ||
+        (attempt.notaryStatus === "rejected") !== !pass ||
+        (history.notaryStatus === "accepted" &&
+          attempt.notaryStatus === "in-progress"))
+    )
+      fail();
+  } else if (attempt.notaryStatus !== null) fail();
+}
+function advanceSigned(history, plan, attempt) {
+  if (attempt.state === "pending") return;
+  if (attempt.state !== "observed-pass") {
+    // Only unavailable status observations can be retried. A failed mutation,
+    // invalid observation, rejected ticket, or interrupted mount never replays.
+    if (!(
+      attempt.stageId === "notary-reconcile" &&
+      ["operation_failed", "operation_incomplete"].includes(attempt.failure)
+    ))
+      history.blocked = true;
+    if (attempt.notaryStatus === "rejected") history.notaryStatus = "rejected";
+    return;
+  }
+  if (attempt.outputArtifact !== null) history.current = attempt.outputArtifact;
+  if (attempt.stageId === "signed-app-verification")
+    history.candidates.signedApp = attempt.outputArtifact;
+  if (attempt.stageId === "notary-submit") {
+    history.candidates.submittedDmg = history.current;
+    history.submission = attempt.submission;
+  }
+  if (attempt.stageId === "dmg-staple")
+    history.candidates.finalDmg = attempt.outputArtifact;
+  if (attempt.stageId === "notary-reconcile")
+    history.notaryStatus = attempt.notaryStatus;
+  const scheduled = signingSchedule(plan)[history.cursor];
+  if (
+    !history.blocked &&
+    scheduled?.stageId === attempt.stageId &&
+    scheduled.signingIndex === attempt.signingIndex &&
+    !(
+      attempt.stageId === "notary-reconcile" &&
+      attempt.notaryStatus !== "accepted"
+    )
+  )
+    history.cursor += 1;
+}
+function replaySigned(attempts, plan) {
+  const history = signedHistory(plan);
+  for (const attempt of attempts) {
+    stageAllowed(history, plan, attempt);
+    signedOutcome(attempt, history, plan);
+    advanceSigned(history, plan, attempt);
+  }
+  return history;
+}
+function parseSignedCheckpoint(bytes, expected) {
+  const row = exact(
+    JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
+    [
+      "schemaVersion",
+      "kind",
+      "runId",
+      "revision",
+      "identity",
+      "plan",
+      "candidates",
+      "submission",
+      "notaryStatus",
+      "attempts",
+      "pendingPhysicalCaseIds",
+    ],
+  );
+  if (
+    row.schemaVersion !== 1 ||
+    row.kind !== signedEvidence.checkpointKind ||
+    row.runId !== expected.runId ||
+    !Number.isSafeInteger(row.revision) ||
+    row.revision < 1 ||
+    !same(identity(row.identity), expected.identity) ||
+    !same(signedPlan(row.plan), expected.plan) ||
+    !same(
+      dense(row.pendingPhysicalCaseIds, pendingPhysicalCaseIds.length),
+      pendingPhysicalCaseIds,
+    )
+  )
+    fail("INVALID_CHECKPOINT");
+  const attempts = dense(row.attempts, unsignedEvidenceLimits.attempts).map(
+    (value, index) => {
+      const attempt = exact(value, [
+        "sequence",
+        "stageId",
+        "signingIndex",
+        "signingStepSha256",
+        "state",
+        "inputArtifact",
+        "reservation",
+        "outputArtifact",
+        "evidence",
+        "submission",
+        "notaryStatus",
+        "failure",
+      ]);
+      if (
+        attempt.sequence !== index + 1 ||
+        !["pending", "observed-pass", "observed-fail", "incomplete"].includes(
+          attempt.state,
+        ) ||
+        (attempt.state === "pending" && index !== row.attempts.length - 1) ||
+        (attempt.state === "pending" || attempt.state === "observed-pass"
+          ? attempt.failure !== null
+          : attempt.state === "incomplete"
+            ? attempt.failure !== "operation_incomplete"
+            : !["observation_failed", "operation_failed"].includes(
+                attempt.failure,
+              ))
+      )
+        fail("INVALID_CHECKPOINT");
+      const evidence = references(attempt.evidence);
+      if (
+        evidence.length > signedCompletionReferences ||
+        (attempt.state === "pending" && evidence.length !== 0) ||
+        (attempt.state === "observed-pass" && evidence.length === 0)
+      )
+        fail("INVALID_CHECKPOINT");
+      return {
+        ...attempt,
+        inputArtifact:
+          attempt.inputArtifact === null
+            ? null
+            : signedArtifact(attempt.inputArtifact),
+        reservation: reference(attempt.reservation),
+        outputArtifact:
+          attempt.outputArtifact === null
+            ? null
+            : signedArtifact(attempt.outputArtifact, true),
+        evidence,
+        submission:
+          attempt.submission === null
+            ? null
+            : { ...exact(attempt.submission, ["id", "submittedDmgSha256"]) },
+      };
+    },
+  );
+  const history = replaySigned(attempts, expected.plan);
+  const candidates = exact(row.candidates, [
+    "signedApp",
+    "submittedDmg",
+    "finalDmg",
+  ]);
+  if (
+    !same(candidates, history.candidates) ||
+    !same(row.submission, history.submission) ||
+    row.notaryStatus !== history.notaryStatus ||
+    row.revision <
+      1 +
+        attempts.length +
+        attempts.filter((attempt) => attempt.state !== "pending").length
+  )
+    fail("INVALID_CHECKPOINT");
+  return frozen({
+    schemaVersion: 1,
+    kind: signedEvidence.checkpointKind,
+    runId: row.runId,
+    revision: row.revision,
+    identity: expected.identity,
+    plan: expected.plan,
+    candidates: history.candidates,
+    submission: history.submission,
+    notaryStatus: history.notaryStatus,
+    attempts,
+    pendingPhysicalCaseIds: [...pendingPhysicalCaseIds],
+  });
+}
+function signedCapacity(checkpoint) {
+  const history = replaySigned(checkpoint.attempts, checkpoint.plan);
+  const pending =
+    checkpoint.attempts.at(-1)?.state === "pending"
+      ? checkpoint.attempts.at(-1)
+      : null;
+  const schedule = signingSchedule(checkpoint.plan);
+  const remaining = history.blocked
+    ? []
+    : schedule.slice(
+        history.cursor +
+          (pending && schedule[history.cursor]?.stageId === pending.stageId
+            ? 1
+            : 0),
+      );
+  const future = [
+    ...remaining,
+    ...Array.from({ length: signedReservedAttempts }, () => ({
+      stageId: "checkpoint-readback",
+      signingIndex: null,
+    })),
+  ];
+  if (
+    checkpoint.attempts.length + future.length >
+    unsignedEvidenceLimits.attempts
+  )
+    fail("CAPACITY");
+  const ref = {
+    sha256: "f".repeat(64),
+    bytes: unsignedEvidenceLimits.sidecarBytes,
+  };
+  const app = { kind: "app-tree", treeSha256: "f".repeat(64), inventory: ref };
+  const dmg = {
+    kind: "dmg-file",
+    sha256: "f".repeat(64),
+    bytes: Number.MAX_SAFE_INTEGER,
+    inventory: ref,
+  };
+  const worst = (attempt) => ({
+    ...attempt,
+    sequence: Number.MAX_SAFE_INTEGER,
+    state: "observed-fail",
+    inputArtifact: artifactInput(dmg),
+    reservation: ref,
+    outputArtifact: dmg,
+    evidence: Array.from({ length: signedCompletionReferences }, () => ref),
+    submission: { id: "f".repeat(36), submittedDmgSha256: "f".repeat(64) },
+    notaryStatus: "in-progress",
+    failure: "operation_incomplete",
+  });
+  // Deliberately overestimate even mutually exclusive fields. This reserves the
+  // complete fixed schedule, the pending operation's largest result, and two
+  // recovery/readback slots within the unchanged 60 KiB / 64-attempt bounds.
+  encode({
+    ...checkpoint,
+    revision: Number.MAX_SAFE_INTEGER,
+    candidates: { signedApp: app, submittedDmg: dmg, finalDmg: dmg },
+    submission: { id: "f".repeat(36), submittedDmgSha256: "f".repeat(64) },
+    notaryStatus: "in-progress",
+    attempts: [
+      ...checkpoint.attempts.map((attempt) =>
+        attempt === pending ? worst(attempt) : attempt,
+      ),
+      ...future.map((stage) =>
+        worst({ ...stage, signingStepSha256: "f".repeat(64) }),
+      ),
+    ],
+  });
+}
+
 function parseCheckpoint(bytes, expected, policy) {
   if (
     !Buffer.isBuffer(bytes) ||
     bytes.length > unsignedEvidenceLimits.checkpointBytes
   )
     fail("INVALID_CHECKPOINT");
+  if (policy === signedEvidence) return parseSignedCheckpoint(bytes, expected);
   const row = exact(
     JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
     [
@@ -431,6 +873,15 @@ export function openUnsignedUniversalArtifactEvidenceForTesting(
   return openOwner(options, async () => binding(native), universalEvidence);
 }
 
+/** Signed CLI-owned entry point; original artifact identity and separate tool pins. */
+export function openSignedArtifactEvidence(options) {
+  return openOwner(options, loadNative, signedEvidence);
+}
+/** Synthetic storage only; this does not establish signing or native durability. */
+export function openSignedArtifactEvidenceForTesting(options, native) {
+  return openOwner(options, async () => binding(native), signedEvidence);
+}
+
 async function openOwner(input, loader, policy) {
   if (processOwner !== null) fail("BUSY");
   const token = {};
@@ -486,7 +937,14 @@ async function openOwner(input, loader, policy) {
           fail("EVIDENCE_INVALID");
         all.set(ref.sha256, ref);
       }
-    if (value.candidate !== null)
+    if (policy === signedEvidence) {
+      for (const attempt of value.attempts) {
+        const ref = attempt.reservation;
+        if (all.has(ref.sha256) && all.get(ref.sha256).bytes !== ref.bytes)
+          fail("EVIDENCE_INVALID");
+        all.set(ref.sha256, ref);
+      }
+    } else if (value.candidate !== null)
       all.set(value.candidate.inventory.sha256, value.candidate.inventory);
     for (const ref of all.values())
       await checkedFile(
@@ -524,6 +982,7 @@ async function openOwner(input, loader, policy) {
       )
         fail("INVALID_CHECKPOINT");
       if (
+        policy !== signedEvidence &&
         baseline.candidate !== null &&
         !same(loaded.candidate, baseline.candidate)
       )
@@ -622,16 +1081,23 @@ async function openOwner(input, loader, policy) {
     await checkedFile(filename, ref);
     return frozen(ref);
   }
-  function scopeForOperation() {
+  function scopeForOperation(
+    referenceLimit = unsignedEvidenceLimits.referencesPerAttempt,
+    notaryRead = false,
+  ) {
     const pending = new Set();
     const evidence = new Map();
     let accepting = true;
     let failed = false;
+    let nonzeroChildExits = 0;
+    const unavailable = notaryRead ? Symbol() : null;
     function own(work) {
       if (!accepting)
         return Promise.reject(new UnsignedArtifactEvidenceError("CLOSED"));
-      if (typeof work !== "function")
+      if (typeof work !== "function") {
+        if (notaryRead) failed = true;
         return Promise.reject(new UnsignedArtifactEvidenceError("INVALID"));
+      }
       const result = Promise.resolve().then(work);
       const settlement = result.then(
         () => undefined,
@@ -656,6 +1122,14 @@ async function openOwner(input, loader, policy) {
     }
     const scope = Object.freeze({
       own,
+      ...(notaryRead
+        ? {
+            notaryReadUnavailable() {
+              if (!accepting) fail("CLOSED");
+              return unavailable;
+            },
+          }
+        : {}),
       markOutputSettlementUncertain() {
         if (!accepting) fail("CLOSED");
         outputSettlementUncertain = true;
@@ -663,7 +1137,10 @@ async function openOwner(input, loader, policy) {
         accepting = false;
       },
       track(promise) {
-        if (!isPromise(promise)) fail();
+        if (!isPromise(promise)) {
+          if (notaryRead) failed = true;
+          fail();
+        }
         return own(() => promise);
       },
       trackChild(child) {
@@ -675,9 +1152,18 @@ async function openOwner(input, loader, policy) {
               let error = false;
               child.once("error", () => {
                 error = true;
+                if (notaryRead) failed = true;
               });
               child.once("close", (code, signal) => {
                 if (
+                  notaryRead &&
+                  !error &&
+                  (signal === null || signal === undefined) &&
+                  Number.isSafeInteger(code) &&
+                  code > 0
+                )
+                  nonzeroChildExits += 1;
+                else if (
                   error ||
                   code !== 0 ||
                   (signal !== null && signal !== undefined)
@@ -699,15 +1185,14 @@ async function openOwner(input, loader, policy) {
           isSharedArrayBuffer(value.buffer) ||
           value.length < 1 ||
           value.length > unsignedEvidenceLimits.sidecarBytes
-        )
+        ) {
+          if (notaryRead) failed = true;
           fail();
+        }
         const bytes = Buffer.from(value);
         return own(async () => {
           const ref = await publishSidecar(bytes);
-          if (
-            !evidence.has(ref.sha256) &&
-            evidence.size >= unsignedEvidenceLimits.referencesPerAttempt
-          )
+          if (!evidence.has(ref.sha256) && evidence.size >= referenceLimit)
             fail("CAPACITY");
           evidence.set(ref.sha256, ref);
           return ref;
@@ -719,10 +1204,174 @@ async function openOwner(input, loader, policy) {
       async drain() {
         while (pending.size > 0) await Promise.all([...pending]);
         accepting = false;
-        return !failed;
+        return !failed && nonzeroChildExits === 0;
       },
+      isNotaryReadUnavailable: (result) =>
+        notaryRead &&
+        !accepting &&
+        result === unavailable &&
+        !failed &&
+        nonzeroChildExits > 0,
       evidence: () => [...evidence.values()],
     };
+  }
+
+  function recordStage(input, work) {
+    return exclusive(async () => {
+      const row = exact(input, [
+        "expectedRevision",
+        "stageId",
+        "signingIndex",
+        "inputArtifact",
+        "reservation",
+      ]);
+      expectedRevision(row.expectedRevision);
+      if (
+        typeof work !== "function" ||
+        !Buffer.isBuffer(row.reservation) ||
+        isSharedArrayBuffer(row.reservation.buffer) ||
+        row.reservation.length < 1 ||
+        row.reservation.length > unsignedEvidenceLimits.sidecarBytes
+      )
+        fail();
+      // Copy caller-owned bytes before the first await; the durable pending
+      // attempt binds this exact pre-command report, not a later mutable view.
+      const reservationBytes = Buffer.from(row.reservation);
+      const pending = {
+        sequence: checkpoint.attempts.length + 1,
+        stageId: row.stageId,
+        signingIndex: row.signingIndex,
+        signingStepSha256:
+          row.signingIndex === null
+            ? null
+            : options.plan.signingStepSha256s[row.signingIndex],
+        state: "pending",
+        inputArtifact:
+          row.inputArtifact === null ? null : signedArtifact(row.inputArtifact),
+        reservation: {
+          sha256: createHash("sha256").update(reservationBytes).digest("hex"),
+          bytes: reservationBytes.length,
+        },
+        outputArtifact: null,
+        evidence: [],
+        submission: null,
+        notaryStatus: null,
+        failure: null,
+      };
+      const pendingCheckpoint = {
+        ...checkpoint,
+        revision: nextRevision(checkpoint),
+        attempts: [...checkpoint.attempts, pending],
+      };
+      // Admission and full-schedule capacity checks happen before publishing a
+      // reservation, committing pending, or allowing the CLI to start work.
+      parseCheckpoint(encode(pendingCheckpoint), options, policy);
+      signedCapacity(pendingCheckpoint);
+      try {
+        await checkReferences(checkpoint);
+      } catch {
+        poisoned = true;
+        fail("EVIDENCE_INVALID");
+      }
+      await publishSidecar(reservationBytes);
+      await commit(pendingCheckpoint);
+      // The storage acknowledgment is an asynchronous boundary. Recheck the
+      // bound sidecar after it, before any command can consume the reservation.
+      try {
+        await checkReferences(checkpoint);
+      } catch {
+        poisoned = true;
+        fail("EVIDENCE_INVALID");
+      }
+      const notaryRead = pending.stageId === "notary-reconcile";
+      const owned = scopeForOperation(signedCompletionReferences, notaryRead);
+      let result;
+      let failed = false;
+      try {
+        result = await work(owned.scope);
+      } catch {
+        failed = true;
+      }
+      const drained = await owned.drain();
+      const unavailable = !failed && owned.isNotaryReadUnavailable(result);
+      if (!drained) failed = true;
+      if (outputSettlementUncertain) fail("OUTPUT_SETTLEMENT_UNCERTAIN");
+      function completion(attempt) {
+        const attempts = [...checkpoint.attempts.slice(0, -1), attempt];
+        const history = replaySigned(attempts, options.plan);
+        return {
+          ...checkpoint,
+          revision: nextRevision(checkpoint),
+          attempts,
+          candidates: history.candidates,
+          submission: history.submission,
+          notaryStatus: history.notaryStatus,
+        };
+      }
+      let complete;
+      let failure =
+        notaryRead && !unavailable ? "observation_failed" : "operation_failed";
+      if (!failed) {
+        try {
+          const value = exact(result, [
+            "state",
+            "evidence",
+            "outputArtifact",
+            "submission",
+            "notaryStatus",
+          ]);
+          if (!["observed-pass", "observed-fail"].includes(value.state)) fail();
+          const refs = references(value.evidence);
+          if (
+            refs.length > signedCompletionReferences ||
+            refs.some(
+              (ref) => !owned.evidence().some((item) => same(item, ref)),
+            ) ||
+            (value.state === "observed-pass" && refs.length === 0)
+          )
+            fail();
+          const observed = {
+            ...pending,
+            state: value.state,
+            evidence: refs,
+            outputArtifact:
+              value.outputArtifact === null
+                ? null
+                : signedArtifact(value.outputArtifact, true),
+            submission:
+              value.submission === null
+                ? null
+                : { ...exact(value.submission, ["id", "submittedDmgSha256"]) },
+            notaryStatus: value.notaryStatus,
+            failure:
+              value.state === "observed-fail" ? "observation_failed" : null,
+          };
+          complete = parseCheckpoint(
+            encode(completion(observed)),
+            options,
+            policy,
+          );
+        } catch {
+          failed = true;
+          failure = "observation_failed";
+        }
+      }
+      if (failed)
+        complete = completion({
+          ...pending,
+          state: "observed-fail",
+          evidence: owned.evidence(),
+          failure,
+        });
+      try {
+        await checkReferences(complete);
+        await commit(complete);
+      } catch (error) {
+        poisoned = true;
+        throw error;
+      }
+      return checkpoint;
+    });
   }
 
   try {
@@ -732,6 +1381,7 @@ async function openOwner(input, loader, policy) {
       "runId",
       "identity",
       "nativeModule",
+      ...(policy === signedEvidence ? ["plan"] : []),
     ]);
     const runRoot = absolute(row.runRoot);
     if (
@@ -747,6 +1397,7 @@ async function openOwner(input, loader, policy) {
       runRoot,
       runId: row.runId,
       identity: identity(row.identity),
+      ...(policy === signedEvidence ? { plan: signedPlan(row.plan) } : {}),
     };
     const selectedNative =
       loader === loadNative ? nativeOptions(row.nativeModule) : null;
@@ -770,16 +1421,29 @@ async function openOwner(input, loader, policy) {
     if (options.mode === "create") {
       await checkDirectories();
       if ((await store.load()) !== null) fail("INVALID_CHECKPOINT");
-      await commit({
+      const initial = {
         schemaVersion: 1,
         kind: policy.checkpointKind,
         runId: options.runId,
         revision: 1,
         identity: options.identity,
-        candidate: null,
+        ...(policy === signedEvidence
+          ? {
+              plan: options.plan,
+              candidates: {
+                signedApp: null,
+                submittedDmg: null,
+                finalDmg: null,
+              },
+              submission: null,
+              notaryStatus: null,
+            }
+          : { candidate: null }),
         attempts: [],
         pendingPhysicalCaseIds: [...pendingPhysicalCaseIds],
-      });
+      };
+      if (policy === signedEvidence) signedCapacity(initial);
+      await commit(initial);
     } else await loadedRecovery();
     initializing = false;
   } catch {
@@ -795,7 +1459,7 @@ async function openOwner(input, loader, policy) {
     fail("OPEN_FAILED");
   }
 
-  return Object.freeze({
+  const owner = {
     readSnapshot() {
       return exclusive(async () => {
         try {
@@ -1033,5 +1697,10 @@ async function openOwner(input, loader, policy) {
       );
       return closing;
     },
-  });
+  };
+  if (policy === signedEvidence) {
+    delete owner.recordCase;
+    owner.recordStage = recordStage;
+  }
+  return Object.freeze(owner);
 }

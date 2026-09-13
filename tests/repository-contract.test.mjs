@@ -734,7 +734,7 @@ test("the runbook names every runtime-only staff and Student backup guard", () =
   }
 });
 
-test("unsigned and universal artifact Node suites remain invoked by required static CI", () => {
+test("unsigned, universal, and signed artifact Node suites remain invoked by required static CI", () => {
   const rootPackage = readJson("package.json");
   const workflow = readText(".github/workflows/ci.yml");
   assert.doesNotThrow(() =>
@@ -747,6 +747,9 @@ test("unsigned and universal artifact Node suites remain invoked by required sta
     "tests/acceptance/desktop-native-build-targets.test.mjs",
     "tests/acceptance/universal-artifact-composition.test.mjs",
     "tests/acceptance/universal-artifact-cli.test.mjs",
+    "tests/acceptance/signed-artifact-custody.test.mjs",
+    "tests/acceptance/signed-artifact-evidence.test.mjs",
+    "tests/acceptance/signed-artifact-cli.test.mjs",
   ];
   for (const file of required) {
     const command = rootPackage.scripts["test:repository"];

@@ -6,6 +6,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { crc32, inflateRawSync } from "node:zlib";
 import plist from "plist";
+import { getCurrentFuseWire } from "@electron/fuses";
 import { packager } from "@electron/packager";
 import {
   extractFile,
@@ -26,6 +27,1319 @@ export const nativeDistributionFiles = Object.freeze([
 ]);
 export const packagedExecutableName = "desmoslock-internal";
 const appName = "DesmosLock Internal";
+const standaloneCrashpadPath =
+  "Contents/Frameworks/Electron Framework.framework/Versions/A/Helpers/chrome_crashpad_handler";
+const signedStatFormat = "%N\t%Op\t%Ul\t%Uu\t%Ug\t%Uf\t%Ud\t%Ui";
+
+// Signing accepts a controlled transformation, never signature-free Mach-O
+// equivalence. These closed observers do not invoke a signer or grant authority.
+const signedObjectKeys = [
+  "objectPath",
+  "primaryPath",
+  "parentPath",
+  "role",
+  "identifier",
+  "requirement",
+  "entitlements",
+  "runtime",
+  "signatureFiles",
+  "signatureDirectories",
+];
+const signedSnapshotKeys = [
+  "schemaVersion",
+  "kind",
+  "buildIdentity",
+  "tree",
+  "machOFiles",
+  "metadata",
+  "fuseWires",
+  "asarIntegrity",
+];
+const signedLimit = Object.freeze({
+  entries: 12000,
+  objects: 40,
+  batch: 64,
+  argumentBytes: 16384,
+  outputBytes: 65536,
+  attributeBytes: 4096,
+  attributeNames: 8,
+  commands: 1400,
+});
+
+function signedPath(value, root = false) {
+  if (root && value === ".") return value;
+  assert.equal(typeof value, "string");
+  assert.ok(
+    value.length > 0 &&
+      value.length <= 1000 &&
+      /^[A-Za-z0-9@_ .()+/-]+$/.test(value) &&
+      value
+        .split("/")
+        .every(
+          (part) =>
+            part &&
+            part !== "." &&
+            part !== ".." &&
+            part.trim() === part &&
+            !part.toLowerCase().startsWith(".env") &&
+            !/^(?:\.git|\.ssh|\.aws|\.gnupg|\.config|keychains?|credentials?(?:\..*)?|secrets?(?:\..*)?|auth-cache)$/i.test(
+              part,
+            ),
+        ),
+    "Invalid signed artifact entry path",
+  );
+  return value;
+}
+
+function signedRows(value, maximum, label) {
+  assert.ok(
+    Array.isArray(value) && value.length <= maximum,
+    `${label} exceeds its limit`,
+  );
+  return exactRows(value, value.length, label);
+}
+
+function nonnegativeInteger(value) {
+  assert.ok(
+    Number.isSafeInteger(value) && value >= 0,
+    "Invalid metadata integer",
+  );
+  return value;
+}
+
+function signedMetadataPolicy(value) {
+  const row = exactObservation(
+    value,
+    ["ownerUid", "ownerGid", "allowedXattrs", "copySymlinkMtime"],
+    "Signed metadata policy",
+  );
+  nonnegativeInteger(row.ownerUid);
+  nonnegativeInteger(row.ownerGid);
+  assert.equal(row.copySymlinkMtime, "record-destination");
+  const allowedXattrs = signedRows(
+    row.allowedXattrs,
+    signedLimit.entries * 2,
+    "Allowed xattrs",
+  ).map((value) => {
+    const item = exactObservation(
+      value,
+      ["path", "name", "bytes", "sha256"],
+      "Allowed xattr",
+    );
+    signedPath(item.path, true);
+    assert.ok(
+      ["com.apple.quarantine", "com.apple.provenance"].includes(item.name),
+      "Unsupported signing xattr policy",
+    );
+    nonnegativeInteger(item.bytes);
+    assert.ok(item.bytes <= signedLimit.attributeBytes);
+    sha256(item.sha256);
+    return item;
+  });
+  const keys = allowedXattrs.map((row) => `${row.path}:${row.name}`);
+  assert.deepEqual(
+    keys,
+    [...new Set(keys)].sort(),
+    "Xattr policy must be unique and sorted",
+  );
+  return { ...row, allowedXattrs };
+}
+
+function signedRequirement(team, identifier) {
+  return `anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "${team}" and identifier "${identifier}"`;
+}
+
+function signedPolicy(value) {
+  const policy = exactObservation(
+    value,
+    ["schemaVersion", "kind", "teamId", "objects", "metadata"],
+    "Signing policy",
+  );
+  assert.equal(policy.schemaVersion, 1);
+  assert.equal(policy.kind, "signed-artifact-policy");
+  assert.match(policy.teamId, /^[A-Z0-9]{10}$/);
+  const objects = signedRows(
+    policy.objects,
+    signedLimit.objects,
+    "Signing objects",
+  ).map((value) => {
+    const row = exactObservation(value, signedObjectKeys, "Signing object");
+    signedPath(row.objectPath, true);
+    signedPath(row.primaryPath);
+    if (row.parentPath !== null) signedPath(row.parentPath, true);
+    assert.ok(
+      ["main", "helper", "framework", "library", "addon"].includes(row.role),
+    );
+    assert.match(row.identifier, /^[A-Za-z0-9][A-Za-z0-9._-]{1,199}$/);
+    assert.equal(
+      row.requirement,
+      signedRequirement(policy.teamId, row.identifier),
+      "Signing requirement differs from approved Team and identifier",
+    );
+    assert.equal(typeof row.runtime, "boolean");
+    const entitlements = exactObservation(
+      row.entitlements,
+      Object.keys(row.entitlements),
+      "Entitlements",
+    );
+    assert.ok(JSON.stringify(entitlements).length <= 8192);
+    for (const [key, val] of Object.entries(entitlements)) {
+      assert.match(key, /^[A-Za-z0-9.-]{1,200}$/);
+      assert.ok(
+        typeof val === "boolean" ||
+          (typeof val === "string" && /^[A-Za-z0-9._-]{1,200}$/.test(val)) ||
+          (Array.isArray(val) &&
+            signedRows(val, 32, "Entitlement strings").every(
+              (entry) =>
+                typeof entry === "string" &&
+                /^[A-Za-z0-9._-]{1,200}$/.test(entry),
+            )),
+        "Unsupported entitlement value",
+      );
+    }
+    let signatureDirectory;
+    if (row.role === "main") {
+      assert.equal(row.objectPath, ".");
+      assert.equal(row.primaryPath, `Contents/MacOS/${packagedExecutableName}`);
+      assert.equal(row.parentPath, null);
+      assert.equal(row.runtime, true);
+      signatureDirectory = "Contents/_CodeSignature";
+    } else if (row.role === "helper") {
+      assert.equal(row.runtime, true);
+      if (row.objectPath === standaloneCrashpadPath) {
+        assert.equal(row.primaryPath, standaloneCrashpadPath);
+      } else {
+        assert.ok(row.objectPath.endsWith(".app"));
+        assert.equal(
+          path.posix.dirname(row.primaryPath),
+          `${row.objectPath}/Contents/MacOS`,
+        );
+        signatureDirectory = `${row.objectPath}/Contents/_CodeSignature`;
+      }
+    } else if (row.role === "framework") {
+      assert.ok(row.objectPath.endsWith(".framework"));
+      assert.equal(
+        path.posix.dirname(row.primaryPath),
+        `${row.objectPath}/Versions/A`,
+      );
+      signatureDirectory = `${row.objectPath}/Versions/A/_CodeSignature`;
+    } else {
+      assert.equal(row.objectPath, row.primaryPath);
+      assert.ok(
+        row.role === "addon"
+          ? row.primaryPath.endsWith(".node")
+          : row.primaryPath.endsWith(".dylib"),
+      );
+    }
+    if (!["main", "helper"].includes(row.role))
+      assert.deepEqual(entitlements, {}, "Library entitlements must be absent");
+    assert.deepEqual(
+      row.signatureDirectories,
+      signatureDirectory ? [signatureDirectory] : [],
+    );
+    assert.deepEqual(
+      row.signatureFiles,
+      signatureDirectory ? [`${signatureDirectory}/CodeResources`] : [],
+    );
+    return { ...row, entitlements };
+  });
+  assert.ok(objects.length > 0);
+  assert.equal(
+    new Set(objects.map((row) => row.objectPath)).size,
+    objects.length,
+    "Duplicate signing object",
+  );
+  assert.equal(
+    new Set(objects.map((row) => row.primaryPath)).size,
+    objects.length,
+    "Duplicate signing primary",
+  );
+  assert.equal(objects.filter((row) => row.role === "main").length, 1);
+  for (const object of objects.filter((row) => row.role !== "main")) {
+    const parents = objects
+      .filter(
+        (parent) =>
+          parent.objectPath !== object.objectPath &&
+          ["main", "helper", "framework"].includes(parent.role) &&
+          parent.objectPath !== parent.primaryPath &&
+          (parent.objectPath === "." ||
+            object.objectPath.startsWith(`${parent.objectPath}/`)),
+      )
+      .sort((a, b) => b.objectPath.length - a.objectPath.length);
+    assert.equal(
+      object.parentPath,
+      parents[0]?.objectPath,
+      "Signing parent is not the containing code object",
+    );
+  }
+  return {
+    ...policy,
+    objects,
+    metadata: signedMetadataPolicy(policy.metadata),
+  };
+}
+
+function insideOut(objects) {
+  const depth = (row) =>
+    row.objectPath === "." ? 0 : row.objectPath.split("/").length;
+  return [...objects].sort(
+    (a, b) =>
+      depth(b) - depth(a) ||
+      (a.objectPath < b.objectPath ? -1 : a.objectPath > b.objectPath ? 1 : 0),
+  );
+}
+
+export function deriveSignedArtifactPlan({
+  unsignedInventory,
+  policy,
+  signingSteps,
+}) {
+  policy = signedPolicy(policy);
+  assert.equal(unsignedInventory.kind, "unsigned-universal-app-inventory");
+  assert.equal(unsignedInventory.schemaVersion, 1);
+  selectedUniversalIdentity(unsignedInventory.buildIdentity);
+  const tree = unsignedInventory.tree;
+  assert.equal(
+    digest(JSON.stringify(tree.entries)),
+    sha256(tree.sha256),
+    "Accepted unsigned tree digest disagrees",
+  );
+  const entries = signedRows(
+    tree.entries,
+    signedLimit.entries,
+    "Unsigned entries",
+  );
+  for (const entry of entries) signedPath(entry.path);
+  assert.deepEqual(
+    entries.map((row) => row.path),
+    [...new Set(entries.map((row) => row.path))].sort(),
+  );
+  const files = signedRows(
+    unsignedInventory.composition.machOFiles,
+    signedLimit.objects,
+    "Unsigned Mach-O inventory",
+  );
+  assert.deepEqual(
+    files.map((row) => row.path).sort(),
+    policy.objects.map((row) => row.primaryPath).sort(),
+    "Code policy does not account for every Mach-O",
+  );
+  for (const object of policy.objects) {
+    const entry = entries.find((row) => row.path === object.primaryPath);
+    const file = files.find((row) => row.path === object.primaryPath);
+    assert.equal(entry?.type, "file");
+    assert.equal(entry.sha256, file.sha256);
+    assert.equal(entry.bytes, file.bytes);
+    assert.deepEqual(Object.keys(file.slices).sort(), ["arm64", "x64"]);
+    retainedUniversalMachO(file, object.primaryPath);
+    if (object.objectPath !== object.primaryPath && object.objectPath !== ".")
+      assert.equal(
+        entries.find((row) => row.path === object.objectPath)?.type,
+        "directory",
+        "Signing object cannot be a symlink alias",
+      );
+  }
+  for (const entry of entries) {
+    if (entry.type === "file" && (entry.mode & 0o111) !== 0)
+      assert.ok(
+        files.some((row) => row.path === entry.path),
+        "Unclassified executable file",
+      );
+    if (entry.path.split("/").includes("_CodeSignature"))
+      assert.ok(
+        policy.objects.some(
+          (row) =>
+            row.signatureFiles.includes(entry.path) ||
+            row.signatureDirectories.includes(entry.path),
+        ),
+        "Undeclared signature resource",
+      );
+  }
+  const ordered = insideOut(policy.objects);
+  assert.deepEqual(
+    signingSteps,
+    ordered,
+    "Signing schedule is not the fixed inside-out object sequence",
+  );
+  const knownPaths = [".", ...entries.map((row) => row.path)];
+  for (const attribute of policy.metadata.allowedXattrs)
+    assert.ok(
+      knownPaths.includes(attribute.path),
+      "Metadata policy names an absent unsigned entry",
+    );
+  // Reserve against the largest admitted root name, including the closed paths
+  // that signing may create. Exact-root observation repeats this before calls.
+  signedMetadataCommandPlan(
+    `/${"a".repeat(1000)}`,
+    [
+      ...new Set([
+        ...knownPaths,
+        ...policy.objects.flatMap((row) => [
+          ...row.signatureFiles,
+          ...row.signatureDirectories,
+        ]),
+      ]),
+    ].sort(),
+    policy.metadata.allowedXattrs,
+  );
+  const result = {
+    schemaVersion: 1,
+    kind: "signed-artifact-plan",
+    unsignedTreeSha256: tree.sha256,
+    policySha256: digest(`${JSON.stringify(policy)}\n`),
+    objects: policy.objects,
+    signingSteps: ordered,
+  };
+  const plan = JSON.parse(
+    JSON.stringify({
+      ...result,
+      sha256: digest(`${JSON.stringify(result)}\n`),
+    }),
+  );
+  function freeze(value) {
+    if (value !== null && typeof value === "object") {
+      for (const item of Object.values(value)) freeze(item);
+      Object.freeze(value);
+    }
+    return value;
+  }
+  return freeze(plan);
+}
+
+async function signedTree(root) {
+  assert.ok(path.isAbsolute(root) && root === path.resolve(root));
+  signedPath(root.slice(1));
+  await assertDirectory(root);
+  const entries = [];
+  const statuses = new Map();
+  async function visit(relative) {
+    const filename = path.join(root, relative === "." ? "" : relative);
+    const status = await fs.lstat(filename, { bigint: true });
+    statuses.set(relative, status);
+    assert.ok(
+      statuses.size <= signedLimit.entries,
+      "Signed tree entry limit exceeded",
+    );
+    const mode = Number(status.mode & 0o777n);
+    if (status.isDirectory()) {
+      if (relative !== ".")
+        entries.push({ path: relative, type: "directory", mode });
+      for (const name of (await fs.readdir(filename)).sort()) {
+        signedPath(name);
+        await visit(relative === "." ? name : `${relative}/${name}`);
+      }
+    } else if (status.isSymbolicLink()) {
+      const target = await fs.readlink(filename);
+      signedPath(target);
+      await validateContainedLink(root, relative);
+      entries.push({ path: relative, type: "symlink", mode, target });
+    } else {
+      assert.ok(
+        status.isFile() && status.nlink === 1n,
+        "Signed tree requires ordinary single-link files",
+      );
+      assert.ok(
+        status.size <= 2n * 1024n ** 3n,
+        "Signed tree file exceeds bound",
+      );
+      entries.push({
+        path: relative,
+        type: "file",
+        mode,
+        ...(await measureRegularFile(filename)),
+      });
+    }
+    sameFile(status, await fs.lstat(filename, { bigint: true }));
+  }
+  await visit(".");
+  entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return {
+    tree: { entries, sha256: digest(JSON.stringify(entries)) },
+    statuses,
+  };
+}
+
+function signedBatches(values, extra = []) {
+  const batches = [];
+  let batch = [];
+  let bytes = extra.reduce(
+    (sum, value) => sum + Buffer.byteLength(value) + 1,
+    0,
+  );
+  for (const value of values) {
+    const size = Buffer.byteLength(value) + 1;
+    assert.ok(size + 1024 < signedLimit.argumentBytes);
+    if (
+      batch.length >= signedLimit.batch ||
+      bytes + size > signedLimit.argumentBytes - 1024
+    ) {
+      batches.push(batch);
+      batch = [];
+      bytes = extra.reduce(
+        (sum, value) => sum + Buffer.byteLength(value) + 1,
+        0,
+      );
+    }
+    batch.push(value);
+    bytes += size;
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
+}
+
+function signedMetadataCommandPlan(root, relativePaths, attributes) {
+  assert.ok(
+    relativePaths.length <= signedLimit.entries,
+    "Metadata entry capacity exceeded",
+  );
+  const names = relativePaths.map((relative) =>
+    path.join(root, relative === "." ? "" : relative),
+  );
+  const batches = signedBatches(names, ["-f", signedStatFormat]);
+  const namesToAttributes = new Map(names.map((name) => [name, new Set()]));
+  for (const attribute of attributes) {
+    const name = path.join(root, attribute.path === "." ? "" : attribute.path);
+    assert.ok(
+      namesToAttributes.has(name),
+      "Metadata policy path missing from planned inventory",
+    );
+    namesToAttributes.get(name).add(attribute.name);
+  }
+  const commandCount = batches.reduce(
+    (count, batch) =>
+      count +
+      3 +
+      new Set(batch.flatMap((name) => [...namesToAttributes.get(name)])).size,
+    0,
+  );
+  assert.ok(
+    commandCount <= signedLimit.commands,
+    "Metadata command capacity exhausted before observation",
+  );
+  return { batches, commandCount };
+}
+
+async function signedMetadata(root, tree, statuses, policy, runCommand) {
+  assert.equal(
+    typeof runCommand,
+    "function",
+    "Metadata requires the pinned tracked command owner",
+  );
+  const expected = signedMetadataPolicy(policy);
+  const relativePaths = [".", ...tree.entries.map((row) => row.path)].sort();
+  const commandPlan = signedMetadataCommandPlan(
+    root,
+    relativePaths,
+    expected.allowedXattrs,
+  );
+  const records = new Map();
+  let commandCount = 0;
+  async function run(toolId, args) {
+    assert.ok(
+      ++commandCount <= commandPlan.commandCount,
+      "Metadata command budget exhausted",
+    );
+    assert.ok(
+      args.reduce((sum, value) => sum + Buffer.byteLength(value) + 1, 0) <=
+        signedLimit.argumentBytes,
+    );
+    const result = exactObservation(
+      await runCommand(toolId, args),
+      ["stdout", "stderr", "exitCode"],
+      "Metadata command result",
+    );
+    assert.equal(result.exitCode, 0, "Metadata command failed");
+    assert.equal(result.stderr, "", "Metadata command emitted diagnostics");
+    assert.equal(typeof result.stdout, "string");
+    assert.ok(
+      Buffer.byteLength(result.stdout) <= signedLimit.outputBytes,
+      "Metadata output exceeds bound",
+    );
+    assert.ok(!result.stdout.includes("\r") && !result.stdout.includes("\0"));
+    return result.stdout;
+  }
+  for (const names of commandPlan.batches) {
+    const output = await run("stat", ["-f", signedStatFormat, ...names]);
+    assert.ok(output.endsWith("\n"));
+    const lines = output.slice(0, -1).split("\n");
+    assert.equal(
+      lines.length,
+      names.length,
+      "Stat batch attribution is incomplete",
+    );
+    for (let index = 0; index < lines.length; index++) {
+      const fields = lines[index].split("\t");
+      assert.equal(fields.length, 8);
+      assert.equal(fields[0], names[index], "Stat batch path mismatch");
+      assert.match(fields[1], /^[0-7]{5,6}$/);
+      for (const field of fields.slice(2))
+        assert.match(field, /^(?:0|[1-9][0-9]*)$/);
+      const relative =
+        names[index] === root
+          ? "."
+          : path.relative(root, names[index]).split(path.sep).join("/");
+      const observed = statuses.get(relative);
+      const mode = BigInt(`0o${fields[1]}`);
+      assert.equal(mode, observed.mode);
+      assert.equal(BigInt(fields[2]), observed.nlink);
+      assert.equal(BigInt(fields[3]), observed.uid);
+      assert.equal(BigInt(fields[4]), observed.gid);
+      assert.equal(BigInt(fields[6]), observed.dev);
+      assert.equal(BigInt(fields[7]), observed.ino);
+      assert.equal(
+        Number(mode & 0o7000n),
+        0,
+        "Special mode bits are forbidden",
+      );
+      assert.equal(fields[5], "0", "File flags are forbidden");
+      assert.equal(
+        Number(observed.uid),
+        expected.ownerUid,
+        "Unexpected artifact owner",
+      );
+      assert.equal(
+        Number(observed.gid),
+        expected.ownerGid,
+        "Unexpected artifact group",
+      );
+      records.set(names[index], {
+        path: relative,
+        type: observed.isDirectory()
+          ? "directory"
+          : observed.isSymbolicLink()
+            ? "symlink"
+            : "file",
+        mode: Number(mode),
+        uid: Number(observed.uid),
+        gid: Number(observed.gid),
+        links: Number(observed.nlink),
+        flags: 0,
+        mtimeNs: String(observed.mtimeNs),
+        ctimeNs: String(observed.ctimeNs),
+        device: String(observed.dev),
+        inode: String(observed.ino),
+        xattrs: [],
+      });
+    }
+    const acl = await run("ls", ["-l", "-n", "-e", "-d", "-P", ...names]);
+    assert.ok(acl.endsWith("\n"));
+    const aclLines = acl.slice(0, -1).split("\n");
+    assert.equal(
+      aclLines.length,
+      names.length,
+      "ACL entries or incomplete ACL batch",
+    );
+    for (let index = 0; index < aclLines.length; index++) {
+      const row = records.get(names[index]);
+      const entry = tree.entries.find((entry) => entry.path === row.path);
+      const suffix = `${names[index]}${row.type === "symlink" ? ` -> ${entry.target}` : ""}`;
+      assert.ok(aclLines[index].endsWith(suffix), "ACL batch path mismatch");
+      const prefix = aclLines[index].slice(0, -suffix.length);
+      assert.match(
+        prefix,
+        /^[dl-][rwxStTs-]{9}[@ ]?\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+[A-Z][a-z]{2}\s+[0-9]{1,2}\s+(?:[0-9]{2}:[0-9]{2}|[0-9]{4})\s+$/,
+        "Unsupported ACL listing or ACL marker",
+      );
+    }
+    const attrNames = await run("xattr", ["-s", "-v", ...names]);
+    const groups = new Map();
+    assert.ok(
+      attrNames === "" || attrNames.endsWith("\n"),
+      "Incomplete xattr names output",
+    );
+    for (const line of attrNames === ""
+      ? []
+      : attrNames.slice(0, -1).split("\n")) {
+      const fields = line.split(": ");
+      assert.equal(fields.length, 2);
+      assert.ok(names.includes(fields[0]), "Foreign xattr batch path");
+      assert.ok(
+        ["com.apple.quarantine", "com.apple.provenance"].includes(fields[1]),
+        "Forbidden or unknown xattr",
+      );
+      const group = groups.get(fields[1]) ?? [];
+      assert.ok(!group.includes(fields[0]), "Duplicate xattr observation");
+      group.push(fields[0]);
+      groups.set(fields[1], group);
+    }
+    for (const [name, targets] of [...groups.entries()].sort(([a], [b]) =>
+      a < b ? -1 : 1,
+    )) {
+      const hex = await run("xattr", [
+        "-s",
+        "-p",
+        "-x",
+        "-v",
+        name,
+        ...targets,
+      ]);
+      assert.ok(hex.endsWith("\n"));
+      const values = new Map();
+      let current = null;
+      for (const line of hex.slice(0, -1).split("\n")) {
+        if (line.endsWith(": ")) {
+          current = line.slice(0, -2);
+          assert.ok(
+            targets.includes(current) && !values.has(current),
+            "Foreign or duplicate xattr value path",
+          );
+          values.set(current, "");
+        } else {
+          assert.ok(current !== null);
+          assert.match(line, /^(?:[0-9A-F]{2} ?)*$/, "Malformed xattr hex");
+          const value = values.get(current) + line.replaceAll(" ", "");
+          assert.ok(
+            value.length <= signedLimit.attributeBytes * 2,
+            "Xattr value exceeds bound",
+          );
+          values.set(current, value);
+        }
+      }
+      assert.deepEqual(
+        [...values.keys()],
+        targets,
+        "Xattr value batch attribution incomplete",
+      );
+      for (const [target, hexValue] of values) {
+        const bytes = Buffer.from(hexValue, "hex");
+        records
+          .get(target)
+          .xattrs.push({ name, bytes: bytes.length, sha256: digest(bytes) });
+      }
+    }
+  }
+  const entries = [...records.values()].sort((a, b) =>
+    a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
+  );
+  const actualAttributes = entries.flatMap((row) =>
+    row.xattrs.map((attribute) => ({ path: row.path, ...attribute })),
+  );
+  assert.deepEqual(
+    actualAttributes,
+    expected.allowedXattrs,
+    "Artifact xattrs differ from approved input metadata",
+  );
+  assert.equal(
+    commandCount,
+    commandPlan.commandCount,
+    "Metadata calls differ from reserved capacity",
+  );
+  for (const [relative, before] of statuses)
+    sameFile(
+      before,
+      await fs.lstat(path.join(root, relative === "." ? "" : relative), {
+        bigint: true,
+      }),
+    );
+  return {
+    schemaVersion: 1,
+    entries,
+    commandCount,
+    singleFileFallbackCount: 0,
+    sha256: digest(`${JSON.stringify(entries)}\n`),
+  };
+}
+
+function signedSnapshot(value) {
+  const snapshot = exactObservation(
+    value,
+    signedSnapshotKeys,
+    "Signed custody observation",
+  );
+  assert.equal(snapshot.schemaVersion, 1);
+  assert.equal(snapshot.kind, "signed-artifact-custody");
+  selectedUniversalIdentity(snapshot.buildIdentity);
+  const tree = exactObservation(
+    snapshot.tree,
+    ["entries", "sha256"],
+    "Custody tree",
+  );
+  assert.equal(digest(JSON.stringify(tree.entries)), sha256(tree.sha256));
+  const paths = signedRows(
+    tree.entries,
+    signedLimit.entries,
+    "Custody entries",
+  ).map((row) => signedPath(row.path));
+  assert.deepEqual(paths, [...new Set(paths)].sort());
+  for (const row of tree.entries) {
+    exactObservation(
+      row,
+      row.type === "file"
+        ? ["path", "type", "mode", "sha256", "bytes"]
+        : row.type === "symlink"
+          ? ["path", "type", "mode", "target"]
+          : ["path", "type", "mode"],
+      "Custody entry",
+    );
+    assert.ok(["file", "directory", "symlink"].includes(row.type));
+    assert.ok(Number.isInteger(row.mode) && row.mode >= 0 && row.mode <= 0o777);
+    if (row.type === "file") {
+      sha256(row.sha256);
+      nonnegativeInteger(row.bytes);
+    }
+    if (row.type === "symlink") signedPath(row.target);
+  }
+  const metadata = exactObservation(
+    snapshot.metadata,
+    [
+      "schemaVersion",
+      "entries",
+      "commandCount",
+      "singleFileFallbackCount",
+      "sha256",
+    ],
+    "Custody metadata",
+  );
+  assert.equal(metadata.schemaVersion, 1);
+  assert.equal(
+    metadata.sha256,
+    digest(`${JSON.stringify(metadata.entries)}\n`),
+  );
+  assert.deepEqual(
+    metadata.entries.map((row) => row.path),
+    [".", ...paths].sort(),
+  );
+  for (const row of metadata.entries) {
+    exactObservation(
+      row,
+      [
+        "path",
+        "type",
+        "mode",
+        "uid",
+        "gid",
+        "links",
+        "flags",
+        "mtimeNs",
+        "ctimeNs",
+        "device",
+        "inode",
+        "xattrs",
+      ],
+      "Custody metadata entry",
+    );
+    const entry =
+      row.path === "."
+        ? { type: "directory", mode: row.mode & 0o777 }
+        : tree.entries.find((entry) => entry.path === row.path);
+    assert.equal(row.type, entry.type);
+    assert.equal(row.mode & 0o777, entry.mode);
+    assert.equal(row.mode & 0o7000, 0);
+    for (const field of ["mode", "uid", "gid", "links"])
+      nonnegativeInteger(row[field]);
+    assert.equal(row.flags, 0);
+    if (row.type === "file") assert.equal(row.links, 1);
+    for (const key of ["mtimeNs", "ctimeNs", "device", "inode"])
+      assert.match(row[key], /^(?:0|[1-9][0-9]*)$/);
+    const names = signedRows(
+      row.xattrs,
+      signedLimit.attributeNames,
+      "Custody xattrs",
+    ).map((attribute) => {
+      exactObservation(attribute, ["name", "bytes", "sha256"], "Custody xattr");
+      assert.ok(
+        ["com.apple.quarantine", "com.apple.provenance"].includes(
+          attribute.name,
+        ),
+      );
+      nonnegativeInteger(attribute.bytes);
+      assert.ok(attribute.bytes <= signedLimit.attributeBytes);
+      sha256(attribute.sha256);
+      return attribute.name;
+    });
+    assert.deepEqual(names, [...new Set(names)].sort());
+  }
+  nonnegativeInteger(metadata.commandCount);
+  assert.ok(metadata.commandCount <= signedLimit.commands);
+  assert.equal(metadata.singleFileFallbackCount, 0);
+  const machOFiles = signedRows(
+    snapshot.machOFiles,
+    signedLimit.objects,
+    "Custody Mach-O files",
+  );
+  assert.deepEqual(
+    machOFiles.map((row) => row.path),
+    [...new Set(machOFiles.map((row) => row.path))].sort(),
+  );
+  for (const row of machOFiles) {
+    retainedUniversalMachO(row, signedPath(row.path));
+    const entry = tree.entries.find((entry) => entry.path === row.path);
+    assert.equal(entry?.type, "file");
+    assert.equal(entry.sha256, row.sha256);
+    assert.equal(entry.bytes, row.bytes);
+  }
+  exactObservation(
+    snapshot.fuseWires,
+    universalArchitectures,
+    "Complete fuse observations",
+  );
+  exactObservation(
+    snapshot.asarIntegrity,
+    universalArchitectures,
+    "ASAR integrity observations",
+  );
+  for (const architecture of universalArchitectures) {
+    const wire = snapshot.fuseWires[architecture];
+    assert.equal(wire.version, "1");
+    const count = Object.keys(wire).length - 1;
+    assert.ok(count >= 4 && count <= 255);
+    exactObservation(
+      wire,
+      [
+        "version",
+        ...Array.from({ length: count }, (_, index) => String(index)),
+      ],
+      "Complete fuse wire",
+    );
+    for (let index = 0; index < count; index++)
+      assert.ok([48, 49, 114, 144].includes(wire[index]), "Unknown fuse state");
+    for (const index of [0, 2, 3])
+      assert.equal(wire[index], 48, "Required runtime fuse enabled");
+    const integrity = exactObservation(
+      snapshot.asarIntegrity[architecture],
+      ["algorithm", "expectedDigest", "observedDigest"],
+      "ASAR integrity",
+    );
+    assert.equal(integrity.algorithm, "SHA256");
+    assert.equal(
+      sha256(integrity.expectedDigest),
+      sha256(integrity.observedDigest),
+    );
+  }
+  return snapshot;
+}
+
+function copiedMetadata(row) {
+  const result = Object.fromEntries(
+    Object.entries(row).filter(
+      ([key]) => !["device", "inode", "ctimeNs"].includes(key),
+    ),
+  );
+  if (row.type === "symlink") delete result.mtimeNs;
+  return result;
+}
+
+export function assertSignedArtifactCopy({ before, after, policy }) {
+  before = signedSnapshot(before);
+  after = signedSnapshot(after);
+  const metadataPolicy = signedMetadataPolicy(policy.metadata);
+  assert.deepEqual(
+    after.tree,
+    before.tree,
+    "Copied artifact bytes/topology differ",
+  );
+  for (const key of [
+    "buildIdentity",
+    "machOFiles",
+    "fuseWires",
+    "asarIntegrity",
+  ])
+    assert.deepEqual(after[key], before[key], `Copied artifact ${key} differs`);
+  for (const observation of [before, after]) {
+    const attrs = observation.metadata.entries.flatMap((row) => {
+      assert.equal(row.uid, metadataPolicy.ownerUid);
+      assert.equal(row.gid, metadataPolicy.ownerGid);
+      return row.xattrs.map((attribute) => ({ path: row.path, ...attribute }));
+    });
+    assert.deepEqual(
+      attrs,
+      metadataPolicy.allowedXattrs,
+      "Copy metadata differs from approved values",
+    );
+  }
+  assert.deepEqual(
+    after.metadata.entries.map(copiedMetadata),
+    before.metadata.entries.map(copiedMetadata),
+    "Copy metadata differs under declared timestamp policy",
+  );
+  return {
+    beforeTreeSha256: before.tree.sha256,
+    afterTreeSha256: after.tree.sha256,
+    beforeMetadataSha256: before.metadata.sha256,
+    afterMetadataSha256: after.metadata.sha256,
+    copiedSymlinkMtimes: after.metadata.entries
+      .filter((row) => row.type === "symlink")
+      .map((row) => ({ path: row.path, mtimeNs: row.mtimeNs })),
+  };
+}
+
+function validateSignedPlan(value) {
+  const plan = exactObservation(
+    value,
+    [
+      "schemaVersion",
+      "kind",
+      "unsignedTreeSha256",
+      "policySha256",
+      "objects",
+      "signingSteps",
+      "sha256",
+    ],
+    "Signing plan",
+  );
+  assert.equal(plan.schemaVersion, 1);
+  assert.equal(plan.kind, "signed-artifact-plan");
+  sha256(plan.unsignedTreeSha256);
+  sha256(plan.policySha256);
+  const { sha256: planHash, ...content } = plan;
+  assert.equal(sha256(planHash), digest(`${JSON.stringify(content)}\n`));
+  assert.deepEqual(plan.signingSteps, insideOut(plan.objects));
+  return plan;
+}
+
+export function assertSigningStepTransition({
+  before,
+  after,
+  plan,
+  signingIndex,
+}) {
+  before = signedSnapshot(before);
+  after = signedSnapshot(after);
+  plan = validateSignedPlan(plan);
+  assert.ok(
+    Number.isInteger(signingIndex) &&
+      signingIndex >= 0 &&
+      signingIndex < plan.signingSteps.length,
+  );
+  const object = plan.signingSteps[signingIndex];
+  for (const key of ["buildIdentity", "fuseWires", "asarIntegrity"])
+    assert.deepEqual(after[key], before[key], `Signing changed ${key}`);
+  const expectedPrimaries = plan.objects.map((row) => row.primaryPath).sort();
+  assert.deepEqual(
+    before.machOFiles.map((row) => row.path),
+    expectedPrimaries,
+  );
+  assert.deepEqual(
+    after.machOFiles.map((row) => row.path),
+    expectedPrimaries,
+  );
+  const permitted = new Set([
+    object.primaryPath,
+    ...object.signatureFiles,
+    ...object.signatureDirectories,
+  ]);
+  const prior = new Map(before.tree.entries.map((row) => [row.path, row]));
+  const next = new Map(after.tree.entries.map((row) => [row.path, row]));
+  for (const name of [...object.signatureFiles, ...object.signatureDirectories])
+    assert.ok(
+      next.has(name),
+      "Signing did not produce the complete declared signature resources",
+    );
+  for (const name of new Set([...prior.keys(), ...next.keys()])) {
+    const left = prior.get(name),
+      right = next.get(name);
+    if (!permitted.has(name))
+      assert.deepEqual(right, left, "Signing changed an unaffected path");
+    else if (name === object.primaryPath) {
+      assert.equal(left?.type, "file");
+      assert.equal(right?.type, "file");
+      assert.equal(right.mode, left.mode);
+    } else {
+      assert.ok(right, "Signing removed a declared signature resource");
+      assert.equal(
+        right.type,
+        object.signatureFiles.includes(name) ? "file" : "directory",
+      );
+      assert.equal(
+        right.mode,
+        left?.mode ?? (right.type === "file" ? 0o644 : 0o755),
+      );
+    }
+  }
+  const parentsWithNewEntries = new Set(
+    [...next.keys()]
+      .filter((name) => !prior.has(name))
+      .map((name) => path.posix.dirname(name)),
+  );
+  const metadataBefore = new Map(
+    before.metadata.entries.map((row) => [row.path, row]),
+  );
+  for (const row of after.metadata.entries) {
+    const old = metadataBefore.get(row.path);
+    if (!old) {
+      assert.ok(permitted.has(row.path) && row.path !== object.primaryPath);
+      assert.deepEqual(
+        row.xattrs,
+        [],
+        "Unexpected metadata on new signature resource",
+      );
+      continue;
+    }
+    // Atomic replacement is allowed only for the target primary/signature files.
+    const allowIdentityChange = permitted.has(row.path) && row.type === "file";
+    const allowWriteTime =
+      permitted.has(row.path) || parentsWithNewEntries.has(row.path);
+    const ignored = new Set(allowWriteTime ? ["mtimeNs", "ctimeNs"] : []);
+    if (allowIdentityChange) {
+      ignored.add("inode");
+      ignored.add("device");
+    }
+    if (row.type === "directory" && parentsWithNewEntries.has(row.path))
+      ignored.add("links");
+    const selected = (value) =>
+      Object.fromEntries(
+        Object.entries(value).filter(([key]) => !ignored.has(key)),
+      );
+    assert.deepEqual(
+      selected(row),
+      selected(old),
+      "Signing changed undeclared metadata",
+    );
+  }
+  const input = before.machOFiles.find(
+    (row) => row.path === object.primaryPath,
+  );
+  const output = after.machOFiles.find(
+    (row) => row.path === object.primaryPath,
+  );
+  return {
+    signingIndex,
+    objectPath: object.objectPath,
+    beforeTreeSha256: before.tree.sha256,
+    afterTreeSha256: after.tree.sha256,
+    inputMachO: input,
+    outputMachO: output,
+    equivalenceClaim: null,
+  };
+}
+
+export async function inspectSignedArtifactCustody({
+  appBundle,
+  temporaryRoot,
+  expectedBuildIdentity,
+  unsignedInventory,
+  policy,
+  runCommand,
+}) {
+  policy = signedPolicy(policy);
+  const plan = deriveSignedArtifactPlan({
+    unsignedInventory,
+    policy,
+    signingSteps: insideOut(policy.objects),
+  });
+  expectedBuildIdentity = selectedUniversalIdentity(expectedBuildIdentity);
+  assertBuildIdentity(unsignedInventory.buildIdentity, expectedBuildIdentity);
+  assertDisjointRoots([appBundle, temporaryRoot]);
+  const observed = await signedTree(appBundle);
+  const tree = observed.tree;
+  const permitted = new Set(
+    plan.objects.flatMap((row) => [
+      row.primaryPath,
+      ...row.signatureFiles,
+      ...row.signatureDirectories,
+    ]),
+  );
+  const accepted = new Map(
+    unsignedInventory.tree.entries.map((row) => [row.path, row]),
+  );
+  for (const row of tree.entries) {
+    const original = accepted.get(row.path);
+    if (!permitted.has(row.path))
+      assert.deepEqual(
+        row,
+        original,
+        "Signing custody changed an accepted resource",
+      );
+    else {
+      const signatureDirectory = plan.objects.some((object) =>
+        object.signatureDirectories.includes(row.path),
+      );
+      assert.equal(row.type, signatureDirectory ? "directory" : "file");
+      assert.equal(
+        row.mode,
+        original?.mode ?? (signatureDirectory ? 0o755 : 0o644),
+      );
+    }
+  }
+  for (const entry of unsignedInventory.tree.entries)
+    assert.ok(
+      tree.entries.some((row) => row.path === entry.path),
+      "Signing custody lost an accepted path",
+    );
+  const machOFiles = await inspectMachOTree(appBundle, tree);
+  assert.deepEqual(
+    machOFiles.map((row) => row.path),
+    plan.objects.map((row) => row.primaryPath).sort(),
+    "Signing changed the complete Mach-O object set",
+  );
+  for (const object of plan.objects) {
+    const file = await measureRegularFile(
+      path.join(appBundle, object.primaryPath),
+      true,
+    );
+    const fileType = ["main", "helper"].includes(object.role)
+      ? 2
+      : object.role === "addon"
+        ? 8
+        : 6;
+    universalMachO(file.contents, object.primaryPath, fileType);
+    if (
+      ["main", "helper", "framework"].includes(object.role) &&
+      object.objectPath !== standaloneCrashpadPath
+    ) {
+      const infoPath =
+        object.role === "framework"
+          ? `${object.objectPath}/Versions/A/Resources/Info.plist`
+          : object.role === "main"
+            ? "Contents/Info.plist"
+            : `${object.objectPath}/Contents/Info.plist`;
+      const info = plist.parse(
+        (
+          await measureRegularFile(path.join(appBundle, infoPath), true)
+        ).contents.toString("utf8"),
+      );
+      assert.equal(
+        info.CFBundleIdentifier,
+        object.identifier,
+        "Candidate identifier differs from signing policy; rebuild required",
+      );
+      assert.equal(
+        info.CFBundleExecutable,
+        path.posix.basename(object.primaryPath),
+      );
+    }
+    if (object.role === "framework") {
+      for (const [name, target] of [
+        [`${object.objectPath}/Versions/Current`, "A"],
+        [
+          `${object.objectPath}/${path.posix.basename(object.primaryPath)}`,
+          `Versions/Current/${path.posix.basename(object.primaryPath)}`,
+        ],
+      ]) {
+        const link = tree.entries.find((row) => row.path === name);
+        assert.equal(link?.type, "symlink");
+        assert.equal(link.target, target, "Framework alias is not canonical");
+      }
+    }
+  }
+  const metadata = await signedMetadata(
+    appBundle,
+    tree,
+    observed.statuses,
+    policy.metadata,
+    runCommand,
+  );
+  const resourcesDirectory = path.join(appBundle, "Contents/Resources");
+  assert.deepEqual(
+    tree.entries
+      .filter((row) => row.type === "file" && row.path.endsWith(".asar"))
+      .map((row) => row.path),
+    ["Contents/Resources/app.asar"],
+  );
+  assert.deepEqual(
+    tree.entries
+      .filter((row) => row.type === "file" && row.path.endsWith(".node"))
+      .map((row) => row.path),
+    nativeDistributionFiles.map(
+      (name) => `Contents/Resources/app.asar.unpacked/dist/${name}`,
+    ),
+  );
+  const common = commonObservation(
+    unsignedInventory.composition.common,
+    expectedBuildIdentity,
+  );
+  const asar = await inspectUniversalAsar(
+    { resourcesDirectory },
+    common,
+    expectedBuildIdentity,
+  );
+  assert.equal(asar.packageVersion, unsignedInventory.packageVersion);
+  const plistValue = plist.parse(
+    (
+      await measureRegularFile(
+        path.join(appBundle, "Contents/Info.plist"),
+        true,
+      )
+    ).contents.toString("utf8"),
+  );
+  assert.equal(plistValue.CFBundleVersion, asar.packageVersion);
+  assert.equal(plistValue.CFBundleShortVersionString, asar.packageVersion);
+  const map = exactObservation(
+    plistValue.ElectronAsarIntegrity,
+    ["Resources/app.asar"],
+    "ASAR integrity map",
+  );
+  const integrity = exactObservation(
+    map["Resources/app.asar"],
+    ["algorithm", "hash"],
+    "ASAR integrity row",
+  );
+  assert.equal(integrity.algorithm, "SHA256");
+  const header = getRawHeader(asar.archivePath);
+  assert.equal(sha256(integrity.hash), digest(header.headerString));
+  const expectedDigest = digest(`Resources/app.asarSHA256${integrity.hash}`);
+  const framework = machOFiles.find(
+    (row) => row.path === frameworkRelativePath,
+  );
+  assert.ok(framework, "Missing fixed Electron framework");
+  const file = await measureRegularFile(
+    path.join(appBundle, frameworkRelativePath),
+    true,
+  );
+  const asarIntegrity = {},
+    fuseWires = {};
+  const temporaryFence = await createUniversalOutput(temporaryRoot);
+  for (const architecture of universalArchitectures) {
+    const slice = framework.slices[architecture];
+    const thin = file.contents.subarray(
+      slice.offset,
+      slice.offset + slice.bytes,
+    );
+    const sentinel = thin.indexOf(integritySentinel);
+    assert.ok(
+      sentinel >= 0 && thin.indexOf(integritySentinel, sentinel + 1) === -1,
+      "Ambiguous or missing framework integrity sentinel",
+    );
+    const offset = sentinel + integritySentinel.length;
+    assert.ok(offset <= thin.length - 34);
+    assert.equal(thin[offset], 1);
+    assert.equal(thin[offset + 1], 1);
+    const observedDigest = thin
+      .subarray(offset + 2, offset + 34)
+      .toString("hex");
+    assert.equal(observedDigest, expectedDigest);
+    asarIntegrity[architecture] = {
+      algorithm: "SHA256",
+      expectedDigest,
+      observedDigest,
+    };
+    const thinPath = path.join(
+      temporaryRoot,
+      `signed-custody-framework-${architecture}.bin`,
+    );
+    await writeUniversalFile(thinPath, thin, 0o600, temporaryFence);
+    fuseWires[architecture] = await getCurrentFuseWire(thinPath);
+    assert.deepEqual(
+      await measureRegularFile(thinPath),
+      { sha256: slice.sha256, bytes: slice.bytes },
+      "Fuse observation changed its disposable thin copy",
+    );
+  }
+  const result = signedSnapshot({
+    schemaVersion: 1,
+    kind: "signed-artifact-custody",
+    buildIdentity: asar.buildIdentity,
+    tree,
+    machOFiles,
+    metadata,
+    fuseWires,
+    asarIntegrity,
+  });
+  assert.deepEqual(
+    (await signedTree(appBundle)).tree,
+    tree,
+    "App changed during signed custody inspection",
+  );
+  for (const [relative, before] of observed.statuses)
+    sameFile(
+      before,
+      await fs.lstat(path.join(appBundle, relative === "." ? "" : relative), {
+        bigint: true,
+      }),
+    );
+  await temporaryFence();
+  return result;
+}
 
 export function expectedDesktopDistributionFiles(platform = process.platform) {
   assert.ok(

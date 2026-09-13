@@ -137,6 +137,9 @@ export function assertUnsignedArtifactCiInvocation(rootPackage, ciWorkflow) {
     "tests/acceptance/desktop-native-build-targets.test.mjs",
     "tests/acceptance/universal-artifact-composition.test.mjs",
     "tests/acceptance/universal-artifact-cli.test.mjs",
+    "tests/acceptance/signed-artifact-custody.test.mjs",
+    "tests/acceptance/signed-artifact-evidence.test.mjs",
+    "tests/acceptance/signed-artifact-cli.test.mjs",
   ];
   const staticJob = readCiJob(ciWorkflow, "static");
   const invocation = /^ {6}- run: npm run test:repository$/mu.exec(staticJob);
