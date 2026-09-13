@@ -72,15 +72,17 @@ test("production Electron shell preserves Student isolation and denies protectio
     await expect(
       window.getByRole("heading", { exact: true, name: "DesmosLock" }),
     ).toBeVisible();
-    const expectedPhase =
-      process.platform === "darwin" ? "entry" : "unavailable";
+    // An unsupported store cannot confirm an empty journal; its current
+    // uncertainty keeps protection blocked even in a fresh user-data directory.
+    const nativeStoreSupported = process.platform === "darwin";
+    const expectedPhase = nativeStoreSupported ? "entry" : "unavailable";
     const assertStudentBoundary = async (page: Page) => {
       await expect(page.locator(".student-session")).toHaveAttribute(
         "data-phase",
         expectedPhase,
       );
       await expect(page.locator("#protection-status")).toHaveText(
-        "Protection not started",
+        nativeStoreSupported ? "Protection not started" : "Recovery required",
       );
       const boundary = await page.evaluate(async () => {
         const bridge = (
@@ -127,28 +129,42 @@ test("production Electron shell preserves Student isolation and denies protectio
           pendingOperation: null,
         },
         protection: {
-          phase: "idle",
-          categories: {
-            aac: { status: expect.any(String), code: expect.any(String) },
-            shortcuts: { status: expect.any(String), code: expect.any(String) },
-            applications: {
-              status: expect.any(String),
-              code: expect.any(String),
-            },
-            persistence: {
-              status: expect.any(String),
-              code: expect.any(String),
-            },
-            windowNetwork: {
-              status: expect.any(String),
-              code: expect.any(String),
-            },
-          },
+          phase: nativeStoreSupported ? "idle" : "recovery_required",
+          categories: nativeStoreSupported
+            ? {
+                aac: { status: expect.any(String), code: expect.any(String) },
+                shortcuts: {
+                  status: expect.any(String),
+                  code: expect.any(String),
+                },
+                applications: {
+                  status: expect.any(String),
+                  code: expect.any(String),
+                },
+                persistence: {
+                  status: expect.any(String),
+                  code: expect.any(String),
+                },
+                windowNetwork: {
+                  status: expect.any(String),
+                  code: expect.any(String),
+                },
+              }
+            : {
+                aac: { status: "pending", code: "awaiting_native_begin" },
+                shortcuts: { status: "pending", code: "none" },
+                applications: { status: "pending", code: "none" },
+                persistence: {
+                  status: "unavailable",
+                  code: "durability_unavailable",
+                },
+                windowNetwork: { status: "pending", code: "none" },
+              },
           calculatorVisible: false,
-          failure: null,
+          failure: nativeStoreSupported ? null : "persistence_unavailable",
           nativeEndObserved: false,
-          cleanup: "not_requested",
-          evidence: "none",
+          cleanup: nativeStoreSupported ? "not_requested" : "unconfirmed",
+          evidence: nativeStoreSupported ? "none" : "unconfirmed",
           emergencyReview: false,
         },
       });
@@ -163,15 +179,27 @@ test("production Electron shell preserves Student isolation and denies protectio
         );
       expect(Number.isSafeInteger(boundary.studentView?.revision)).toBe(true);
       expect(boundary.studentView?.revision).toBeGreaterThanOrEqual(1);
-      await expect(
-        page.locator('[data-action="start-assessment"]'),
-      ).toBeVisible();
+      if (nativeStoreSupported) {
+        await expect(
+          page.locator('[data-action="start-assessment"]'),
+        ).toBeVisible();
+        await expect(
+          page.locator('[data-action="review-emergency"]'),
+        ).toBeHidden();
+      } else {
+        await expect(
+          page.locator('[data-action="start-assessment"]'),
+        ).toBeHidden();
+        await expect(
+          page.locator('[data-action="review-emergency"]'),
+        ).toBeVisible();
+        await expect(
+          page.locator('[data-action="review-emergency"]'),
+        ).toBeEnabled();
+      }
       await expect(
         page.locator('[data-action="start-assessment"]'),
       ).toBeDisabled();
-      await expect(
-        page.locator('[data-action="review-emergency"]'),
-      ).toBeHidden();
       await expect(
         page.getByRole("button", { name: /lock intent/i }),
       ).toHaveCount(0);
