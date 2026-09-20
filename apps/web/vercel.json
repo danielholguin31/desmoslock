@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "cd ../.. && npm ci",
+  "buildCommand": "cd ../.. && npm run build:packages && npm run build --workspace @desmoslock/web -- --production",
+  "outputDirectory": "dist",
+  "ignoreCommand": null,
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Referrer-Policy", "value": "no-referrer" },
+        { "key": "Cache-Control", "value": "no-store" }
+      ]
+    }
+  ]
+}
