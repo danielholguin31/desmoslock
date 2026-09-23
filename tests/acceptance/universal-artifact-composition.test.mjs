@@ -224,6 +224,7 @@ export function getCurrentFuseWire() { throw new Error("Actual fuse wire reads a
 });
 const {
   expectedDesktopDistributionFiles,
+  desktopPackagePaths,
   inspectDesktopCommon,
   inspectUniversalDesktop,
   nativeDistributionFiles,
@@ -844,6 +845,44 @@ await test("universal composition uses synthetic files and mocked packager, ASAR
         );
       }
     }
+    await t.test(
+      "validates packaged executable mode without requesting sandbox execution authority",
+      async () => {
+        const current = await make();
+        const previousAccess = state.fs.access;
+        let executableAccessAttempts = 0;
+        state.fs.access = async (filename, mode) => {
+          if (mode === constants.X_OK) {
+            executableAccessAttempts += 1;
+            const error = new Error(
+              `Synthetic sandbox denied executable access: ${filename}`,
+            );
+            error.code = "EPERM";
+            throw error;
+          }
+          return fs.access(filename, mode);
+        };
+        try {
+          const paths = await desktopPackagePaths(
+            current.packageDirectory,
+            "darwin",
+          );
+          assert.equal(
+            paths.executable,
+            path.join(current.appBundle, "Contents/MacOS/desmoslock-internal"),
+          );
+          assert.equal(executableAccessAttempts, 0);
+
+          await fs.chmod(paths.executable, 0o600);
+          await assert.rejects(
+            desktopPackagePaths(current.packageDirectory, "darwin"),
+            /Packaged executable must have an executable mode bit/,
+          );
+        } finally {
+          state.fs.access = previousAccess;
+        }
+      },
+    );
     await t.test(
       "common inventory is exactly nine production files with one identity",
       async () => {
