@@ -1,0 +1,1968 @@
+diff --git a/packages/contracts/src/authorization-command.ts b/packages/contracts/src/authorization-command.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e9c65081b6b37b3a1b57a7f84af888eac1da5881
+--- /dev/null
++++ b/packages/contracts/src/authorization-command.ts
+@@ -0,0 +1,297 @@
++import {
++  schoolSettingKeys,
++  staffAuthorizationActions,
++  type AuthoritativeStaffActor,
++  type MembershipRole,
++  type MembershipStatus,
++  type StaffAuthorizationAuditIntent,
++  type StaffAuthorizationRequest,
++} from "@desmoslock/domain";
++
++export const authorizationCommandActions = staffAuthorizationActions;
++
++export type StaffAuthorizationCommand =
++  | {
++      readonly action: "school.list" | "school.read";
++      readonly schoolId: string;
++    }
++  | { readonly action: "school.settings.list"; readonly schoolId: string }
++  | {
++      readonly action: "school.setting.read" | "school.setting.update";
++      readonly schoolId: string;
++      readonly settingKey: (typeof schoolSettingKeys)[number];
++    }
++  | {
++      readonly action: "membership.list";
++      readonly schoolId: string;
++      readonly targetRole: MembershipRole;
++      readonly targetStatus: MembershipStatus;
++    }
++  | {
++      readonly action: "membership.read";
++      readonly membershipId: string;
++    }
++  | {
++      readonly action: "membership.invite";
++      readonly requestedRole: MembershipRole;
++      readonly schoolId: string;
++    }
++  | {
++      readonly action: "membership.change-role";
++      readonly membershipId: string;
++      readonly requestedRole: MembershipRole;
++    }
++  | {
++      readonly action:
++        "membership.suspend" | "membership.reactivate" | "membership.remove";
++      readonly membershipId: string;
++    }
++  | { readonly action: "test.list"; readonly schoolId: string }
++  | { readonly action: "test.create"; readonly schoolId: string }
++  | {
++      readonly action:
++        | "test.read"
++        | "test.update"
++        | "test.start"
++        | "test.end"
++        | "test.archive";
++      readonly testId: string;
++    };
++
++export type StaffAuthorizationCommandParseCode =
++  | "malformed-command"
++  | "unsupported-action"
++  | "unexpected-fields"
++  | "invalid-identifier"
++  | "invalid-target-role"
++  | "invalid-target-status"
++  | "invalid-setting";
++
++export type StaffAuthorizationCommandParseResult =
++  | { readonly ok: true; readonly value: StaffAuthorizationCommand }
++  | { readonly code: StaffAuthorizationCommandParseCode; readonly ok: false };
++
++export interface StaffAuthorizationContextResolver {
++  /**
++   * Backend-only adapter seam. Resolve the current session's Membership and
++   * every target field from authoritative storage on each call; never accept
++   * actor authority from the command or reuse a cached role/status snapshot.
++   * Collection adapters must constrain results to the resolved role, status,
++   * ownership, School, and exported School-setting allowlist.
++   */
++  resolveForCurrentSession(command: StaffAuthorizationCommand): Promise<{
++    readonly actor: AuthoritativeStaffActor | null;
++    readonly request: StaffAuthorizationRequest;
++  }>;
++}
++
++export interface StaffAuthorizationAuditWriter {
++  /** Persist only the evaluator's minimized, immutable audit intent. */
++  append(intent: StaffAuthorizationAuditIntent): Promise<void>;
++}
++
++const identifierPattern =
++  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
++const roleSet = new Set<MembershipRole>(["owner", "administrator", "teacher"]);
++const statusSet = new Set<MembershipStatus>(["active", "suspended", "removed"]);
++const actionSet = new Set<string>(authorizationCommandActions);
++const settingSet = new Set<string>(schoolSettingKeys);
++
++function isRecord(value: unknown): value is Record<string, unknown> {
++  if (typeof value !== "object" || value === null || Array.isArray(value)) {
++    return false;
++  }
++  const prototype = Object.getPrototypeOf(value) as unknown;
++  return prototype === Object.prototype || prototype === null;
++}
++
++function hasExactKeys(
++  value: Record<string, unknown>,
++  expectedKeys: readonly string[],
++): boolean {
++  const actualKeys = Object.keys(value);
++  return (
++    actualKeys.length === expectedKeys.length &&
++    expectedKeys.every((key) => Object.hasOwn(value, key))
++  );
++}
++
++function isIdentifier(value: unknown): value is string {
++  return typeof value === "string" && identifierPattern.test(value);
++}
++
++function isRole(value: unknown): value is MembershipRole {
++  return typeof value === "string" && roleSet.has(value as MembershipRole);
++}
++
++function isStatus(value: unknown): value is MembershipStatus {
++  return typeof value === "string" && statusSet.has(value as MembershipStatus);
++}
++
++function failure(
++  code: StaffAuthorizationCommandParseCode,
++): StaffAuthorizationCommandParseResult {
++  return { code, ok: false };
++}
++
++function parseSchoolIdCommand(
++  input: Record<string, unknown>,
++  action:
++    | "school.list"
++    | "school.read"
++    | "school.settings.list"
++    | "test.list"
++    | "test.create",
++): StaffAuthorizationCommandParseResult {
++  if (!hasExactKeys(input, ["action", "schoolId"])) {
++    return failure("unexpected-fields");
++  }
++  if (!isIdentifier(input.schoolId)) {
++    return failure("invalid-identifier");
++  }
++  return { ok: true, value: { action, schoolId: input.schoolId } };
++}
++
++function parseMembershipIdCommand(
++  input: Record<string, unknown>,
++  action:
++    | "membership.read"
++    | "membership.suspend"
++    | "membership.reactivate"
++    | "membership.remove",
++): StaffAuthorizationCommandParseResult {
++  if (!hasExactKeys(input, ["action", "membershipId"])) {
++    return failure("unexpected-fields");
++  }
++  if (!isIdentifier(input.membershipId)) {
++    return failure("invalid-identifier");
++  }
++  return { ok: true, value: { action, membershipId: input.membershipId } };
++}
++
++export function parseStaffAuthorizationCommand(
++  input: unknown,
++): StaffAuthorizationCommandParseResult {
++  if (!isRecord(input)) {
++    return failure("malformed-command");
++  }
++  const action = input.action;
++  if (typeof action !== "string" || !actionSet.has(action)) {
++    return failure("unsupported-action");
++  }
++
++  switch (action) {
++    case "school.list":
++    case "school.read":
++    case "school.settings.list":
++    case "test.list":
++    case "test.create":
++      return parseSchoolIdCommand(input, action);
++    case "school.setting.read":
++    case "school.setting.update":
++      if (!hasExactKeys(input, ["action", "schoolId", "settingKey"])) {
++        return failure("unexpected-fields");
++      }
++      if (!isIdentifier(input.schoolId)) {
++        return failure("invalid-identifier");
++      }
++      if (
++        typeof input.settingKey !== "string" ||
++        !settingSet.has(input.settingKey)
++      ) {
++        return failure("invalid-setting");
++      }
++      return {
++        ok: true,
++        value: {
++          action,
++          schoolId: input.schoolId,
++          settingKey: input.settingKey as (typeof schoolSettingKeys)[number],
++        },
++      };
++    case "membership.list":
++      if (
++        !hasExactKeys(input, [
++          "action",
++          "schoolId",
++          "targetRole",
++          "targetStatus",
++        ])
++      ) {
++        return failure("unexpected-fields");
++      }
++      if (!isIdentifier(input.schoolId)) {
++        return failure("invalid-identifier");
++      }
++      if (!isRole(input.targetRole)) {
++        return failure("invalid-target-role");
++      }
++      if (!isStatus(input.targetStatus)) {
++        return failure("invalid-target-status");
++      }
++      return {
++        ok: true,
++        value: {
++          action,
++          schoolId: input.schoolId,
++          targetRole: input.targetRole,
++          targetStatus: input.targetStatus,
++        },
++      };
++    case "membership.read":
++    case "membership.suspend":
++    case "membership.reactivate":
++    case "membership.remove":
++      return parseMembershipIdCommand(input, action);
++    case "membership.invite":
++      if (!hasExactKeys(input, ["action", "requestedRole", "schoolId"])) {
++        return failure("unexpected-fields");
++      }
++      if (!isIdentifier(input.schoolId)) {
++        return failure("invalid-identifier");
++      }
++      if (!isRole(input.requestedRole)) {
++        return failure("invalid-target-role");
++      }
++      return {
++        ok: true,
++        value: {
++          action,
++          requestedRole: input.requestedRole,
++          schoolId: input.schoolId,
++        },
++      };
++    case "membership.change-role":
++      if (!hasExactKeys(input, ["action", "membershipId", "requestedRole"])) {
++        return failure("unexpected-fields");
++      }
++      if (!isIdentifier(input.membershipId)) {
++        return failure("invalid-identifier");
++      }
++      if (!isRole(input.requestedRole)) {
++        return failure("invalid-target-role");
++      }
++      return {
++        ok: true,
++        value: {
++          action,
++          membershipId: input.membershipId,
++          requestedRole: input.requestedRole,
++        },
++      };
++    case "test.read":
++    case "test.update":
++    case "test.start":
++    case "test.end":
++    case "test.archive":
++      if (!hasExactKeys(input, ["action", "testId"])) {
++        return failure("unexpected-fields");
++      }
++      if (!isIdentifier(input.testId)) {
++        return failure("invalid-identifier");
++      }
++      return { ok: true, value: { action, testId: input.testId } };
++  }
++
++  return failure("unsupported-action");
++}
+diff --git a/packages/contracts/src/index.ts b/packages/contracts/src/index.ts
+index 3e20016964ee0a4dbf0e75b2f27c6f0c92284fdd..f5e00b80d5ed0a28c9219f8d031813a14bd2418b 100644
+--- a/packages/contracts/src/index.ts
++++ b/packages/contracts/src/index.ts
+@@ -61,3 +61,14 @@ export {
+   verifyReleaseProvenance,
+ } from "./release-provenance.js";
+ export type { ReleaseProvenanceInput } from "./release-provenance.js";
++export {
++  authorizationCommandActions,
++  parseStaffAuthorizationCommand,
++} from "./authorization-command.js";
++export type {
++  StaffAuthorizationAuditWriter,
++  StaffAuthorizationCommand,
++  StaffAuthorizationCommandParseCode,
++  StaffAuthorizationCommandParseResult,
++  StaffAuthorizationContextResolver,
++} from "./authorization-command.js";
+diff --git a/packages/contracts/tests/staff-authorization-command.test.ts b/packages/contracts/tests/staff-authorization-command.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..da63cc93f304ede53a3b925ed1eb101eaa4b0134
+--- /dev/null
++++ b/packages/contracts/tests/staff-authorization-command.test.ts
+@@ -0,0 +1,172 @@
++import { describe, expect, it } from "vitest";
++
++import {
++  authorizationCommandActions,
++  parseStaffAuthorizationCommand,
++} from "../src/index.js";
++
++const SCHOOL_ID = "11111111-1111-4111-8111-111111111111";
++const MEMBERSHIP_ID = "22222222-2222-4222-8222-222222222222";
++const TEST_ID = "abcdefab-cdef-4abc-8def-abcdefabcdef";
++
++const validCommands = [
++  { action: "school.list", schoolId: SCHOOL_ID },
++  { action: "school.read", schoolId: SCHOOL_ID },
++  { action: "school.settings.list", schoolId: SCHOOL_ID },
++  {
++    action: "school.setting.read",
++    schoolId: SCHOOL_ID,
++    settingKey: "displayName",
++  },
++  {
++    action: "school.setting.update",
++    schoolId: SCHOOL_ID,
++    settingKey: "displayName",
++  },
++  {
++    action: "membership.list",
++    schoolId: SCHOOL_ID,
++    targetRole: "teacher",
++    targetStatus: "active",
++  },
++  { action: "membership.read", membershipId: MEMBERSHIP_ID },
++  {
++    action: "membership.invite",
++    requestedRole: "teacher",
++    schoolId: SCHOOL_ID,
++  },
++  {
++    action: "membership.change-role",
++    membershipId: MEMBERSHIP_ID,
++    requestedRole: "administrator",
++  },
++  { action: "membership.suspend", membershipId: MEMBERSHIP_ID },
++  { action: "membership.reactivate", membershipId: MEMBERSHIP_ID },
++  { action: "membership.remove", membershipId: MEMBERSHIP_ID },
++  { action: "test.list", schoolId: SCHOOL_ID },
++  { action: "test.create", schoolId: SCHOOL_ID },
++  { action: "test.read", testId: TEST_ID },
++  { action: "test.update", testId: TEST_ID },
++  { action: "test.start", testId: TEST_ID },
++  { action: "test.end", testId: TEST_ID },
++  { action: "test.archive", testId: TEST_ID },
++] as const;
++
++describe("staff authorization command parser", () => {
++  it("accepts only target/action identifiers for every supported action", () => {
++    expect(authorizationCommandActions).toEqual(
++      validCommands.map(({ action }) => action),
++    );
++    for (const command of validCommands) {
++      expect(parseStaffAuthorizationCommand(command), command.action).toEqual({
++        ok: true,
++        value: command,
++      });
++    }
++  });
++
++  it("rejects every actor-authority injection field across every action", () => {
++    const forgedFields = [
++      "actorId",
++      "actorMembershipId",
++      "actorRole",
++      "actorSchoolId",
++      "ownerMembershipId",
++      "serviceRole",
++    ] as const;
++    let evaluated = 0;
++    for (const command of validCommands) {
++      for (const forgedField of forgedFields) {
++        expect(
++          parseStaffAuthorizationCommand({
++            ...command,
++            [forgedField]: MEMBERSHIP_ID,
++          }),
++          `${command.action}/${forgedField}`,
++        ).toEqual({ code: "unexpected-fields", ok: false });
++        evaluated += 1;
++      }
++    }
++    expect(evaluated).toBe(
++      authorizationCommandActions.length * forgedFields.length,
++    );
++  });
++
++  it("rejects malformed, oversized, non-canonical, and nil identifiers", () => {
++    for (const forgedId of [
++      "not-a-uuid",
++      `${TEST_ID}0`,
++      TEST_ID.toUpperCase(),
++      ` ${TEST_ID}`,
++      "00000000-0000-0000-0000-000000000000",
++    ]) {
++      for (const command of [
++        { action: "school.read", schoolId: forgedId },
++        { action: "membership.read", membershipId: forgedId },
++        { action: "test.read", testId: forgedId },
++      ]) {
++        expect(parseStaffAuthorizationCommand(command), forgedId).toEqual({
++          code: "invalid-identifier",
++          ok: false,
++        });
++      }
++    }
++  });
++
++  it("rejects forged roles, statuses, and arbitrary School-setting keys", () => {
++    expect(
++      parseStaffAuthorizationCommand({
++        action: "membership.invite",
++        requestedRole: "admin",
++        schoolId: SCHOOL_ID,
++      }),
++    ).toEqual({ code: "invalid-target-role", ok: false });
++    expect(
++      parseStaffAuthorizationCommand({
++        action: "membership.list",
++        schoolId: SCHOOL_ID,
++        targetRole: "super-admin",
++        targetStatus: "active",
++      }),
++    ).toEqual({ code: "invalid-target-role", ok: false });
++    expect(
++      parseStaffAuthorizationCommand({
++        action: "membership.list",
++        schoolId: SCHOOL_ID,
++        targetRole: "teacher",
++        targetStatus: "enabled",
++      }),
++    ).toEqual({ code: "invalid-target-status", ok: false });
++    for (const action of [
++      "school.setting.read",
++      "school.setting.update",
++    ] as const) {
++      expect(
++        parseStaffAuthorizationCommand({
++          action,
++          schoolId: SCHOOL_ID,
++          settingKey: "billingPlan",
++        }),
++      ).toEqual({ code: "invalid-setting", ok: false });
++    }
++  });
++
++  it("rejects unsupported actions and non-record payloads with stable codes", () => {
++    for (const action of [
++      "school.delete",
++      "membership.claim-email-domain",
++      "test.delete",
++    ]) {
++      expect(parseStaffAuthorizationCommand({ action })).toEqual({
++        code: "unsupported-action",
++        ok: false,
++      });
++    }
++    for (const payload of [null, [], "test.start", 1]) {
++      expect(parseStaffAuthorizationCommand(payload)).toEqual({
++        code: "malformed-command",
++        ok: false,
++      });
++    }
++  });
++});
+diff --git a/packages/domain/src/index.ts b/packages/domain/src/index.ts
+index 04e76e1acad124f1fd6791935678aca32a40092e..1d2be96da2d943200f6b587778381afd5962c339 100644
+--- a/packages/domain/src/index.ts
++++ b/packages/domain/src/index.ts
+@@ -1,9 +1,5 @@
+ export type WorkspaceKind = "personal" | "school";
+ 
+-export type MembershipRole = "owner" | "administrator" | "teacher";
+-
+-export type MembershipStatus = "active" | "suspended" | "removed";
+-
+ export type TestLifecycle = "draft" | "open" | "ended";
+ 
+ export type LockState = "unlocked" | "locked";
+@@ -41,3 +37,29 @@ export type {
+   RestoredStudentSession,
+   StudentSessionLookup,
+ } from "./student-session.js";
++export { membershipRoleStorageAdapter } from "./membership-role-storage-adapter.js";
++export type { StorageMembershipRole } from "./membership-role-storage-adapter.js";
++export {
++  evaluateStaffAuthorization,
++  schoolSettingKeys,
++  staffAuthorizationActions,
++  staffAuthorizationMatrix,
++} from "./school-authorization.js";
++export type {
++  AuthoritativeStaffActor,
++  MembershipRole,
++  MembershipStatus,
++  ResolvedMembershipCollectionTarget,
++  ResolvedMembershipTarget,
++  ResolvedSchoolTarget,
++  ResolvedTestCollectionTarget,
++  ResolvedTestTarget,
++  SchoolSettingKey,
++  StaffAuthorizationAction,
++  StaffAuthorizationAuditDetail,
++  StaffAuthorizationAuditIntent,
++  StaffAuthorizationDecision,
++  StaffAuthorizationDenialCode,
++  StaffAuthorizationRequest,
++  StaffAuthorizationRule,
++} from "./school-authorization.js";
+diff --git a/packages/domain/src/membership-role-storage-adapter.ts b/packages/domain/src/membership-role-storage-adapter.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c0c12b9efea0306dd2570625a08e73f01d9e02ff
+--- /dev/null
++++ b/packages/domain/src/membership-role-storage-adapter.ts
+@@ -0,0 +1,28 @@
++import type { MembershipRole } from "./school-authorization.js";
++
++export type StorageMembershipRole = "owner" | "admin" | "teacher";
++
++export const membershipRoleStorageAdapter = Object.freeze({
++  toProduct(value: string): MembershipRole | null {
++    switch (value) {
++      case "owner":
++        return "owner";
++      case "admin":
++        return "administrator";
++      case "teacher":
++        return "teacher";
++      default:
++        return null;
++    }
++  },
++  toStorage(value: MembershipRole): StorageMembershipRole {
++    switch (value) {
++      case "owner":
++        return "owner";
++      case "administrator":
++        return "admin";
++      case "teacher":
++        return "teacher";
++    }
++  },
++});
+diff --git a/packages/domain/src/school-authorization.ts b/packages/domain/src/school-authorization.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ebfac1399c49c32cc0084c59e158b286d2271f2f
+--- /dev/null
++++ b/packages/domain/src/school-authorization.ts
+@@ -0,0 +1,658 @@
++export type MembershipRole = "owner" | "administrator" | "teacher";
++
++export type MembershipStatus = "active" | "suspended" | "removed";
++
++export const staffAuthorizationActions = Object.freeze([
++  "school.list",
++  "school.read",
++  "school.settings.list",
++  "school.setting.read",
++  "school.setting.update",
++  "membership.list",
++  "membership.read",
++  "membership.invite",
++  "membership.change-role",
++  "membership.suspend",
++  "membership.reactivate",
++  "membership.remove",
++  "test.list",
++  "test.create",
++  "test.read",
++  "test.update",
++  "test.start",
++  "test.end",
++  "test.archive",
++] as const);
++
++export type StaffAuthorizationAction =
++  (typeof staffAuthorizationActions)[number];
++
++export const schoolSettingKeys = Object.freeze(["displayName"] as const);
++
++export type SchoolSettingKey = (typeof schoolSettingKeys)[number];
++
++export type StaffAuthorizationRule =
++  | "own-school-only"
++  | "administrator-or-teacher-memberships"
++  | "teacher-memberships-only"
++  | "allowlisted-settings-only"
++  | "owned-tests-only"
++  | "never";
++
++const ownerAuthorizationRules = Object.freeze({
++  "school.list": "own-school-only",
++  "school.read": "own-school-only",
++  "school.settings.list": "allowlisted-settings-only",
++  "school.setting.read": "allowlisted-settings-only",
++  "school.setting.update": "allowlisted-settings-only",
++  "membership.list": "administrator-or-teacher-memberships",
++  "membership.read": "administrator-or-teacher-memberships",
++  "membership.invite": "administrator-or-teacher-memberships",
++  "membership.change-role": "administrator-or-teacher-memberships",
++  "membership.suspend": "administrator-or-teacher-memberships",
++  "membership.reactivate": "administrator-or-teacher-memberships",
++  "membership.remove": "administrator-or-teacher-memberships",
++  "test.list": "never",
++  "test.create": "never",
++  "test.read": "never",
++  "test.update": "never",
++  "test.start": "never",
++  "test.end": "never",
++  "test.archive": "never",
++} as const satisfies Record<StaffAuthorizationAction, StaffAuthorizationRule>);
++
++const administratorAuthorizationRules = Object.freeze({
++  "school.list": "own-school-only",
++  "school.read": "own-school-only",
++  "school.settings.list": "allowlisted-settings-only",
++  "school.setting.read": "allowlisted-settings-only",
++  "school.setting.update": "allowlisted-settings-only",
++  "membership.list": "teacher-memberships-only",
++  "membership.read": "teacher-memberships-only",
++  "membership.invite": "teacher-memberships-only",
++  "membership.change-role": "never",
++  "membership.suspend": "teacher-memberships-only",
++  "membership.reactivate": "teacher-memberships-only",
++  "membership.remove": "teacher-memberships-only",
++  "test.list": "never",
++  "test.create": "never",
++  "test.read": "never",
++  "test.update": "never",
++  "test.start": "never",
++  "test.end": "never",
++  "test.archive": "never",
++} as const satisfies Record<StaffAuthorizationAction, StaffAuthorizationRule>);
++
++const teacherAuthorizationRules = Object.freeze({
++  "school.list": "own-school-only",
++  "school.read": "own-school-only",
++  "school.settings.list": "never",
++  "school.setting.read": "never",
++  "school.setting.update": "never",
++  "membership.list": "never",
++  "membership.read": "never",
++  "membership.invite": "never",
++  "membership.change-role": "never",
++  "membership.suspend": "never",
++  "membership.reactivate": "never",
++  "membership.remove": "never",
++  "test.list": "owned-tests-only",
++  "test.create": "owned-tests-only",
++  "test.read": "owned-tests-only",
++  "test.update": "owned-tests-only",
++  "test.start": "owned-tests-only",
++  "test.end": "owned-tests-only",
++  "test.archive": "owned-tests-only",
++} as const satisfies Record<StaffAuthorizationAction, StaffAuthorizationRule>);
++
++export const staffAuthorizationMatrix = Object.freeze({
++  administrator: administratorAuthorizationRules,
++  owner: ownerAuthorizationRules,
++  teacher: teacherAuthorizationRules,
++} as const satisfies Record<
++  MembershipRole,
++  Record<StaffAuthorizationAction, StaffAuthorizationRule>
++>);
++
++export interface AuthoritativeStaffActor {
++  readonly membershipId: string;
++  readonly role: MembershipRole;
++  readonly schoolId: string;
++  readonly status: MembershipStatus;
++}
++
++export type ResolvedSchoolTarget =
++  | {
++      readonly exists: true;
++      readonly kind: "school";
++      readonly schoolId: string;
++    }
++  | {
++      readonly exists: false;
++      readonly kind: "school";
++      readonly schoolId: string;
++    };
++
++export type ResolvedMembershipCollectionTarget =
++  | {
++      readonly exists: true;
++      readonly kind: "membership-collection";
++      readonly role: MembershipRole;
++      readonly schoolId: string;
++      readonly status: MembershipStatus;
++    }
++  | {
++      readonly exists: false;
++      readonly kind: "membership-collection";
++      readonly role: MembershipRole;
++      readonly schoolId: string;
++      readonly status: MembershipStatus;
++    };
++
++export type ResolvedMembershipTarget =
++  | {
++      readonly exists: true;
++      readonly isLastOwner: boolean;
++      readonly kind: "membership";
++      readonly membershipId: string;
++      readonly role: MembershipRole;
++      readonly schoolId: string;
++      readonly status: MembershipStatus;
++    }
++  | {
++      readonly exists: false;
++      readonly kind: "membership";
++      readonly membershipId: string;
++    };
++
++export type ResolvedTestCollectionTarget =
++  | {
++      readonly exists: true;
++      readonly kind: "test-collection";
++      readonly ownerMembershipId: string;
++      readonly schoolId: string;
++    }
++  | {
++      readonly exists: false;
++      readonly kind: "test-collection";
++      readonly schoolId: string;
++    };
++
++export type ResolvedTestTarget =
++  | {
++      readonly exists: true;
++      readonly kind: "test";
++      readonly ownerMembershipId: string;
++      readonly schoolId: string;
++      readonly testId: string;
++    }
++  | {
++      readonly exists: false;
++      readonly kind: "test";
++      readonly testId: string;
++    };
++
++export type StaffAuthorizationRequest =
++  | {
++      readonly action: "school.list" | "school.read";
++      readonly target: ResolvedSchoolTarget;
++    }
++  | {
++      readonly action: "school.settings.list";
++      readonly target: ResolvedSchoolTarget;
++    }
++  | {
++      readonly action: "school.setting.read" | "school.setting.update";
++      readonly settingKey: string;
++      readonly target: ResolvedSchoolTarget;
++    }
++  | {
++      readonly action: "membership.list";
++      readonly target: ResolvedMembershipCollectionTarget;
++    }
++  | {
++      readonly action: "membership.read";
++      readonly target: ResolvedMembershipTarget;
++    }
++  | {
++      readonly action: "membership.invite";
++      readonly requestedRole: MembershipRole;
++      readonly target: ResolvedSchoolTarget;
++    }
++  | {
++      readonly action: "membership.change-role";
++      readonly requestedRole: MembershipRole;
++      readonly target: ResolvedMembershipTarget;
++    }
++  | {
++      readonly action:
++        "membership.suspend" | "membership.reactivate" | "membership.remove";
++      readonly target: ResolvedMembershipTarget;
++    }
++  | {
++      readonly action: "test.list";
++      readonly target: ResolvedTestCollectionTarget;
++    }
++  | {
++      readonly action: "test.create";
++      readonly target: ResolvedSchoolTarget;
++    }
++  | {
++      readonly action:
++        | "test.read"
++        | "test.update"
++        | "test.start"
++        | "test.end"
++        | "test.archive";
++      readonly target: ResolvedTestTarget;
++    };
++
++export type StaffAuthorizationDenialCode =
++  | "actor-unknown"
++  | "actor-inactive"
++  | "actor-removed"
++  | "target-unknown"
++  | "target-inactive"
++  | "cross-school"
++  | "role-not-permitted"
++  | "target-role-not-permitted"
++  | "requested-role-not-permitted"
++  | "self-management-forbidden"
++  | "last-owner-forbidden"
++  | "ownership-transfer-forbidden"
++  | "target-not-owned"
++  | "setting-not-allowed";
++
++export type StaffAuthorizationAuditDetail =
++  | {
++      readonly kind: "school";
++      readonly scope: "collection" | "object";
++    }
++  | {
++      readonly kind: "school-settings";
++      readonly scope: "collection";
++      readonly settingKeys: readonly SchoolSettingKey[];
++    }
++  | {
++      readonly kind: "school-setting";
++      readonly scope: "object";
++      readonly settingKey: SchoolSettingKey | null;
++    }
++  | {
++      readonly kind: "membership-collection";
++      readonly role: MembershipRole;
++      readonly status: MembershipStatus;
++    }
++  | {
++      readonly kind: "membership-read";
++      readonly role: MembershipRole | null;
++      readonly status: MembershipStatus | null;
++    }
++  | {
++      readonly kind: "membership-invitation";
++      readonly requestedRole: MembershipRole;
++    }
++  | {
++      readonly fromRole: MembershipRole | null;
++      readonly kind: "membership-role-transition";
++      readonly toRole: MembershipRole;
++    }
++  | {
++      readonly fromStatus: MembershipStatus | null;
++      readonly kind: "membership-status-transition";
++      readonly toStatus: MembershipStatus;
++    }
++  | {
++      readonly kind: "test";
++      readonly ownership: "foreign" | "new" | "owned" | "unknown";
++      readonly scope: "collection" | "object";
++    };
++
++export interface StaffAuthorizationAuditIntent {
++  readonly action: StaffAuthorizationAction;
++  readonly actorMembershipId: string | null;
++  readonly decision: "allow" | "deny";
++  readonly denialCode: StaffAuthorizationDenialCode | null;
++  readonly detail: StaffAuthorizationAuditDetail;
++  readonly targetId: string;
++  readonly targetKind:
++    | "membership"
++    | "membership-collection"
++    | "school"
++    | "test"
++    | "test-collection";
++}
++
++export type StaffAuthorizationDecision =
++  | {
++      readonly allowed: true;
++      readonly audit: StaffAuthorizationAuditIntent;
++      readonly code: "allowed";
++    }
++  | {
++      readonly allowed: false;
++      readonly audit: StaffAuthorizationAuditIntent;
++      readonly code: StaffAuthorizationDenialCode;
++    };
++
++function isSchoolSettingKey(value: string): value is SchoolSettingKey {
++  return schoolSettingKeys.some((settingKey) => settingKey === value);
++}
++
++function targetIdentifier(request: StaffAuthorizationRequest): string {
++  switch (request.target.kind) {
++    case "membership":
++      return request.target.membershipId;
++    case "membership-collection":
++    case "school":
++    case "test-collection":
++      return request.target.schoolId;
++    case "test":
++      return request.target.testId;
++  }
++}
++
++function testOwnership(
++  actor: AuthoritativeStaffActor | null,
++  ownerMembershipId: string | null,
++): "foreign" | "owned" | "unknown" {
++  if (actor === null || ownerMembershipId === null) {
++    return "unknown";
++  }
++  return ownerMembershipId === actor.membershipId ? "owned" : "foreign";
++}
++
++function auditDetail(
++  actor: AuthoritativeStaffActor | null,
++  request: StaffAuthorizationRequest,
++): StaffAuthorizationAuditDetail {
++  switch (request.action) {
++    case "school.list":
++      return Object.freeze({ kind: "school", scope: "collection" });
++    case "school.read":
++      return Object.freeze({ kind: "school", scope: "object" });
++    case "school.settings.list":
++      return Object.freeze({
++        kind: "school-settings",
++        scope: "collection",
++        settingKeys: schoolSettingKeys,
++      });
++    case "school.setting.read":
++    case "school.setting.update":
++      return Object.freeze({
++        kind: "school-setting",
++        scope: "object",
++        settingKey: isSchoolSettingKey(request.settingKey)
++          ? request.settingKey
++          : null,
++      });
++    case "membership.list":
++      return Object.freeze({
++        kind: "membership-collection",
++        role: request.target.role,
++        status: request.target.status,
++      });
++    case "membership.read":
++      return Object.freeze({
++        kind: "membership-read",
++        role: request.target.exists ? request.target.role : null,
++        status: request.target.exists ? request.target.status : null,
++      });
++    case "membership.invite":
++      return Object.freeze({
++        kind: "membership-invitation",
++        requestedRole: request.requestedRole,
++      });
++    case "membership.change-role":
++      return Object.freeze({
++        fromRole: request.target.exists ? request.target.role : null,
++        kind: "membership-role-transition",
++        toRole: request.requestedRole,
++      });
++    case "membership.suspend":
++    case "membership.reactivate":
++    case "membership.remove": {
++      const toStatus =
++        request.action === "membership.suspend"
++          ? "suspended"
++          : request.action === "membership.reactivate"
++            ? "active"
++            : "removed";
++      return Object.freeze({
++        fromStatus: request.target.exists ? request.target.status : null,
++        kind: "membership-status-transition",
++        toStatus,
++      });
++    }
++    case "test.list":
++      return Object.freeze({
++        kind: "test",
++        ownership: testOwnership(
++          actor,
++          request.target.exists ? request.target.ownerMembershipId : null,
++        ),
++        scope: "collection",
++      });
++    case "test.create":
++      return Object.freeze({
++        kind: "test",
++        ownership: "new",
++        scope: "collection",
++      });
++    case "test.read":
++    case "test.update":
++    case "test.start":
++    case "test.end":
++    case "test.archive":
++      return Object.freeze({
++        kind: "test",
++        ownership: testOwnership(
++          actor,
++          request.target.exists ? request.target.ownerMembershipId : null,
++        ),
++        scope: "object",
++      });
++  }
++}
++
++function createAuditIntent(
++  actor: AuthoritativeStaffActor | null,
++  request: StaffAuthorizationRequest,
++  decision: "allow" | "deny",
++  denialCode: StaffAuthorizationDenialCode | null,
++): StaffAuthorizationAuditIntent {
++  return Object.freeze({
++    action: request.action,
++    actorMembershipId: actor?.membershipId ?? null,
++    decision,
++    denialCode,
++    detail: auditDetail(actor, request),
++    targetId: targetIdentifier(request),
++    targetKind: request.target.kind,
++  });
++}
++
++function allow(
++  actor: AuthoritativeStaffActor,
++  request: StaffAuthorizationRequest,
++): StaffAuthorizationDecision {
++  return Object.freeze({
++    allowed: true,
++    audit: createAuditIntent(actor, request, "allow", null),
++    code: "allowed",
++  });
++}
++
++function deny(
++  actor: AuthoritativeStaffActor | null,
++  request: StaffAuthorizationRequest,
++  code: StaffAuthorizationDenialCode,
++): StaffAuthorizationDecision {
++  return Object.freeze({
++    allowed: false,
++    audit: createAuditIntent(actor, request, "deny", code),
++    code,
++  });
++}
++
++function targetSchoolId(request: StaffAuthorizationRequest): string | null {
++  return request.target.exists ? request.target.schoolId : null;
++}
++
++function isMembershipObjectRequest(
++  request: StaffAuthorizationRequest,
++): request is Extract<
++  StaffAuthorizationRequest,
++  { readonly target: ResolvedMembershipTarget }
++> {
++  return request.target.kind === "membership";
++}
++
++function isRequestedRoleAction(
++  request: StaffAuthorizationRequest,
++): request is Extract<
++  StaffAuthorizationRequest,
++  { readonly requestedRole: MembershipRole }
++> {
++  return (
++    request.action === "membership.invite" ||
++    request.action === "membership.change-role"
++  );
++}
++
++function membershipTargetRole(
++  request: StaffAuthorizationRequest,
++): MembershipRole | null {
++  if (request.action === "membership.invite") {
++    return request.requestedRole;
++  }
++  if (
++    request.target.kind === "membership" ||
++    request.target.kind === "membership-collection"
++  ) {
++    return request.target.exists ||
++      request.target.kind === "membership-collection"
++      ? request.target.role
++      : null;
++  }
++  return null;
++}
++
++function hasValidMembershipTargetState(
++  request: StaffAuthorizationRequest,
++): boolean {
++  if (request.target.kind === "membership-collection") {
++    return request.target.status !== "removed";
++  }
++  if (request.target.kind !== "membership" || !request.target.exists) {
++    return true;
++  }
++  switch (request.action) {
++    case "membership.read":
++    case "membership.remove":
++      return request.target.status !== "removed";
++    case "membership.change-role":
++    case "membership.suspend":
++      return request.target.status === "active";
++    case "membership.reactivate":
++      return request.target.status === "suspended";
++    default:
++      return true;
++  }
++}
++
++export function evaluateStaffAuthorization(input: {
++  readonly actor: AuthoritativeStaffActor | null;
++  readonly request: StaffAuthorizationRequest;
++}): StaffAuthorizationDecision {
++  const { actor, request } = input;
++
++  if (actor === null) {
++    return deny(null, request, "actor-unknown");
++  }
++  if (actor.status === "removed") {
++    return deny(actor, request, "actor-removed");
++  }
++  if (actor.status !== "active") {
++    return deny(actor, request, "actor-inactive");
++  }
++  if (!request.target.exists) {
++    return deny(actor, request, "target-unknown");
++  }
++  if (targetSchoolId(request) !== actor.schoolId) {
++    return deny(actor, request, "cross-school");
++  }
++
++  if (isMembershipObjectRequest(request)) {
++    if (request.target.membershipId === actor.membershipId) {
++      return deny(actor, request, "self-management-forbidden");
++    }
++    if (request.target.role === "owner" && request.target.isLastOwner) {
++      return deny(actor, request, "last-owner-forbidden");
++    }
++  }
++  if (!hasValidMembershipTargetState(request)) {
++    return deny(actor, request, "target-inactive");
++  }
++  if (isRequestedRoleAction(request) && request.requestedRole === "owner") {
++    return deny(actor, request, "ownership-transfer-forbidden");
++  }
++
++  const rule = staffAuthorizationMatrix[actor.role][request.action];
++  switch (rule) {
++    case "never":
++      return deny(actor, request, "role-not-permitted");
++    case "own-school-only":
++      return allow(actor, request);
++    case "allowlisted-settings-only":
++      if (request.action === "school.settings.list") {
++        return allow(actor, request);
++      }
++      if (
++        (request.action !== "school.setting.read" &&
++          request.action !== "school.setting.update") ||
++        !isSchoolSettingKey(request.settingKey)
++      ) {
++        return deny(actor, request, "setting-not-allowed");
++      }
++      return allow(actor, request);
++    case "owned-tests-only":
++      if (request.action === "test.create") {
++        return allow(actor, request);
++      }
++      if (
++        (request.target.kind !== "test" &&
++          request.target.kind !== "test-collection") ||
++        request.target.ownerMembershipId !== actor.membershipId
++      ) {
++        return deny(actor, request, "target-not-owned");
++      }
++      return allow(actor, request);
++    case "administrator-or-teacher-memberships": {
++      const targetRole = membershipTargetRole(request);
++      if (targetRole !== "administrator" && targetRole !== "teacher") {
++        return deny(actor, request, "target-role-not-permitted");
++      }
++      if (
++        request.action === "membership.change-role" &&
++        request.requestedRole !== "administrator" &&
++        request.requestedRole !== "teacher"
++      ) {
++        return deny(actor, request, "requested-role-not-permitted");
++      }
++      return allow(actor, request);
++    }
++    case "teacher-memberships-only": {
++      if (
++        request.action === "membership.invite" &&
++        request.requestedRole !== "teacher"
++      ) {
++        return deny(actor, request, "requested-role-not-permitted");
++      }
++      if (membershipTargetRole(request) !== "teacher") {
++        return deny(actor, request, "target-role-not-permitted");
++      }
++      return allow(actor, request);
++    }
++  }
++}
+diff --git a/packages/domain/tests/school-authorization.test.ts b/packages/domain/tests/school-authorization.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d7ca1163d60d9ad5b0a6d2f802d37fccc91b2d2a
+--- /dev/null
++++ b/packages/domain/tests/school-authorization.test.ts
+@@ -0,0 +1,720 @@
++import { describe, expect, it } from "vitest";
++
++import {
++  evaluateStaffAuthorization,
++  membershipRoleStorageAdapter,
++  schoolSettingKeys,
++  staffAuthorizationActions,
++  staffAuthorizationMatrix,
++  type AuthoritativeStaffActor,
++  type MembershipRole,
++  type MembershipStatus,
++  type StaffAuthorizationAction,
++  type StaffAuthorizationRequest,
++} from "../src/index.js";
++
++const SCHOOL_A = "school-a";
++const SCHOOL_B = "school-b";
++const roles = ["owner", "administrator", "teacher"] as const;
++const statuses = ["active", "suspended", "removed"] as const;
++
++interface Scenario {
++  readonly label: string;
++  readonly request: StaffAuthorizationRequest;
++}
++
++function actor(
++  role: MembershipRole,
++  status: MembershipStatus = "active",
++): AuthoritativeStaffActor {
++  return {
++    membershipId: `${role}-membership`,
++    role,
++    schoolId: SCHOOL_A,
++    status,
++  };
++}
++
++function membershipTarget(input: {
++  readonly actorMembershipId: string;
++  readonly isLastOwner: boolean;
++  readonly role: MembershipRole;
++  readonly schoolId: string;
++  readonly self: boolean;
++  readonly status: MembershipStatus;
++}) {
++  return {
++    exists: true as const,
++    isLastOwner: input.isLastOwner,
++    kind: "membership" as const,
++    membershipId: input.self ? input.actorMembershipId : "target-membership",
++    role: input.role,
++    schoolId: input.schoolId,
++    status: input.status,
++  };
++}
++
++function scenariosFor(
++  action: StaffAuthorizationAction,
++  schoolId: string,
++  actorMembershipId: string,
++): readonly Scenario[] {
++  switch (action) {
++    case "school.list":
++    case "school.read":
++    case "school.settings.list":
++      return [
++        {
++          label: action,
++          request: {
++            action,
++            target: { exists: true, kind: "school", schoolId },
++          },
++        },
++      ];
++    case "school.setting.read":
++    case "school.setting.update":
++      return ["displayName", "billingPlan"].map((settingKey) => ({
++        label: `${action}/${settingKey}`,
++        request: {
++          action,
++          settingKey,
++          target: { exists: true, kind: "school", schoolId },
++        },
++      }));
++    case "membership.list":
++      return roles.flatMap((role) =>
++        statuses.map((status) => ({
++          label: `${action}/${role}/${status}`,
++          request: {
++            action,
++            target: {
++              exists: true,
++              kind: "membership-collection",
++              role,
++              schoolId,
++              status,
++            },
++          },
++        })),
++      );
++    case "membership.read":
++    case "membership.suspend":
++    case "membership.reactivate":
++    case "membership.remove":
++      return roles.flatMap((role) =>
++        statuses.flatMap((status) =>
++          [false, true].flatMap((self) =>
++            [false, true].map((isLastOwner) => ({
++              label: `${action}/${role}/${status}/self:${self}/last:${isLastOwner}`,
++              request: {
++                action,
++                target: membershipTarget({
++                  actorMembershipId,
++                  isLastOwner,
++                  role,
++                  schoolId,
++                  self,
++                  status,
++                }),
++              },
++            })),
++          ),
++        ),
++      );
++    case "membership.invite":
++      return roles.map((requestedRole) => ({
++        label: `${action}/${requestedRole}`,
++        request: {
++          action,
++          requestedRole,
++          target: { exists: true, kind: "school", schoolId },
++        },
++      }));
++    case "membership.change-role":
++      return roles.flatMap((role) =>
++        statuses.flatMap((status) =>
++          [false, true].flatMap((self) =>
++            [false, true].flatMap((isLastOwner) =>
++              roles.map((requestedRole) => ({
++                label: `${action}/${role}/${status}/self:${self}/last:${isLastOwner}/to:${requestedRole}`,
++                request: {
++                  action,
++                  requestedRole,
++                  target: membershipTarget({
++                    actorMembershipId,
++                    isLastOwner,
++                    role,
++                    schoolId,
++                    self,
++                    status,
++                  }),
++                },
++              })),
++            ),
++          ),
++        ),
++      );
++    case "test.list":
++      return [true, false].map((owned) => ({
++        label: `${action}/owned:${owned}`,
++        request: {
++          action,
++          target: {
++            exists: true,
++            kind: "test-collection",
++            ownerMembershipId: owned ? actorMembershipId : "foreign-membership",
++            schoolId,
++          },
++        },
++      }));
++    case "test.create":
++      return [
++        {
++          label: action,
++          request: {
++            action,
++            target: { exists: true, kind: "school", schoolId },
++          },
++        },
++      ];
++    case "test.read":
++    case "test.update":
++    case "test.start":
++    case "test.end":
++    case "test.archive":
++      return [true, false].map((owned) => ({
++        label: `${action}/owned:${owned}`,
++        request: {
++          action,
++          target: {
++            exists: true,
++            kind: "test",
++            ownerMembershipId: owned ? actorMembershipId : "foreign-membership",
++            schoolId,
++            testId: "test-one",
++          },
++        },
++      }));
++  }
++}
++
++function canManageRole(
++  actorRole: MembershipRole,
++  targetRole: MembershipRole,
++): boolean {
++  if (actorRole === "owner") {
++    return targetRole === "administrator" || targetRole === "teacher";
++  }
++  return actorRole === "administrator" && targetRole === "teacher";
++}
++
++function expectedAllowed(
++  currentActor: AuthoritativeStaffActor,
++  request: StaffAuthorizationRequest,
++): boolean {
++  if (
++    currentActor.status !== "active" ||
++    !request.target.exists ||
++    request.target.schoolId !== currentActor.schoolId
++  ) {
++    return false;
++  }
++
++  switch (request.action) {
++    case "school.list":
++    case "school.read":
++      return true;
++    case "school.settings.list":
++      return currentActor.role !== "teacher";
++    case "school.setting.read":
++    case "school.setting.update":
++      return (
++        currentActor.role !== "teacher" && request.settingKey === "displayName"
++      );
++    case "membership.list":
++      return (
++        request.target.status !== "removed" &&
++        canManageRole(currentActor.role, request.target.role)
++      );
++    case "membership.read":
++      return (
++        request.target.membershipId !== currentActor.membershipId &&
++        request.target.status !== "removed" &&
++        canManageRole(currentActor.role, request.target.role)
++      );
++    case "membership.invite":
++      return (
++        request.requestedRole !== "owner" &&
++        canManageRole(currentActor.role, request.requestedRole)
++      );
++    case "membership.change-role":
++      return (
++        currentActor.role === "owner" &&
++        request.target.membershipId !== currentActor.membershipId &&
++        request.target.status === "active" &&
++        !(request.target.role === "owner" && request.target.isLastOwner) &&
++        canManageRole(currentActor.role, request.target.role) &&
++        request.requestedRole !== "owner"
++      );
++    case "membership.suspend":
++      return (
++        request.target.membershipId !== currentActor.membershipId &&
++        request.target.status === "active" &&
++        !(request.target.role === "owner" && request.target.isLastOwner) &&
++        canManageRole(currentActor.role, request.target.role)
++      );
++    case "membership.reactivate":
++      return (
++        request.target.membershipId !== currentActor.membershipId &&
++        request.target.status === "suspended" &&
++        !(request.target.role === "owner" && request.target.isLastOwner) &&
++        canManageRole(currentActor.role, request.target.role)
++      );
++    case "membership.remove":
++      return (
++        request.target.membershipId !== currentActor.membershipId &&
++        request.target.status !== "removed" &&
++        !(request.target.role === "owner" && request.target.isLastOwner) &&
++        canManageRole(currentActor.role, request.target.role)
++      );
++    case "test.create":
++      return currentActor.role === "teacher";
++    case "test.list":
++    case "test.read":
++    case "test.update":
++    case "test.start":
++    case "test.end":
++    case "test.archive":
++      return (
++        currentActor.role === "teacher" &&
++        request.target.ownerMembershipId === currentActor.membershipId
++      );
++  }
++}
++
++function unresolvedRequest(
++  action: StaffAuthorizationAction,
++): StaffAuthorizationRequest {
++  switch (action) {
++    case "school.list":
++    case "school.read":
++    case "school.settings.list":
++      return {
++        action,
++        target: { exists: false, kind: "school", schoolId: "missing-school" },
++      };
++    case "school.setting.read":
++    case "school.setting.update":
++      return {
++        action,
++        settingKey: "displayName",
++        target: { exists: false, kind: "school", schoolId: "missing-school" },
++      };
++    case "membership.list":
++      return {
++        action,
++        target: {
++          exists: false,
++          kind: "membership-collection",
++          role: "teacher",
++          schoolId: "missing-school",
++          status: "active",
++        },
++      };
++    case "membership.read":
++    case "membership.suspend":
++    case "membership.reactivate":
++    case "membership.remove":
++      return {
++        action,
++        target: {
++          exists: false,
++          kind: "membership",
++          membershipId: "missing-membership",
++        },
++      };
++    case "membership.invite":
++      return {
++        action,
++        requestedRole: "teacher",
++        target: { exists: false, kind: "school", schoolId: "missing-school" },
++      };
++    case "membership.change-role":
++      return {
++        action,
++        requestedRole: "teacher",
++        target: {
++          exists: false,
++          kind: "membership",
++          membershipId: "missing-membership",
++        },
++      };
++    case "test.list":
++      return {
++        action,
++        target: {
++          exists: false,
++          kind: "test-collection",
++          schoolId: "missing-school",
++        },
++      };
++    case "test.create":
++      return {
++        action,
++        target: { exists: false, kind: "school", schoolId: "missing-school" },
++      };
++    case "test.read":
++    case "test.update":
++    case "test.start":
++    case "test.end":
++    case "test.archive":
++      return {
++        action,
++        target: { exists: false, kind: "test", testId: "missing-test" },
++      };
++  }
++}
++
++describe("staff authorization matrix", () => {
++  it("publishes a frozen exhaustive rule for every role and action", () => {
++    expect(staffAuthorizationActions).toEqual([
++      "school.list",
++      "school.read",
++      "school.settings.list",
++      "school.setting.read",
++      "school.setting.update",
++      "membership.list",
++      "membership.read",
++      "membership.invite",
++      "membership.change-role",
++      "membership.suspend",
++      "membership.reactivate",
++      "membership.remove",
++      "test.list",
++      "test.create",
++      "test.read",
++      "test.update",
++      "test.start",
++      "test.end",
++      "test.archive",
++    ]);
++    expect(Object.keys(staffAuthorizationMatrix)).toEqual([
++      "administrator",
++      "owner",
++      "teacher",
++    ]);
++    for (const role of roles) {
++      expect(Object.keys(staffAuthorizationMatrix[role])).toEqual(
++        staffAuthorizationActions,
++      );
++      expect(Object.isFrozen(staffAuthorizationMatrix[role])).toBe(true);
++    }
++    expect(staffAuthorizationMatrix).toMatchObject({
++      administrator: {
++        "membership.change-role": "never",
++        "membership.list": "teacher-memberships-only",
++        "membership.read": "teacher-memberships-only",
++        "school.read": "own-school-only",
++        "school.setting.read": "allowlisted-settings-only",
++        "test.list": "never",
++        "test.read": "never",
++      },
++      owner: {
++        "membership.change-role": "administrator-or-teacher-memberships",
++        "membership.list": "administrator-or-teacher-memberships",
++        "membership.read": "administrator-or-teacher-memberships",
++        "school.read": "own-school-only",
++        "school.setting.read": "allowlisted-settings-only",
++        "test.list": "never",
++        "test.read": "never",
++      },
++      teacher: {
++        "membership.list": "never",
++        "membership.read": "never",
++        "school.read": "own-school-only",
++        "school.setting.read": "never",
++        "test.list": "owned-tests-only",
++        "test.read": "owned-tests-only",
++      },
++    });
++    expect(Object.isFrozen(staffAuthorizationActions)).toBe(true);
++    expect(Object.isFrozen(schoolSettingKeys)).toBe(true);
++    expect(Object.isFrozen(staffAuthorizationMatrix)).toBe(true);
++  });
++
++  it("exhausts actor role/status/School and every applicable target dimension", () => {
++    let evaluated = 0;
++    for (const role of roles) {
++      for (const status of statuses) {
++        const currentActor = actor(role, status);
++        for (const sameSchool of [true, false]) {
++          for (const action of staffAuthorizationActions) {
++            const scenarios = scenariosFor(
++              action,
++              sameSchool ? SCHOOL_A : SCHOOL_B,
++              currentActor.membershipId,
++            );
++            for (const scenario of scenarios) {
++              const decision = evaluateStaffAuthorization({
++                actor: currentActor,
++                request: scenario.request,
++              });
++              expect(
++                decision.allowed,
++                `${role}/${status}/same:${sameSchool}/${scenario.label}`,
++              ).toBe(expectedAllowed(currentActor, scenario.request));
++              evaluated += 1;
++            }
++          }
++        }
++      }
++    }
++    expect(evaluated).toBe(5112);
++  });
++
++  it("denies unknown actors and unresolved targets for every action", () => {
++    for (const action of staffAuthorizationActions) {
++      const request = unresolvedRequest(action);
++      expect(
++        evaluateStaffAuthorization({ actor: null, request }),
++      ).toMatchObject({ allowed: false, code: "actor-unknown" });
++      expect(
++        evaluateStaffAuthorization({ actor: actor("owner"), request }),
++      ).toMatchObject({ allowed: false, code: "target-unknown" });
++    }
++  });
++});
++
++describe("immediate authority and least privilege", () => {
++  it("uses the current role and status so downgrade and removal revoke old power", () => {
++    const request: StaffAuthorizationRequest = {
++      action: "membership.invite",
++      requestedRole: "administrator",
++      target: { exists: true, kind: "school", schoolId: SCHOOL_A },
++    };
++    const membershipId = "same-membership";
++
++    expect(
++      evaluateStaffAuthorization({
++        actor: {
++          membershipId,
++          role: "owner",
++          schoolId: SCHOOL_A,
++          status: "active",
++        },
++        request,
++      }).allowed,
++    ).toBe(true);
++    expect(
++      evaluateStaffAuthorization({
++        actor: {
++          membershipId,
++          role: "administrator",
++          schoolId: SCHOOL_A,
++          status: "active",
++        },
++        request,
++      }),
++    ).toMatchObject({ allowed: false, code: "requested-role-not-permitted" });
++    expect(
++      evaluateStaffAuthorization({
++        actor: {
++          membershipId,
++          role: "owner",
++          schoolId: SCHOOL_A,
++          status: "removed",
++        },
++        request,
++      }),
++    ).toMatchObject({ allowed: false, code: "actor-removed" });
++  });
++
++  it("forbids self-management, last-Owner removal, ownership transfer, and implicit Test power", () => {
++    const currentOwner = actor("owner");
++    const selfRemoval: StaffAuthorizationRequest = {
++      action: "membership.remove",
++      target: membershipTarget({
++        actorMembershipId: currentOwner.membershipId,
++        isLastOwner: true,
++        role: "owner",
++        schoolId: SCHOOL_A,
++        self: true,
++        status: "active",
++      }),
++    };
++    expect(
++      evaluateStaffAuthorization({ actor: currentOwner, request: selfRemoval }),
++    ).toMatchObject({ allowed: false, code: "self-management-forbidden" });
++
++    const lastOwnerRemoval: StaffAuthorizationRequest = {
++      action: "membership.remove",
++      target: membershipTarget({
++        actorMembershipId: currentOwner.membershipId,
++        isLastOwner: true,
++        role: "owner",
++        schoolId: SCHOOL_A,
++        self: false,
++        status: "active",
++      }),
++    };
++    expect(
++      evaluateStaffAuthorization({
++        actor: currentOwner,
++        request: lastOwnerRemoval,
++      }),
++    ).toMatchObject({ allowed: false, code: "last-owner-forbidden" });
++
++    const transfer: StaffAuthorizationRequest = {
++      action: "membership.change-role",
++      requestedRole: "owner",
++      target: membershipTarget({
++        actorMembershipId: currentOwner.membershipId,
++        isLastOwner: false,
++        role: "teacher",
++        schoolId: SCHOOL_A,
++        self: false,
++        status: "active",
++      }),
++    };
++    expect(
++      evaluateStaffAuthorization({ actor: currentOwner, request: transfer }),
++    ).toMatchObject({
++      allowed: false,
++      code: "ownership-transfer-forbidden",
++    });
++
++    for (const role of ["owner", "administrator"] as const) {
++      const elevatedActor = actor(role);
++      const request = scenariosFor(
++        "test.start",
++        SCHOOL_A,
++        elevatedActor.membershipId,
++      )[0]?.request;
++      expect(request).toBeDefined();
++      if (request !== undefined) {
++        expect(
++          evaluateStaffAuthorization({ actor: elevatedActor, request }),
++        ).toMatchObject({ allowed: false, code: "role-not-permitted" });
++      }
++    }
++  });
++});
++
++describe("role adapter and audit intent", () => {
++  it("translates the lone storage alias at one frozen adapter", () => {
++    expect(membershipRoleStorageAdapter.toProduct("owner")).toBe("owner");
++    expect(membershipRoleStorageAdapter.toProduct("admin")).toBe(
++      "administrator",
++    );
++    expect(membershipRoleStorageAdapter.toProduct("administrator")).toBeNull();
++    expect(membershipRoleStorageAdapter.toProduct("unknown")).toBeNull();
++    expect(membershipRoleStorageAdapter.toStorage("owner")).toBe("owner");
++    expect(membershipRoleStorageAdapter.toStorage("administrator")).toBe(
++      "admin",
++    );
++    expect(membershipRoleStorageAdapter.toStorage("teacher")).toBe("teacher");
++    expect(Object.isFrozen(membershipRoleStorageAdapter)).toBe(true);
++  });
++
++  it("records non-PII role, status, setting, and Test-scope metadata", () => {
++    const owner = actor("owner");
++    const teacher = actor("teacher");
++    const cases: readonly [StaffAuthorizationRequest, unknown][] = [
++      [
++        {
++          action: "membership.invite",
++          requestedRole: "teacher",
++          target: { exists: true, kind: "school", schoolId: SCHOOL_A },
++        },
++        { kind: "membership-invitation", requestedRole: "teacher" },
++      ],
++      [
++        {
++          action: "membership.change-role",
++          requestedRole: "administrator",
++          target: membershipTarget({
++            actorMembershipId: owner.membershipId,
++            isLastOwner: false,
++            role: "teacher",
++            schoolId: SCHOOL_A,
++            self: false,
++            status: "active",
++          }),
++        },
++        {
++          fromRole: "teacher",
++          kind: "membership-role-transition",
++          toRole: "administrator",
++        },
++      ],
++      [
++        {
++          action: "membership.suspend",
++          target: membershipTarget({
++            actorMembershipId: owner.membershipId,
++            isLastOwner: false,
++            role: "teacher",
++            schoolId: SCHOOL_A,
++            self: false,
++            status: "active",
++          }),
++        },
++        {
++          fromStatus: "active",
++          kind: "membership-status-transition",
++          toStatus: "suspended",
++        },
++      ],
++      [
++        {
++          action: "school.setting.update",
++          settingKey: "displayName",
++          target: { exists: true, kind: "school", schoolId: SCHOOL_A },
++        },
++        { kind: "school-setting", scope: "object", settingKey: "displayName" },
++      ],
++      [
++        scenariosFor("test.list", SCHOOL_A, teacher.membershipId)[0]!.request,
++        { kind: "test", ownership: "owned", scope: "collection" },
++      ],
++      [
++        scenariosFor("test.start", SCHOOL_A, teacher.membershipId)[1]!.request,
++        { kind: "test", ownership: "foreign", scope: "object" },
++      ],
++    ];
++
++    for (const [request, expectedDetail] of cases) {
++      const currentActor = request.action.startsWith("test.") ? teacher : owner;
++      const decision = evaluateStaffAuthorization({
++        actor: currentActor,
++        request,
++      });
++      expect(decision.audit.detail).toEqual(expectedDetail);
++      expect(Object.isFrozen(decision)).toBe(true);
++      expect(Object.isFrozen(decision.audit)).toBe(true);
++      expect(Object.isFrozen(decision.audit.detail)).toBe(true);
++    }
++  });
++
++  it("never copies arbitrary setting values or personal/client payload data into audit intent", () => {
++    const decision = evaluateStaffAuthorization({
++      actor: actor("owner"),
++      request: {
++        action: "school.setting.update",
++        settingKey: "attacker-controlled-setting",
++        target: { exists: true, kind: "school", schoolId: SCHOOL_A },
++      },
++    });
++    expect(decision).toMatchObject({
++      allowed: false,
++      audit: {
++        detail: { kind: "school-setting", settingKey: null },
++      },
++      code: "setting-not-allowed",
++    });
++    const serialized = JSON.stringify(decision.audit);
++    expect(serialized).not.toContain("attacker-controlled-setting");
++    expect(serialized).not.toMatch(/email|name|payload|user/i);
++  });
++});

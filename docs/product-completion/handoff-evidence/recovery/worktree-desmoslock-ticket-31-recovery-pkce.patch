@@ -1,0 +1,1704 @@
+diff --git a/supabase/functions/_shared/email-action-pkce-broker.test.ts b/supabase/functions/_shared/email-action-pkce-broker.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2690c93ed83d5aae1fe512a67fe791976e3c9b1e
+--- /dev/null
++++ b/supabase/functions/_shared/email-action-pkce-broker.test.ts
+@@ -0,0 +1,271 @@
++// deno-lint-ignore-file require-await
++
++import {
++  createEmailActionPkceBroker,
++  type EmailActionFlowRepository,
++} from './email-action-pkce-broker.ts'
++import type { EmailActionPkceProvider } from './recovery-pkce-provider.ts'
++
++const ORIGIN = 'https://staff.desmoslock.invalid'
++const SECRET = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8'
++const FLOW_ID = 'ABEiM0RVZneImaq7zN3u_w'
++
++function assertEquals(actual: unknown, expected: unknown): void {
++  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
++    throw new Error(
++      `Expected ${JSON.stringify(expected)}, received ${JSON.stringify(actual)}`,
++    )
++  }
++}
++
++function flowRepository(
++  calls: unknown[],
++  overrides: Partial<EmailActionFlowRepository> = {},
++): EmailActionFlowRepository {
++  return {
++    async activate(input) {
++      calls.push(['activate', input])
++      return 'ready'
++    },
++    async begin(input) {
++      calls.push(['begin', input])
++      return {
++        context: {
++          expiresAt: 1_780_000_900,
++          flowId: input.flowId,
++          intendedOrigin: input.intendedOrigin,
++          issuedAt: 1_780_000_000,
++          purpose: input.purpose,
++        },
++        status: 'initiating',
++      }
++    },
++    async claim(input) {
++      calls.push(['claim', input])
++      return {
++        context: {
++          expiresAt: 1_780_000_900,
++          flowId: input.flowId,
++          intendedOrigin: ORIGIN,
++          issuedAt: 1_780_000_000,
++          purpose: input.purpose,
++        },
++        status: 'claimed',
++      }
++    },
++    ...overrides,
++  }
++}
++
++function provider(
++  calls: unknown[],
++  overrides: Partial<EmailActionPkceProvider> = {},
++): EmailActionPkceProvider {
++  return {
++    async exchangeCode(input) {
++      calls.push(['exchange', input])
++      return {
++        session: {
++          accessToken: 'synthetic-access-value',
++          refreshToken: 'synthetic-refresh-value',
++        },
++        status: 'ready',
++      }
++    },
++    async requestEmailVerification(input) {
++      calls.push(['verification', input])
++    },
++    async requestRecovery(input) {
++      calls.push(['recovery', input])
++    },
++    ...overrides,
++  }
++}
++
++Deno.test('broker begins and activates password recovery without persisting derivation material', async () => {
++  const calls: unknown[] = []
++  const broker = createEmailActionPkceBroker({
++    allowedOrigin: ORIGIN,
++    derivationSecret: SECRET,
++    flowRepository: flowRepository(calls),
++    newFlowId: () => FLOW_ID,
++    now: () => 1_780_000_100_000,
++    provider: provider(calls),
++  })
++
++  await broker.requestEmailAction({
++    email: 'owner@example.com',
++    purpose: 'password_recovery',
++  })
++
++  assertEquals(calls, [
++    ['begin', {
++      flowId: FLOW_ID,
++      intendedOrigin: ORIGIN,
++      lifetimeSeconds: 900,
++      purpose: 'password_recovery',
++    }],
++    ['recovery', {
++      codeChallenge: '_wXrViLS-RXLg1gJPUe-4zeoJoIg7dI3zb9iUgrDg1o',
++      email: 'owner@example.com',
++      flowId: FLOW_ID,
++      state: 'VmwQ-TLidXAtSEscvyc4s3o53n_zRIMpr58NMzGxBiE',
++    }],
++    ['activate', { flowId: FLOW_ID, purpose: 'password_recovery' }],
++  ])
++})
++
++Deno.test('broker sends signup resend with independently derived email-verification material', async () => {
++  const calls: unknown[] = []
++  const broker = createEmailActionPkceBroker({
++    allowedOrigin: ORIGIN,
++    derivationSecret: SECRET,
++    flowRepository: flowRepository(calls),
++    newFlowId: () => FLOW_ID,
++    now: () => 1_780_000_100_000,
++    provider: provider(calls),
++  })
++
++  await broker.requestEmailAction({
++    email: 'owner@example.com',
++    purpose: 'email_verification',
++  })
++
++  assertEquals(calls[1], ['verification', {
++    codeChallenge: 'kGdI0dF8ONoLc3VxahH3qyACDIT8vv3Ieo99Ir4ItRU',
++    email: 'owner@example.com',
++    flowId: FLOW_ID,
++    state: 'wOEhI2hMGykbY7yIKclpMWfcx5KLPS6sdK-AoJld7aU',
++  }])
++  assertEquals(calls[2], [
++    'activate',
++    { flowId: FLOW_ID, purpose: 'email_verification' },
++  ])
++})
++
++Deno.test('broker irreversibly claims before recomputing and exchanging a recovery code', async () => {
++  const calls: unknown[] = []
++  const broker = createEmailActionPkceBroker({
++    allowedOrigin: ORIGIN,
++    derivationSecret: SECRET,
++    flowRepository: flowRepository(calls),
++    newFlowId: () => FLOW_ID,
++    now: () => 1_780_000_100_000,
++    provider: provider(calls),
++  })
++
++  assertEquals(
++    await broker.exchangeEmailAction({
++      authorizationCode: 'synthetic-authorization-code',
++      flowId: FLOW_ID,
++      purpose: 'password_recovery',
++      state: 'VmwQ-TLidXAtSEscvyc4s3o53n_zRIMpr58NMzGxBiE',
++    }),
++    {
++      session: {
++        accessToken: 'synthetic-access-value',
++        refreshToken: 'synthetic-refresh-value',
++      },
++      status: 'ready',
++    },
++  )
++  assertEquals(calls, [
++    ['claim', { flowId: FLOW_ID, purpose: 'password_recovery' }],
++    ['exchange', {
++      authorizationCode: 'synthetic-authorization-code',
++      purpose: 'password_recovery',
++      verifier: 'LJamG9H31kYG-QMFogiTmxjJ5LHNHQBfZx4ibhqAOVk',
++    }],
++  ])
++})
++
++Deno.test('invalid state burns the claimed flow without sending a provider request', async () => {
++  const calls: unknown[] = []
++  const broker = createEmailActionPkceBroker({
++    allowedOrigin: ORIGIN,
++    derivationSecret: SECRET,
++    flowRepository: flowRepository(calls),
++    newFlowId: () => FLOW_ID,
++    now: () => 1_780_000_100_000,
++    provider: provider(calls),
++  })
++
++  assertEquals(
++    await broker.exchangeEmailAction({
++      authorizationCode: 'synthetic-authorization-code',
++      flowId: FLOW_ID,
++      purpose: 'password_recovery',
++      state: 'x'.repeat(43),
++    }),
++    { status: 'rejected' },
++  )
++  assertEquals(calls, [
++    ['claim', { flowId: FLOW_ID, purpose: 'password_recovery' }],
++  ])
++})
++
++Deno.test('wrong-purpose, replay, stale, and ambiguous claims never reach the provider', async () => {
++  for (const claimResult of [
++    { status: 'rejected' },
++    { status: 'unavailable' },
++  ] as const) {
++    const calls: unknown[] = []
++    const broker = createEmailActionPkceBroker({
++      allowedOrigin: ORIGIN,
++      derivationSecret: SECRET,
++      flowRepository: flowRepository(calls, {
++        claim: async (input) => {
++          calls.push(['claim', input])
++          return claimResult
++        },
++      }),
++      newFlowId: () => FLOW_ID,
++      now: () => 1_780_000_100_000,
++      provider: provider(calls),
++    })
++    assertEquals(
++      await broker.exchangeEmailAction({
++        authorizationCode: 'synthetic-authorization-code',
++        flowId: FLOW_ID,
++        purpose: 'email_verification',
++        state: 'wOEhI2hMGykbY7yIKclpMWfcx5KLPS6sdK-AoJld7aU',
++      }),
++      claimResult,
++    )
++    assertEquals(calls, [
++      ['claim', { flowId: FLOW_ID, purpose: 'email_verification' }],
++    ])
++  }
++})
++
++Deno.test('provider ambiguity consumes the lease and is never retried', async () => {
++  const calls: unknown[] = []
++  const broker = createEmailActionPkceBroker({
++    allowedOrigin: ORIGIN,
++    derivationSecret: SECRET,
++    flowRepository: flowRepository(calls),
++    newFlowId: () => FLOW_ID,
++    now: () => 1_780_000_100_000,
++    provider: provider(calls, {
++      exchangeCode: async (input) => {
++        calls.push(['exchange', input])
++        return { status: 'unavailable' }
++      },
++    }),
++  })
++
++  assertEquals(
++    await broker.exchangeEmailAction({
++      authorizationCode: 'synthetic-authorization-code',
++      flowId: FLOW_ID,
++      purpose: 'email_verification',
++      state: 'wOEhI2hMGykbY7yIKclpMWfcx5KLPS6sdK-AoJld7aU',
++    }),
++    { status: 'unavailable' },
++  )
++  assertEquals(calls.length, 2)
++  assertEquals(calls[0], [
++    'claim',
++    { flowId: FLOW_ID, purpose: 'email_verification' },
++  ])
++})
+diff --git a/supabase/functions/_shared/email-action-pkce-broker.ts b/supabase/functions/_shared/email-action-pkce-broker.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..87786913ae7b1a9d35bbcf21a24aae3adbc05aef
+--- /dev/null
++++ b/supabase/functions/_shared/email-action-pkce-broker.ts
+@@ -0,0 +1,240 @@
++import { parseCanonicalEmail, parseExactOrigin } from './http.ts'
++import {
++  deriveEmailActionPkceMaterial,
++  matchesEmailActionPkceState,
++  type EmailActionPkceContext,
++  type EmailActionPkcePurpose,
++} from './recovery-pkce.ts'
++import type { EmailActionPkceProvider } from './recovery-pkce-provider.ts'
++
++const FLOW_LIFETIME_SECONDS = 900
++
++export interface EmailActionFlowRepository {
++  activate(input: {
++    readonly flowId: string
++    readonly purpose: EmailActionPkcePurpose
++  }): Promise<'ready' | 'unavailable'>
++  begin(input: {
++    readonly flowId: string
++    readonly intendedOrigin: string
++    readonly lifetimeSeconds: number
++    readonly purpose: EmailActionPkcePurpose
++  }): Promise<
++    | {
++        readonly context: EmailActionPkceContext
++        readonly status: 'initiating'
++      }
++    | { readonly status: 'unavailable' }
++  >
++  claim(input: {
++    readonly flowId: string
++    readonly purpose: EmailActionPkcePurpose
++  }): Promise<
++    | {
++        readonly context: EmailActionPkceContext
++        readonly status: 'claimed'
++      }
++    | { readonly status: 'rejected' | 'unavailable' }
++  >
++}
++
++export interface EmailActionPkceBroker {
++  exchangeEmailAction(input: {
++    readonly authorizationCode: string
++    readonly flowId: string
++    readonly purpose: EmailActionPkcePurpose
++    readonly state: string
++  }): Promise<
++    | {
++        readonly session: {
++          readonly accessToken: string
++          readonly refreshToken: string
++        }
++        readonly status: 'ready'
++      }
++    | { readonly status: 'rejected' | 'unavailable' }
++  >
++  requestEmailAction(input: {
++    readonly email: string
++    readonly purpose: EmailActionPkcePurpose
++  }): Promise<void>
++}
++
++export function createEmailActionPkceBroker(dependencies: {
++  readonly allowedOrigin: string
++  readonly derivationSecret: string
++  readonly flowRepository: EmailActionFlowRepository
++  readonly newFlowId?: () => string
++  readonly now?: () => number
++  readonly provider: EmailActionPkceProvider
++}): EmailActionPkceBroker {
++  const allowedOrigin = parseExactOrigin(dependencies.allowedOrigin)
++  if (
++    allowedOrigin === null ||
++    !/^[A-Za-z0-9_-]{43}$/u.test(dependencies.derivationSecret)
++  ) {
++    throw new Error('Email-action PKCE broker configuration is invalid')
++  }
++  const newFlowId = dependencies.newFlowId ?? createRandomFlowId
++  const now = dependencies.now ?? Date.now
++
++  return {
++    async exchangeEmailAction(input) {
++      if (
++        !isPurpose(input.purpose) ||
++        !/^[A-Za-z0-9_-]{22}$/u.test(input.flowId) ||
++        !/^[A-Za-z0-9_-]{43}$/u.test(input.state) ||
++        !isOpaqueAscii(input.authorizationCode, 2_048)
++      ) {
++        return { status: 'rejected' }
++      }
++
++      let claim: Awaited<
++        ReturnType<EmailActionFlowRepository['claim']>
++      >
++      try {
++        claim = await dependencies.flowRepository.claim({
++          flowId: input.flowId,
++          purpose: input.purpose,
++        })
++      } catch {
++        return { status: 'unavailable' }
++      }
++      if (claim.status !== 'claimed') return claim
++      const contextStatus = validateClaimedContext(
++        claim.context,
++        {
++          flowId: input.flowId,
++          intendedOrigin: allowedOrigin,
++          purpose: input.purpose,
++        },
++        Math.floor(now() / 1_000),
++      )
++      if (contextStatus !== 'ready') return { status: contextStatus }
++
++      let stateMatches: boolean
++      let material: Awaited<ReturnType<typeof deriveEmailActionPkceMaterial>>
++      try {
++        ;[stateMatches, material] = await Promise.all([
++          matchesEmailActionPkceState(dependencies.derivationSecret, {
++            context: claim.context,
++            state: input.state,
++          }),
++          deriveEmailActionPkceMaterial(
++            dependencies.derivationSecret,
++            claim.context,
++          ),
++        ])
++      } catch {
++        return { status: 'unavailable' }
++      }
++      if (!stateMatches) return { status: 'rejected' }
++
++      try {
++        return await dependencies.provider.exchangeCode({
++          authorizationCode: input.authorizationCode,
++          purpose: input.purpose,
++          verifier: material.verifier,
++        })
++      } catch {
++        return { status: 'unavailable' }
++      }
++    },
++
++    async requestEmailAction(input) {
++      if (!isPurpose(input.purpose) || parseCanonicalEmail(input.email) === null) {
++        throw new Error('Email-action PKCE request is invalid')
++      }
++      const flowId = newFlowId()
++      if (!/^[A-Za-z0-9_-]{22}$/u.test(flowId)) {
++        throw new Error('Email-action PKCE flow identity is invalid')
++      }
++      const begin = await dependencies.flowRepository.begin({
++        flowId,
++        intendedOrigin: allowedOrigin,
++        lifetimeSeconds: FLOW_LIFETIME_SECONDS,
++        purpose: input.purpose,
++      })
++      if (
++        begin.status !== 'initiating' ||
++        validateClaimedContext(
++          begin.context,
++          { flowId, intendedOrigin: allowedOrigin, purpose: input.purpose },
++          Math.floor(now() / 1_000),
++        ) !== 'ready'
++      ) {
++        throw new Error('Email-action PKCE flow is unavailable')
++      }
++      const material = await deriveEmailActionPkceMaterial(
++        dependencies.derivationSecret,
++        begin.context,
++      )
++      const providerInput = {
++        codeChallenge: material.codeChallenge,
++        email: input.email,
++        flowId,
++        state: material.state,
++      }
++      if (input.purpose === 'password_recovery') {
++        await dependencies.provider.requestRecovery(providerInput)
++      } else {
++        await dependencies.provider.requestEmailVerification(providerInput)
++      }
++      if (
++        await dependencies.flowRepository.activate({
++          flowId,
++          purpose: input.purpose,
++        }) !== 'ready'
++      ) {
++        throw new Error('Email-action PKCE flow is unavailable')
++      }
++    },
++  }
++}
++
++function createRandomFlowId(): string {
++  const bytes = crypto.getRandomValues(new Uint8Array(16))
++  let binary = ''
++  for (const byte of bytes) binary += String.fromCharCode(byte)
++  return btoa(binary)
++    .replace(/=+$/u, '')
++    .replace(/\+/gu, '-')
++    .replace(/\//gu, '_')
++}
++
++function isOpaqueAscii(value: unknown, maximumLength: number): value is string {
++  return (
++    typeof value === 'string' &&
++    value.length > 0 &&
++    value.length <= maximumLength &&
++    value === value.trim() &&
++    /^[\x21-\x7e]+$/u.test(value)
++  )
++}
++
++function isPurpose(value: unknown): value is EmailActionPkcePurpose {
++  return value === 'password_recovery' || value === 'email_verification'
++}
++
++function validateClaimedContext(
++  context: EmailActionPkceContext,
++  expected: {
++    readonly flowId: string
++    readonly intendedOrigin: string
++    readonly purpose: EmailActionPkcePurpose
++  },
++  now: number,
++): 'ready' | 'rejected' | 'unavailable' {
++  if (
++    context.flowId !== expected.flowId ||
++    context.intendedOrigin !== expected.intendedOrigin ||
++    context.purpose !== expected.purpose ||
++    !Number.isSafeInteger(context.issuedAt) ||
++    !Number.isSafeInteger(context.expiresAt) ||
++    context.expiresAt - context.issuedAt !== FLOW_LIFETIME_SECONDS ||
++    context.issuedAt > now + 30
++  ) {
++    return 'unavailable'
++  }
++  return context.expiresAt <= now ? 'rejected' : 'ready'
++}
+diff --git a/supabase/functions/_shared/email-action-pkce-repository.test.ts b/supabase/functions/_shared/email-action-pkce-repository.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..52ba3d251c0136eeaf040155fcf8047e99d73cea
+--- /dev/null
++++ b/supabase/functions/_shared/email-action-pkce-repository.test.ts
+@@ -0,0 +1,211 @@
++// deno-lint-ignore-file require-await
++
++import { createEmailActionFlowRepository } from './email-action-pkce-repository.ts'
++
++const BACKEND_ORIGIN = 'https://abcdefghijklmnopqrst.supabase.co'
++const FLOW_ID = 'ABEiM0RVZneImaq7zN3u_w'
++
++function assertEquals(actual: unknown, expected: unknown): void {
++  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
++    throw new Error(
++      `Expected ${JSON.stringify(expected)}, received ${JSON.stringify(actual)}`,
++    )
++  }
++}
++
++Deno.test('flow repository calls the three exact service-only lifecycle RPCs', async () => {
++  const requests: Array<{
++    body: unknown
++    headers: Headers
++    url: string
++  }> = []
++  const results = [
++    [{
++      code: 'flow_initiating',
++      expires_at_epoch: 1_780_000_900,
++      intended_origin: 'https://staff.desmoslock.invalid',
++      issued_at_epoch: 1_780_000_000,
++      purpose: 'password_recovery',
++    }],
++    [{ code: 'flow_ready' }],
++    [{
++      code: 'flow_claimed',
++      expires_at_epoch: 1_780_000_900,
++      intended_origin: 'https://staff.desmoslock.invalid',
++      issued_at_epoch: 1_780_000_000,
++      purpose: 'password_recovery',
++    }],
++  ]
++  const repository = createEmailActionFlowRepository(
++    {
++      expectedSupabaseOrigin: BACKEND_ORIGIN,
++      serviceRoleKey: 'synthetic-service-role-sentinel',
++      supabaseUrl: BACKEND_ORIGIN,
++    },
++    async (input, init) => {
++      const url = String(input)
++      requests.push({
++        body: JSON.parse(String(init?.body)),
++        headers: new Headers(init?.headers),
++        url,
++      })
++      const response = Response.json(results[requests.length - 1], {
++        status: 200,
++      })
++      Object.defineProperty(response, 'url', { value: url })
++      return response
++    },
++  )
++
++  assertEquals(
++    await repository.begin({
++      flowId: FLOW_ID,
++      intendedOrigin: 'https://staff.desmoslock.invalid',
++      lifetimeSeconds: 900,
++      purpose: 'password_recovery',
++    }),
++    {
++      context: {
++        expiresAt: 1_780_000_900,
++        flowId: FLOW_ID,
++        intendedOrigin: 'https://staff.desmoslock.invalid',
++        issuedAt: 1_780_000_000,
++        purpose: 'password_recovery',
++      },
++      status: 'initiating',
++    },
++  )
++  assertEquals(
++    await repository.activate({
++      flowId: FLOW_ID,
++      purpose: 'password_recovery',
++    }),
++    'ready',
++  )
++  assertEquals(
++    await repository.claim({
++      flowId: FLOW_ID,
++      purpose: 'password_recovery',
++    }),
++    {
++      context: {
++        expiresAt: 1_780_000_900,
++        flowId: FLOW_ID,
++        intendedOrigin: 'https://staff.desmoslock.invalid',
++        issuedAt: 1_780_000_000,
++        purpose: 'password_recovery',
++      },
++      status: 'claimed',
++    },
++  )
++
++  assertEquals(
++    requests.map((request) => ({
++      body: request.body,
++      path: new URL(request.url).pathname,
++    })),
++    [
++      {
++        body: {
++          flow_id: FLOW_ID,
++          intended_origin: 'https://staff.desmoslock.invalid',
++          lifetime_seconds: 900,
++          purpose: 'password_recovery',
++        },
++        path:
++          '/rest/v1/rpc/internal_begin_staff_email_action_pkce_flow',
++      },
++      {
++        body: { flow_id: FLOW_ID, purpose: 'password_recovery' },
++        path:
++          '/rest/v1/rpc/internal_activate_staff_email_action_pkce_flow',
++      },
++      {
++        body: { flow_id: FLOW_ID, purpose: 'password_recovery' },
++        path:
++          '/rest/v1/rpc/internal_claim_staff_email_action_pkce_flow',
++      },
++    ],
++  )
++  for (const request of requests) {
++    assertEquals(request.headers.get('accept-profile'), 'desmoslock_v2')
++    assertEquals(request.headers.get('content-profile'), 'desmoslock_v2')
++    assertEquals(request.headers.get('content-type'), 'application/json')
++    assertEquals(request.headers.get('apikey'), 'synthetic-service-role-sentinel')
++    assertEquals(
++      request.headers.get('authorization'),
++      'Bearer synthetic-service-role-sentinel',
++    )
++  }
++})
++
++Deno.test('repository maps every denied claim to one opaque rejection', async () => {
++  let calls = 0
++  const repository = createEmailActionFlowRepository(
++    {
++      expectedSupabaseOrigin: BACKEND_ORIGIN,
++      serviceRoleKey: 'synthetic-service-role-sentinel',
++      supabaseUrl: BACKEND_ORIGIN,
++    },
++    async (input) => {
++      calls += 1
++      const response = Response.json([{
++        code: 'flow_rejected',
++        expires_at_epoch: null,
++        intended_origin: null,
++        issued_at_epoch: null,
++        purpose: null,
++      }])
++      Object.defineProperty(response, 'url', { value: String(input) })
++      return response
++    },
++  )
++
++  assertEquals(
++    await repository.claim({
++      flowId: FLOW_ID,
++      purpose: 'email_verification',
++    }),
++    { status: 'rejected' },
++  )
++  assertEquals(calls, 1)
++})
++
++Deno.test('repository fails malformed, redirected, and ambiguous responses closed', async () => {
++  const responses = [
++    Response.json([{
++      code: 'flow_claimed',
++      expires_at_epoch: 1_780_000_900,
++      intended_origin: 'https://staff.desmoslock.invalid',
++      issued_at_epoch: 1_780_000_000,
++      leaked: 'forbidden',
++      purpose: 'password_recovery',
++    }]),
++    new Response('{}', { status: 503 }),
++    Response.json([]),
++  ]
++  let calls = 0
++  const repository = createEmailActionFlowRepository(
++    {
++      expectedSupabaseOrigin: BACKEND_ORIGIN,
++      serviceRoleKey: 'synthetic-service-role-sentinel',
++      supabaseUrl: BACKEND_ORIGIN,
++    },
++    async (input) => {
++      const response = responses[calls++]
++      Object.defineProperty(response, 'url', { value: String(input) })
++      return response
++    },
++  )
++
++  for (let index = 0; index < responses.length; index += 1) {
++    assertEquals(
++      await repository.claim({
++        flowId: FLOW_ID,
++        purpose: 'password_recovery',
++      }),
++      { status: 'unavailable' },
++    )
++  }
++  assertEquals(calls, responses.length)
++})
+diff --git a/supabase/functions/_shared/recovery-pkce-provider.test.ts b/supabase/functions/_shared/recovery-pkce-provider.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3b13642c42f260c618d06290468ffefa0700cde5
+--- /dev/null
++++ b/supabase/functions/_shared/recovery-pkce-provider.test.ts
+@@ -0,0 +1,340 @@
++// deno-lint-ignore-file require-await
++
++import {
++  buildEmailActionVerificationUrl,
++  createEmailActionPkceProvider,
++} from './recovery-pkce-provider.ts'
++
++const WEB_ORIGIN = 'https://staff.desmoslock.invalid'
++const BACKEND_ORIGIN = 'https://abcdefghijklmnopqrst.supabase.co'
++const FLOW_ID = 'ABEiM0RVZneImaq7zN3u_w'
++const STATE = 'VmwQ-TLidXAtSEscvyc4s3o53n_zRIMpr58NMzGxBiE'
++const CODE_CHALLENGE = '_wXrViLS-RXLg1gJPUe-4zeoJoIg7dI3zb9iUgrDg1o'
++const TOKEN_HASH = `pkce_${'a'.repeat(56)}`
++
++function assertEquals(actual: unknown, expected: unknown): void {
++  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
++    throw new Error(
++      `Expected ${JSON.stringify(expected)}, received ${JSON.stringify(actual)}`,
++    )
++  }
++}
++
++Deno.test('recovery provider registers only the server-derived S256 challenge and clean callback', async () => {
++  const requests: Array<{
++    readonly body: string
++    readonly headers: Headers
++    readonly init?: RequestInit
++    readonly url: string
++  }> = []
++  const provider = createEmailActionPkceProvider(
++    {
++      callback: `${WEB_ORIGIN}/`,
++      expectedSupabaseOrigin: BACKEND_ORIGIN,
++      publishableKey: 'synthetic-publishable-sentinel',
++      supabaseUrl: BACKEND_ORIGIN,
++    },
++    async (input, init) => {
++      requests.push({
++        body: String(init?.body ?? ''),
++        headers: new Headers(init?.headers),
++        init,
++        url: String(input),
++      })
++      const response = new Response('{}', {
++        headers: { 'content-type': 'application/json' },
++        status: 200,
++      })
++      Object.defineProperty(response, 'url', { value: String(input) })
++      return response
++    },
++  )
++
++  await provider.requestRecovery({
++    codeChallenge: CODE_CHALLENGE,
++    email: 'owner@example.com',
++    flowId: FLOW_ID,
++    state: STATE,
++  })
++
++  assertEquals(requests.length, 1)
++  const request = requests[0]
++  const url = new URL(request.url)
++  assertEquals(url.origin, BACKEND_ORIGIN)
++  assertEquals(url.pathname, '/auth/v1/recover')
++  assertEquals([...url.searchParams.keys()], ['redirect_to'])
++  assertEquals(
++    url.searchParams.get('redirect_to'),
++    `${WEB_ORIGIN}/?auth=recovery&flow=${FLOW_ID}&state=${STATE}`,
++  )
++  assertEquals(request.init?.method, 'POST')
++  assertEquals(request.init?.redirect, 'error')
++  assertEquals(request.headers.get('apikey'), 'synthetic-publishable-sentinel')
++  assertEquals(
++    request.headers.get('authorization'),
++    'Bearer synthetic-publishable-sentinel',
++  )
++  assertEquals(request.headers.get('content-type'), 'application/json')
++  assertEquals(JSON.parse(request.body), {
++    code_challenge: CODE_CHALLENGE,
++    code_challenge_method: 's256',
++    email: 'owner@example.com',
++  })
++})
++
++Deno.test('email-verification provider registers the exact signup resend PKCE request', async () => {
++  const requests: Array<{
++    readonly body: string
++    readonly headers: Headers
++    readonly init?: RequestInit
++    readonly url: string
++  }> = []
++  const provider = createEmailActionPkceProvider(
++    {
++      callback: `${WEB_ORIGIN}/`,
++      expectedSupabaseOrigin: BACKEND_ORIGIN,
++      publishableKey: 'synthetic-publishable-sentinel',
++      supabaseUrl: BACKEND_ORIGIN,
++    },
++    async (input, init) => {
++      const url = String(input)
++      requests.push({
++        body: String(init?.body ?? ''),
++        headers: new Headers(init?.headers),
++        init,
++        url,
++      })
++      const response = new Response('{}', {
++        headers: { 'content-type': 'application/json' },
++        status: 200,
++      })
++      Object.defineProperty(response, 'url', { value: url })
++      return response
++    },
++  )
++
++  await provider.requestEmailVerification({
++    codeChallenge: CODE_CHALLENGE,
++    email: 'owner@example.com',
++    flowId: FLOW_ID,
++    state: STATE,
++  })
++
++  assertEquals(requests.length, 1)
++  const request = requests[0]
++  const url = new URL(request.url)
++  assertEquals(url.origin, BACKEND_ORIGIN)
++  assertEquals(url.pathname, '/auth/v1/resend')
++  assertEquals([...url.searchParams.keys()], ['redirect_to'])
++  assertEquals(
++    url.searchParams.get('redirect_to'),
++    `${WEB_ORIGIN}/?auth=email-verification&flow=${FLOW_ID}&state=${STATE}`,
++  )
++  assertEquals(request.init?.method, 'POST')
++  assertEquals(request.init?.redirect, 'error')
++  assertEquals(request.headers.get('apikey'), 'synthetic-publishable-sentinel')
++  assertEquals(
++    request.headers.get('authorization'),
++    'Bearer synthetic-publishable-sentinel',
++  )
++  assertEquals(request.headers.get('content-type'), 'application/json')
++  assertEquals(JSON.parse(request.body), {
++    code_challenge: CODE_CHALLENGE,
++    code_challenge_method: 's256',
++    email: 'owner@example.com',
++    type: 'signup',
++  })
++})
++
++Deno.test('verification navigation preserves the exact PKCE-prefixed template token', () => {
++  assertEquals(
++    buildEmailActionVerificationUrl({
++      callback: `${WEB_ORIGIN}/?auth=recovery&flow=${FLOW_ID}&state=${STATE}`,
++      providerOrigin: BACKEND_ORIGIN,
++      providerType: 'recovery',
++      tokenHash: TOKEN_HASH,
++    }),
++    `${BACKEND_ORIGIN}/auth/v1/verify?token=${TOKEN_HASH}&type=recovery&redirect_to=${encodeURIComponent(`${WEB_ORIGIN}/?auth=recovery&flow=${FLOW_ID}&state=${STATE}`)}`,
++  )
++  assertEquals(
++    buildEmailActionVerificationUrl({
++      callback: `${WEB_ORIGIN}/?auth=email-verification&flow=${FLOW_ID}&state=${STATE}`,
++      providerOrigin: BACKEND_ORIGIN,
++      providerType: 'signup',
++      tokenHash: TOKEN_HASH,
++    }),
++    `${BACKEND_ORIGIN}/auth/v1/verify?token=${TOKEN_HASH}&type=signup&redirect_to=${encodeURIComponent(`${WEB_ORIGIN}/?auth=email-verification&flow=${FLOW_ID}&state=${STATE}`)}`,
++  )
++  for (const tokenHash of [
++    'a'.repeat(56),
++    `pkce_${'a'.repeat(55)}`,
++    `pkce_${'a'.repeat(57)}`,
++    `pkce_${'A'.repeat(56)}`,
++    `PKCE_${'a'.repeat(56)}`,
++    `pkce_${'a'.repeat(55)}-`,
++  ]) {
++    assertEquals(
++      buildEmailActionVerificationUrl({
++        callback: `${WEB_ORIGIN}/?auth=recovery&flow=${FLOW_ID}&state=${STATE}`,
++        providerOrigin: BACKEND_ORIGIN,
++        providerType: 'recovery',
++        tokenHash,
++      }),
++      null,
++    )
++  }
++})
++
++Deno.test('email-action provider exchanges once and returns only a validated session pair', async () => {
++  const requests: Array<{
++    readonly body: string
++    readonly headers: Headers
++    readonly init?: RequestInit
++    readonly url: string
++  }> = []
++  const provider = createEmailActionPkceProvider(
++    {
++      callback: `${WEB_ORIGIN}/`,
++      expectedSupabaseOrigin: BACKEND_ORIGIN,
++      publishableKey: 'synthetic-publishable-sentinel',
++      supabaseUrl: BACKEND_ORIGIN,
++    },
++    async (input, init) => {
++      const url = String(input)
++      requests.push({
++        body: String(init?.body ?? ''),
++        headers: new Headers(init?.headers),
++        init,
++        url,
++      })
++      const response = Response.json(
++        {
++          access_token: 'synthetic-access-value',
++          expires_at: 1_780_004_500,
++          expires_in: 3_600,
++          refresh_token: 'synthetic-refresh-value',
++          token_type: 'bearer',
++          user: { id: '00000000-0000-4000-8000-000000000001' },
++        },
++        { status: 200 },
++      )
++      Object.defineProperty(response, 'url', { value: url })
++      return response
++    },
++  )
++
++  const result = await provider.exchangeCode({
++    authorizationCode: 'synthetic-authorization-code',
++    purpose: 'password_recovery',
++    verifier: 'LJamG9H31kYG-QMFogiTmxjJ5LHNHQBfZx4ibhqAOVk',
++  })
++
++  assertEquals(result, {
++    session: {
++      accessToken: 'synthetic-access-value',
++      refreshToken: 'synthetic-refresh-value',
++    },
++    status: 'ready',
++  })
++  assertEquals(requests.length, 1)
++  const request = requests[0]
++  const url = new URL(request.url)
++  assertEquals(url.origin, BACKEND_ORIGIN)
++  assertEquals(url.pathname, '/auth/v1/token')
++  assertEquals([...url.searchParams.entries()], [['grant_type', 'pkce']])
++  assertEquals(request.init?.method, 'POST')
++  assertEquals(request.init?.redirect, 'error')
++  assertEquals(request.headers.get('apikey'), 'synthetic-publishable-sentinel')
++  assertEquals(request.headers.get('authorization'), null)
++  assertEquals(request.headers.get('content-type'), 'application/json')
++  assertEquals(JSON.parse(request.body), {
++    auth_code: 'synthetic-authorization-code',
++    code_verifier: 'LJamG9H31kYG-QMFogiTmxjJ5LHNHQBfZx4ibhqAOVk',
++  })
++})
++
++Deno.test('provider failures fail closed without a retry or response detail', async () => {
++  for (const scenario of [
++    { expected: 'rejected', status: 400 },
++    { expected: 'rejected', status: 422 },
++    { expected: 'unavailable', status: 429 },
++    { expected: 'unavailable', status: 500 },
++  ] as const) {
++    let calls = 0
++    const provider = createEmailActionPkceProvider(
++      {
++        callback: `${WEB_ORIGIN}/`,
++        expectedSupabaseOrigin: BACKEND_ORIGIN,
++        publishableKey: 'synthetic-publishable-sentinel',
++        supabaseUrl: BACKEND_ORIGIN,
++      },
++      async (input) => {
++        calls += 1
++        const response = Response.json(
++          { forbidden_detail: 'must-not-escape' },
++          { status: scenario.status },
++        )
++        Object.defineProperty(response, 'url', { value: String(input) })
++        return response
++      },
++    )
++    assertEquals(
++      await provider.exchangeCode({
++        authorizationCode: 'synthetic-authorization-code',
++        purpose: 'email_verification',
++        verifier: 'SL-MTH5RQWHUVE3rmqg_ohVuzxGCnYTDCOISCCAgaM0',
++      }),
++      { status: scenario.expected },
++    )
++    assertEquals(calls, 1)
++  }
++})
++
++Deno.test('provider rejects malformed, redirected, cross-purpose, and overbroad session data', async () => {
++  const responses: Response[] = [
++    Response.json({
++      access_token: 'synthetic-access-value',
++      expires_in: 3_600,
++      refresh_token: 'synthetic-refresh-value',
++      token_type: 'bearer',
++      unexpected: true,
++      user: {},
++    }),
++    new Response('{', { headers: { 'content-type': 'application/json' } }),
++    new Response('{}', { headers: { 'content-type': 'text/plain' } }),
++  ]
++  let calls = 0
++  const provider = createEmailActionPkceProvider(
++    {
++      callback: `${WEB_ORIGIN}/`,
++      expectedSupabaseOrigin: BACKEND_ORIGIN,
++      publishableKey: 'synthetic-publishable-sentinel',
++      supabaseUrl: BACKEND_ORIGIN,
++    },
++    async (input) => {
++      const response = responses[calls++]
++      Object.defineProperty(response, 'url', { value: String(input) })
++      return response
++    },
++  )
++  for (let index = 0; index < responses.length; index += 1) {
++    assertEquals(
++      await provider.exchangeCode({
++        authorizationCode: 'synthetic-authorization-code',
++        purpose: 'password_recovery',
++        verifier: 'LJamG9H31kYG-QMFogiTmxjJ5LHNHQBfZx4ibhqAOVk',
++      }),
++      { status: 'unavailable' },
++    )
++  }
++  assertEquals(calls, responses.length)
++  assertEquals(
++    await provider.exchangeCode({
++      authorizationCode: 'synthetic-authorization-code',
++      purpose: 'recovery' as never,
++      verifier: 'LJamG9H31kYG-QMFogiTmxjJ5LHNHQBfZx4ibhqAOVk',
++    }),
++    { status: 'rejected' },
++  )
++  assertEquals(calls, responses.length)
++})
+diff --git a/supabase/functions/_shared/recovery-pkce-provider.ts b/supabase/functions/_shared/recovery-pkce-provider.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..43ba09eb92d1def3790b8fdfb1261d05736a1353
+--- /dev/null
++++ b/supabase/functions/_shared/recovery-pkce-provider.ts
+@@ -0,0 +1,312 @@
++import {
++  isExactRecord,
++  parseCanonicalEmail,
++  parseExactRootCallback,
++} from './http.ts'
++import type { EmailActionPkcePurpose } from './recovery-pkce.ts'
++import {
++  createSupabaseHttpClient,
++  parseAuthActionLinkOrigin,
++  readBoundedJsonResponse,
++  type ServiceFetch,
++} from './supabase-http.ts'
++
++export type EmailActionProviderType = 'recovery' | 'signup'
++
++export interface EmailActionPkceProviderConfiguration {
++  readonly callback: string
++  readonly expectedSupabaseOrigin?: string
++  readonly publishableKey: string
++  readonly supabaseUrl: string
++}
++
++export interface EmailActionPkceProvider {
++  exchangeCode(input: {
++    readonly authorizationCode: string
++    readonly purpose: EmailActionPkcePurpose
++    readonly verifier: string
++  }): Promise<
++    | {
++        readonly session: {
++          readonly accessToken: string
++          readonly refreshToken: string
++        }
++        readonly status: 'ready'
++      }
++    | { readonly status: 'rejected' | 'unavailable' }
++  >
++  requestRecovery(input: {
++    readonly codeChallenge: string
++    readonly email: string
++    readonly flowId: string
++    readonly state: string
++  }): Promise<void>
++  requestEmailVerification(input: {
++    readonly codeChallenge: string
++    readonly email: string
++    readonly flowId: string
++    readonly state: string
++  }): Promise<void>
++}
++
++export function createEmailActionPkceProvider(
++  configuration: EmailActionPkceProviderConfiguration,
++  serviceFetch: ServiceFetch = globalThis.fetch,
++): EmailActionPkceProvider {
++  let callbackOrigin: string
++  try {
++    callbackOrigin = new URL(configuration.callback).origin
++  } catch {
++    throw new Error('Recovery provider configuration is invalid')
++  }
++  const callback = parseExactRootCallback(
++    configuration.callback,
++    callbackOrigin,
++  )
++  if (callback === null) {
++    throw new Error('Recovery provider configuration is invalid')
++  }
++  const client = createSupabaseHttpClient(
++    {
++      expectedOrigin: configuration.expectedSupabaseOrigin,
++      publishableKey: configuration.publishableKey,
++      supabaseUrl: configuration.supabaseUrl,
++    },
++    serviceFetch,
++  )
++
++  return {
++    async exchangeCode(input) {
++      if (
++        !isBoundedOpaqueValue(input.authorizationCode, 2_048) ||
++        (input.purpose !== 'password_recovery' &&
++          input.purpose !== 'email_verification') ||
++        !/^[A-Za-z0-9_-]{43}$/u.test(input.verifier)
++      ) {
++        return { status: 'rejected' }
++      }
++      const tokenUrl = new URL(
++        '/auth/v1/token?grant_type=pkce',
++        `${client.origin}/`,
++      ).href
++      try {
++        const response = await client.request(tokenUrl, {
++          body: JSON.stringify({
++            auth_code: input.authorizationCode,
++            code_verifier: input.verifier,
++          }),
++          headers: {
++            apikey: client.publishableKey,
++            'content-type': 'application/json',
++          },
++          method: 'POST',
++        })
++        if (
++          response.redirected ||
++          response.url !== tokenUrl ||
++          response.status !== 200
++        ) {
++          return {
++            status:
++              response.status >= 400 &&
++                response.status < 500 &&
++                response.status !== 429
++                ? 'rejected'
++                : 'unavailable',
++          }
++        }
++        const contentType = response.headers.get('content-type')
++        if (
++          contentType === null ||
++          !/^application\/json(?:;[\t ]*charset=utf-8)?$/iu.test(contentType)
++        ) {
++          return { status: 'unavailable' }
++        }
++        const session = parseProviderSession(
++          await readBoundedJsonResponse(response, 65_536),
++        )
++        return session === null
++          ? { status: 'unavailable' }
++          : { session, status: 'ready' }
++      } catch {
++        return { status: 'unavailable' }
++      }
++    },
++    async requestEmailVerification(input) {
++      await requestEmailAction({
++        callback,
++        client,
++        input,
++        kind: 'email-verification',
++      })
++    },
++    async requestRecovery(input) {
++      await requestEmailAction({ callback, client, input, kind: 'recovery' })
++    },
++  }
++}
++
++export function buildEmailActionVerificationUrl(input: {
++  readonly callback: string
++  readonly providerOrigin: string
++  readonly providerType: EmailActionProviderType
++  readonly tokenHash: string
++}): string | null {
++  const providerOrigin = parseAuthActionLinkOrigin(input.providerOrigin)
++  if (
++    providerOrigin === null ||
++    !/^pkce_[0-9a-f]{56}$/u.test(input.tokenHash) ||
++    (input.providerType !== 'recovery' && input.providerType !== 'signup') ||
++    !isExactEmailActionCallback(input.callback, input.providerType)
++  ) {
++    return null
++  }
++  const providerUrl = new URL('/auth/v1/verify', `${providerOrigin}/`)
++  providerUrl.searchParams.append('token', input.tokenHash)
++  providerUrl.searchParams.append('type', input.providerType)
++  providerUrl.searchParams.append('redirect_to', input.callback)
++  return providerUrl.href
++}
++
++async function requestEmailAction(input: {
++  readonly callback: string
++  readonly client: ReturnType<typeof createSupabaseHttpClient>
++  readonly input: {
++    readonly codeChallenge: string
++    readonly email: string
++    readonly flowId: string
++    readonly state: string
++  }
++  readonly kind: 'email-verification' | 'recovery'
++}): Promise<void> {
++  if (
++    parseCanonicalEmail(input.input.email) === null ||
++    !/^[A-Za-z0-9_-]{22}$/u.test(input.input.flowId) ||
++    !/^[A-Za-z0-9_-]{43}$/u.test(input.input.state) ||
++    !/^[A-Za-z0-9_-]{43}$/u.test(input.input.codeChallenge)
++  ) {
++    throw new Error('Email-action provider input is invalid')
++  }
++  const targetCallback = new URL(input.callback)
++  targetCallback.searchParams.append('auth', input.kind)
++  targetCallback.searchParams.append('flow', input.input.flowId)
++  targetCallback.searchParams.append('state', input.input.state)
++  const providerUrl = new URL(
++    input.kind === 'recovery' ? '/auth/v1/recover' : '/auth/v1/resend',
++    `${input.client.origin}/`,
++  )
++  providerUrl.searchParams.set('redirect_to', targetCallback.href)
++  const body = input.kind === 'recovery'
++    ? {
++        code_challenge: input.input.codeChallenge,
++        code_challenge_method: 's256',
++        email: input.input.email,
++      }
++    : {
++        code_challenge: input.input.codeChallenge,
++        code_challenge_method: 's256',
++        email: input.input.email,
++        type: 'signup',
++      }
++  const response = await input.client.request(providerUrl.href, {
++    body: JSON.stringify(body),
++    headers: {
++      apikey: input.client.publishableKey,
++      authorization: `Bearer ${input.client.publishableKey}`,
++      'content-type': 'application/json',
++    },
++    method: 'POST',
++  })
++  if (
++    response.status !== 200 ||
++    response.redirected ||
++    response.url !== providerUrl.href
++  ) {
++    throw new Error('Email-action provider request is unavailable')
++  }
++}
++
++function isExactEmailActionCallback(
++  value: string,
++  providerType: EmailActionProviderType,
++): boolean {
++  let callback: URL
++  try {
++    callback = new URL(value)
++  } catch {
++    return false
++  }
++  const entries = [...callback.searchParams.entries()]
++  const expectedAuth = providerType === 'recovery'
++    ? 'recovery'
++    : 'email-verification'
++  return (
++    parseExactRootCallback(`${callback.origin}/`, callback.origin) !== null &&
++    callback.pathname === '/' &&
++    callback.hash === '' &&
++    entries.length === 3 &&
++    entries[0]?.[0] === 'auth' &&
++    entries[0]?.[1] === expectedAuth &&
++    entries[1]?.[0] === 'flow' &&
++    /^[A-Za-z0-9_-]{22}$/u.test(entries[1]?.[1] ?? '') &&
++    entries[2]?.[0] === 'state' &&
++    /^[A-Za-z0-9_-]{43}$/u.test(entries[2]?.[1] ?? '')
++  )
++}
++
++function isBoundedOpaqueValue(value: unknown, maximumLength: number): value is string {
++  return (
++    typeof value === 'string' &&
++    value.length > 0 &&
++    value.length <= maximumLength &&
++    value === value.trim() &&
++    [...value].every((character) => {
++      const codePoint = character.codePointAt(0)
++      return codePoint !== undefined && codePoint >= 0x21 && codePoint <= 0x7e
++    })
++  )
++}
++
++function parseProviderSession(value: unknown): {
++  readonly accessToken: string
++  readonly refreshToken: string
++} | null {
++  if (
++    !isExactRecord(value, [
++      'access_token',
++      'expires_at',
++      'expires_in',
++      'refresh_token',
++      'token_type',
++      'user',
++    ]) &&
++    !isExactRecord(value, [
++      'access_token',
++      'expires_in',
++      'refresh_token',
++      'token_type',
++      'user',
++    ])
++  ) {
++    return null
++  }
++  if (
++    !isBoundedOpaqueValue(value.access_token, 16_384) ||
++    !isBoundedOpaqueValue(value.refresh_token, 16_384) ||
++    value.token_type !== 'bearer' ||
++    !Number.isSafeInteger(value.expires_in) ||
++    (value.expires_in as number) <= 0 ||
++    (Object.hasOwn(value, 'expires_at') &&
++      (!Number.isSafeInteger(value.expires_at) ||
++        (value.expires_at as number) <= 0)) ||
++    typeof value.user !== 'object' ||
++    value.user === null ||
++    Array.isArray(value.user)
++  ) {
++    return null
++  }
++  return {
++    accessToken: value.access_token,
++    refreshToken: value.refresh_token,
++  }
++}
+diff --git a/supabase/functions/_shared/recovery-pkce.test.ts b/supabase/functions/_shared/recovery-pkce.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ad30fede19fcd6a2dda48153a6e5247b88e95003
+--- /dev/null
++++ b/supabase/functions/_shared/recovery-pkce.test.ts
+@@ -0,0 +1,146 @@
++import {
++  createS256Challenge,
++  deriveEmailActionPkceMaterial,
++  matchesEmailActionPkceState,
++  type EmailActionPkceContext,
++} from './recovery-pkce.ts'
++
++function assertEquals(actual: unknown, expected: unknown): void {
++  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
++    throw new Error(
++      `Expected ${JSON.stringify(expected)}, received ${JSON.stringify(actual)}`,
++    )
++  }
++}
++
++async function assertRejects(action: () => Promise<unknown>): Promise<void> {
++  try {
++    await action()
++  } catch {
++    return
++  }
++  throw new Error('Expected action to reject')
++}
++
++Deno.test('email-action PKCE derivation matches the password-recovery synthetic HKDF vector', async () => {
++  const result = await deriveEmailActionPkceMaterial(
++    'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
++    {
++      expiresAt: 1_780_000_900,
++      flowId: 'ABEiM0RVZneImaq7zN3u_w',
++      intendedOrigin: 'https://staff.desmoslock.invalid',
++      issuedAt: 1_780_000_000,
++      purpose: 'password_recovery',
++    },
++  )
++
++  assertEquals(result, {
++    codeChallenge: '_wXrViLS-RXLg1gJPUe-4zeoJoIg7dI3zb9iUgrDg1o',
++    state: 'VmwQ-TLidXAtSEscvyc4s3o53n_zRIMpr58NMzGxBiE',
++    verifier: 'LJamG9H31kYG-QMFogiTmxjJ5LHNHQBfZx4ibhqAOVk',
++  })
++})
++
++Deno.test('S256 challenge matches RFC 7636 Appendix B', async () => {
++  assertEquals(
++    await createS256Challenge(
++      'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk',
++    ),
++    'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM',
++  )
++})
++
++Deno.test('email-action PKCE derivation rejects every noncanonical server secret', async () => {
++  const context = {
++    expiresAt: 1_780_000_900,
++    flowId: 'ABEiM0RVZneImaq7zN3u_w',
++    intendedOrigin: 'https://staff.desmoslock.invalid',
++    issuedAt: 1_780_000_000,
++    purpose: 'password_recovery',
++  } as const
++  for (const secret of [
++    '',
++    'A'.repeat(42),
++    'A'.repeat(44),
++    `${'A'.repeat(42)}=`,
++    `${'A'.repeat(42)}+`,
++    `${'A'.repeat(42)}/`,
++  ]) {
++    await assertRejects(() => deriveEmailActionPkceMaterial(secret, context))
++  }
++})
++
++Deno.test('email-action PKCE derivation rejects ambiguous or stale flow context', async () => {
++  const secret = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8'
++  const valid = {
++    expiresAt: 1_780_000_900,
++    flowId: 'ABEiM0RVZneImaq7zN3u_w',
++    intendedOrigin: 'https://staff.desmoslock.invalid',
++    issuedAt: 1_780_000_000,
++    purpose: 'password_recovery',
++  } as const
++  const invalid: unknown[] = [
++    { ...valid, flowId: 'f'.repeat(21) },
++    { ...valid, flowId: `${'f'.repeat(21)}=` },
++    { ...valid, intendedOrigin: 'http://staff.desmoslock.invalid' },
++    { ...valid, intendedOrigin: `${valid.intendedOrigin}/` },
++    { ...valid, purpose: 'recovery' },
++    { ...valid, issuedAt: -1 },
++    { ...valid, issuedAt: valid.issuedAt + 0.5 },
++    { ...valid, expiresAt: valid.issuedAt },
++    { ...valid, expiresAt: valid.issuedAt + 59 },
++    { ...valid, expiresAt: valid.issuedAt + 901 },
++  ]
++  for (const context of invalid) {
++    await assertRejects(() =>
++      deriveEmailActionPkceMaterial(secret, context as EmailActionPkceContext),
++    )
++  }
++})
++
++Deno.test('email verification is a closed, cryptographically separated purpose', async () => {
++  const secret = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8'
++  const recovery = await deriveEmailActionPkceMaterial(secret, {
++    expiresAt: 1_780_000_900,
++    flowId: 'ABEiM0RVZneImaq7zN3u_w',
++    intendedOrigin: 'https://staff.desmoslock.invalid',
++    issuedAt: 1_780_000_000,
++    purpose: 'password_recovery',
++  })
++  const verification = await deriveEmailActionPkceMaterial(secret, {
++    expiresAt: 1_780_000_900,
++    flowId: 'ABEiM0RVZneImaq7zN3u_w',
++    intendedOrigin: 'https://staff.desmoslock.invalid',
++    issuedAt: 1_780_000_000,
++    purpose: 'email_verification',
++  })
++
++  assertEquals(verification, {
++    codeChallenge: 'kGdI0dF8ONoLc3VxahH3qyACDIT8vv3Ieo99Ir4ItRU',
++    state: 'wOEhI2hMGykbY7yIKclpMWfcx5KLPS6sdK-AoJld7aU',
++    verifier: 'SL-MTH5RQWHUVE3rmqg_ohVuzxGCnYTDCOISCCAgaM0',
++  })
++  assertEquals(await matchesEmailActionPkceState(secret, {
++    context: {
++      expiresAt: 1_780_000_900,
++      flowId: 'ABEiM0RVZneImaq7zN3u_w',
++      intendedOrigin: 'https://staff.desmoslock.invalid',
++      issuedAt: 1_780_000_000,
++      purpose: 'password_recovery',
++    },
++    state: recovery.state,
++  }), true)
++  assertEquals(await matchesEmailActionPkceState(secret, {
++    context: {
++      expiresAt: 1_780_000_900,
++      flowId: 'ABEiM0RVZneImaq7zN3u_w',
++      intendedOrigin: 'https://staff.desmoslock.invalid',
++      issuedAt: 1_780_000_000,
++      purpose: 'email_verification',
++    },
++    state: recovery.state,
++  }), false)
++  assertEquals(recovery.state === verification.state, false)
++  assertEquals(recovery.verifier === verification.verifier, false)
++  assertEquals(recovery.codeChallenge === verification.codeChallenge, false)
++})
+diff --git a/supabase/functions/_shared/recovery-pkce.ts b/supabase/functions/_shared/recovery-pkce.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..10e5b4a120488bad2525a2a1a733df9652647048
+--- /dev/null
++++ b/supabase/functions/_shared/recovery-pkce.ts
+@@ -0,0 +1,142 @@
++import { parseExactOrigin } from './http.ts'
++
++export type EmailActionPkcePurpose =
++  | 'email_verification'
++  | 'password_recovery'
++
++export interface EmailActionPkceContext {
++  readonly expiresAt: number
++  readonly flowId: string
++  readonly intendedOrigin: string
++  readonly issuedAt: number
++  readonly purpose: EmailActionPkcePurpose
++}
++
++export interface EmailActionPkceMaterial {
++  readonly codeChallenge: string
++  readonly state: string
++  readonly verifier: string
++}
++
++const textEncoder = new TextEncoder()
++const derivationVersion = 'desmoslock.staff-email-action-pkce.v1'
++
++export async function createS256Challenge(verifier: string): Promise<string> {
++  const digest = await crypto.subtle.digest(
++    'SHA-256',
++    textEncoder.encode(verifier),
++  )
++  return encodeBase64Url(new Uint8Array(digest))
++}
++
++export async function deriveEmailActionPkceMaterial(
++  encodedSecret: string,
++  context: EmailActionPkceContext,
++): Promise<EmailActionPkceMaterial> {
++  if (!/^[A-Za-z0-9_-]{43}$/u.test(encodedSecret)) {
++    throw new Error('Recovery PKCE configuration is invalid')
++  }
++  if (!isEmailActionPkceContext(context)) {
++    throw new Error('Recovery PKCE context is invalid')
++  }
++  const secret = decodeBase64Url(encodedSecret)
++  if (secret.length !== 32 || encodeBase64Url(secret) !== encodedSecret) {
++    throw new Error('Recovery PKCE configuration is invalid')
++  }
++  const key = await crypto.subtle.importKey(
++    'raw',
++    secret,
++    'HKDF',
++    false,
++    ['deriveBits'],
++  )
++  const derive = async (use: 'state' | 'verifier'): Promise<string> => {
++    const contextInput = [
++      derivationVersion,
++      `flow=${context.flowId}`,
++      `origin=${context.intendedOrigin}`,
++      `purpose=${context.purpose}`,
++      `issued=${context.issuedAt}`,
++      `expires=${context.expiresAt}`,
++    ].join('\n')
++    const bits = await crypto.subtle.deriveBits(
++      {
++        hash: 'SHA-256',
++        info: textEncoder.encode(`${contextInput}\nuse=${use}`),
++        name: 'HKDF',
++        salt: textEncoder.encode(
++          `${derivationVersion}\npurpose=${context.purpose}`,
++        ),
++      },
++      key,
++      256,
++    )
++    return encodeBase64Url(new Uint8Array(bits))
++  }
++  const [state, verifier] = await Promise.all([
++    derive('state'),
++    derive('verifier'),
++  ])
++  return {
++    codeChallenge: await createS256Challenge(verifier),
++    state,
++    verifier,
++  }
++}
++
++export async function matchesEmailActionPkceState(
++  encodedSecret: string,
++  input: {
++    readonly context: EmailActionPkceContext
++    readonly state: string
++  },
++): Promise<boolean> {
++  if (!/^[A-Za-z0-9_-]{43}$/u.test(input.state)) return false
++  const expected = await deriveEmailActionPkceMaterial(
++    encodedSecret,
++    input.context,
++  )
++  const actualBytes = decodeBase64Url(input.state)
++  const expectedBytes = decodeBase64Url(expected.state)
++  let difference = actualBytes.length ^ expectedBytes.length
++  for (let index = 0; index < expectedBytes.length; index += 1) {
++    difference |= (actualBytes[index] ?? 0) ^ expectedBytes[index]
++  }
++  return difference === 0
++}
++
++function isEmailActionPkceContext(
++  context: EmailActionPkceContext,
++): boolean {
++  const lifetime = context.expiresAt - context.issuedAt
++  return (
++    /^[A-Za-z0-9_-]{22}$/u.test(context.flowId) &&
++    parseExactOrigin(context.intendedOrigin) === context.intendedOrigin &&
++    (context.purpose === 'password_recovery' ||
++      context.purpose === 'email_verification') &&
++    Number.isSafeInteger(context.issuedAt) &&
++    context.issuedAt >= 0 &&
++    Number.isSafeInteger(context.expiresAt) &&
++    lifetime >= 60 &&
++    lifetime <= 900
++  )
++}
++
++function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
++  const standard = value.replace(/-/gu, '+').replace(/_/gu, '/')
++  const decoded = atob(`${standard}=`)
++  const bytes = new Uint8Array(decoded.length)
++  for (let index = 0; index < decoded.length; index += 1) {
++    bytes[index] = decoded.charCodeAt(index)
++  }
++  return bytes
++}
++
++function encodeBase64Url(bytes: Uint8Array): string {
++  let binary = ''
++  for (const byte of bytes) binary += String.fromCharCode(byte)
++  return btoa(binary)
++    .replace(/=+$/u, '')
++    .replace(/\+/gu, '-')
++    .replace(/\//gu, '_')
++}

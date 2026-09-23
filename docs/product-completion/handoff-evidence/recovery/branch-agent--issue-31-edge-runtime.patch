@@ -1,0 +1,169 @@
+diff --git a/supabase/functions/account-recovery/index.test.ts b/supabase/functions/account-recovery/index.test.ts
+index c64abd7f5c2d1382f3d9316c20ce384ea5beac46..af48a276fd9dd07a96611acbb82b006741fb1a7b 100644
+--- a/supabase/functions/account-recovery/index.test.ts
++++ b/supabase/functions/account-recovery/index.test.ts
+@@ -120,11 +120,11 @@ Deno.test(
+   },
+ );
+ 
+-Deno.test("account recovery validates exact CORS preflight", async () => {
++Deno.test("account recovery CORS matches Supabase SDK", async () => {
+   const valid = await handleRequest(
+     recoveryRequest(undefined, {
+       headers: {
+-        "access-control-request-headers": "Content-Type",
++        "access-control-request-headers": "X-Client-Info, Content-Type, ApiKey",
+         "access-control-request-method": "POST",
+       },
+       method: "OPTIONS",
+@@ -134,13 +134,46 @@ Deno.test("account recovery validates exact CORS preflight", async () => {
+   assertEquals(valid.status, 204);
+   assertEquals(
+     valid.headers.get("access-control-allow-headers"),
+-    "content-type",
++    "apikey, content-type, x-client-info",
+   );
+ 
++  const omittedSdkHeader = await handleRequest(
++    recoveryRequest(undefined, {
++      headers: {
++        "access-control-request-headers": "apikey, content-type",
++        "access-control-request-method": "POST",
++      },
++      method: "OPTIONS",
++    }),
++    dependencies(),
++  );
++  assertEquals(omittedSdkHeader.status, 400);
++  assertEquals(await omittedSdkHeader.json(), {
++    code: "invalid_request",
++    ok: false,
++  });
++
++  const extraHeader = await handleRequest(
++    recoveryRequest(undefined, {
++      headers: {
++        "access-control-request-headers":
++          "apikey, content-type, x-client-info, x-extra",
++        "access-control-request-method": "POST",
++      },
++      method: "OPTIONS",
++    }),
++    dependencies(),
++  );
++  assertEquals(extraHeader.status, 400);
++  assertEquals(await extraHeader.json(), {
++    code: "invalid_request",
++    ok: false,
++  });
++
+   const wrongMethod = await handleRequest(
+     recoveryRequest(undefined, {
+       headers: {
+-        "access-control-request-headers": "content-type",
++        "access-control-request-headers": "apikey, content-type, x-client-info",
+         "access-control-request-method": "PUT",
+       },
+       method: "OPTIONS",
+@@ -156,7 +189,7 @@ Deno.test("account recovery validates exact CORS preflight", async () => {
+   const wrongOrigin = await handleRequest(
+     recoveryRequest(undefined, {
+       headers: {
+-        "access-control-request-headers": "content-type",
++        "access-control-request-headers": "apikey, content-type, x-client-info",
+         "access-control-request-method": "POST",
+         origin: "https://attacker.invalid",
+       },
+diff --git a/supabase/functions/account-recovery/index.ts b/supabase/functions/account-recovery/index.ts
+index 49246c9a1458c6a92c6a714f79a1698aff32a836..edb6d656d49471abf16d729203e41261c4ba7a50 100644
+--- a/supabase/functions/account-recovery/index.ts
++++ b/supabase/functions/account-recovery/index.ts
+@@ -173,7 +173,7 @@ export async function handleRequest(
+     return codeResponse("service_unavailable", 503);
+   }
+   const corsPolicy = {
+-    allowedHeaders: ["content-type"],
++    allowedHeaders: ["apikey", "content-type", "x-client-info"],
+     allowedOrigin: dependencies.allowedOrigin,
+   } as const;
+   if (request.method === "OPTIONS") {
+diff --git a/supabase/functions/staff-invitations/index.test.ts b/supabase/functions/staff-invitations/index.test.ts
+index ff387f036c1620c11effbb75865037e67ebed47e..9f4be51c5ef2e86ac4a216b13744a6b824d50144 100644
+--- a/supabase/functions/staff-invitations/index.test.ts
++++ b/supabase/functions/staff-invitations/index.test.ts
+@@ -169,11 +169,12 @@ Deno.test(
+   },
+ );
+ 
+-Deno.test("staff invitation validates exact CORS preflight", async () => {
++Deno.test("staff invitation CORS matches Supabase SDK", async () => {
+   const valid = await handleRequest(
+     invitationRequest(undefined, {
+       headers: {
+-        "access-control-request-headers": "Content-Type, Authorization",
++        "access-control-request-headers":
++          "X-Client-Info, Authorization, ApiKey, Content-Type",
+         "access-control-request-method": "POST",
+       },
+       method: "OPTIONS",
+@@ -183,14 +184,30 @@ Deno.test("staff invitation validates exact CORS preflight", async () => {
+   assertEquals(valid.status, 204);
+   assertEquals(
+     valid.headers.get("access-control-allow-headers"),
+-    "authorization, content-type",
++    "apikey, authorization, content-type, x-client-info",
++  );
++
++  const omittedAuthorization = await handleRequest(
++    invitationRequest(undefined, {
++      headers: {
++        "access-control-request-headers": "apikey, content-type, x-client-info",
++        "access-control-request-method": "POST",
++      },
++      method: "OPTIONS",
++    }),
++    dependencies(),
+   );
++  assertEquals(omittedAuthorization.status, 400);
++  assertEquals(await omittedAuthorization.json(), {
++    code: "invalid_request",
++    ok: false,
++  });
+ 
+   const extraHeader = await handleRequest(
+     invitationRequest(undefined, {
+       headers: {
+         "access-control-request-headers":
+-          "authorization, content-type, x-extra",
++          "apikey, authorization, content-type, x-client-info, x-extra",
+         "access-control-request-method": "POST",
+       },
+       method: "OPTIONS",
+@@ -206,7 +223,8 @@ Deno.test("staff invitation validates exact CORS preflight", async () => {
+   const wrongOrigin = await handleRequest(
+     invitationRequest(undefined, {
+       headers: {
+-        "access-control-request-headers": "authorization, content-type",
++        "access-control-request-headers":
++          "apikey, authorization, content-type, x-client-info",
+         "access-control-request-method": "POST",
+         origin: "https://attacker.invalid",
+       },
+diff --git a/supabase/functions/staff-invitations/index.ts b/supabase/functions/staff-invitations/index.ts
+index 7df5441062f799e88fe7c4760e808af64d7ae257..f9dbe46fe7c0759e0edd298f655be06ff11d1b00 100644
+--- a/supabase/functions/staff-invitations/index.ts
++++ b/supabase/functions/staff-invitations/index.ts
+@@ -750,7 +750,12 @@ export async function handleRequest(
+     return codeResponse("service_unavailable", 503);
+   }
+   const corsPolicy = {
+-    allowedHeaders: ["authorization", "content-type"],
++    allowedHeaders: [
++      "apikey",
++      "authorization",
++      "content-type",
++      "x-client-info",
++    ],
+     allowedOrigin: dependencies.allowedOrigin,
+   } as const;
+   if (request.method === "OPTIONS") {

@@ -1,0 +1,455 @@
+{
+  "boundary": {
+    "authorization_headers_supplied": false,
+    "automatic_retries": 0,
+    "exact_denied_body_and_headers": true,
+    "get405_allowPOST": 4,
+    "health_exact_generation4_ready": true,
+    "health_requests": 1,
+    "post_empty_object403": 4,
+    "redirects_followed": 0,
+    "request_timeout_seconds": 15,
+    "response_body_limit_bytes": 8192,
+    "student_requests": 8
+  },
+  "deploy_invocations": 4,
+  "deployment_retries": 0,
+  "deployments": [
+    {
+      "action": "deploy-student-session-read",
+      "automatic_retry": false,
+      "captured_bytes": {
+        "stderr": 661,
+        "stdout": 193
+      },
+      "failure_code": null,
+      "finished_at": "2026-09-23T00:39:56.092567+00:00",
+      "process_exit_code": 0,
+      "raw_output_persisted": false,
+      "started_at": "2026-09-23T00:39:54.481610+00:00",
+      "status": "cli_acknowledged",
+      "target": "adlhhdbglpamaftcbmce"
+    },
+    {
+      "action": "deploy-student-session-reconnect",
+      "automatic_retry": false,
+      "captured_bytes": {
+        "stderr": 691,
+        "stdout": 198
+      },
+      "failure_code": null,
+      "finished_at": "2026-09-23T00:40:13.048255+00:00",
+      "process_exit_code": 0,
+      "raw_output_persisted": false,
+      "started_at": "2026-09-23T00:40:12.023437+00:00",
+      "status": "cli_acknowledged",
+      "target": "adlhhdbglpamaftcbmce"
+    },
+    {
+      "action": "deploy-student-session-forfeit",
+      "automatic_retry": false,
+      "captured_bytes": {
+        "stderr": 679,
+        "stdout": 196
+      },
+      "failure_code": null,
+      "finished_at": "2026-09-23T00:40:19.874807+00:00",
+      "process_exit_code": 0,
+      "raw_output_persisted": false,
+      "started_at": "2026-09-23T00:40:18.911450+00:00",
+      "status": "cli_acknowledged",
+      "target": "adlhhdbglpamaftcbmce"
+    },
+    {
+      "action": "deploy-student-session-evidence",
+      "automatic_retry": false,
+      "captured_bytes": {
+        "stderr": 797,
+        "stdout": 197
+      },
+      "failure_code": null,
+      "finished_at": "2026-09-23T00:40:25.771664+00:00",
+      "process_exit_code": 0,
+      "raw_output_persisted": false,
+      "started_at": "2026-09-23T00:40:24.613831+00:00",
+      "status": "cli_acknowledged",
+      "target": "adlhhdbglpamaftcbmce"
+    }
+  ],
+  "evidence": [
+    {
+      "bytes": 14171,
+      "path": "manifest.json",
+      "sha256": "75cb202dbcf8dd2bec082956e31f723f3e5ea389ee2677949fc23d1f697a1f6e"
+    },
+    {
+      "bytes": 945,
+      "path": "selection.json",
+      "sha256": "7c16a92762844af93c9f6c28bb173ff3a35a334db147328cef039487b5b93486"
+    },
+    {
+      "bytes": 11184,
+      "path": "WORKORDER.md",
+      "sha256": "62f2e255bf96d3da2ba153fee243c301f7c330bad4b2beb19134c1e243daca85"
+    },
+    {
+      "bytes": 4947,
+      "path": "preparation-receipt.json",
+      "sha256": "570b9798089b643a757d0172fed18eabc94b0697720a70df85e96f45389cc93f"
+    },
+    {
+      "bytes": 9427,
+      "path": "execute-selected.py",
+      "sha256": "a5a750dc9c5763832c1e582a70a5c215ba59a16aec53bcda6ba0c10e173ca418"
+    },
+    {
+      "bytes": 645,
+      "path": "predeploy-functions.json",
+      "sha256": "bfcf89525e23e01f27a26178a57f9aedf201a7dc8e239d17223669dd1be62b82"
+    },
+    {
+      "bytes": 408,
+      "path": "public-config-result.json",
+      "sha256": "efac06d95727a8eb4537a0df753b3dc276ef172648972e6920bfdaa3f09069df"
+    },
+    {
+      "bytes": 458,
+      "path": "public-config-names.json",
+      "sha256": "82843d72186739c906c19481f518039b8190998f08e172bebc809ce97a26c49a"
+    },
+    {
+      "bytes": 514,
+      "path": "prior-cli-metadata-receipt.json",
+      "sha256": "47f87aff99a1d34b3c6560f0aae2f59ed21b5343f01a6f73babca451ac85c835"
+    },
+    {
+      "bytes": 557,
+      "path": "generated-cli-metadata-after.json",
+      "sha256": "be5c7fcb12fd80c6956388dad485a7b81b29ff622fa0df3759e5b439863f2242"
+    },
+    {
+      "bytes": 930,
+      "path": "postdeploy-inventory-first-result.json",
+      "sha256": "23a18310ba66de5323a6a39ea09f33b89ad710ebe86de5e980327cbd81eb29a8"
+    },
+    {
+      "bytes": 3052,
+      "path": "postdeploy-inventory-reconciliation-root.json",
+      "sha256": "1c1cf5d8935f6cf5780bcac6fbf3bdc60c0e4d5035bf95c6f2c9206618df49ec"
+    },
+    {
+      "bytes": 2401,
+      "path": "postdeploy-functions.json",
+      "sha256": "55570969eec15ff43e2b1143811dea490f16e6b6c44acdc3bfe97c5343626876"
+    },
+    {
+      "bytes": 182,
+      "path": "boundary-probes-result.json",
+      "sha256": "187014ce1c7570fa8d99381d9a2eb5df8695dcba60258127758ab899b83d9ca8"
+    },
+    {
+      "bytes": 533,
+      "path": "probe-health.json",
+      "sha256": "f4ce177fef25b2d23e5fccbb45a68cd3d01d1420fd1230653125699a0c41981b"
+    },
+    {
+      "bytes": 432,
+      "path": "claims/boundary-probes.json",
+      "sha256": "2c68671b7bc4a4b76d0269a49caeb7ac349929c1d745b3ead58061e85d0b66e8"
+    },
+    {
+      "bytes": 856,
+      "path": "claims/deploy-student-session-evidence.json",
+      "sha256": "2f2eb361a2b9a37228692655ea212a1af72508911799a8a84b54d349fccc38c2"
+    },
+    {
+      "bytes": 854,
+      "path": "claims/deploy-student-session-forfeit.json",
+      "sha256": "2b8f9efb8c1652bbeafa6f403f4e3a80a44ad8b72290f8bea37170945e49ea02"
+    },
+    {
+      "bytes": 848,
+      "path": "claims/deploy-student-session-read.json",
+      "sha256": "8f84e8fa0f561ede2e0c7b8fa3b2694d47e62e68c5fecbf671c2dc4c2b4c24a9"
+    },
+    {
+      "bytes": 858,
+      "path": "claims/deploy-student-session-reconnect.json",
+      "sha256": "27ff16ef2b7ac7fb353fed2d8399b463dd082965ccde446336d6b64621a7e566"
+    },
+    {
+      "bytes": 804,
+      "path": "claims/postdeploy-inventory.json",
+      "sha256": "b10b781facfa2d07798511cb1f44bc98913f7b728081e7a957c91abde26ac753"
+    },
+    {
+      "bytes": 372,
+      "path": "claims/public-config.json",
+      "sha256": "299e0640fbaf782d4fcf34a480cd578cb4f7f692392abab418504a7e92f555df"
+    },
+    {
+      "bytes": 338,
+      "path": "deploy-student-session-read-result.json",
+      "sha256": "a3f476523d3ed932221ef49288f509f88ffb8c350cc2b9856f68819d4334d940"
+    },
+    {
+      "bytes": 412,
+      "path": "probe-student-session-read-get.json",
+      "sha256": "4fa67a81fd4c5ea977f57e26954424fa278ca3aa1bed794f1d126fe46693ebaf"
+    },
+    {
+      "bytes": 398,
+      "path": "probe-student-session-read-post.json",
+      "sha256": "32010282e50553e57bc00aa764e0ccab6d090ed0aa8e567eb6da690eb5d63028"
+    },
+    {
+      "bytes": 343,
+      "path": "deploy-student-session-reconnect-result.json",
+      "sha256": "987eb71bcc4402323cb3e0a7af64acc64e587108015e4322c7ffc4cc8c4eca12"
+    },
+    {
+      "bytes": 417,
+      "path": "probe-student-session-reconnect-get.json",
+      "sha256": "7ef8d7103ed259ed8c6feb2db538060f7fa691971affd9d21ea695a2aebb92d1"
+    },
+    {
+      "bytes": 403,
+      "path": "probe-student-session-reconnect-post.json",
+      "sha256": "e2019f5fd9c84c2475c7b89ee66be17e975e358ce530c1795aec357251bcc177"
+    },
+    {
+      "bytes": 341,
+      "path": "deploy-student-session-forfeit-result.json",
+      "sha256": "a5ff4e2a3a688cfdedac091528ca64616263e37e9d985370bbfd4fa891536615"
+    },
+    {
+      "bytes": 415,
+      "path": "probe-student-session-forfeit-get.json",
+      "sha256": "d60c46f3bbe75d73e91fa6ad18115347dd6531959f0c82a155310c5cd3ad42d6"
+    },
+    {
+      "bytes": 401,
+      "path": "probe-student-session-forfeit-post.json",
+      "sha256": "2c07593b72a17420ffae1809791b336a249b1000c9960cd6898c4f3c8ab0f43f"
+    },
+    {
+      "bytes": 342,
+      "path": "deploy-student-session-evidence-result.json",
+      "sha256": "9103e3ecbda7fb712723cdcae5a9629c85f19d73b0e755ed424f2450af0a87f9"
+    },
+    {
+      "bytes": 416,
+      "path": "probe-student-session-evidence-get.json",
+      "sha256": "57be5e35d59b486507f5fcf41408a20928521e797538cf5de61ff90174ca67d2"
+    },
+    {
+      "bytes": 402,
+      "path": "probe-student-session-evidence-post.json",
+      "sha256": "67879744395c3db73e2e53795a9a9acf388ed992999f359542cc216d51255776"
+    },
+    {
+      "bytes": 908,
+      "path": "pristine-state-v1/root-before-selection.json",
+      "sha256": "622ac01786882700cd035f1117620a4cea8d0a7650a221d0788aaf0f47bc0845"
+    },
+    {
+      "bytes": 1310,
+      "path": "pristine-state-v1/root-after-selection.json",
+      "sha256": "e4b37fcecfe080e4d3eea65a5f2f289c1eb5759b2f743d38559555abc022fd9c"
+    },
+    {
+      "bytes": 7586,
+      "path": "pristine-state-v1/run.before-selected.py",
+      "sha256": "2ca432144c38dd8deb00f45d8cfd9bdf25e62934f1b9edabbe56ed368fadccc4"
+    },
+    {
+      "bytes": 7585,
+      "path": "pristine-state-v1/run.py",
+      "sha256": "fc0eb37798ef8b564633b1a1ab1d2e4f58836dacf9f79c2fee84b70a4e311e47"
+    },
+    {
+      "bytes": 51142,
+      "path": "pristine-state-v1/pristine-state.sql",
+      "sha256": "be3167d4a7b6a5fe2f675a0e5af90efee5047ce3264bfec7a65c034b61a0e8ae"
+    },
+    {
+      "bytes": 3201,
+      "path": "pristine-state-v1/expected-pristine-state.json",
+      "sha256": "0fa613ef3cd029446f1b14fa3c4b68291338b0aa4a17d24857942159aaa8face"
+    },
+    {
+      "bytes": 377,
+      "path": "pristine-state-v1/before-claim.json",
+      "sha256": "c70149487b6b59670d60c7f21194340cdcc51ddb82e133aee07a8fa3891ff8ce"
+    },
+    {
+      "bytes": 878,
+      "path": "pristine-state-v1/before-result.json",
+      "sha256": "fc79c8e966d88341e0000baf9fcf62556ce9dd92919dbb7ce6d2c3ea87e996a2"
+    },
+    {
+      "bytes": 3201,
+      "path": "pristine-state-v1/before-output.json",
+      "sha256": "0fa613ef3cd029446f1b14fa3c4b68291338b0aa4a17d24857942159aaa8face"
+    },
+    {
+      "bytes": 376,
+      "path": "pristine-state-v1/after-claim.json",
+      "sha256": "07482b2f327d461faf16a6f96e40458dd1a10a9dd1a3077008d899c180e594a2"
+    },
+    {
+      "bytes": 877,
+      "path": "pristine-state-v1/after-result.json",
+      "sha256": "462a20d0873861a7462b8ada98c1409b0b8bf7cbe66d1d413ba83a2f6c6c0db1"
+    },
+    {
+      "bytes": 3201,
+      "path": "pristine-state-v1/after-output.json",
+      "sha256": "0fa613ef3cd029446f1b14fa3c4b68291338b0aa4a17d24857942159aaa8face"
+    }
+  ],
+  "execution": {
+    "after_read_exit_code": 0,
+    "all_deploy_cli_exit_codes": 0,
+    "cli_capture_deadline_seconds": 45,
+    "long_running_service_started": false,
+    "owned_group_retirement_wait_seconds": 5,
+    "raw_provider_stdout_stderr_persisted": false,
+    "secret_values_or_digests_recorded": false
+  },
+  "finished_at": "2026-09-23T00:45:08.901127+00:00",
+  "format_version": 1,
+  "inventory": {
+    "all_active": true,
+    "all_selected_versions": 1,
+    "all_verify_jwt_false": true,
+    "first_validator_result": "stopped_HEALTH_CHANGED",
+    "four_deployed_source_download_equality_claimed": false,
+    "health_identity_policy_bundle_created_updated_unchanged": true,
+    "health_version_after": 3,
+    "health_version_before": 2,
+    "reconciliation_owner": "root",
+    "reconciliation_sha256": "1c1cf5d8935f6cf5780bcac6fbf3bdc60c0e4d5035bf95c6f2c9206618df49ec",
+    "selected_functions": 4,
+    "version_change_cause": "not_established"
+  },
+  "limits": [
+    "Public denial behavior only; no valid Student operation or evidence upload exercised.",
+    "Malformed evidence rejection precedes dependency construction; does not prove its configuration or database connectivity.",
+    "No challenge/join calls, Auth users, Owner operations, mail, recovery, invitations, migrations, seed, or health redeploy.",
+    "Source bundle inputs and provider bundle hashes are recorded; independently downloaded deployed source-byte equality is not claimed.",
+    "Pristine before/after reads verify the selected fields at their observed times; they are not a backup or an ongoing no-writer lock."
+  ],
+  "main_commit": "f9b09be664fe8589bd3be6d71cbeb0a37035a8c7",
+  "preservation": {
+    "all_claims_preserved": true,
+    "before_evidence_preserved": true,
+    "first_failure_preserved": true,
+    "generated_cli_metadata_retained": true,
+    "prior_cli_metadata_atomically_moved": true
+  },
+  "pristine_state": {
+    "after_result_sha256": "462a20d0873861a7462b8ada98c1409b0b8bf7cbe66d1d413ba83a2f6c6c0db1",
+    "after_status": "pristine_verified",
+    "backup_claimed": false,
+    "before_status": "pristine_verified",
+    "checks": {
+      "added_defaults_exact": true,
+      "auth_users_zero": true,
+      "canonical21_rows_with_marker_conversion": true,
+      "execution_context_equal": true,
+      "ledger13_exact": true,
+      "new_runtime_tables_empty": true,
+      "old_memberships_exact": true,
+      "old_roles_exact": true,
+      "ordinary_relations_and_builtin_types": true
+    },
+    "counts": {
+      "auth_users_bounded": 0,
+      "canonical_rows_sampled": 21,
+      "ledger_entries_bounded": 13,
+      "membership_records": 25,
+      "role_records": 19
+    },
+    "output_sha256": "0fa613ef3cd029446f1b14fa3c4b68291338b0aa4a17d24857942159aaa8face",
+    "outputs_byte_identical_to_expected": true,
+    "same_point_in_time_claimed": false
+  },
+  "source_and_main_tree": "1db14a29523c8b03f4e56c25539558321c30f587",
+  "source_commit": "62c1238812323f830c0640d8ba0d5bec88408d0d",
+  "source_config_and_tool_pins_after": [
+    {
+      "bytes": 9571,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/backend-student-maintenance-edge-deploy-v1/workdir/supabase/functions/_shared/http.ts",
+      "sha256": "1d03140eecaf35f5d30acccdc0e74b16ccce78ebd20f29c6735d162e1d5cebb3"
+    },
+    {
+      "bytes": 24232,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/backend-student-maintenance-edge-deploy-v1/workdir/supabase/functions/_shared/student-protection-evidence-proof.ts",
+      "sha256": "d632b64278b9a0ecbb92e5ff162dce6f105a1bd3d2188dddd4908f787b6a02de"
+    },
+    {
+      "bytes": 17077,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/backend-student-maintenance-edge-deploy-v1/workdir/supabase/functions/_shared/student-protection-evidence.ts",
+      "sha256": "56510ec243ee9fce1a667fc105e8e36c0cbf015096214102e0ab15947be84583"
+    },
+    {
+      "bytes": 30396,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/backend-student-maintenance-edge-deploy-v1/workdir/supabase/functions/_shared/student-session-proof.ts",
+      "sha256": "8a4935630f8fefb7a458cba331119e8b8edbda019959148e02ccee0d9e5e54ac"
+    },
+    {
+      "bytes": 34066,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/backend-student-maintenance-edge-deploy-v1/workdir/supabase/functions/_shared/student-session-service.ts",
+      "sha256": "43783551eb311acb8b8bcb5d61031769ef659947bb8c8255931938ff7aea9c2f"
+    },
+    {
+      "bytes": 6160,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/backend-student-maintenance-edge-deploy-v1/workdir/supabase/functions/_shared/supabase-http.ts",
+      "sha256": "b73817f7720b2969c8a5fb0a85012971f8417b41a4f4009afa8abc234d9208e5"
+    },
+    {
+      "bytes": 266,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/backend-student-maintenance-edge-deploy-v1/workdir/supabase/functions/deno.json",
+      "sha256": "3d34ebc28db6db729967b2bffec315eba47617c9900123c327a1457fc12298b3"
+    },
+    {
+      "bytes": 386,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/backend-student-maintenance-edge-deploy-v1/workdir/supabase/functions/student-session-evidence/index.ts",
+      "sha256": "85cd9f6313a8f575a6cacd7794f2e98a8364f02dc9825f4e66609f279ad72366"
+    },
+    {
+      "bytes": 384,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/backend-student-maintenance-edge-deploy-v1/workdir/supabase/functions/student-session-forfeit/index.ts",
+      "sha256": "62701bb797e903ab5cca82a27e153ebe94a09103784318b4dbe0883beae787ad"
+    },
+    {
+      "bytes": 378,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/backend-student-maintenance-edge-deploy-v1/workdir/supabase/functions/student-session-read/index.ts",
+      "sha256": "e78581b1f74bb1ba3513f906bcbec979647b4ffb08297e2b5e336900c9bbd2a4"
+    },
+    {
+      "bytes": 388,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/backend-student-maintenance-edge-deploy-v1/workdir/supabase/functions/student-session-reconnect/index.ts",
+      "sha256": "97b09d8618d9db82cc13e3d0694218c63467494a3faab535f54a895b34c6dcee"
+    },
+    {
+      "bytes": 275,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/backend-student-maintenance-edge-deploy-v1/workdir/supabase/config.toml",
+      "sha256": "574b27dd2d8607b929def8ce5f6c0de2c9ba30dfc909d056382a929ad99f8a35"
+    },
+    {
+      "bytes": 71777616,
+      "path": "/Users/nicky/workspace/projects/desmoslock-ticket-31-provider/node_modules/@supabase/cli-darwin-arm64/bin/supabase",
+      "sha256": "06179215a136f183ed24841e177e605fe15bf3e1ac1b6edac8312da71e835014"
+    },
+    {
+      "bytes": 19638,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/backend-hosted-catalog-read-v1/executor-v1/run.py",
+      "sha256": "711a38844d20507f76b4641797dd67a01837ac3a0082798698933636698450e0"
+    }
+  ],
+  "source_config_input_count": 12,
+  "status": "maintenance_edge_rollout_verified_pristine",
+  "target": "adlhhdbglpamaftcbmce"
+}

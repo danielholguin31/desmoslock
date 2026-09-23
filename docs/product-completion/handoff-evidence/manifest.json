@@ -1,0 +1,42 @@
+[
+  {
+    "file": "universal-candidate.json",
+    "sha256": "3a6cc54b6fd99b3d1485f47ce2e1c0353cd31f4cc97af1e31cc7011a2e37afd4",
+    "bytes": 10118,
+    "originalPacketPath": "canonical-universal-61ec-43.7-v1/final-release-receipt.json",
+    "status": "historical observed evidence, not a fresh revalidation",
+    "originalSha256": "0350315d532bd49889b378fd14feff73673e2ddf40b6812ceb642ab1df0da49b",
+    "originalBytes": 10238,
+    "formatting": "JSON formatting normalized; values unchanged"
+  },
+  {
+    "file": "staff-web.json",
+    "sha256": "e2c2514bd28a884335929242ab46ea731e4460525a91a511e33905ffdef0e97b",
+    "bytes": 5026,
+    "originalPacketPath": "qa/staff-vercel-live/v1/receipt.json",
+    "status": "historical observed evidence, not a fresh revalidation",
+    "originalSha256": "e2c2514bd28a884335929242ab46ea731e4460525a91a511e33905ffdef0e97b",
+    "originalBytes": 5026,
+    "formatting": "JSON formatting normalized; values unchanged"
+  },
+  {
+    "file": "student-functions.json",
+    "sha256": "aca99d7efeaa4aec731173d4f137d3c4d371b8fc981f91c27d1200387829bfd2",
+    "bytes": 17547,
+    "originalPacketPath": "backend-student-maintenance-edge-deploy-v1/rollout-receipt.json",
+    "status": "historical observed evidence, not a fresh revalidation",
+    "originalSha256": "aca99d7efeaa4aec731173d4f137d3c4d371b8fc981f91c27d1200387829bfd2",
+    "originalBytes": 17547,
+    "formatting": "JSON formatting normalized; values unchanged"
+  },
+  {
+    "file": "generation4-upgrade.json",
+    "sha256": "ef41c04501401f46018079018dd8b7fe8b137343c6e2bcf86a177839bee16aed",
+    "bytes": 823,
+    "originalPacketPath": "backend-atomic-upgrade-apply-v1/verify-result.json",
+    "status": "historical observed evidence, not a fresh revalidation",
+    "originalSha256": "879805d1ed7f804b328b34645c7b4c21d8ea6ad8c2b1db0c2312fed0b6843f77",
+    "originalBytes": 749,
+    "formatting": "JSON formatting normalized; values unchanged"
+  }
+]

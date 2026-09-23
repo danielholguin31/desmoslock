@@ -1,0 +1,4392 @@
+diff --git a/supabase/config.toml b/supabase/config.toml
+index 944adca2df0472dc82604d3d2aaaecee6d87c4cf..d81632e0cdc7950cff45618afecd2f8b0db9aa6c 100644
+--- a/supabase/config.toml
++++ b/supabase/config.toml
+@@ -51,8 +51,14 @@ enabled = true
+ policy = "per_worker"
+ deno_version = 2
+ 
++[functions.account-recovery]
++verify_jwt = false
++
+ [functions.health]
+ verify_jwt = false
+ 
++[functions.staff-invitations]
++verify_jwt = true
++
+ [analytics]
+ enabled = false
+diff --git a/supabase/functions/_shared/config-contract.test.ts b/supabase/functions/_shared/config-contract.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8d579fe58ba3b8cffba865d92796856922fcffba
+--- /dev/null
++++ b/supabase/functions/_shared/config-contract.test.ts
+@@ -0,0 +1,40 @@
++import configToml from "../../config.toml" with { type: "text" };
++
++function assertEquals(actual: unknown, expected: unknown): void {
++  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
++    throw new Error(
++      `Expected ${JSON.stringify(expected)}, received ${JSON.stringify(actual)}`,
++    );
++  }
++}
++
++function functionSection(name: string): string[] {
++  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
++  const matches = [
++    ...configToml.matchAll(
++      new RegExp(
++        `^\\[functions\\.${escapedName}\\]\\n([^[]*)(?=^\\[|\\s*$)`,
++        "gmu",
++      ),
++    ),
++  ];
++  assertEquals(matches.length, 1);
++  return matches[0][1]
++    .split("\n")
++    .map((line) => line.trim())
++    .filter((line) => line !== "");
++}
++
++Deno.test(
++  "account recovery explicitly disables gateway JWT verification",
++  () => {
++    assertEquals(functionSection("account-recovery"), ["verify_jwt = false"]);
++  },
++);
++
++Deno.test(
++  "staff invitations explicitly enables gateway JWT verification",
++  () => {
++    assertEquals(functionSection("staff-invitations"), ["verify_jwt = true"]);
++  },
++);
+diff --git a/supabase/functions/_shared/http.ts b/supabase/functions/_shared/http.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7cdf1e803c719231d4075030fbf6b682a58377a0
+--- /dev/null
++++ b/supabase/functions/_shared/http.ts
+@@ -0,0 +1,378 @@
++export const MAX_REQUEST_BODY_BYTES = 4_096;
++
++export interface CorsPolicy {
++  readonly allowedHeaders: readonly string[];
++  readonly allowedOrigin: string;
++}
++
++export type JsonRecord = Record<string, unknown>;
++
++const jsonContentType = "application/json; charset=utf-8";
++const canonicalEmailPattern =
++  /^[a-z0-9!#$%&'*+/=?^_{}|~-]+(?:\.[a-z0-9!#$%&'*+/=?^_{}|~-]+)*@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/u;
++
++function baseHeaders(allowedOrigin?: string): Headers {
++  const headers = new Headers({
++    "cache-control": "no-store",
++    "content-type": jsonContentType,
++  });
++  if (allowedOrigin !== undefined) {
++    headers.set("access-control-allow-origin", allowedOrigin);
++    headers.set("vary", "Origin");
++  }
++  return headers;
++}
++
++export function codeResponse(
++  code: string,
++  status: number,
++  allowedOrigin?: string,
++): Response {
++  return Response.json(
++    { code, ok: status >= 200 && status < 300 },
++    {
++      headers: baseHeaders(allowedOrigin),
++      status,
++    },
++  );
++}
++
++export function methodNotAllowedResponse(allowedOrigin: string): Response {
++  const headers = baseHeaders(allowedOrigin);
++  headers.set("allow", "POST, OPTIONS");
++  return new Response(JSON.stringify({ code: "invalid_request", ok: false }), {
++    headers,
++    status: 405,
++  });
++}
++
++export function isExactRecord(
++  value: unknown,
++  expectedKeys: readonly string[],
++): value is JsonRecord {
++  if (typeof value !== "object" || value === null || Array.isArray(value)) {
++    return false;
++  }
++  const observedKeys = Object.keys(value);
++  return (
++    observedKeys.length === expectedKeys.length &&
++    expectedKeys.every((key) =>
++      Object.prototype.hasOwnProperty.call(value, key),
++    )
++  );
++}
++
++export function parseExactOrigin(value: unknown): string | null {
++  if (typeof value !== "string" || value.length === 0 || value.length > 2_048) {
++    return null;
++  }
++  let parsed: URL;
++  try {
++    parsed = new URL(value);
++  } catch {
++    return null;
++  }
++  const localHost =
++    parsed.hostname === "127.0.0.1" ||
++    parsed.hostname === "[::1]" ||
++    parsed.hostname === "localhost";
++  const allowedProtocol =
++    parsed.protocol === "https:" || (parsed.protocol === "http:" && localHost);
++  if (
++    !allowedProtocol ||
++    parsed.username !== "" ||
++    parsed.password !== "" ||
++    parsed.pathname !== "/" ||
++    parsed.search !== "" ||
++    parsed.hash !== "" ||
++    parsed.origin !== value
++  ) {
++    return null;
++  }
++  return parsed.origin;
++}
++
++export function parseExactCallback(
++  value: unknown,
++  expectedOrigin: string,
++): string | null {
++  if (typeof value !== "string" || value.length === 0 || value.length > 2_048) {
++    return null;
++  }
++  let parsed: URL;
++  try {
++    parsed = new URL(value);
++  } catch {
++    return null;
++  }
++  if (
++    parsed.origin !== expectedOrigin ||
++    parsed.username !== "" ||
++    parsed.password !== "" ||
++    parsed.pathname === "/" ||
++    parsed.search !== "" ||
++    parsed.hash !== "" ||
++    parsed.href !== value
++  ) {
++    return null;
++  }
++  return parsed.href;
++}
++
++export function parseExactRootCallback(
++  value: unknown,
++  expectedOrigin: string,
++): string | null {
++  if (typeof value !== "string" || value.length === 0 || value.length > 2_048) {
++    return null;
++  }
++  let parsed: URL;
++  try {
++    parsed = new URL(value);
++  } catch {
++    return null;
++  }
++  return parsed.origin === expectedOrigin &&
++    parsed.username === "" &&
++    parsed.password === "" &&
++    parsed.pathname === "/" &&
++    parsed.search === "" &&
++    parsed.hash === "" &&
++    parsed.href === value
++    ? parsed.href
++    : null;
++}
++
++function parseRequestedHeaders(value: string | null): string[] | null {
++  if (value === null || value.length === 0 || value.length > 1_024) {
++    return null;
++  }
++  const headers = value.split(",").map((header) => header.trim().toLowerCase());
++  if (headers.some((header) => !/^[a-z0-9-]+$/u.test(header))) {
++    return null;
++  }
++  if (new Set(headers).size !== headers.length) {
++    return null;
++  }
++  return headers.sort();
++}
++
++export function validateRequestOrigin(
++  request: Request,
++  allowedOrigin: string,
++): boolean {
++  return request.headers.get("origin") === allowedOrigin;
++}
++
++export function handlePreflight(
++  request: Request,
++  policy: CorsPolicy,
++): Response {
++  if (!validateRequestOrigin(request, policy.allowedOrigin)) {
++    return codeResponse("invalid_request", 403);
++  }
++  if (request.headers.get("access-control-request-method") !== "POST") {
++    return codeResponse("invalid_request", 400, policy.allowedOrigin);
++  }
++  const requestedHeaders = parseRequestedHeaders(
++    request.headers.get("access-control-request-headers"),
++  );
++  const allowedHeaders = [...policy.allowedHeaders]
++    .map((header) => header.toLowerCase())
++    .sort();
++  if (
++    requestedHeaders === null ||
++    requestedHeaders.length !== allowedHeaders.length ||
++    requestedHeaders.some((header, index) => header !== allowedHeaders[index])
++  ) {
++    return codeResponse("invalid_request", 400, policy.allowedOrigin);
++  }
++  return new Response(null, {
++    headers: {
++      "access-control-allow-headers": allowedHeaders.join(", "),
++      "access-control-allow-methods": "POST",
++      "access-control-allow-origin": policy.allowedOrigin,
++      "access-control-max-age": "600",
++      "cache-control": "no-store",
++      vary: "Origin",
++    },
++    status: 204,
++  });
++}
++
++function isJsonContentType(value: string | null): boolean {
++  if (value === null) {
++    return false;
++  }
++  return /^application\/json(?:;[\t ]*charset=utf-8)?$/iu.test(value);
++}
++
++async function readBoundedBody(
++  request: Request,
++  maximumBytes: number,
++): Promise<Uint8Array | null> {
++  const contentLength = request.headers.get("content-length");
++  if (contentLength !== null) {
++    if (!/^(0|[1-9][0-9]*)$/u.test(contentLength)) {
++      return null;
++    }
++    const announcedLength = Number(contentLength);
++    if (
++      !Number.isSafeInteger(announcedLength) ||
++      announcedLength > maximumBytes
++    ) {
++      return null;
++    }
++  }
++  if (request.body === null) {
++    return null;
++  }
++  let reader: ReadableStreamDefaultReader<Uint8Array>;
++  try {
++    reader = request.body.getReader();
++  } catch {
++    return null;
++  }
++  const chunks: Uint8Array[] = [];
++  let totalBytes = 0;
++  try {
++    while (true) {
++      const { done, value } = await reader.read();
++      if (done) {
++        break;
++      }
++      totalBytes += value.byteLength;
++      if (totalBytes > maximumBytes) {
++        await reader.cancel();
++        return null;
++      }
++      chunks.push(value);
++    }
++  } catch {
++    return null;
++  }
++  if (totalBytes === 0) {
++    return null;
++  }
++  const body = new Uint8Array(totalBytes);
++  let offset = 0;
++  for (const chunk of chunks) {
++    body.set(chunk, offset);
++    offset += chunk.byteLength;
++  }
++  return body;
++}
++
++export async function readStrictJson(
++  request: Request,
++  maximumBytes = MAX_REQUEST_BODY_BYTES,
++): Promise<JsonRecord | null> {
++  if (!isJsonContentType(request.headers.get("content-type"))) {
++    return null;
++  }
++  const body = await readBoundedBody(request, maximumBytes);
++  if (body === null) {
++    return null;
++  }
++  let text: string;
++  try {
++    text = new TextDecoder("utf-8", { fatal: true }).decode(body);
++  } catch {
++    return null;
++  }
++  let parsed: unknown;
++  try {
++    parsed = JSON.parse(text);
++  } catch {
++    return null;
++  }
++  return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
++    ? (parsed as JsonRecord)
++    : null;
++}
++
++export function parseEmail(value: unknown): string | null {
++  if (
++    typeof value !== "string" ||
++    value.length < 3 ||
++    value.length > 254 ||
++    value.trim() !== value
++  ) {
++    return null;
++  }
++  if (!/^[\x21-\x7e]+$/u.test(value)) {
++    return null;
++  }
++  const atIndex = value.lastIndexOf("@");
++  if (atIndex <= 0 || atIndex !== value.indexOf("@")) {
++    return null;
++  }
++  const local = value.slice(0, atIndex);
++  const domain = value.slice(atIndex + 1);
++  if (
++    local.length > 64 ||
++    local.startsWith(".") ||
++    local.endsWith(".") ||
++    local.includes("..") ||
++    !/^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+$/u.test(local) ||
++    domain.length > 253
++  ) {
++    return null;
++  }
++  const labels = domain.split(".");
++  if (
++    labels.length < 2 ||
++    labels.some(
++      (label) =>
++        label.length === 0 ||
++        label.length > 63 ||
++        label.startsWith("-") ||
++        label.endsWith("-") ||
++        !/^[A-Za-z0-9-]+$/u.test(label),
++    ) ||
++    !/[A-Za-z]/u.test(labels.at(-1) ?? "")
++  ) {
++    return null;
++  }
++  return `${local.toLowerCase()}@${domain.toLowerCase()}`;
++}
++
++export function parseCanonicalEmail(value: unknown): string | null {
++  return typeof value === "string" &&
++    value.length <= 254 &&
++    value === value.trim() &&
++    value === value.toLowerCase() &&
++    canonicalEmailPattern.test(value)
++    ? value
++    : null;
++}
++
++export function parseUuid(value: unknown): string | null {
++  if (
++    typeof value !== "string" ||
++    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
++      value,
++    )
++  ) {
++    return null;
++  }
++  return value.toLowerCase();
++}
++
++export function parseCanonicalUuid(value: unknown): string | null {
++  return typeof value === "string" &&
++    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
++      value,
++    )
++    ? value
++    : null;
++}
++
++export function parseBearerJwt(value: string | null): string | null {
++  if (value === null || value.length > 4_103) {
++    return null;
++  }
++  const match =
++    /^Bearer ([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/u.exec(value);
++  return match?.[1] ?? null;
++}
+diff --git a/supabase/functions/_shared/supabase-http.test.ts b/supabase/functions/_shared/supabase-http.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..fabe6afff16b9da8bf07b8339a45b3842f86ae06
+--- /dev/null
++++ b/supabase/functions/_shared/supabase-http.test.ts
+@@ -0,0 +1,192 @@
++// deno-lint-ignore-file require-await
++
++import {
++  createSupabaseHttpClient,
++  parseAuthActionLinkOrigin,
++  resolveSupabaseEgressOrigin,
++} from "./supabase-http.ts";
++
++function assertEquals(actual: unknown, expected: unknown): void {
++  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
++    throw new Error(
++      `Expected ${JSON.stringify(expected)}, received ${JSON.stringify(actual)}`,
++    );
++  }
++}
++
++async function assertRejects(action: () => Promise<unknown>): Promise<void> {
++  try {
++    await action();
++  } catch {
++    return;
++  }
++  throw new Error("Expected action to reject");
++}
++
++Deno.test(
++  "Supabase HTTP client rejects cross-origin egress before fetch",
++  async () => {
++    let requests = 0;
++    const client = createSupabaseHttpClient(
++      {
++        expectedOrigin: "https://abcdefghijklmnopqrst.supabase.co",
++        publishableKey: "synthetic-publishable-sentinel",
++        supabaseUrl: "https://abcdefghijklmnopqrst.supabase.co",
++      },
++      async () => {
++        requests += 1;
++        return new Response(null, { status: 200 });
++      },
++    );
++    await assertRejects(() =>
++      client.request("https://attacker.invalid/auth/v1/recover", {
++        method: "POST",
++      }),
++    );
++    assertEquals(requests, 0);
++  },
++);
++
++Deno.test(
++  "Supabase HTTP client pins the configured origin and disables redirects",
++  async () => {
++    const requests: Array<{ init?: RequestInit; url: string }> = [];
++    const client = createSupabaseHttpClient(
++      {
++        expectedOrigin: "https://abcdefghijklmnopqrst.supabase.co",
++        publishableKey: "synthetic-publishable-sentinel",
++        supabaseUrl: "https://abcdefghijklmnopqrst.supabase.co",
++      },
++      async (input, init) => {
++        requests.push({ init, url: String(input) });
++        return new Response(null, { status: 200 });
++      },
++    );
++    await client.request("/rest/v1/rpc/example", { method: "POST" });
++    assertEquals(
++      requests[0].url,
++      "https://abcdefghijklmnopqrst.supabase.co/rest/v1/rpc/example",
++    );
++    assertEquals(requests[0].init?.redirect, "error");
++  },
++);
++
++Deno.test(
++  "Supabase HTTP client rejects a matching arbitrary HTTPS origin",
++  () => {
++    let requests = 0;
++    try {
++      createSupabaseHttpClient(
++        {
++          expectedOrigin: "https://attacker.invalid",
++          publishableKey: "synthetic-publishable-sentinel",
++          supabaseUrl: "https://attacker.invalid",
++        },
++        async () => {
++          requests += 1;
++          return new Response(null, { status: 200 });
++        },
++      );
++    } catch {
++      assertEquals(requests, 0);
++      return;
++    }
++    throw new Error("Expected arbitrary HTTPS origin to be rejected");
++  },
++);
++
++Deno.test(
++  "Supabase HTTP client accepts every pinned local runtime host",
++  () => {
++    for (const origin of [
++      "http://127.0.0.1:54321",
++      "http://[::1]:54321",
++      "http://host.docker.internal:54321",
++      "http://kong:8000",
++    ]) {
++      const client = createSupabaseHttpClient(
++        {
++          expectedOrigin: origin,
++          publishableKey: "synthetic-publishable-sentinel",
++          supabaseUrl: origin,
++        },
++        async () => new Response(null, { status: 200 }),
++      );
++      assertEquals(client.origin, origin);
++    }
++  },
++);
++
++Deno.test(
++  "Supabase HTTP client accepts only canonical CLI kong without an independent pin",
++  () => {
++    const client = createSupabaseHttpClient(
++      {
++        publishableKey: "synthetic-publishable-sentinel",
++        supabaseUrl: "http://kong:8000",
++      },
++      async () => new Response(null, { status: 200 }),
++    );
++    assertEquals(client.origin, "http://kong:8000");
++    assertEquals(
++      resolveSupabaseEgressOrigin("http://kong:8000", undefined),
++      "http://kong:8000",
++    );
++  },
++);
++
++Deno.test(
++  "absent egress pin rejects every canonical-kong near miss and other origin",
++  () => {
++    for (const origin of [
++      "http://kong:8000/",
++      "http://KONG:8000",
++      "http://kong:8001",
++      "http://kong:08000",
++      "http://kong.:8000",
++      "http://kong:8000/path",
++      "http://kong:8000?query=value",
++      "http://kong:8000#fragment",
++      "http://user:password@kong:8000",
++      "http://127.0.0.1:54321",
++      "http://[::1]:54321",
++      "http://host.docker.internal:54321",
++      "https://abcdefghijklmnopqrst.supabase.co",
++    ]) {
++      assertEquals(resolveSupabaseEgressOrigin(origin, undefined), null);
++    }
++    for (const nonAbsentPin of [null, "", "undefined"]) {
++      assertEquals(
++        resolveSupabaseEgressOrigin("http://kong:8000", nonAbsentPin),
++        null,
++      );
++    }
++  },
++);
++
++Deno.test(
++  "Auth action links accept only hosted or loopback public origins",
++  () => {
++    for (const origin of [
++      "https://abcdefghijklmnopqrst.supabase.co",
++      "http://127.0.0.1:54321",
++      "http://[::1]:54321",
++    ]) {
++      assertEquals(parseAuthActionLinkOrigin(origin), origin);
++    }
++    for (const origin of [
++      undefined,
++      "http://kong:8000",
++      "http://host.docker.internal:54321",
++      "http://localhost:54321",
++      "http://attacker.invalid",
++      "https://attacker.invalid",
++      "https://abcdefghijklmnopqrst.supabase.co/path",
++      "https://abcdefghijklmnopqrst.supabase.co?query=value",
++      "https://abcdefghijklmnopqrst.supabase.co#fragment",
++      "https://user:password@abcdefghijklmnopqrst.supabase.co",
++    ]) {
++      assertEquals(parseAuthActionLinkOrigin(origin), null);
++    }
++  },
++);
+diff --git a/supabase/functions/_shared/supabase-http.ts b/supabase/functions/_shared/supabase-http.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f743c580224e9e21ef6355f95a450dd9c2d63463
+--- /dev/null
++++ b/supabase/functions/_shared/supabase-http.ts
+@@ -0,0 +1,224 @@
++import { isExactRecord, type JsonRecord } from "./http.ts";
++
++export type ServiceFetch = (
++  input: RequestInfo | URL,
++  init?: RequestInit,
++) => Promise<Response>;
++
++export interface SupabaseRuntimeConfiguration {
++  readonly expectedOrigin?: string;
++  readonly publishableKey: string;
++  readonly serviceRoleKey?: string;
++  readonly supabaseUrl: string;
++}
++
++export interface SupabaseHttpClient {
++  request(path: string, init: RequestInit): Promise<Response>;
++  readonly origin: string;
++  readonly publishableKey: string;
++  readonly serviceRoleKey?: string;
++}
++
++function isServerValue(value: unknown): value is string {
++  return (
++    typeof value === "string" &&
++    value.length >= 16 &&
++    value.length <= 16_384 &&
++    /^[\x21-\x7e]+$/u.test(value)
++  );
++}
++
++function parseSupabaseOrigin(value: unknown): string | null {
++  if (typeof value !== "string" || value.length === 0 || value.length > 2_048) {
++    return null;
++  }
++  let parsed: URL;
++  try {
++    parsed = new URL(value);
++  } catch {
++    return null;
++  }
++  const localHost =
++    parsed.hostname === "127.0.0.1" ||
++    parsed.hostname === "[::1]" ||
++    parsed.hostname === "host.docker.internal" ||
++    parsed.hostname === "kong";
++  const hostedProject =
++    parsed.protocol === "https:" &&
++    parsed.port === "" &&
++    /^[a-z0-9]{20}\.supabase\.co$/u.test(parsed.hostname);
++  if (
++    (!hostedProject && !(parsed.protocol === "http:" && localHost)) ||
++    parsed.username !== "" ||
++    parsed.password !== "" ||
++    parsed.pathname !== "/" ||
++    parsed.search !== "" ||
++    parsed.hash !== "" ||
++    parsed.origin !== value
++  ) {
++    return null;
++  }
++  return parsed.origin;
++}
++
++const CANONICAL_LOCAL_EDGE_RUNTIME_ORIGIN = "http://kong:8000";
++
++/**
++ * Resolves the sole permitted Supabase egress origin. Hosted and externally
++ * reachable local origins require an independent exact pin. The only absent-pin
++ * exception is the byte-exact URL injected inside Supabase's local Edge runtime.
++ */
++export function resolveSupabaseEgressOrigin(
++  supabaseUrl: unknown,
++  expectedOrigin: unknown,
++): string | null {
++  const suppliedOrigin = parseSupabaseOrigin(supabaseUrl);
++  if (suppliedOrigin === null) {
++    return null;
++  }
++  if (expectedOrigin === undefined) {
++    return supabaseUrl === CANONICAL_LOCAL_EDGE_RUNTIME_ORIGIN
++      ? suppliedOrigin
++      : null;
++  }
++  const pinnedOrigin = parseSupabaseOrigin(expectedOrigin);
++  return pinnedOrigin !== null && pinnedOrigin === suppliedOrigin
++    ? suppliedOrigin
++    : null;
++}
++
++export function parseAuthActionLinkOrigin(value: unknown): string | null {
++  if (typeof value !== "string" || value.length === 0 || value.length > 2_048) {
++    return null;
++  }
++  let parsed: URL;
++  try {
++    parsed = new URL(value);
++  } catch {
++    return null;
++  }
++  const localLoopback =
++    parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
++  const hostedProject =
++    parsed.protocol === "https:" &&
++    parsed.port === "" &&
++    /^[a-z0-9]{20}\.supabase\.co$/u.test(parsed.hostname);
++  if (
++    (!hostedProject && !(parsed.protocol === "http:" && localLoopback)) ||
++    parsed.username !== "" ||
++    parsed.password !== "" ||
++    parsed.pathname !== "/" ||
++    parsed.search !== "" ||
++    parsed.hash !== "" ||
++    parsed.origin !== value
++  ) {
++    return null;
++  }
++  return parsed.origin;
++}
++
++export function createSupabaseHttpClient(
++  configuration: SupabaseRuntimeConfiguration,
++  serviceFetch: ServiceFetch,
++): SupabaseHttpClient {
++  const suppliedOrigin = resolveSupabaseEgressOrigin(
++    configuration.supabaseUrl,
++    configuration.expectedOrigin,
++  );
++  if (
++    suppliedOrigin === null ||
++    !isServerValue(configuration.publishableKey) ||
++    (configuration.serviceRoleKey !== undefined &&
++      !isServerValue(configuration.serviceRoleKey))
++  ) {
++    throw new Error("Backend configuration is invalid");
++  }
++  return {
++    origin: suppliedOrigin,
++    publishableKey: configuration.publishableKey,
++    serviceRoleKey: configuration.serviceRoleKey,
++    async request(path, init) {
++      let target: URL;
++      try {
++        target = new URL(path, `${suppliedOrigin}/`);
++      } catch {
++        throw new Error("Backend target is invalid");
++      }
++      if (
++        target.origin !== suppliedOrigin ||
++        target.username !== "" ||
++        target.password !== "" ||
++        !target.pathname.startsWith("/") ||
++        target.hash !== ""
++      ) {
++        throw new Error("Backend target is invalid");
++      }
++      return await serviceFetch(target, {
++        ...init,
++        redirect: "error",
++        signal: init.signal ?? AbortSignal.timeout(5_000),
++      });
++    },
++  };
++}
++
++export async function readBoundedJsonResponse(
++  response: Response,
++  maximumBytes = 65_536,
++): Promise<unknown> {
++  const contentLength = response.headers.get("content-length");
++  if (contentLength !== null) {
++    if (
++      !/^(0|[1-9][0-9]*)$/u.test(contentLength) ||
++      Number(contentLength) > maximumBytes
++    ) {
++      throw new Error("Backend response is invalid");
++    }
++  }
++  if (response.body === null) {
++    throw new Error("Backend response is invalid");
++  }
++  const reader = response.body.getReader();
++  const chunks: Uint8Array[] = [];
++  let totalBytes = 0;
++  while (true) {
++    const { done, value } = await reader.read();
++    if (done) {
++      break;
++    }
++    totalBytes += value.byteLength;
++    if (totalBytes > maximumBytes) {
++      await reader.cancel();
++      throw new Error("Backend response is invalid");
++    }
++    chunks.push(value);
++  }
++  const bytes = new Uint8Array(totalBytes);
++  let offset = 0;
++  for (const chunk of chunks) {
++    bytes.set(chunk, offset);
++    offset += chunk.byteLength;
++  }
++  let text: string;
++  try {
++    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
++  } catch {
++    throw new Error("Backend response is invalid");
++  }
++  try {
++    return JSON.parse(text);
++  } catch {
++    throw new Error("Backend response is invalid");
++  }
++}
++
++export function readExactSingleRow(
++  value: unknown,
++  expectedKeys: readonly string[],
++): JsonRecord | null {
++  if (!Array.isArray(value) || value.length !== 1) {
++    return null;
++  }
++  const [row] = value;
++  return isExactRecord(row, expectedKeys) ? row : null;
++}
+diff --git a/supabase/functions/account-recovery/index.test.ts b/supabase/functions/account-recovery/index.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c64abd7f5c2d1382f3d9316c20ce384ea5beac46
+--- /dev/null
++++ b/supabase/functions/account-recovery/index.test.ts
+@@ -0,0 +1,580 @@
++// deno-lint-ignore-file require-await
++
++import {
++  type AccountRecoveryDependencies,
++  createAccountRecoveryDependencies,
++  handleRequest,
++  type RequestLifetimeWaitUntil,
++} from "./index.ts";
++
++const WEB_ORIGIN = "https://staff.desmoslock.invalid";
++const BACKEND_ORIGIN = "https://abcdefghijklmnopqrst.supabase.co";
++const FLOW_ID = "f".repeat(22);
++const STATE = "s".repeat(43);
++const CODE_CHALLENGE = "c".repeat(43);
++const RECOVERY_INPUT = {
++  codeChallenge: CODE_CHALLENGE,
++  email: "owner@example.com",
++  flowId: FLOW_ID,
++  state: STATE,
++} as const;
++
++function assertEquals(actual: unknown, expected: unknown): void {
++  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
++    throw new Error(
++      `Expected ${JSON.stringify(expected)}, received ${JSON.stringify(actual)}`,
++    );
++  }
++}
++
++function assert(
++  condition: unknown,
++  message = "Assertion failed",
++): asserts condition {
++  if (!condition) throw new Error(message);
++}
++
++async function assertRejects(action: () => Promise<unknown>): Promise<void> {
++  try {
++    await action();
++  } catch {
++    return;
++  }
++  throw new Error("Expected action to reject");
++}
++
++function recoveryRequest(
++  body: unknown = RECOVERY_INPUT,
++  overrides: {
++    readonly headers?: Record<string, string>;
++    readonly method?: string;
++    readonly rawBody?: string;
++  } = {},
++): Request {
++  return new Request(`${WEB_ORIGIN}/functions/v1/account-recovery`, {
++    body:
++      overrides.method === "GET" || overrides.method === "OPTIONS"
++        ? undefined
++        : (overrides.rawBody ?? JSON.stringify(body)),
++    headers: {
++      "content-type": "application/json",
++      origin: WEB_ORIGIN,
++      ...overrides.headers,
++    },
++    method: overrides.method ?? "POST",
++  });
++}
++
++function dependencies(
++  overrides: Partial<AccountRecoveryDependencies> = {},
++): AccountRecoveryDependencies {
++  return {
++    allowedOrigin: WEB_ORIGIN,
++    requestRecovery: async () => undefined,
++    waitUntil: (task) => {
++      void task();
++    },
++    ...overrides,
++  };
++}
++
++async function publicSnapshot(response: Response): Promise<unknown> {
++  return {
++    accessControlAllowOrigin: response.headers.get(
++      "access-control-allow-origin",
++    ),
++    body: await response.text(),
++    cacheControl: response.headers.get("cache-control"),
++    contentType: response.headers.get("content-type"),
++    status: response.status,
++    vary: response.headers.get("vary"),
++  };
++}
++
++Deno.test(
++  "account recovery returns the exact public contract while scheduling canonical PKCE input",
++  async () => {
++    const inputs: unknown[] = [];
++    let background: Promise<void> | undefined;
++    const response = await handleRequest(
++      recoveryRequest(),
++      dependencies({
++        requestRecovery: async (input) => {
++          inputs.push(input);
++        },
++        waitUntil: (task) => {
++          background = task();
++        },
++      }),
++    );
++    assertEquals(await publicSnapshot(response), {
++      accessControlAllowOrigin: WEB_ORIGIN,
++      body: JSON.stringify({ code: "recovery_requested", ok: true }),
++      cacheControl: "no-store",
++      contentType: "application/json; charset=utf-8",
++      status: 202,
++      vary: "Origin",
++    });
++    await background;
++    assertEquals(inputs, [RECOVERY_INPUT]);
++  },
++);
++
++Deno.test("account recovery validates exact CORS preflight", async () => {
++  const valid = await handleRequest(
++    recoveryRequest(undefined, {
++      headers: {
++        "access-control-request-headers": "Content-Type",
++        "access-control-request-method": "POST",
++      },
++      method: "OPTIONS",
++    }),
++    dependencies(),
++  );
++  assertEquals(valid.status, 204);
++  assertEquals(
++    valid.headers.get("access-control-allow-headers"),
++    "content-type",
++  );
++
++  const wrongMethod = await handleRequest(
++    recoveryRequest(undefined, {
++      headers: {
++        "access-control-request-headers": "content-type",
++        "access-control-request-method": "PUT",
++      },
++      method: "OPTIONS",
++    }),
++    dependencies(),
++  );
++  assertEquals(wrongMethod.status, 400);
++  assertEquals(await wrongMethod.json(), {
++    code: "invalid_request",
++    ok: false,
++  });
++
++  const wrongOrigin = await handleRequest(
++    recoveryRequest(undefined, {
++      headers: {
++        "access-control-request-headers": "content-type",
++        "access-control-request-method": "POST",
++        origin: "https://attacker.invalid",
++      },
++      method: "OPTIONS",
++    }),
++    dependencies(),
++  );
++  assertEquals(wrongOrigin.status, 403);
++  assertEquals(wrongOrigin.headers.get("access-control-allow-origin"), null);
++  assertEquals(await wrongOrigin.json(), {
++    code: "invalid_request",
++    ok: false,
++  });
++});
++
++Deno.test({
++  name: "account recovery config failure returns the exact product response",
++  permissions: { env: false },
++  fn: async () => {
++    const response = await handleRequest(recoveryRequest());
++    assertEquals(response.status, 503);
++    assertEquals(await response.json(), {
++      code: "service_unavailable",
++      ok: false,
++    });
++  },
++});
++
++Deno.test(
++  "account recovery rejects wrong method and exact origin",
++  async () => {
++    const methodResponse = await handleRequest(
++      recoveryRequest(undefined, { method: "GET" }),
++      dependencies(),
++    );
++    assertEquals(methodResponse.status, 405);
++    assertEquals(methodResponse.headers.get("allow"), "POST, OPTIONS");
++    assertEquals(await methodResponse.json(), {
++      code: "invalid_request",
++      ok: false,
++    });
++
++    const originResponse = await handleRequest(
++      recoveryRequest(undefined, {
++        headers: { origin: "https://attacker.invalid" },
++      }),
++      dependencies(),
++    );
++    assertEquals(originResponse.status, 403);
++    assertEquals(
++      originResponse.headers.get("access-control-allow-origin"),
++      null,
++    );
++    assertEquals(await originResponse.json(), {
++      code: "invalid_request",
++      ok: false,
++    });
++  },
++);
++
++Deno.test(
++  "account recovery rejects content type, oversized body, malformed JSON, and invalid PKCE fields",
++  async () => {
++    const invalidRequests = [
++      recoveryRequest(undefined, { headers: { "content-type": "text/plain" } }),
++      recoveryRequest(undefined, {
++        headers: { "content-type": "application/ json" },
++      }),
++      recoveryRequest(undefined, { rawBody: "{" }),
++      recoveryRequest(undefined, {
++        rawBody: JSON.stringify({ padding: "x".repeat(4_096) }),
++      }),
++      recoveryRequest({ ...RECOVERY_INPUT, extra: true }),
++      recoveryRequest({ email: "owner@example.com" }),
++      recoveryRequest({ ...RECOVERY_INPUT, email: "not-an-email" }),
++      recoveryRequest({ ...RECOVERY_INPUT, email: "Owner@Example.com" }),
++      recoveryRequest({ ...RECOVERY_INPUT, email: "owner`tag@example.com" }),
++      recoveryRequest({ ...RECOVERY_INPUT, flowId: "f".repeat(21) }),
++      recoveryRequest({ ...RECOVERY_INPUT, flowId: "f".repeat(23) }),
++      recoveryRequest({ ...RECOVERY_INPUT, flowId: `${"f".repeat(21)}=` }),
++      recoveryRequest({ ...RECOVERY_INPUT, flowId: `${"f".repeat(21)}+` }),
++      recoveryRequest({ ...RECOVERY_INPUT, state: "s".repeat(42) }),
++      recoveryRequest({ ...RECOVERY_INPUT, state: "s".repeat(44) }),
++      recoveryRequest({ ...RECOVERY_INPUT, state: `${"s".repeat(42)}=` }),
++      recoveryRequest({ ...RECOVERY_INPUT, state: `${"s".repeat(42)}/` }),
++      recoveryRequest({ ...RECOVERY_INPUT, codeChallenge: "c".repeat(42) }),
++      recoveryRequest({ ...RECOVERY_INPUT, codeChallenge: "c".repeat(44) }),
++      recoveryRequest({
++        ...RECOVERY_INPUT,
++        codeChallenge: `${"c".repeat(42)}=`,
++      }),
++      recoveryRequest({
++        ...RECOVERY_INPUT,
++        codeChallenge: `${"c".repeat(42)}+`,
++      }),
++    ];
++    let schedules = 0;
++    for (const request of invalidRequests) {
++      const response = await handleRequest(
++        request,
++        dependencies({
++          waitUntil: () => {
++            schedules += 1;
++          },
++        }),
++      );
++      assertEquals(response.status, 400);
++      assertEquals(await response.json(), {
++        code: "invalid_request",
++        ok: false,
++      });
++    }
++    assertEquals(schedules, 0);
++  },
++);
++
++Deno.test(
++  "account recovery rejects an already-consumed request body",
++  async () => {
++    const request = recoveryRequest();
++    await request.text();
++    const response = await handleRequest(request, dependencies());
++    assertEquals(response.status, 400);
++    assertEquals(await response.json(), { code: "invalid_request", ok: false });
++  },
++);
++
++Deno.test(
++  "every provider HTTP outcome has an identical immediate public response",
++  async () => {
++    const snapshots: unknown[] = [];
++    for (const status of [200, 400, 404, 422, 429, 500, 503]) {
++      let background: Promise<void> | undefined;
++      const service = createAccountRecoveryDependencies(
++        runtimeConfiguration(),
++        async () => new Response("{}", { status }),
++        (task) => {
++          background = task();
++        },
++      );
++      const response = await handleRequest(recoveryRequest(), service);
++      snapshots.push(await publicSnapshot(response));
++      await background;
++    }
++    assertEquals(
++      new Set(snapshots.map((snapshot) => JSON.stringify(snapshot))).size,
++      1,
++    );
++    assertEquals(snapshots[0], {
++      accessControlAllowOrigin: WEB_ORIGIN,
++      body: JSON.stringify({ code: "recovery_requested", ok: true }),
++      cacheControl: "no-store",
++      contentType: "application/json; charset=utf-8",
++      status: 202,
++      vary: "Origin",
++    });
++  },
++);
++
++Deno.test(
++  "account recovery response completes before delayed provider work",
++  async () => {
++    let finishProvider: (() => void) | undefined;
++    let providerFinished = false;
++    let background: Promise<void> | undefined;
++    const response = await handleRequest(
++      recoveryRequest(),
++      dependencies({
++        requestRecovery: () =>
++          new Promise((resolve) => {
++            finishProvider = () => {
++              providerFinished = true;
++              resolve();
++            };
++          }),
++        waitUntil: (task) => {
++          background = task();
++        },
++      }),
++    );
++    assertEquals(response.status, 202);
++    assert(!providerFinished, "Public response waited for the provider");
++    assert(finishProvider !== undefined, "Provider work was not scheduled");
++    finishProvider();
++    await background;
++    assert(providerFinished);
++  },
++);
++
++Deno.test(
++  "account recovery absorbs timeout and provider errors without leakage",
++  async () => {
++    const sentinel = "credential-shaped-provider-sentinel";
++    const logEntries: unknown[][] = [];
++    const originalConsoleError = console.error;
++    const originalConsoleLog = console.log;
++    const originalConsoleWarn = console.warn;
++    let background: Promise<void> | undefined;
++    try {
++      const capture = (...values: unknown[]) => {
++        logEntries.push(values);
++      };
++      console.error = capture;
++      console.log = capture;
++      console.warn = capture;
++      const response = await handleRequest(
++        recoveryRequest(),
++        dependencies({
++          requestRecovery: () => Promise.reject(new Error(sentinel)),
++          waitUntil: (task) => {
++            background = task();
++          },
++        }),
++      );
++      const snapshot = await publicSnapshot(response);
++      await background;
++      assertEquals(snapshot, {
++        accessControlAllowOrigin: WEB_ORIGIN,
++        body: JSON.stringify({ code: "recovery_requested", ok: true }),
++        cacheControl: "no-store",
++        contentType: "application/json; charset=utf-8",
++        status: 202,
++        vary: "Origin",
++      });
++      const serialized = JSON.stringify(snapshot);
++      for (const privateValue of [
++        sentinel,
++        FLOW_ID,
++        STATE,
++        CODE_CHALLENGE,
++        RECOVERY_INPUT.email,
++      ]) {
++        assert(
++          !serialized.includes(privateValue),
++          "Private recovery data leaked",
++        );
++      }
++      assertEquals(logEntries, []);
++    } finally {
++      console.error = originalConsoleError;
++      console.log = originalConsoleLog;
++      console.warn = originalConsoleWarn;
++    }
++  },
++);
++
++Deno.test(
++  "account recovery hides request-lifetime scheduler failures",
++  async () => {
++    const response = await handleRequest(
++      recoveryRequest(),
++      dependencies({
++        waitUntil: () => {
++          throw new Error("scheduler diagnostic must stay private");
++        },
++      }),
++    );
++    assertEquals(await publicSnapshot(response), {
++      accessControlAllowOrigin: WEB_ORIGIN,
++      body: JSON.stringify({ code: "recovery_requested", ok: true }),
++      cacheControl: "no-store",
++      contentType: "application/json; charset=utf-8",
++      status: 202,
++      vary: "Origin",
++    });
++  },
++);
++
++function runtimeConfiguration(): Record<string, string> {
++  return {
++    DESMOSLOCK_ACCOUNT_RECOVERY_CALLBACK: `${WEB_ORIGIN}/`,
++    DESMOSLOCK_ALLOWED_WEB_ORIGIN: WEB_ORIGIN,
++    DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: BACKEND_ORIGIN,
++    SUPABASE_ANON_KEY: "synthetic-publishable-sentinel",
++    SUPABASE_URL: BACKEND_ORIGIN,
++  };
++}
++
++Deno.test(
++  "known and unknown account provider outcomes have an identical response",
++  async () => {
++    const createService = (providerStatus: number) => {
++      let background: Promise<void> | undefined;
++      const service = createAccountRecoveryDependencies(
++        runtimeConfiguration(),
++        async () => new Response("{}", { status: providerStatus }),
++        (task) => {
++          background = task();
++        },
++      );
++      return { getBackground: () => background, service };
++    };
++    const knownService = createService(200);
++    const unknownService = createService(400);
++    const known = await handleRequest(
++      recoveryRequest({ ...RECOVERY_INPUT, email: "known@example.com" }),
++      knownService.service,
++    );
++    const unknown = await handleRequest(
++      recoveryRequest({ ...RECOVERY_INPUT, email: "unknown@example.com" }),
++      unknownService.service,
++    );
++    const knownSnapshot = await publicSnapshot(known);
++    const unknownSnapshot = await publicSnapshot(unknown);
++    await Promise.all([
++      knownService.getBackground(),
++      unknownService.getBackground(),
++    ]);
++    assertEquals(knownSnapshot, unknownSnapshot);
++  },
++);
++
++Deno.test(
++  "account recovery runtime pins provider and callback origins without URL key leakage",
++  async () => {
++    const publishableSentinel = "synthetic-publishable-sentinel";
++    const requests: Array<{ body: string; headers: Headers; url: string }> = [];
++    const service = createAccountRecoveryDependencies(
++      { ...runtimeConfiguration(), SUPABASE_ANON_KEY: publishableSentinel },
++      async (input, init) => {
++        requests.push({
++          body: String(init?.body ?? ""),
++          headers: new Headers(init?.headers),
++          url: String(input),
++        });
++        return new Response("{}", { status: 500 });
++      },
++      (() => undefined) as RequestLifetimeWaitUntil,
++    );
++    assertEquals(
++      await service.requestRecovery({
++        ...RECOVERY_INPUT,
++        email: "unknown@example.com",
++      }),
++      undefined,
++    );
++    assertEquals(requests.length, 1);
++    const request = requests[0];
++    const url = new URL(request.url);
++    assertEquals(url.origin, BACKEND_ORIGIN);
++    assertEquals(url.pathname, "/auth/v1/recover");
++    assertEquals(
++      url.searchParams.get("redirect_to"),
++      `${WEB_ORIGIN}/?auth=recovery&flow=${FLOW_ID}&state=${STATE}`,
++    );
++    assert(
++      !request.url.includes(publishableSentinel),
++      "Publishable value leaked into URL",
++    );
++    assertEquals(request.headers.get("apikey"), publishableSentinel);
++    assertEquals(
++      request.headers.get("authorization"),
++      `Bearer ${publishableSentinel}`,
++    );
++    assertEquals(JSON.parse(request.body), {
++      code_challenge: CODE_CHALLENGE,
++      code_challenge_method: "s256",
++      email: "unknown@example.com",
++    });
++    assert(
++      !request.url.includes(CODE_CHALLENGE),
++      "PKCE challenge leaked into the provider URL",
++    );
++  },
++);
++
++Deno.test(
++  "account recovery accepts the exact CLI kong origin when its independent pin is absent",
++  async () => {
++    const requests: string[] = [];
++    const service = createAccountRecoveryDependencies(
++      {
++        ...runtimeConfiguration(),
++        DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: undefined,
++        SUPABASE_URL: "http://kong:8000",
++      },
++      async (input) => {
++        requests.push(String(input));
++        return new Response("{}", { status: 200 });
++      },
++      (() => undefined) as RequestLifetimeWaitUntil,
++    );
++
++    await service.requestRecovery({
++      ...RECOVERY_INPUT,
++      email: "unknown@example.com",
++    });
++    assertEquals(requests.length, 1);
++    assertEquals(new URL(requests[0]).origin, "http://kong:8000");
++  },
++);
++
++Deno.test(
++  "account recovery runtime rejects mismatched callback before egress",
++  async () => {
++    let requests = 0;
++    for (const callback of [
++      "https://attacker.invalid/",
++      `${WEB_ORIGIN}/auth/recovery`,
++      `${WEB_ORIGIN}/?auth=recovery`,
++      `${WEB_ORIGIN}/#fragment`,
++      WEB_ORIGIN,
++      "https://user@staff.desmoslock.invalid/",
++    ]) {
++      await assertRejects(async () => {
++        createAccountRecoveryDependencies(
++          {
++            ...runtimeConfiguration(),
++            DESMOSLOCK_ACCOUNT_RECOVERY_CALLBACK: callback,
++          },
++          async () => {
++            requests += 1;
++            return new Response(null, { status: 500 });
++          },
++          (() => undefined) as RequestLifetimeWaitUntil,
++        );
++      });
++    }
++    assertEquals(requests, 0);
++  },
++);
+diff --git a/supabase/functions/account-recovery/index.ts b/supabase/functions/account-recovery/index.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..49246c9a1458c6a92c6a714f79a1698aff32a836
+--- /dev/null
++++ b/supabase/functions/account-recovery/index.ts
+@@ -0,0 +1,214 @@
++import {
++  codeResponse,
++  handlePreflight,
++  isExactRecord,
++  methodNotAllowedResponse,
++  parseCanonicalEmail,
++  parseExactOrigin,
++  parseExactRootCallback,
++  readStrictJson,
++  validateRequestOrigin,
++} from "../_shared/http.ts";
++import {
++  createSupabaseHttpClient,
++  type ServiceFetch,
++} from "../_shared/supabase-http.ts";
++
++export type RequestLifetimeWaitUntil = (task: () => Promise<void>) => void;
++
++export interface AccountRecoveryInput {
++  readonly codeChallenge: string;
++  readonly email: string;
++  readonly flowId: string;
++  readonly state: string;
++}
++
++export interface AccountRecoveryDependencies {
++  readonly allowedOrigin: string;
++  requestRecovery(input: AccountRecoveryInput): Promise<void>;
++  waitUntil: RequestLifetimeWaitUntil;
++}
++
++interface EdgeRuntimeWaitUntil {
++  waitUntil(promise: Promise<unknown>): void;
++}
++
++function runtimeWaitUntil(task: () => Promise<void>): void {
++  const edgeRuntime = (
++    globalThis as typeof globalThis & { EdgeRuntime?: EdgeRuntimeWaitUntil }
++  ).EdgeRuntime;
++  if (
++    edgeRuntime === undefined ||
++    typeof edgeRuntime.waitUntil !== "function"
++  ) {
++    throw new Error("Request-lifetime background execution is unavailable");
++  }
++  edgeRuntime.waitUntil(Promise.resolve().then(task));
++}
++
++export function createAccountRecoveryDependencies(
++  configuration: unknown,
++  serviceFetch: ServiceFetch = globalThis.fetch,
++  waitUntil: RequestLifetimeWaitUntil = runtimeWaitUntil,
++): AccountRecoveryDependencies {
++  if (
++    !isExactRecord(configuration, [
++      "DESMOSLOCK_ACCOUNT_RECOVERY_CALLBACK",
++      "DESMOSLOCK_ALLOWED_WEB_ORIGIN",
++      "DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN",
++      "SUPABASE_ANON_KEY",
++      "SUPABASE_URL",
++    ])
++  ) {
++    throw new Error("Account recovery configuration is invalid");
++  }
++  const allowedOrigin = parseExactOrigin(
++    configuration.DESMOSLOCK_ALLOWED_WEB_ORIGIN,
++  );
++  const callback =
++    allowedOrigin === null
++      ? null
++      : parseExactRootCallback(
++          configuration.DESMOSLOCK_ACCOUNT_RECOVERY_CALLBACK,
++          allowedOrigin,
++        );
++  const expectedSupabaseOrigin =
++    configuration.DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN;
++  const supabaseUrl = configuration.SUPABASE_URL;
++  if (
++    allowedOrigin === null ||
++    callback === null ||
++    typeof supabaseUrl !== "string" ||
++    (expectedSupabaseOrigin !== undefined &&
++      typeof expectedSupabaseOrigin !== "string")
++  ) {
++    throw new Error("Account recovery configuration is invalid");
++  }
++  const client = createSupabaseHttpClient(
++    {
++      expectedOrigin: expectedSupabaseOrigin,
++      publishableKey: String(configuration.SUPABASE_ANON_KEY),
++      supabaseUrl,
++    },
++    serviceFetch,
++  );
++
++  return {
++    allowedOrigin,
++    waitUntil,
++    async requestRecovery(input) {
++      // Supabase's standard recovery template must retain `{{ .ConfirmationURL }}`:
++      // the provider verifies that URL, then redirects this S256 flow with an auth code.
++      const recoveryCallback = new URL(callback);
++      recoveryCallback.searchParams.append("auth", "recovery");
++      recoveryCallback.searchParams.append("flow", input.flowId);
++      recoveryCallback.searchParams.append("state", input.state);
++      const providerUrl = new URL("/auth/v1/recover", `${client.origin}/`);
++      providerUrl.searchParams.set("redirect_to", recoveryCallback.href);
++      await client.request(providerUrl.href, {
++        body: JSON.stringify({
++          code_challenge: input.codeChallenge,
++          code_challenge_method: "s256",
++          email: input.email,
++        }),
++        headers: {
++          apikey: client.publishableKey,
++          authorization: `Bearer ${client.publishableKey}`,
++          "content-type": "application/json",
++        },
++        method: "POST",
++      });
++    },
++  };
++}
++
++function parseExactBase64Url(value: unknown, length: number): string | null {
++  return typeof value === "string" &&
++    value.length === length &&
++    /^[A-Za-z0-9_-]+$/u.test(value)
++    ? value
++    : null;
++}
++
++function parseInput(value: unknown): AccountRecoveryInput | null {
++  if (!isExactRecord(value, ["codeChallenge", "email", "flowId", "state"])) {
++    return null;
++  }
++  const email = parseCanonicalEmail(value.email);
++  const flowId = parseExactBase64Url(value.flowId, 22);
++  const state = parseExactBase64Url(value.state, 43);
++  const codeChallenge = parseExactBase64Url(value.codeChallenge, 43);
++  return email !== null &&
++    flowId !== null &&
++    state !== null &&
++    codeChallenge !== null
++    ? { codeChallenge, email, flowId, state }
++    : null;
++}
++
++function runtimeDependencies(): AccountRecoveryDependencies {
++  return createAccountRecoveryDependencies({
++    DESMOSLOCK_ACCOUNT_RECOVERY_CALLBACK: Deno.env.get(
++      "DESMOSLOCK_ACCOUNT_RECOVERY_CALLBACK",
++    ),
++    DESMOSLOCK_ALLOWED_WEB_ORIGIN: Deno.env.get(
++      "DESMOSLOCK_ALLOWED_WEB_ORIGIN",
++    ),
++    DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: Deno.env.get(
++      "DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN",
++    ),
++    SUPABASE_ANON_KEY: Deno.env.get("SUPABASE_ANON_KEY"),
++    SUPABASE_URL: Deno.env.get("SUPABASE_URL"),
++  });
++}
++
++export async function handleRequest(
++  request: Request,
++  injectedDependencies?: AccountRecoveryDependencies,
++): Promise<Response> {
++  let dependencies: AccountRecoveryDependencies;
++  try {
++    dependencies = injectedDependencies ?? runtimeDependencies();
++  } catch {
++    return codeResponse("service_unavailable", 503);
++  }
++  const corsPolicy = {
++    allowedHeaders: ["content-type"],
++    allowedOrigin: dependencies.allowedOrigin,
++  } as const;
++  if (request.method === "OPTIONS") {
++    return handlePreflight(request, corsPolicy);
++  }
++  if (!validateRequestOrigin(request, dependencies.allowedOrigin)) {
++    return codeResponse("invalid_request", 403);
++  }
++  if (request.method !== "POST") {
++    return methodNotAllowedResponse(dependencies.allowedOrigin);
++  }
++  const body = await readStrictJson(request);
++  const input = parseInput(body);
++  if (input === null) {
++    return codeResponse("invalid_request", 400, dependencies.allowedOrigin);
++  }
++
++  const recoveryTask = async (): Promise<void> => {
++    try {
++      await dependencies.requestRecovery(input);
++    } catch {
++      // Provider outcomes are intentionally absorbed to preserve the public
++      // non-enumeration contract. This path must never log provider details.
++    }
++  };
++  // Integration gate: any future externally visible abuse control must be
++  // durable, account-independent, and complete before provider lookup.
++  try {
++    dependencies.waitUntil(recoveryTask);
++  } catch {
++    // Scheduling failures are also hidden from the public response.
++  }
++  return codeResponse("recovery_requested", 202, dependencies.allowedOrigin);
++}
++
++if (import.meta.main) {
++  Deno.serve((request) => handleRequest(request));
++}
+diff --git a/supabase/functions/staff-invitations/index.test.ts b/supabase/functions/staff-invitations/index.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff387f036c1620c11effbb75865037e67ebed47e
+--- /dev/null
++++ b/supabase/functions/staff-invitations/index.test.ts
+@@ -0,0 +1,1797 @@
++// deno-lint-ignore-file require-await
++
++import {
++  createStaffInvitationDependencies,
++  handleRequest,
++  type StaffInvitationDeliveryTransport,
++  type StaffInvitationDependencies,
++} from "./index.ts";
++
++const WEB_ORIGIN = "https://staff.desmoslock.invalid";
++const BACKEND_ORIGIN = "https://abcdefghijklmnopqrst.supabase.co";
++const CALLBACK = `${WEB_ORIGIN}/`;
++const INVITATION_ID = "10000000-0000-0000-0000-000000000001";
++const USER_ID = "20000000-0000-0000-0000-000000000002";
++const WORKSPACE_ID = "30000000-0000-4000-8000-000000000003";
++const REQUEST_KEY = "40000000-0000-4000-8000-000000000004";
++const SECOND_REQUEST_KEY = "50000000-0000-4000-8000-000000000005";
++const THIRD_REQUEST_KEY = "60000000-0000-4000-8000-000000000006";
++const JWT = "synthetic-header.synthetic-payload.synthetic-signature";
++const TOKEN_HASH = "a".repeat(56);
++const INVITE_CALLBACK = `${CALLBACK}?auth=invite&token_hash=${TOKEN_HASH}`;
++const ACTION_LINK =
++  `${BACKEND_ORIGIN}/auth/v1/verify?token=${TOKEN_HASH}` +
++  `&type=invite&redirect_to=${encodeURIComponent(CALLBACK)}`;
++
++function assertEquals(actual: unknown, expected: unknown): void {
++  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
++    throw new Error(
++      `Expected ${JSON.stringify(expected)}, received ${JSON.stringify(actual)}`,
++    );
++  }
++}
++
++function assert(
++  condition: unknown,
++  message = "Assertion failed",
++): asserts condition {
++  if (!condition) throw new Error(message);
++}
++
++async function assertRejects(action: () => Promise<unknown>): Promise<void> {
++  try {
++    await action();
++  } catch {
++    return;
++  }
++  throw new Error("Expected action to reject");
++}
++
++function invitationRequest(
++  body: unknown = {
++    email: "teacher@example.com",
++    role: "administrator",
++    schoolId: WORKSPACE_ID,
++  },
++  overrides: {
++    readonly headers?: Record<string, string>;
++    readonly method?: string;
++    readonly rawBody?: string;
++  } = {},
++): Request {
++  return new Request(`${WEB_ORIGIN}/functions/v1/staff-invitations`, {
++    body:
++      overrides.method === "GET" || overrides.method === "OPTIONS"
++        ? undefined
++        : (overrides.rawBody ?? JSON.stringify(body)),
++    headers: {
++      authorization: `Bearer ${JWT}`,
++      "content-type": "application/json",
++      origin: WEB_ORIGIN,
++      ...overrides.headers,
++    },
++    method: overrides.method ?? "POST",
++  });
++}
++
++function dependencies(
++  overrides: Partial<StaffInvitationDependencies> = {},
++): StaffInvitationDependencies {
++  return {
++    allowedOrigin: WEB_ORIGIN,
++    authorizeInvitation: async () => ({
++      code: "invitation_pending",
++      invitationId: INVITATION_ID,
++    }),
++    deliverInvitation: async () => "delivered",
++    failInvitation: async () => "invitation_delivery_failed",
++    generateInviteLink: async () => ({
++      callbackUrl: INVITE_CALLBACK,
++      code: "link_generated",
++      userId: USER_ID,
++    }),
++    inviteLifetimeSeconds: 3_600,
++    newRequestKey: () => REQUEST_KEY,
++    now: () => Date.UTC(2026, 7, 30, 12),
++    prepareInvitation: async () => "invitation_delivery_ready",
++    publishInvitation: async () => "invitation_usable",
++    ...overrides,
++  };
++}
++
++Deno.test(
++  "staff invitation sequences authorize, generate, prepare, deliver, then publish",
++  async () => {
++    const calls: unknown[] = [];
++    const response = await handleRequest(
++      invitationRequest(),
++      dependencies({
++        authorizeInvitation: async (jwt, input, requestKey) => {
++          calls.push(["authorize", jwt, input, requestKey]);
++          return { code: "invitation_pending", invitationId: INVITATION_ID };
++        },
++        generateInviteLink: async (email) => {
++          calls.push(["generate", email]);
++          return {
++            callbackUrl: INVITE_CALLBACK,
++            code: "link_generated",
++            userId: USER_ID,
++          };
++        },
++        deliverInvitation: async (message) => {
++          calls.push(["deliver", message]);
++          return "delivered";
++        },
++        prepareInvitation: async (invitationId, userId, expiresAt) => {
++          calls.push(["prepare", invitationId, userId, expiresAt]);
++          return "invitation_delivery_ready";
++        },
++        publishInvitation: async (invitationId) => {
++          calls.push(["publish", invitationId]);
++          return "invitation_usable";
++        },
++      }),
++    );
++
++    assertEquals(response.status, 201);
++    assertEquals(response.headers.get("cache-control"), "no-store");
++    assertEquals(
++      response.headers.get("access-control-allow-origin"),
++      WEB_ORIGIN,
++    );
++    assertEquals(await response.json(), {
++      code: "invitation_created",
++      ok: true,
++    });
++    assertEquals(calls, [
++      [
++        "authorize",
++        JWT,
++        {
++          email: "teacher@example.com",
++          role: "administrator",
++          schoolId: WORKSPACE_ID,
++        },
++        REQUEST_KEY,
++      ],
++      ["generate", "teacher@example.com"],
++      ["prepare", INVITATION_ID, USER_ID, "2026-08-30T13:00:00.000Z"],
++      [
++        "deliver",
++        {
++          callbackUrl: INVITE_CALLBACK,
++          expiresAt: "2026-08-30T13:00:00.000Z",
++          recipientEmail: "teacher@example.com",
++        },
++      ],
++      ["publish", INVITATION_ID],
++    ]);
++  },
++);
++
++Deno.test("staff invitation validates exact CORS preflight", async () => {
++  const valid = await handleRequest(
++    invitationRequest(undefined, {
++      headers: {
++        "access-control-request-headers": "Content-Type, Authorization",
++        "access-control-request-method": "POST",
++      },
++      method: "OPTIONS",
++    }),
++    dependencies(),
++  );
++  assertEquals(valid.status, 204);
++  assertEquals(
++    valid.headers.get("access-control-allow-headers"),
++    "authorization, content-type",
++  );
++
++  const extraHeader = await handleRequest(
++    invitationRequest(undefined, {
++      headers: {
++        "access-control-request-headers":
++          "authorization, content-type, x-extra",
++        "access-control-request-method": "POST",
++      },
++      method: "OPTIONS",
++    }),
++    dependencies(),
++  );
++  assertEquals(extraHeader.status, 400);
++  assertEquals(await extraHeader.json(), {
++    code: "invalid_request",
++    ok: false,
++  });
++
++  const wrongOrigin = await handleRequest(
++    invitationRequest(undefined, {
++      headers: {
++        "access-control-request-headers": "authorization, content-type",
++        "access-control-request-method": "POST",
++        origin: "https://attacker.invalid",
++      },
++      method: "OPTIONS",
++    }),
++    dependencies(),
++  );
++  assertEquals(wrongOrigin.status, 403);
++  assertEquals(wrongOrigin.headers.get("access-control-allow-origin"), null);
++  assertEquals(await wrongOrigin.json(), {
++    code: "invalid_request",
++    ok: false,
++  });
++});
++
++Deno.test({
++  name: "staff invitation config failure returns the exact product response",
++  permissions: { env: false },
++  fn: async () => {
++    const response = await handleRequest(invitationRequest());
++    assertEquals(response.status, 503);
++    assertEquals(await response.json(), {
++      code: "service_unavailable",
++      ok: false,
++    });
++  },
++});
++
++Deno.test(
++  "staff invitation rejects the wrong method and exact origin",
++  async () => {
++    const methodResponse = await handleRequest(
++      invitationRequest(undefined, { method: "GET" }),
++      dependencies(),
++    );
++    assertEquals(methodResponse.status, 405);
++    assertEquals(methodResponse.headers.get("allow"), "POST, OPTIONS");
++    assertEquals(await methodResponse.json(), {
++      code: "invalid_request",
++      ok: false,
++    });
++
++    const originResponse = await handleRequest(
++      invitationRequest(undefined, {
++        headers: { origin: "https://attacker.invalid" },
++      }),
++      dependencies(),
++    );
++    assertEquals(originResponse.status, 403);
++    assertEquals(
++      originResponse.headers.get("access-control-allow-origin"),
++      null,
++    );
++    assertEquals(await originResponse.json(), {
++      code: "invalid_request",
++      ok: false,
++    });
++  },
++);
++
++Deno.test(
++  "staff invitation requires a syntactically valid JWT before authorization",
++  async () => {
++    let calls = 0;
++    for (const authorization of [
++      "",
++      "Bearer opaque-token",
++      "bearer a.b.c",
++      "Basic a.b.c",
++    ]) {
++      const response = await handleRequest(
++        invitationRequest(undefined, { headers: { authorization } }),
++        dependencies({
++          authorizeInvitation: async () => {
++            calls += 1;
++            return { code: "invitation_pending", invitationId: INVITATION_ID };
++          },
++        }),
++      );
++      assertEquals(response.status, 401);
++      assertEquals(await response.json(), {
++        code: "authentication_required",
++        ok: false,
++      });
++    }
++    assertEquals(calls, 0);
++  },
++);
++
++Deno.test(
++  "staff invitation rejects content type, oversized body, and malformed JSON",
++  async () => {
++    const invalidRequests = [
++      invitationRequest(undefined, {
++        headers: { "content-type": "text/plain" },
++      }),
++      invitationRequest(undefined, {
++        headers: { "content-type": "application/ json" },
++      }),
++      invitationRequest(undefined, { rawBody: "{" }),
++      invitationRequest(undefined, {
++        rawBody: JSON.stringify({ padding: "x".repeat(4_096) }),
++      }),
++    ];
++    for (const request of invalidRequests) {
++      const response = await handleRequest(request, dependencies());
++      assertEquals(response.status, 400);
++      assertEquals(await response.json(), {
++        code: "invalid_request",
++        ok: false,
++      });
++    }
++  },
++);
++
++Deno.test(
++  "staff invitation accepts only exact School schema and product roles",
++  async () => {
++    let calls = 0;
++    const invalidBodies = [
++      {
++        email: "teacher@example.com",
++        role: "owner",
++        schoolId: WORKSPACE_ID,
++      },
++      {
++        email: "teacher@example.com",
++        role: "student",
++        schoolId: WORKSPACE_ID,
++      },
++      {
++        email: "teacher@example.com",
++        role: "admin",
++        schoolId: WORKSPACE_ID,
++      },
++      {
++        email: "Teacher@Example.com",
++        role: "teacher",
++        schoolId: WORKSPACE_ID,
++      },
++      {
++        email: "teacher`tag@example.com",
++        role: "teacher",
++        schoolId: WORKSPACE_ID,
++      },
++      { email: "not-an-email", role: "teacher", schoolId: WORKSPACE_ID },
++      {
++        email: "teacher@example.com",
++        extra: true,
++        role: "teacher",
++        schoolId: WORKSPACE_ID,
++      },
++      {
++        email: "teacher@example.com",
++        role: "teacher",
++        schoolId: "not-a-uuid",
++      },
++      {
++        email: "teacher@example.com",
++        role: "teacher",
++        schoolId: "30000000-0000-0000-8000-000000000003",
++      },
++      {
++        email: "teacher@example.com",
++        role: "teacher",
++        schoolId: "30000000-0000-4000-A000-000000000003",
++      },
++      {
++        email: "teacher@example.com",
++        role: "teacher",
++        workspaceId: WORKSPACE_ID,
++      },
++    ];
++    for (const body of invalidBodies) {
++      const response = await handleRequest(
++        invitationRequest(body),
++        dependencies({
++          authorizeInvitation: async () => {
++            calls += 1;
++            return { code: "invitation_pending", invitationId: INVITATION_ID };
++          },
++        }),
++      );
++      assertEquals(response.status, 400);
++    }
++    assertEquals(calls, 0);
++  },
++);
++
++Deno.test(
++  "staff invitation never calls Auth Admin before database authorization",
++  async () => {
++    let generatedLinks = 0;
++    const response = await handleRequest(
++      invitationRequest(),
++      dependencies({
++        authorizeInvitation: async () => ({ code: "forbidden" }),
++        generateInviteLink: async () => {
++          generatedLinks += 1;
++          return {
++            callbackUrl: INVITE_CALLBACK,
++            code: "link_generated",
++            userId: USER_ID,
++          };
++        },
++      }),
++    );
++    assertEquals(response.status, 403);
++    assertEquals(await response.json(), {
++      code: "authorization_denied",
++      ok: false,
++    });
++    assertEquals(generatedLinks, 0);
++  },
++);
++
++Deno.test(
++  "staff invitation maps internal authorization results to product codes",
++  async () => {
++    const cases = [
++      ["invalid_request", "invalid_request", 400],
++      ["unauthenticated", "authentication_required", 401],
++      ["email_unverified", "authorization_denied", 403],
++      ["forbidden", "authorization_denied", 403],
++      ["membership_inactive", "authorization_denied", 403],
++      ["invitation_not_found", "invitation_not_found", 404],
++      ["invitation_expired", "invitation_expired", 409],
++      ["invitation_consumed", "invitation_not_found", 404],
++      ["session_expired", "session_expired", 401],
++      ["session_revoked", "session_revoked", 401],
++      ["step_up_required", "step_up_required", 403],
++      ["rate_limited", "rate_limited", 429],
++      ["conflict", "service_unavailable", 503],
++      ["dependency_unavailable", "service_unavailable", 503],
++      ["provider_diagnostic_sentinel", "service_unavailable", 503],
++    ] as const;
++    for (const [internalCode, publicCode, status] of cases) {
++      const response = await handleRequest(
++        invitationRequest(),
++        dependencies({
++          authorizeInvitation: async () => ({ code: internalCode }),
++        }),
++      );
++      assertEquals(response.status, status);
++      assertEquals(await response.json(), { code: publicCode, ok: false });
++    }
++  },
++);
++
++Deno.test(
++  "staff invitation replays one request key after a lost begin response",
++  async () => {
++    const requestKeys: string[] = [];
++    let beginCalls = 0;
++    let generatedLinks = 0;
++    let requestKeyCalls = 0;
++    const response = await handleRequest(
++      invitationRequest(),
++      dependencies({
++        authorizeInvitation: async (_jwt, _input, requestKey) => {
++          beginCalls += 1;
++          requestKeys.push(requestKey);
++          if (beginCalls === 1) {
++            throw new Error("response lost after begin commit");
++          }
++          return { code: "invitation_pending", invitationId: INVITATION_ID };
++        },
++        generateInviteLink: async () => {
++          generatedLinks += 1;
++          return {
++            callbackUrl: INVITE_CALLBACK,
++            code: "link_generated",
++            userId: USER_ID,
++          };
++        },
++        newRequestKey: () => {
++          requestKeyCalls += 1;
++          return REQUEST_KEY;
++        },
++      }),
++    );
++
++    assertEquals(response.status, 201);
++    assertEquals(await response.json(), {
++      code: "invitation_created",
++      ok: true,
++    });
++    assertEquals(requestKeyCalls, 1);
++    assertEquals(beginCalls, 2);
++    assertEquals(requestKeys, [REQUEST_KEY, REQUEST_KEY]);
++    assertEquals(generatedLinks, 1);
++  },
++);
++
++Deno.test(
++  "staff invitation fails closed when its server request key is unavailable",
++  async () => {
++    for (const newRequestKey of [
++      () => "not-a-uuid",
++      () => "40000000-0000-4000-A000-000000000004",
++      () => {
++        throw new Error("entropy diagnostic sentinel");
++      },
++    ]) {
++      let authorizationCalls = 0;
++      let providerCalls = 0;
++      const response = await handleRequest(
++        invitationRequest(),
++        dependencies({
++          authorizeInvitation: async () => {
++            authorizationCalls += 1;
++            return { code: "invitation_pending", invitationId: INVITATION_ID };
++          },
++          generateInviteLink: async () => {
++            providerCalls += 1;
++            return { code: "dependency_unavailable" };
++          },
++          newRequestKey,
++        }),
++      );
++      const body = await response.text();
++      assertEquals(response.status, 503);
++      assertEquals(
++        body,
++        JSON.stringify({ code: "service_unavailable", ok: false }),
++      );
++      assertEquals(authorizationCalls, 0);
++      assertEquals(providerCalls, 0);
++      assert(!body.includes("40000000"), "Request key leaked");
++      assert(!body.includes("entropy"), "Entropy failure leaked");
++    }
++  },
++);
++
++Deno.test(
++  "staff invitation records accepted cleanup reasons before returning product failures",
++  async () => {
++    for (const [generatorCode, cleanupReason, publicCode, expectedStatus] of [
++      [
++        "existing_user_conflict",
++        "invalid_request",
++        "existing_confirmed_user_unsupported",
++        409,
++      ],
++      ["rate_limited", "dependency_unavailable", "rate_limited", 429],
++      [
++        "dependency_unavailable",
++        "dependency_unavailable",
++        "service_unavailable",
++        503,
++      ],
++    ] as const) {
++      const failures: unknown[] = [];
++      const response = await handleRequest(
++        invitationRequest(),
++        dependencies({
++          failInvitation: async (invitationId, reasonCode) => {
++            failures.push([invitationId, reasonCode]);
++            return "invitation_delivery_failed";
++          },
++          generateInviteLink: async () => ({ code: generatorCode }),
++        }),
++      );
++      assertEquals(response.status, expectedStatus);
++      assertEquals(await response.json(), { code: publicCode, ok: false });
++      assertEquals(failures, [[INVITATION_ID, cleanupReason]]);
++    }
++  },
++);
++
++Deno.test(
++  "staff invitation reconciles an ambiguous idempotent cleanup response",
++  async () => {
++    const failures: unknown[] = [];
++    const response = await handleRequest(
++      invitationRequest(),
++      dependencies({
++        failInvitation: async (invitationId, reasonCode) => {
++          failures.push([invitationId, reasonCode]);
++          return failures.length === 1
++            ? "dependency_unavailable"
++            : "invitation_delivery_failed";
++        },
++        generateInviteLink: async () => ({ code: "existing_user_conflict" }),
++      }),
++    );
++
++    assertEquals(response.status, 409);
++    assertEquals(await response.json(), {
++      code: "existing_confirmed_user_unsupported",
++      ok: false,
++    });
++    assertEquals(failures, [
++      [INVITATION_ID, "invalid_request"],
++      [INVITATION_ID, "invalid_request"],
++    ]);
++  },
++);
++
++Deno.test(
++  "staff invitation retries an ambiguous idempotent preparation before delivery",
++  async () => {
++    const calls: string[] = [];
++    let preparations = 0;
++    const response = await handleRequest(
++      invitationRequest(),
++      dependencies({
++        prepareInvitation: async () => {
++          preparations += 1;
++          calls.push(`prepare-${preparations}`);
++          if (preparations === 1) {
++            throw new Error("lost response after possible commit");
++          }
++          return "invitation_delivery_ready";
++        },
++        deliverInvitation: async () => {
++          calls.push("deliver");
++          return "delivered";
++        },
++        publishInvitation: async () => {
++          calls.push("publish");
++          return "invitation_usable";
++        },
++      }),
++    );
++    assertEquals(response.status, 201);
++    assertEquals(calls, ["prepare-1", "prepare-2", "deliver", "publish"]);
++  },
++);
++
++Deno.test(
++  "staff invitation never delivers when preparation cannot be confirmed",
++  async () => {
++    let preparations = 0;
++    let deliveries = 0;
++    const failures: unknown[] = [];
++    const response = await handleRequest(
++      invitationRequest(),
++      dependencies({
++        prepareInvitation: async () => {
++          preparations += 1;
++          return "dependency_unavailable";
++        },
++        deliverInvitation: async () => {
++          deliveries += 1;
++          return "delivered";
++        },
++        failInvitation: async (invitationId, reasonCode) => {
++          failures.push([invitationId, reasonCode]);
++          return "invitation_delivery_failed";
++        },
++      }),
++    );
++    assertEquals(response.status, 503);
++    assertEquals(await response.json(), {
++      code: "service_unavailable",
++      ok: false,
++    });
++    assertEquals(preparations, 2);
++    assertEquals(deliveries, 0);
++    assertEquals(failures, [[INVITATION_ID, "dependency_unavailable"]]);
++  },
++);
++
++Deno.test(
++  "staff invitation treats an explicit preparation failure as closed",
++  async () => {
++    let preparations = 0;
++    let deliveries = 0;
++    const failures: unknown[] = [];
++    const response = await handleRequest(
++      invitationRequest(),
++      dependencies({
++        prepareInvitation: async () => {
++          preparations += 1;
++          return "conflict";
++        },
++        deliverInvitation: async () => {
++          deliveries += 1;
++          return "delivered";
++        },
++        failInvitation: async (invitationId, reasonCode) => {
++          failures.push([invitationId, reasonCode]);
++          return "invitation_delivery_failed";
++        },
++      }),
++    );
++    assertEquals(response.status, 503);
++    assertEquals(await response.json(), {
++      code: "service_unavailable",
++      ok: false,
++    });
++    assertEquals(preparations, 1);
++    assertEquals(deliveries, 0);
++    assertEquals(failures, [[INVITATION_ID, "dependency_unavailable"]]);
++  },
++);
++
++Deno.test(
++  "expired preparation replay is terminal before SMTP delivery",
++  async () => {
++    for (const terminalCode of [
++      "invitation_delivery_failed",
++      "invitation_expired",
++    ]) {
++      let preparations = 0;
++      let deliveries = 0;
++      let failures = 0;
++      let publications = 0;
++      const response = await handleRequest(
++        invitationRequest(),
++        dependencies({
++          prepareInvitation: async () => {
++            preparations += 1;
++            return terminalCode;
++          },
++          deliverInvitation: async () => {
++            deliveries += 1;
++            return "delivered";
++          },
++          failInvitation: async () => {
++            failures += 1;
++            return "invitation_consumed";
++          },
++          publishInvitation: async () => {
++            publications += 1;
++            return "invitation_usable";
++          },
++        }),
++      );
++
++      assertEquals(response.status, 503);
++      assertEquals(await response.json(), {
++        code: "service_unavailable",
++        ok: false,
++      });
++      assertEquals(preparations, 1);
++      assertEquals(deliveries, 0);
++      assertEquals(failures, 0);
++      assertEquals(publications, 0);
++    }
++  },
++);
++
++Deno.test(
++  "staff invitation leaves delivery-ready non-consumable after delivery failure",
++  async () => {
++    const calls: unknown[] = [];
++    const response = await handleRequest(
++      invitationRequest(),
++      dependencies({
++        prepareInvitation: async () => {
++          calls.push("prepare");
++          return "invitation_delivery_ready";
++        },
++        deliverInvitation: async () => {
++          calls.push("deliver");
++          return "dependency_unavailable";
++        },
++        failInvitation: async (invitationId, reasonCode) => {
++          calls.push(["fail", invitationId, reasonCode]);
++          return "invitation_delivery_failed";
++        },
++        publishInvitation: async () => {
++          calls.push("publish");
++          return "invitation_usable";
++        },
++      }),
++    );
++    assertEquals(response.status, 503);
++    assertEquals(await response.json(), {
++      code: "service_unavailable",
++      ok: false,
++    });
++    assertEquals(calls, [
++      "prepare",
++      "deliver",
++      ["fail", INVITATION_ID, "dependency_unavailable"],
++    ]);
++  },
++);
++
++Deno.test(
++  "SMTP sent-then-throw remains non-consumable even when failure recording fails",
++  async () => {
++    for (const failureOutcome of ["throws", "unexpected"] as const) {
++      const events: unknown[] = [];
++      let deliveries = 0;
++      let publications = 0;
++      const diagnosticSentinel = "smtp-provider-diagnostic-sentinel";
++      const response = await handleRequest(
++        invitationRequest(),
++        dependencies({
++          deliverInvitation: async () => {
++            deliveries += 1;
++            events.push("smtp-sent-then-threw");
++            throw new Error(diagnosticSentinel);
++          },
++          failInvitation: async (invitationId, reasonCode) => {
++            events.push(["fail", invitationId, reasonCode]);
++            if (failureOutcome === "throws") {
++              throw new Error("failure-rpc-diagnostic-sentinel");
++            }
++            return "unexpected_result";
++          },
++          prepareInvitation: async () => {
++            events.push("ready");
++            return "invitation_delivery_ready";
++          },
++          publishInvitation: async () => {
++            publications += 1;
++            events.push("publish");
++            return "invitation_usable";
++          },
++        }),
++      );
++      const body = await response.text();
++      assertEquals(response.status, 503);
++      assertEquals(
++        body,
++        JSON.stringify({ code: "service_unavailable", ok: false }),
++      );
++      assertEquals(deliveries, 1);
++      assertEquals(publications, 0);
++      const expectedEvents: unknown[] = [
++        "ready",
++        "smtp-sent-then-threw",
++        ["fail", INVITATION_ID, "dependency_unavailable"],
++      ];
++      if (failureOutcome === "throws") {
++        expectedEvents.push(["fail", INVITATION_ID, "dependency_unavailable"]);
++      }
++      assertEquals(events, expectedEvents);
++      assert(!body.includes(TOKEN_HASH), "Action token hash leaked");
++      assert(!body.includes("teacher@example.com"), "Recipient email leaked");
++      assert(!body.includes(diagnosticSentinel), "Provider error leaked");
++    }
++  },
++);
++
++Deno.test(
++  "staff invitation reconciles an ambiguous idempotent publish without resending SMTP",
++  async () => {
++    const calls: string[] = [];
++    let publications = 0;
++    const response = await handleRequest(
++      invitationRequest(),
++      dependencies({
++        deliverInvitation: async () => {
++          calls.push("deliver");
++          return "delivered";
++        },
++        prepareInvitation: async () => {
++          calls.push("ready");
++          return "invitation_delivery_ready";
++        },
++        publishInvitation: async () => {
++          publications += 1;
++          calls.push(`publish-${publications}`);
++          if (publications === 1) {
++            throw new Error("lost publish response after possible commit");
++          }
++          return "invitation_usable";
++        },
++      }),
++    );
++    assertEquals(response.status, 201);
++    assertEquals(await response.json(), {
++      code: "invitation_created",
++      ok: true,
++    });
++    assertEquals(calls, ["ready", "deliver", "publish-1", "publish-2"]);
++  },
++);
++
++Deno.test(
++  "staff invitation never resends SMTP when publish reconciliation stays ambiguous",
++  async () => {
++    let deliveries = 0;
++    let failureWrites = 0;
++    let publications = 0;
++    const diagnosticSentinel = "publish-timeout-diagnostic-sentinel";
++    const response = await handleRequest(
++      invitationRequest(),
++      dependencies({
++        deliverInvitation: async () => {
++          deliveries += 1;
++          return "delivered";
++        },
++        failInvitation: async () => {
++          failureWrites += 1;
++          return "invitation_delivery_failed";
++        },
++        publishInvitation: async () => {
++          publications += 1;
++          if (publications === 1) {
++            return "dependency_unavailable";
++          }
++          throw new Error(diagnosticSentinel);
++        },
++      }),
++    );
++    const body = await response.text();
++    assertEquals(response.status, 503);
++    assertEquals(
++      body,
++      JSON.stringify({ code: "service_unavailable", ok: false }),
++    );
++    assertEquals(deliveries, 1);
++    assertEquals(publications, 2);
++    assertEquals(failureWrites, 0);
++    assert(!body.includes(TOKEN_HASH), "Action token hash leaked");
++    assert(!body.includes("teacher@example.com"), "Recipient email leaked");
++    assert(!body.includes(diagnosticSentinel), "Publish error leaked");
++  },
++);
++
++Deno.test(
++  "expired publish is terminal, sanitized, and never resends SMTP",
++  async () => {
++    let deliveries = 0;
++    let failureWrites = 0;
++    let publications = 0;
++    const response = await handleRequest(
++      invitationRequest(),
++      dependencies({
++        deliverInvitation: async () => {
++          deliveries += 1;
++          return "delivered";
++        },
++        failInvitation: async () => {
++          failureWrites += 1;
++          return "invitation_delivery_failed";
++        },
++        publishInvitation: async () => {
++          publications += 1;
++          return "invitation_expired";
++        },
++      }),
++    );
++    const body = await response.text();
++    assertEquals(response.status, 503);
++    assertEquals(
++      body,
++      JSON.stringify({ code: "service_unavailable", ok: false }),
++    );
++    assertEquals(deliveries, 1);
++    assertEquals(publications, 1);
++    assertEquals(failureWrites, 0);
++    assert(!body.includes("invitation_usable"), "Usable state was reported");
++    assert(!body.includes(TOKEN_HASH), "Action token hash leaked");
++    assert(!body.includes("teacher@example.com"), "Recipient email leaked");
++  },
++);
++
++Deno.test(
++  "staff invitation never leaks the generated action token",
++  async () => {
++    const response = await handleRequest(invitationRequest(), dependencies());
++    const body = await response.text();
++    assertEquals(response.status, 201);
++    assertEquals(
++      body,
++      JSON.stringify({ code: "invitation_created", ok: true }),
++    );
++    assert(!body.includes(TOKEN_HASH), "Action token hash leaked");
++  },
++);
++
++Deno.test(
++  "staff invitation fails closed on invalid configured lifetime or clock",
++  async () => {
++    for (const overrides of [
++      { inviteLifetimeSeconds: 0 },
++      { inviteLifetimeSeconds: 86_401 },
++      { now: () => Number.MAX_SAFE_INTEGER },
++    ]) {
++      let deliveries = 0;
++      const response = await handleRequest(
++        invitationRequest(),
++        dependencies({
++          ...overrides,
++          deliverInvitation: async () => {
++            deliveries += 1;
++            return "delivered";
++          },
++        }),
++      );
++      assertEquals(response.status, 503);
++      assertEquals(deliveries, 0);
++    }
++  },
++);
++
++function runtimeConfiguration(
++  overrides: Record<string, unknown> = {},
++): Record<string, unknown> {
++  return {
++    DESMOSLOCK_ALLOWED_WEB_ORIGIN: WEB_ORIGIN,
++    DESMOSLOCK_EXPECTED_AUTH_ACTION_LINK_ORIGIN: BACKEND_ORIGIN,
++    DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: BACKEND_ORIGIN,
++    DESMOSLOCK_STAFF_INVITATION_CALLBACK: CALLBACK,
++    DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS: "3600",
++    SUPABASE_ANON_KEY: "synthetic-publishable-sentinel",
++    SUPABASE_SERVICE_ROLE_KEY: "synthetic-service-role-sentinel",
++    SUPABASE_URL: BACKEND_ORIGIN,
++    ...overrides,
++  };
++}
++
++function generatedProviderResponse(
++  overrides: Record<string, unknown> = {},
++): Record<string, unknown> {
++  return {
++    ...generatedProviderProperties(),
++    ...generatedProviderUser(),
++    ...overrides,
++  };
++}
++
++function generatedProviderProperties(
++  overrides: Record<string, unknown> = {},
++): Record<string, unknown> {
++  return {
++    action_link: ACTION_LINK,
++    email_otp: "12345678",
++    hashed_token: TOKEN_HASH,
++    redirect_to: CALLBACK,
++    verification_type: "invite",
++    ...overrides,
++  };
++}
++
++function generatedProviderUser(
++  overrides: Record<string, unknown> = {},
++): Record<string, unknown> {
++  return {
++    email: "teacher@example.com",
++    email_confirmed_at: null,
++    id: USER_ID,
++    identities: [
++      {
++        identity_data: { email_verified: false },
++        provider: "email",
++      },
++    ],
++    invited_at: "2026-08-30T12:00:00.000Z",
++    is_anonymous: false,
++    ...overrides,
++  };
++}
++
++Deno.test(
++  "generated-link cleanup closes pending delivery so provider failures are retryable",
++  async () => {
++    for (const [
++      providerStatus,
++      confirmedUser,
++      cleanupReason,
++      publicCode,
++      publicStatus,
++    ] of [
++      [
++        200,
++        true,
++        "invalid_request",
++        "existing_confirmed_user_unsupported",
++        409,
++      ],
++      [409, false, "dependency_unavailable", "service_unavailable", 503],
++      [429, false, "dependency_unavailable", "rate_limited", 429],
++      [500, false, "dependency_unavailable", "service_unavailable", 503],
++    ] as const) {
++      let pendingDelivery = false;
++      let beginCalls = 0;
++      const cleanupReasons: string[] = [];
++      const providerSentinel = "auth-admin-provider-diagnostic-sentinel";
++      const service = createStaffInvitationDependencies(
++        runtimeConfiguration(),
++        async (input, init) => {
++          const url = new URL(String(input));
++          if (url.pathname.endsWith("/begin_staff_invitation")) {
++            beginCalls += 1;
++            if (pendingDelivery) {
++              return Response.json([{ code: "conflict", invitation_id: null }]);
++            }
++            pendingDelivery = true;
++            return Response.json([
++              { code: "invitation_pending", invitation_id: INVITATION_ID },
++            ]);
++          }
++          if (url.pathname === "/auth/v1/admin/generate_link") {
++            if (confirmedUser) {
++              return Response.json(
++                generatedProviderResponse({
++                  email_confirmed_at: "2026-08-30T11:00:00.000Z",
++                }),
++              );
++            }
++            return Response.json(
++              { message: providerSentinel },
++              { status: providerStatus },
++            );
++          }
++          if (url.pathname.endsWith("/internal_fail_staff_invitation")) {
++            const requestBody = JSON.parse(String(init?.body)) as {
++              readonly reason_code?: unknown;
++            };
++            if (requestBody.reason_code !== cleanupReason) {
++              return Response.json([{ code: "invalid_request" }]);
++            }
++            cleanupReasons.push(cleanupReason);
++            pendingDelivery = false;
++            return Response.json([{ code: "invitation_delivery_failed" }]);
++          }
++          throw new Error("Unexpected service request");
++        },
++      );
++
++      const publicBodies: string[] = [];
++      for (let attempt = 0; attempt < 2; attempt += 1) {
++        const response = await handleRequest(invitationRequest(), service);
++        assertEquals(response.status, publicStatus);
++        publicBodies.push(await response.text());
++      }
++
++      assertEquals(beginCalls, 2);
++      assertEquals(cleanupReasons, [cleanupReason, cleanupReason]);
++      assertEquals(pendingDelivery, false);
++      assertEquals(publicBodies, [
++        JSON.stringify({ code: publicCode, ok: false }),
++        JSON.stringify({ code: publicCode, ok: false }),
++      ]);
++      assert(
++        publicBodies.every(
++          (body) =>
++            !body.includes("teacher@example.com") &&
++            !body.includes(providerSentinel),
++        ),
++        "Provider or recipient detail leaked",
++      );
++    }
++  },
++);
++
++Deno.test(
++  "HTTP cleanup failure is reconciled before the next invitation request",
++  async () => {
++    let pendingDelivery = false;
++    let beginCalls = 0;
++    let cleanupCalls = 0;
++    let providerCalls = 0;
++    const beginRequestKeys: unknown[] = [];
++    const requestKeys = [REQUEST_KEY, SECOND_REQUEST_KEY];
++    const runtimeService = createStaffInvitationDependencies(
++      runtimeConfiguration(),
++      async (input, init) => {
++        const url = new URL(String(input));
++        if (url.pathname.endsWith("/begin_staff_invitation")) {
++          const body = JSON.parse(String(init?.body)) as {
++            readonly request_key?: unknown;
++          };
++          beginRequestKeys.push(body.request_key);
++          beginCalls += 1;
++          if (pendingDelivery) {
++            return Response.json([{ code: "conflict", invitation_id: null }]);
++          }
++          pendingDelivery = true;
++          return Response.json([
++            { code: "invitation_pending", invitation_id: INVITATION_ID },
++          ]);
++        }
++        if (url.pathname === "/auth/v1/admin/generate_link") {
++          providerCalls += 1;
++          return Response.json(
++            { diagnostic: "provider-sentinel" },
++            {
++              status: 500,
++            },
++          );
++        }
++        if (url.pathname.endsWith("/internal_fail_staff_invitation")) {
++          cleanupCalls += 1;
++          if (cleanupCalls === 1) {
++            return Response.json(
++              { diagnostic: "cleanup-sentinel" },
++              {
++                status: 500,
++              },
++            );
++          }
++          pendingDelivery = false;
++          return Response.json([{ code: "invitation_delivery_failed" }]);
++        }
++        throw new Error("Unexpected service request");
++      },
++    );
++    const service: StaffInvitationDependencies = {
++      ...runtimeService,
++      newRequestKey: () => {
++        const requestKey = requestKeys.shift();
++        if (requestKey === undefined) throw new Error("No request key");
++        return requestKey;
++      },
++    };
++
++    for (let request = 0; request < 2; request += 1) {
++      const response = await handleRequest(invitationRequest(), service);
++      assertEquals(response.status, 503);
++      assertEquals(await response.json(), {
++        code: "service_unavailable",
++        ok: false,
++      });
++    }
++
++    assertEquals(beginCalls, 2);
++    assertEquals(beginRequestKeys, [REQUEST_KEY, SECOND_REQUEST_KEY]);
++    assertEquals(providerCalls, 2);
++    assertEquals(cleanupCalls, 3);
++    assertEquals(pendingDelivery, false);
++  },
++);
++
++Deno.test(
++  "expired pending-delivery lease recovers after all cleanup responses fail",
++  async () => {
++    let databaseSeconds = 0;
++    let pending:
++      | { readonly leaseExpiresAt: number; readonly requestKey: string }
++      | undefined;
++    let cleanupCalls = 0;
++    let leaseRecoveries = 0;
++    let providerCalls = 0;
++    const beginRequestKeys: string[] = [];
++    const requestKeys = [REQUEST_KEY, SECOND_REQUEST_KEY, THIRD_REQUEST_KEY];
++    const runtimeService = createStaffInvitationDependencies(
++      runtimeConfiguration(),
++      async (input, init) => {
++        const url = new URL(String(input));
++        if (url.pathname.endsWith("/begin_staff_invitation")) {
++          const body = JSON.parse(String(init?.body)) as {
++            readonly request_key?: unknown;
++          };
++          const requestKey = String(body.request_key);
++          beginRequestKeys.push(requestKey);
++          if (
++            pending !== undefined &&
++            databaseSeconds >= pending.leaseExpiresAt
++          ) {
++            pending = undefined;
++            leaseRecoveries += 1;
++          }
++          if (pending !== undefined) {
++            return Response.json([
++              pending.requestKey === requestKey
++                ? { code: "invitation_pending", invitation_id: INVITATION_ID }
++                : { code: "conflict", invitation_id: null },
++            ]);
++          }
++          pending = { leaseExpiresAt: databaseSeconds + 300, requestKey };
++          return Response.json([
++            { code: "invitation_pending", invitation_id: INVITATION_ID },
++          ]);
++        }
++        if (url.pathname === "/auth/v1/admin/generate_link") {
++          providerCalls += 1;
++          return Response.json(
++            { diagnostic: "provider-sentinel" },
++            {
++              status: 500,
++            },
++          );
++        }
++        if (url.pathname.endsWith("/internal_fail_staff_invitation")) {
++          cleanupCalls += 1;
++          if (cleanupCalls <= 2) {
++            return Response.json(
++              { diagnostic: "cleanup-sentinel" },
++              {
++                status: 500,
++              },
++            );
++          }
++          pending = undefined;
++          return Response.json([{ code: "invitation_delivery_failed" }]);
++        }
++        throw new Error("Unexpected service request");
++      },
++    );
++    const service: StaffInvitationDependencies = {
++      ...runtimeService,
++      newRequestKey: () => {
++        const requestKey = requestKeys.shift();
++        if (requestKey === undefined) throw new Error("No request key");
++        return requestKey;
++      },
++    };
++
++    const first = await handleRequest(invitationRequest(), service);
++    const blocked = await handleRequest(invitationRequest(), service);
++    databaseSeconds = 301;
++    const recovered = await handleRequest(invitationRequest(), service);
++
++    for (const response of [first, blocked, recovered]) {
++      assertEquals(response.status, 503);
++      assertEquals(await response.json(), {
++        code: "service_unavailable",
++        ok: false,
++      });
++    }
++    assertEquals(beginRequestKeys, [
++      REQUEST_KEY,
++      SECOND_REQUEST_KEY,
++      THIRD_REQUEST_KEY,
++    ]);
++    assertEquals(providerCalls, 2);
++    assertEquals(cleanupCalls, 3);
++    assertEquals(leaseRecoveries, 1);
++    assertEquals(pending, undefined);
++  },
++);
++
++Deno.test(
++  "staff invitation runtime pins Auth Admin generation and callback origins",
++  async () => {
++    const serviceRoleSentinel = "synthetic-service-role-sentinel";
++    const publishableSentinel = "synthetic-publishable-sentinel";
++    const requests: Array<{ body: string; headers: Headers; url: string }> = [];
++    const deliveryMessages: unknown[] = [];
++    const transport: StaffInvitationDeliveryTransport = {
++      deliver: async (message) => {
++        deliveryMessages.push(message);
++        return "delivered";
++      },
++    };
++    const service = createStaffInvitationDependencies(
++      runtimeConfiguration({
++        SUPABASE_ANON_KEY: publishableSentinel,
++        SUPABASE_SERVICE_ROLE_KEY: serviceRoleSentinel,
++      }),
++      async (input, init) => {
++        const url = String(input);
++        requests.push({
++          body: String(init?.body ?? ""),
++          headers: new Headers(init?.headers),
++          url,
++        });
++        if (url.includes("begin_staff_invitation")) {
++          return Response.json([
++            { code: "invitation_pending", invitation_id: INVITATION_ID },
++          ]);
++        }
++        if (url.includes("/auth/v1/admin/generate_link")) {
++          return Response.json(generatedProviderResponse());
++        }
++        if (url.includes("internal_prepare_staff_invitation")) {
++          return Response.json([{ code: "invitation_delivery_ready" }]);
++        }
++        return Response.json([{ code: "invitation_usable" }]);
++      },
++      () => Date.UTC(2026, 7, 30, 12),
++      transport,
++    );
++
++    const authorization = await service.authorizeInvitation(
++      JWT,
++      {
++        email: "teacher@example.com",
++        role: "administrator",
++        schoolId: WORKSPACE_ID,
++      },
++      REQUEST_KEY,
++    );
++    const generated = await service.generateInviteLink("teacher@example.com");
++    const prepared = await service.prepareInvitation(
++      INVITATION_ID,
++      USER_ID,
++      "2026-08-30T13:00:00.000Z",
++    );
++    const published = await service.publishInvitation(INVITATION_ID);
++    assertEquals(authorization, {
++      code: "invitation_pending",
++      invitationId: INVITATION_ID,
++    });
++    assertEquals(generated, {
++      callbackUrl: INVITE_CALLBACK,
++      code: "link_generated",
++      userId: USER_ID,
++    });
++    assertEquals(prepared, "invitation_delivery_ready");
++    assertEquals(published, "invitation_usable");
++    assertEquals(requests.length, 4);
++    assert(requests.every(({ url }) => new URL(url).origin === BACKEND_ORIGIN));
++    assert(requests.every(({ url }) => !url.includes(serviceRoleSentinel)));
++    assert(requests.every(({ url }) => !url.includes(publishableSentinel)));
++    assertEquals(JSON.parse(requests[0].body), {
++      email: "teacher@example.com",
++      request_key: REQUEST_KEY,
++      role: "admin",
++      workspace_id: WORKSPACE_ID,
++    });
++    assertEquals(requests[0].headers.get("authorization"), `Bearer ${JWT}`);
++    assertEquals(requests[0].headers.get("apikey"), publishableSentinel);
++    const providerUrl = new URL(requests[1].url);
++    assertEquals(providerUrl.pathname, "/auth/v1/admin/generate_link");
++    assertEquals(providerUrl.searchParams.get("redirect_to"), CALLBACK);
++    assertEquals(JSON.parse(requests[1].body), {
++      email: "teacher@example.com",
++      type: "invite",
++    });
++    assertEquals(
++      requests[1].headers.get("authorization"),
++      `Bearer ${serviceRoleSentinel}`,
++    );
++    assertEquals(
++      new URL(requests[2].url).pathname,
++      "/rest/v1/rpc/internal_prepare_staff_invitation",
++    );
++    assertEquals(JSON.parse(requests[2].body), {
++      expires_at: "2026-08-30T13:00:00.000Z",
++      invitation_id: INVITATION_ID,
++      invited_user_id: USER_ID,
++    });
++    assertEquals(
++      requests[2].headers.get("authorization"),
++      `Bearer ${serviceRoleSentinel}`,
++    );
++    assertEquals(
++      new URL(requests[3].url).pathname,
++      "/rest/v1/rpc/internal_publish_staff_invitation",
++    );
++    assertEquals(JSON.parse(requests[3].body), {
++      invitation_id: INVITATION_ID,
++    });
++    assertEquals(
++      requests[3].headers.get("authorization"),
++      `Bearer ${serviceRoleSentinel}`,
++    );
++
++    await service.deliverInvitation({
++      callbackUrl: INVITE_CALLBACK,
++      expiresAt: "2026-08-30T13:00:00.000Z",
++      recipientEmail: "teacher@example.com",
++    });
++    assertEquals(deliveryMessages.length, 1);
++  },
++);
++
++Deno.test(
++  "staff invitation constructs only the approved root token-hash callback",
++  async () => {
++    const rawProviderLink =
++      `${BACKEND_ORIGIN}/auth/v1/verify?token=${TOKEN_HASH}` +
++      `&type=invite&redirect_to=${encodeURIComponent(CALLBACK)}`;
++    const providerResponses = [
++      generatedProviderResponse({
++        action_link: rawProviderLink,
++        hashed_token: TOKEN_HASH,
++        redirect_to: CALLBACK,
++        verification_type: "invite",
++      }),
++      {
++        properties: generatedProviderProperties({
++          action_link: rawProviderLink,
++        }),
++        user: generatedProviderUser(),
++      },
++    ];
++
++    for (const providerResponse of providerResponses) {
++      const service = createStaffInvitationDependencies(
++        runtimeConfiguration({
++          DESMOSLOCK_STAFF_INVITATION_CALLBACK: CALLBACK,
++        }),
++        async () => Response.json(providerResponse),
++      );
++
++      assertEquals(await service.generateInviteLink("teacher@example.com"), {
++        callbackUrl: INVITE_CALLBACK,
++        code: "link_generated",
++        userId: USER_ID,
++      });
++    }
++  },
++);
++
++Deno.test(
++  "staff invitation rejects malformed missing or extra provider link material",
++  async () => {
++    const mismatchedHash = "b".repeat(56);
++    const invalidResponses: Record<string, unknown>[] = [
++      generatedProviderResponse({ hashed_token: undefined }),
++      generatedProviderResponse({ hashed_token: "a".repeat(55) }),
++      generatedProviderResponse({ hashed_token: "A".repeat(56) }),
++      generatedProviderResponse({ hashed_token: mismatchedHash }),
++      generatedProviderResponse({ verification_type: undefined }),
++      generatedProviderResponse({ verification_type: "recovery" }),
++      generatedProviderResponse({ redirect_to: undefined }),
++      generatedProviderResponse({
++        redirect_to: `${WEB_ORIGIN}/auth/invitation`,
++      }),
++      generatedProviderResponse({ email_otp: undefined }),
++      generatedProviderResponse({ action_link: undefined }),
++      generatedProviderResponse({ action_link: `${ACTION_LINK}&code=extra` }),
++      generatedProviderResponse({
++        action_link:
++          `${BACKEND_ORIGIN}/auth/v1/verify?token_hash=${TOKEN_HASH}` +
++          `&type=invite&redirect_to=${encodeURIComponent(CALLBACK)}`,
++      }),
++      {
++        properties: generatedProviderProperties({ extra: "unexpected" }),
++        user: generatedProviderUser(),
++      },
++      {
++        properties: generatedProviderProperties({ hashed_token: undefined }),
++        user: generatedProviderUser(),
++      },
++    ];
++
++    for (const providerResponse of invalidResponses) {
++      const service = createStaffInvitationDependencies(
++        runtimeConfiguration(),
++        async () => Response.json(providerResponse),
++      );
++      const result = await service.generateInviteLink("teacher@example.com");
++      assertEquals(result, { code: "dependency_unavailable" });
++      assert(!JSON.stringify(result).includes(TOKEN_HASH), "Token hash leaked");
++      assert(
++        !JSON.stringify(result).includes(BACKEND_ORIGIN),
++        "Raw provider action URL leaked",
++      );
++    }
++  },
++);
++
++Deno.test(
++  "staff invitation refuses raw mixed or extra callbacks before SMTP",
++  async () => {
++    const invalidCallbacks = [
++      ACTION_LINK,
++      `${WEB_ORIGIN}/auth/invitation?auth=invite&token_hash=${TOKEN_HASH}`,
++      `${INVITE_CALLBACK}&code=extra`,
++      `${INVITE_CALLBACK}&token_hash=${TOKEN_HASH}`,
++      `${CALLBACK}?auth=recovery&token_hash=${TOKEN_HASH}`,
++      `${CALLBACK}?auth=invite&token_hash=not-a-provider-hash`,
++      `${INVITE_CALLBACK}#fragment`,
++    ];
++
++    for (const callbackUrl of invalidCallbacks) {
++      let deliveries = 0;
++      const response = await handleRequest(
++        invitationRequest(),
++        dependencies({
++          deliverInvitation: async () => {
++            deliveries += 1;
++            return "delivered";
++          },
++          generateInviteLink: async () => ({
++            callbackUrl,
++            code: "link_generated",
++            userId: USER_ID,
++          }),
++        }),
++      );
++      const body = await response.text();
++      assertEquals(response.status, 503);
++      assertEquals(
++        body,
++        JSON.stringify({ code: "service_unavailable", ok: false }),
++      );
++      assertEquals(deliveries, 0);
++      assert(!body.includes(TOKEN_HASH), "Token hash leaked");
++      assert(!body.includes(BACKEND_ORIGIN), "Raw provider URL leaked");
++    }
++  },
++);
++
++Deno.test(
++  "staff invitation accepts injected canonical kong without an independent egress pin",
++  async () => {
++    const internalOrigin = "http://kong:8000";
++    const publicActionLinkOrigin = "http://127.0.0.1:54321";
++    const publicActionLink =
++      `${publicActionLinkOrigin}/auth/v1/verify?token=${TOKEN_HASH}` +
++      `&type=invite&redirect_to=${encodeURIComponent(CALLBACK)}`;
++    const requests: string[] = [];
++    const service = createStaffInvitationDependencies(
++      runtimeConfiguration({
++        DESMOSLOCK_EXPECTED_AUTH_ACTION_LINK_ORIGIN: publicActionLinkOrigin,
++        DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: undefined,
++        SUPABASE_URL: internalOrigin,
++      }),
++      async (input) => {
++        requests.push(String(input));
++        return Response.json(
++          generatedProviderResponse({ action_link: publicActionLink }),
++        );
++      },
++    );
++
++    assertEquals(await service.generateInviteLink("teacher@example.com"), {
++      callbackUrl: INVITE_CALLBACK,
++      code: "link_generated",
++      userId: USER_ID,
++    });
++    assertEquals(requests.length, 1);
++    assertEquals(new URL(requests[0]).origin, internalOrigin);
++    assert(!requests[0].includes(TOKEN_HASH), "Token entered egress URL");
++  },
++);
++
++Deno.test(
++  "staff invitation rejects the internal origin when it is not the public action-link origin",
++  async () => {
++    const internalOrigin = "http://kong:8000";
++    const publicActionLinkOrigin = "http://127.0.0.1:54321";
++    const hostileLink =
++      `${internalOrigin}/auth/v1/verify?token=${TOKEN_HASH}` +
++      `&type=invite&redirect_to=${encodeURIComponent(CALLBACK)}`;
++    const service = createStaffInvitationDependencies(
++      runtimeConfiguration({
++        DESMOSLOCK_EXPECTED_AUTH_ACTION_LINK_ORIGIN: publicActionLinkOrigin,
++        DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: internalOrigin,
++        SUPABASE_URL: internalOrigin,
++      }),
++      async () =>
++        Response.json(generatedProviderResponse({ action_link: hostileLink })),
++    );
++
++    const result = await service.generateInviteLink("teacher@example.com");
++    assertEquals(result, { code: "dependency_unavailable" });
++    assert(
++      !JSON.stringify(result).includes(TOKEN_HASH),
++      "Rejected token leaked",
++    );
++  },
++);
++
++Deno.test(
++  "staff invitation runtime rejects a provider-confirmed existing user",
++  async () => {
++    const service = createStaffInvitationDependencies(
++      runtimeConfiguration(),
++      async () =>
++        Response.json(
++          generatedProviderResponse({
++            email_confirmed_at: "2026-08-30T11:00:00.000Z",
++            identities: [
++              {
++                identity_data: { email_verified: true },
++                provider: "email",
++              },
++            ],
++          }),
++        ),
++    );
++    assertEquals(await service.generateInviteLink("teacher@example.com"), {
++      code: "existing_user_conflict",
++    });
++  },
++);
++
++Deno.test(
++  "staff invitation runtime sanitizes Auth Admin HTTP failures",
++  async () => {
++    const sentinel = "provider-diagnostic-sentinel";
++    for (const [status, expectedCode] of [
++      [400, "dependency_unavailable"],
++      [404, "dependency_unavailable"],
++      [409, "dependency_unavailable"],
++      [422, "dependency_unavailable"],
++      [429, "rate_limited"],
++      [500, "dependency_unavailable"],
++      [503, "dependency_unavailable"],
++    ] as const) {
++      const service = createStaffInvitationDependencies(
++        runtimeConfiguration(),
++        async () => Response.json({ diagnostic: sentinel }, { status }),
++      );
++      const result = await service.generateInviteLink("teacher@example.com");
++      assertEquals(result, { code: expectedCode });
++      assert(
++        !JSON.stringify(result).includes(sentinel),
++        "Provider diagnostic leaked",
++      );
++    }
++  },
++);
++
++Deno.test(
++  "staff invitation runtime rejects an off-origin generated action link",
++  async () => {
++    const service = createStaffInvitationDependencies(
++      runtimeConfiguration(),
++      async () =>
++        Response.json(
++          generatedProviderResponse({
++            action_link:
++              "https://attacker.invalid/auth/v1/verify?token=synthetic&type=invite" +
++              `&redirect_to=${encodeURIComponent(CALLBACK)}`,
++          }),
++        ),
++    );
++    assertEquals(await service.generateInviteLink("teacher@example.com"), {
++      code: "dependency_unavailable",
++    });
++  },
++);
++
++Deno.test(
++  "staff invitation runtime fails closed without an approved delivery transport",
++  async () => {
++    const service = createStaffInvitationDependencies(runtimeConfiguration());
++    assertEquals(
++      await service.deliverInvitation({
++        callbackUrl: INVITE_CALLBACK,
++        expiresAt: "2026-08-30T13:00:00.000Z",
++        recipientEmail: "teacher@example.com",
++      }),
++      "dependency_unavailable",
++    );
++  },
++);
++
++Deno.test(
++  "staff invitation runtime requires a bounded explicit lifetime",
++  async () => {
++    for (const value of [undefined, "", "0", "59", "86401", "3600.5"]) {
++      await assertRejects(async () => {
++        createStaffInvitationDependencies(
++          runtimeConfiguration({
++            DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS: value,
++          }),
++        );
++      });
++    }
++  },
++);
++
++Deno.test(
++  "staff invitation runtime requires an exact public Auth action-link origin",
++  async () => {
++    for (const origin of [
++      undefined,
++      "http://kong:8000",
++      "https://attacker.invalid",
++      `${BACKEND_ORIGIN}/path`,
++      `${BACKEND_ORIGIN}?query=value`,
++      `${BACKEND_ORIGIN}#fragment`,
++    ]) {
++      await assertRejects(async () => {
++        createStaffInvitationDependencies(
++          runtimeConfiguration({
++            DESMOSLOCK_EXPECTED_AUTH_ACTION_LINK_ORIGIN: origin,
++          }),
++        );
++      });
++    }
++  },
++);
++
++Deno.test(
++  "staff invitation runtime rejects mismatched callback configuration before egress",
++  async () => {
++    let requests = 0;
++    for (const callback of [
++      "https://attacker.invalid/",
++      `${WEB_ORIGIN}/auth/invitation`,
++      `${WEB_ORIGIN}/?auth=invite`,
++      `${WEB_ORIGIN}/#fragment`,
++      WEB_ORIGIN,
++      "https://user@staff.desmoslock.invalid/",
++    ]) {
++      await assertRejects(async () => {
++        createStaffInvitationDependencies(
++          runtimeConfiguration({
++            DESMOSLOCK_STAFF_INVITATION_CALLBACK: callback,
++          }),
++          async () => {
++            requests += 1;
++            return new Response(null, { status: 500 });
++          },
++        );
++      });
++    }
++    assertEquals(requests, 0);
++  },
++);
+diff --git a/supabase/functions/staff-invitations/index.ts b/supabase/functions/staff-invitations/index.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7df5441062f799e88fe7c4760e808af64d7ae257
+--- /dev/null
++++ b/supabase/functions/staff-invitations/index.ts
+@@ -0,0 +1,900 @@
++import {
++  codeResponse,
++  handlePreflight,
++  isExactRecord,
++  methodNotAllowedResponse,
++  parseBearerJwt,
++  parseCanonicalEmail,
++  parseCanonicalUuid,
++  parseEmail,
++  parseExactOrigin,
++  parseExactRootCallback,
++  parseUuid,
++  readStrictJson,
++  validateRequestOrigin,
++} from "../_shared/http.ts";
++import {
++  createSupabaseHttpClient,
++  parseAuthActionLinkOrigin,
++  readBoundedJsonResponse,
++  readExactSingleRow,
++  type ServiceFetch,
++  type SupabaseHttpClient,
++} from "../_shared/supabase-http.ts";
++
++const MAXIMUM_INVITATION_LIFETIME_SECONDS = 86_400;
++const MINIMUM_INVITATION_LIFETIME_SECONDS = 60;
++const BEGIN_ATTEMPTS = 2;
++const FAILURE_ATTEMPTS = 2;
++const PREPARE_ATTEMPTS = 2;
++const PUBLISH_ATTEMPTS = 2;
++
++type StaffRole = "administrator" | "teacher";
++
++type PublicInvitationErrorCode =
++  | "authentication_required"
++  | "authorization_denied"
++  | "existing_confirmed_user_unsupported"
++  | "invalid_request"
++  | "invitation_expired"
++  | "invitation_not_found"
++  | "rate_limited"
++  | "service_unavailable"
++  | "session_expired"
++  | "session_revoked"
++  | "step_up_required";
++
++interface PublicInvitationFailure {
++  readonly code: PublicInvitationErrorCode;
++  readonly status: number;
++}
++
++interface GeneratedInvitationFailure extends PublicInvitationFailure {
++  readonly cleanupReason: "dependency_unavailable" | "invalid_request";
++}
++
++interface StaffInvitationInput {
++  readonly email: string;
++  readonly role: StaffRole;
++  readonly schoolId: string;
++}
++
++export interface InvitationAuthorizationResult {
++  readonly code: string;
++  readonly invitationId?: string;
++}
++
++export interface GeneratedInvitationResult {
++  readonly callbackUrl?: string;
++  readonly code:
++    | "dependency_unavailable"
++    | "existing_user_conflict"
++    | "link_generated"
++    | "rate_limited";
++  readonly userId?: string;
++}
++
++export interface InvitationDeliveryMessage {
++  readonly callbackUrl: string;
++  readonly expiresAt: string;
++  readonly recipientEmail: string;
++}
++
++export type InvitationDeliveryResult = "delivered" | "dependency_unavailable";
++
++export interface StaffInvitationDeliveryTransport {
++  deliver(
++    message: InvitationDeliveryMessage,
++  ): Promise<InvitationDeliveryResult>;
++}
++
++export interface StaffInvitationDependencies {
++  readonly allowedOrigin: string;
++  readonly inviteLifetimeSeconds: number;
++  authorizeInvitation(
++    jwt: string,
++    input: StaffInvitationInput,
++    requestKey: string,
++  ): Promise<InvitationAuthorizationResult>;
++  prepareInvitation(
++    invitationId: string,
++    userId: string,
++    expiresAt: string,
++  ): Promise<string>;
++  deliverInvitation(
++    message: InvitationDeliveryMessage,
++  ): Promise<InvitationDeliveryResult>;
++  failInvitation(invitationId: string, reasonCode: string): Promise<string>;
++  generateInviteLink(email: string): Promise<GeneratedInvitationResult>;
++  newRequestKey(): string;
++  now(): number;
++  publishInvitation(invitationId: string): Promise<string>;
++}
++
++function parseInput(value: unknown): StaffInvitationInput | null {
++  if (!isExactRecord(value, ["email", "role", "schoolId"])) {
++    return null;
++  }
++  const email = parseCanonicalEmail(value.email);
++  const schoolId = parseCanonicalUuid(value.schoolId);
++  const role =
++    value.role === "administrator" || value.role === "teacher"
++      ? value.role
++      : null;
++  return email !== null && schoolId !== null && role !== null
++    ? { email, role, schoolId }
++    : null;
++}
++
++function parseInvitationLifetimeSeconds(value: unknown): number | null {
++  if (typeof value !== "string" || !/^[1-9][0-9]{1,5}$/u.test(value)) {
++    return null;
++  }
++  const seconds = Number(value);
++  return Number.isSafeInteger(seconds) &&
++    seconds >= MINIMUM_INVITATION_LIFETIME_SECONDS &&
++    seconds <= MAXIMUM_INVITATION_LIFETIME_SECONDS
++    ? seconds
++    : null;
++}
++
++function mapAuthorizationFailure(code: string): PublicInvitationFailure {
++  switch (code) {
++    case "invalid_request":
++      return { code, status: 400 };
++    case "unauthenticated":
++      return { code: "authentication_required", status: 401 };
++    case "session_expired":
++    case "session_revoked":
++      return { code, status: 401 };
++    case "email_unverified":
++    case "forbidden":
++    case "membership_inactive":
++      return { code: "authorization_denied", status: 403 };
++    case "step_up_required":
++      return { code, status: 403 };
++    case "invitation_not_found":
++    case "invitation_consumed":
++      return { code: "invitation_not_found", status: 404 };
++    case "invitation_expired":
++      return { code, status: 409 };
++    case "rate_limited":
++      return { code, status: 429 };
++    default:
++      return { code: "service_unavailable", status: 503 };
++  }
++}
++
++function mapGeneratedInvitationFailure(
++  code: GeneratedInvitationResult["code"],
++): GeneratedInvitationFailure {
++  if (code === "existing_user_conflict") {
++    return {
++      cleanupReason: "invalid_request",
++      code: "existing_confirmed_user_unsupported",
++      status: 409,
++    };
++  }
++  if (code === "rate_limited") {
++    return {
++      cleanupReason: "dependency_unavailable",
++      code: "rate_limited",
++      status: 429,
++    };
++  }
++  return {
++    cleanupReason: "dependency_unavailable",
++    code: "service_unavailable",
++    status: 503,
++  };
++}
++
++function mapHttpFailure(status: number): string {
++  if (status === 401) return "unauthenticated";
++  if (status === 403) return "forbidden";
++  if (status === 409 || status === 422) return "conflict";
++  if (status === 429) return "rate_limited";
++  return "dependency_unavailable";
++}
++
++async function callRpc(
++  client: SupabaseHttpClient,
++  functionName: string,
++  body: Record<string, unknown>,
++  authorization: string,
++  apikey: string,
++): Promise<{ readonly code: string; readonly row?: Record<string, unknown> }> {
++  const response = await client.request(`/rest/v1/rpc/${functionName}`, {
++    body: JSON.stringify(body),
++    headers: {
++      "accept-profile": "desmoslock_v2",
++      apikey,
++      authorization,
++      "content-profile": "desmoslock_v2",
++      "content-type": "application/json",
++    },
++    method: "POST",
++  });
++  if (!response.ok) {
++    return { code: mapHttpFailure(response.status) };
++  }
++  const value = await readBoundedJsonResponse(response);
++  const expectedKeys =
++    functionName === "begin_staff_invitation"
++      ? ["code", "invitation_id"]
++      : ["code"];
++  const row = readExactSingleRow(value, expectedKeys);
++  return row !== null && typeof row.code === "string"
++    ? { code: row.code, row }
++    : { code: "dependency_unavailable" };
++}
++
++function asRecord(value: unknown): Record<string, unknown> | null {
++  return typeof value === "object" && value !== null && !Array.isArray(value)
++    ? (value as Record<string, unknown>)
++    : null;
++}
++
++function hasUnverifiedEmailIdentity(user: Record<string, unknown>): boolean {
++  if (!Array.isArray(user.identities) || user.identities.length === 0) {
++    return false;
++  }
++  return user.identities.some((identityValue) => {
++    const identity = asRecord(identityValue);
++    const identityData = asRecord(identity?.identity_data);
++    return (
++      identity?.provider === "email" && identityData?.email_verified === false
++    );
++  });
++}
++
++function isUnconfirmedInvitedUser(
++  user: Record<string, unknown>,
++  requestedEmail: string,
++): boolean {
++  const id = parseUuid(user.id);
++  const email = parseEmail(user.email);
++  const confirmed =
++    typeof user.email_confirmed_at === "string" ||
++    typeof user.confirmed_at === "string";
++  return (
++    id !== null &&
++    email === requestedEmail &&
++    !confirmed &&
++    user.is_anonymous === false &&
++    typeof user.invited_at === "string" &&
++    Number.isFinite(Date.parse(user.invited_at)) &&
++    hasUnverifiedEmailIdentity(user)
++  );
++}
++
++function isConfirmedExistingUser(
++  user: Record<string, unknown>,
++  requestedEmail: string,
++): boolean {
++  const id = parseUuid(user.id);
++  const email = parseEmail(user.email);
++  const confirmationTimestamp =
++    typeof user.email_confirmed_at === "string"
++      ? user.email_confirmed_at
++      : typeof user.confirmed_at === "string"
++        ? user.confirmed_at
++        : null;
++  return (
++    id !== null &&
++    email === requestedEmail &&
++    confirmationTimestamp !== null &&
++    Number.isFinite(Date.parse(confirmationTimestamp))
++  );
++}
++
++function parseProviderTokenHash(value: unknown): string | null {
++  return typeof value === "string" && /^[0-9a-f]{56}$/u.test(value)
++    ? value
++    : null;
++}
++
++function validateGeneratedActionLink(
++  value: unknown,
++  backendOrigin: string,
++  callback: string,
++  tokenHash: string,
++): boolean {
++  if (typeof value !== "string" || value.length === 0 || value.length > 8_192) {
++    return false;
++  }
++  let actionLink: URL;
++  try {
++    actionLink = new URL(value);
++  } catch {
++    return false;
++  }
++  if (
++    actionLink.origin !== backendOrigin ||
++    actionLink.pathname !== "/auth/v1/verify" ||
++    actionLink.username !== "" ||
++    actionLink.password !== "" ||
++    actionLink.hash !== ""
++  ) {
++    return false;
++  }
++  const queryKeys = [...actionLink.searchParams.keys()];
++  const allowedKeys = new Set(["redirect_to", "token", "type"]);
++  if (
++    queryKeys.length !== 3 ||
++    queryKeys.some((key) => !allowedKeys.has(key)) ||
++    new Set(queryKeys).size !== queryKeys.length ||
++    actionLink.searchParams.get("type") !== "invite" ||
++    actionLink.searchParams.get("redirect_to") !== callback ||
++    actionLink.searchParams.get("token") !== tokenHash
++  ) {
++    return false;
++  }
++  return true;
++}
++
++function createInviteCallback(callback: string, tokenHash: string): string {
++  const callbackUrl = new URL(callback);
++  callbackUrl.searchParams.append("auth", "invite");
++  callbackUrl.searchParams.append("token_hash", tokenHash);
++  return callbackUrl.href;
++}
++
++function parseInviteCallback(
++  value: unknown,
++  expectedOrigin: string,
++): string | null {
++  if (typeof value !== "string" || value.length === 0 || value.length > 8_192) {
++    return null;
++  }
++  let callback: URL;
++  try {
++    callback = new URL(value);
++  } catch {
++    return null;
++  }
++  const queryKeys = [...callback.searchParams.keys()];
++  return callback.origin === expectedOrigin &&
++    callback.username === "" &&
++    callback.password === "" &&
++    callback.pathname === "/" &&
++    callback.hash === "" &&
++    callback.href === value &&
++    queryKeys.length === 2 &&
++    new Set(queryKeys).size === queryKeys.length &&
++    queryKeys.every((key) => key === "auth" || key === "token_hash") &&
++    callback.searchParams.get("auth") === "invite" &&
++    parseProviderTokenHash(callback.searchParams.get("token_hash")) !== null
++    ? callback.href
++    : null;
++}
++
++function parseGeneratedInvitation(
++  value: unknown,
++  requestedEmail: string,
++  backendOrigin: string,
++  callback: string,
++): GeneratedInvitationResult {
++  const response = asRecord(value);
++  if (response === null) {
++    return { code: "dependency_unavailable" };
++  }
++  const properties = asRecord(response.properties);
++  if (
++    response.properties !== undefined &&
++    (properties === null ||
++      !isExactRecord(properties, [
++        "action_link",
++        "email_otp",
++        "hashed_token",
++        "redirect_to",
++        "verification_type",
++      ]))
++  ) {
++    return { code: "dependency_unavailable" };
++  }
++  const wrappedUser = asRecord(response.user);
++  const user = wrappedUser ?? response;
++  if (isConfirmedExistingUser(user, requestedEmail)) {
++    return { code: "existing_user_conflict" };
++  }
++  const material = properties ?? response;
++  const tokenHash = parseProviderTokenHash(material.hashed_token);
++  const userId = parseUuid(user.id);
++  return tokenHash !== null &&
++    typeof material.email_otp === "string" &&
++    material.email_otp.length > 0 &&
++    material.email_otp.length <= 64 &&
++    material.verification_type === "invite" &&
++    material.redirect_to === callback &&
++    validateGeneratedActionLink(
++      material.action_link,
++      backendOrigin,
++      callback,
++      tokenHash,
++    ) &&
++    userId !== null &&
++    isUnconfirmedInvitedUser(user, requestedEmail)
++    ? {
++        callbackUrl: createInviteCallback(callback, tokenHash),
++        code: "link_generated",
++        userId,
++      }
++    : { code: "dependency_unavailable" };
++}
++
++export function createStaffInvitationDependencies(
++  configuration: unknown,
++  serviceFetch: ServiceFetch = globalThis.fetch,
++  now: () => number = Date.now,
++  deliveryTransport?: StaffInvitationDeliveryTransport,
++): StaffInvitationDependencies {
++  if (
++    !isExactRecord(configuration, [
++      "DESMOSLOCK_ALLOWED_WEB_ORIGIN",
++      "DESMOSLOCK_EXPECTED_AUTH_ACTION_LINK_ORIGIN",
++      "DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN",
++      "DESMOSLOCK_STAFF_INVITATION_CALLBACK",
++      "DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS",
++      "SUPABASE_ANON_KEY",
++      "SUPABASE_SERVICE_ROLE_KEY",
++      "SUPABASE_URL",
++    ])
++  ) {
++    throw new Error("Staff invitation configuration is invalid");
++  }
++  const allowedOrigin = parseExactOrigin(
++    configuration.DESMOSLOCK_ALLOWED_WEB_ORIGIN,
++  );
++  const actionLinkOrigin = parseAuthActionLinkOrigin(
++    configuration.DESMOSLOCK_EXPECTED_AUTH_ACTION_LINK_ORIGIN,
++  );
++  const callback =
++    allowedOrigin === null
++      ? null
++      : parseExactRootCallback(
++          configuration.DESMOSLOCK_STAFF_INVITATION_CALLBACK,
++          allowedOrigin,
++        );
++  const inviteLifetimeSeconds = parseInvitationLifetimeSeconds(
++    configuration.DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS,
++  );
++  const expectedSupabaseOrigin =
++    configuration.DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN;
++  const supabaseUrl = configuration.SUPABASE_URL;
++  // This explicit value must exactly match the hosted
++  // `auth.email.otp_expiry`; there is intentionally no inferred default.
++  if (
++    allowedOrigin === null ||
++    actionLinkOrigin === null ||
++    callback === null ||
++    inviteLifetimeSeconds === null ||
++    typeof supabaseUrl !== "string" ||
++    (expectedSupabaseOrigin !== undefined &&
++      typeof expectedSupabaseOrigin !== "string")
++  ) {
++    throw new Error("Staff invitation configuration is invalid");
++  }
++  const client = createSupabaseHttpClient(
++    {
++      expectedOrigin: expectedSupabaseOrigin,
++      publishableKey: String(configuration.SUPABASE_ANON_KEY),
++      serviceRoleKey: String(configuration.SUPABASE_SERVICE_ROLE_KEY),
++      supabaseUrl,
++    },
++    serviceFetch,
++  );
++  const serviceRoleKey = client.serviceRoleKey;
++  if (serviceRoleKey === undefined) {
++    throw new Error("Staff invitation configuration is invalid");
++  }
++  const serviceAuthorization = `Bearer ${serviceRoleKey}`;
++
++  return {
++    allowedOrigin,
++    inviteLifetimeSeconds,
++    newRequestKey: () => crypto.randomUUID(),
++    now,
++    async authorizeInvitation(jwt, input, requestKey) {
++      const result = await callRpc(
++        client,
++        "begin_staff_invitation",
++        {
++          email: input.email,
++          request_key: requestKey,
++          role: input.role === "administrator" ? "admin" : "teacher",
++          workspace_id: input.schoolId,
++        },
++        `Bearer ${jwt}`,
++        client.publishableKey,
++      );
++      if (result.code !== "invitation_pending") {
++        return { code: result.code };
++      }
++      const invitationId = parseUuid(result.row?.invitation_id);
++      return invitationId === null
++        ? { code: "dependency_unavailable" }
++        : { code: "invitation_pending", invitationId };
++    },
++    async prepareInvitation(invitationId, userId, expiresAt) {
++      const result = await callRpc(
++        client,
++        "internal_prepare_staff_invitation",
++        {
++          expires_at: expiresAt,
++          invitation_id: invitationId,
++          invited_user_id: userId,
++        },
++        serviceAuthorization,
++        serviceRoleKey,
++      );
++      return result.code;
++    },
++    async publishInvitation(invitationId) {
++      const result = await callRpc(
++        client,
++        "internal_publish_staff_invitation",
++        { invitation_id: invitationId },
++        serviceAuthorization,
++        serviceRoleKey,
++      );
++      return result.code;
++    },
++    async deliverInvitation(message) {
++      if (deliveryTransport === undefined) {
++        return "dependency_unavailable";
++      }
++      return await deliveryTransport.deliver(message);
++    },
++    async failInvitation(invitationId, reasonCode) {
++      const result = await callRpc(
++        client,
++        "internal_fail_staff_invitation",
++        {
++          invitation_id: invitationId,
++          reason_code: reasonCode,
++        },
++        serviceAuthorization,
++        serviceRoleKey,
++      );
++      return result.code;
++    },
++    async generateInviteLink(email) {
++      const providerUrl = new URL(
++        "/auth/v1/admin/generate_link",
++        `${client.origin}/`,
++      );
++      providerUrl.searchParams.set("redirect_to", callback);
++      const response = await client.request(providerUrl.href, {
++        body: JSON.stringify({ email, type: "invite" }),
++        headers: {
++          apikey: serviceRoleKey,
++          authorization: serviceAuthorization,
++          "content-type": "application/json",
++        },
++        method: "POST",
++      });
++      if (response.status === 429) {
++        return { code: "rate_limited" };
++      }
++      if (!response.ok) {
++        return { code: "dependency_unavailable" };
++      }
++      return parseGeneratedInvitation(
++        await readBoundedJsonResponse(response),
++        email,
++        actionLinkOrigin,
++        callback,
++      );
++    },
++  };
++}
++
++function runtimeDependencies(): StaffInvitationDependencies {
++  // Delivery is deliberately unavailable until an approved server-only
++  // transport is wired; runtime configuration must never imply a vendor.
++  return createStaffInvitationDependencies({
++    DESMOSLOCK_ALLOWED_WEB_ORIGIN: Deno.env.get(
++      "DESMOSLOCK_ALLOWED_WEB_ORIGIN",
++    ),
++    DESMOSLOCK_EXPECTED_AUTH_ACTION_LINK_ORIGIN: Deno.env.get(
++      "DESMOSLOCK_EXPECTED_AUTH_ACTION_LINK_ORIGIN",
++    ),
++    DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN: Deno.env.get(
++      "DESMOSLOCK_EXPECTED_SUPABASE_ORIGIN",
++    ),
++    DESMOSLOCK_STAFF_INVITATION_CALLBACK: Deno.env.get(
++      "DESMOSLOCK_STAFF_INVITATION_CALLBACK",
++    ),
++    DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS: Deno.env.get(
++      "DESMOSLOCK_STAFF_INVITATION_LIFETIME_SECONDS",
++    ),
++    SUPABASE_ANON_KEY: Deno.env.get("SUPABASE_ANON_KEY"),
++    SUPABASE_SERVICE_ROLE_KEY: Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"),
++    SUPABASE_URL: Deno.env.get("SUPABASE_URL"),
++  });
++}
++
++async function recordFailedDelivery(
++  dependencies: StaffInvitationDependencies,
++  invitationId: string,
++  reasonCode: string,
++): Promise<boolean> {
++  for (let attempt = 0; attempt < FAILURE_ATTEMPTS; attempt += 1) {
++    try {
++      const code = await dependencies.failInvitation(invitationId, reasonCode);
++      if (code === "invitation_delivery_failed") {
++        return true;
++      }
++      if (code !== "conflict" && code !== "dependency_unavailable") {
++        return false;
++      }
++    } catch {
++      // The failure transition is idempotent. Retry the same tuple after an
++      // ambiguous response so a committed terminal state can be reconciled.
++    }
++  }
++  return false;
++}
++
++async function beginStaffInvitation(
++  dependencies: StaffInvitationDependencies,
++  jwt: string,
++  input: StaffInvitationInput,
++  requestKey: string,
++): Promise<InvitationAuthorizationResult> {
++  for (let attempt = 0; attempt < BEGIN_ATTEMPTS; attempt += 1) {
++    try {
++      const result = await dependencies.authorizeInvitation(
++        jwt,
++        input,
++        requestKey,
++      );
++      if (result.code !== "dependency_unavailable") {
++        return result;
++      }
++    } catch {
++      // The DB request key makes begin idempotent. Reusing it reconciles a
++      // possibly committed insert without allowing a second delivery owner.
++    }
++  }
++  return { code: "dependency_unavailable" };
++}
++
++async function confirmInvitationDeliveryReady(
++  dependencies: StaffInvitationDependencies,
++  invitationId: string,
++  userId: string,
++  expiresAt: string,
++): Promise<"failed" | "ready" | "terminal"> {
++  for (let attempt = 0; attempt < PREPARE_ATTEMPTS; attempt += 1) {
++    try {
++      const code = await dependencies.prepareInvitation(
++        invitationId,
++        userId,
++        expiresAt,
++      );
++      if (code === "invitation_delivery_ready") {
++        return "ready";
++      }
++      if (
++        code === "invitation_expired" ||
++        code === "invitation_delivery_failed"
++      ) {
++        return "terminal";
++      }
++      if (code !== "dependency_unavailable") {
++        return "failed";
++      }
++    } catch {
++      // A lost response is ambiguous. Retry the same idempotency tuple once;
++      // delivery remains forbidden until an exact ready result is observed.
++    }
++  }
++  return "failed";
++}
++
++async function confirmInvitationPublished(
++  dependencies: StaffInvitationDependencies,
++  invitationId: string,
++): Promise<boolean> {
++  for (let attempt = 0; attempt < PUBLISH_ATTEMPTS; attempt += 1) {
++    try {
++      const code = await dependencies.publishInvitation(invitationId);
++      if (code === "invitation_usable") {
++        return true;
++      }
++      if (code !== "dependency_unavailable") {
++        return false;
++      }
++    } catch {
++      // SMTP has already reported exact delivery. Reconcile only by repeating
++      // the idempotent publish transition; never retry the delivery itself.
++    }
++  }
++  return false;
++}
++
++function invitationExpiration(
++  dependencies: StaffInvitationDependencies,
++): string | null {
++  try {
++    const now = dependencies.now();
++    const lifetimeMilliseconds = dependencies.inviteLifetimeSeconds * 1_000;
++    if (
++      !Number.isSafeInteger(now) ||
++      now < 0 ||
++      !Number.isSafeInteger(lifetimeMilliseconds) ||
++      dependencies.inviteLifetimeSeconds <
++        MINIMUM_INVITATION_LIFETIME_SECONDS ||
++      dependencies.inviteLifetimeSeconds >
++        MAXIMUM_INVITATION_LIFETIME_SECONDS ||
++      now > 8_640_000_000_000_000 - lifetimeMilliseconds
++    ) {
++      return null;
++    }
++    return new Date(now + lifetimeMilliseconds).toISOString();
++  } catch {
++    return null;
++  }
++}
++
++export async function handleRequest(
++  request: Request,
++  injectedDependencies?: StaffInvitationDependencies,
++): Promise<Response> {
++  let dependencies: StaffInvitationDependencies;
++  try {
++    dependencies = injectedDependencies ?? runtimeDependencies();
++  } catch {
++    return codeResponse("service_unavailable", 503);
++  }
++  const corsPolicy = {
++    allowedHeaders: ["authorization", "content-type"],
++    allowedOrigin: dependencies.allowedOrigin,
++  } as const;
++  if (request.method === "OPTIONS") {
++    return handlePreflight(request, corsPolicy);
++  }
++  if (!validateRequestOrigin(request, dependencies.allowedOrigin)) {
++    return codeResponse("invalid_request", 403);
++  }
++  if (request.method !== "POST") {
++    return methodNotAllowedResponse(dependencies.allowedOrigin);
++  }
++  const jwt = parseBearerJwt(request.headers.get("authorization"));
++  if (jwt === null) {
++    return codeResponse(
++      "authentication_required",
++      401,
++      dependencies.allowedOrigin,
++    );
++  }
++  const input = parseInput(await readStrictJson(request));
++  if (input === null) {
++    return codeResponse("invalid_request", 400, dependencies.allowedOrigin);
++  }
++
++  let requestKey: string | null = null;
++  try {
++    requestKey = parseCanonicalUuid(dependencies.newRequestKey());
++  } catch {
++    // A runtime entropy failure is an internal dependency failure.
++  }
++  if (requestKey === null) {
++    return codeResponse("service_unavailable", 503, dependencies.allowedOrigin);
++  }
++
++  const authorization = await beginStaffInvitation(
++    dependencies,
++    jwt,
++    input,
++    requestKey,
++  );
++  if (authorization.code !== "invitation_pending") {
++    const failure = mapAuthorizationFailure(authorization.code);
++    return codeResponse(
++      failure.code,
++      failure.status,
++      dependencies.allowedOrigin,
++    );
++  }
++  const invitationId = parseUuid(authorization.invitationId);
++  if (invitationId === null) {
++    return codeResponse("service_unavailable", 503, dependencies.allowedOrigin);
++  }
++
++  let generated: GeneratedInvitationResult;
++  try {
++    generated = await dependencies.generateInviteLink(input.email);
++  } catch {
++    generated = { code: "dependency_unavailable" };
++  }
++  const generatedUserId =
++    generated.code === "link_generated" ? parseUuid(generated.userId) : null;
++  const callbackUrl =
++    generated.code === "link_generated" &&
++    typeof generated.callbackUrl === "string"
++      ? parseInviteCallback(generated.callbackUrl, dependencies.allowedOrigin)
++      : null;
++  if (generatedUserId === null || callbackUrl === null) {
++    const failure = mapGeneratedInvitationFailure(generated.code);
++    const recorded = await recordFailedDelivery(
++      dependencies,
++      invitationId,
++      failure.cleanupReason,
++    );
++    if (!recorded) {
++      return codeResponse(
++        "service_unavailable",
++        503,
++        dependencies.allowedOrigin,
++      );
++    }
++    return codeResponse(
++      failure.code,
++      failure.status,
++      dependencies.allowedOrigin,
++    );
++  }
++
++  const expiresAt = invitationExpiration(dependencies);
++  if (expiresAt === null) {
++    await recordFailedDelivery(
++      dependencies,
++      invitationId,
++      "dependency_unavailable",
++    );
++    return codeResponse("service_unavailable", 503, dependencies.allowedOrigin);
++  }
++  const preparation = await confirmInvitationDeliveryReady(
++    dependencies,
++    invitationId,
++    generatedUserId,
++    expiresAt,
++  );
++  if (preparation !== "ready") {
++    // Expiry terminalization is already audited by the database. Do not issue
++    // a second lifecycle mutation after an exact terminal prepare result.
++    if (preparation !== "terminal") {
++      await recordFailedDelivery(
++        dependencies,
++        invitationId,
++        "dependency_unavailable",
++      );
++    }
++    return codeResponse("service_unavailable", 503, dependencies.allowedOrigin);
++  }
++
++  let delivery: InvitationDeliveryResult = "dependency_unavailable";
++  try {
++    delivery = await dependencies.deliverInvitation({
++      callbackUrl,
++      expiresAt,
++      recipientEmail: input.email,
++    });
++  } catch {
++    // A sent-then-failed SMTP outcome is ambiguous. The delivery-ready state is
++    // non-consumable, so safety does not depend on the failure write succeeding.
++  }
++  if (delivery !== "delivered") {
++    await recordFailedDelivery(
++      dependencies,
++      invitationId,
++      "dependency_unavailable",
++    );
++    return codeResponse("service_unavailable", 503, dependencies.allowedOrigin);
++  }
++  const published = await confirmInvitationPublished(
++    dependencies,
++    invitationId,
++  );
++  if (!published) {
++    return codeResponse("service_unavailable", 503, dependencies.allowedOrigin);
++  }
++  return codeResponse("invitation_created", 201, dependencies.allowedOrigin);
++}
++
++if (import.meta.main) {
++  Deno.serve((request) => handleRequest(request));
++}

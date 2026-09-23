@@ -1,0 +1,1598 @@
+diff --git a/apps/desktop/src/main/student-session-coordinator.ts b/apps/desktop/src/main/student-session-coordinator.ts
+index da96d53faef01dceade7549d35d20bca7556d017..e7c671b42fa7622363f43d0546e5a37d8a4835de 100644
+--- a/apps/desktop/src/main/student-session-coordinator.ts
++++ b/apps/desktop/src/main/student-session-coordinator.ts
+@@ -29,6 +29,7 @@ import {
+   type StoredNativeEvidenceOrigin,
+   type StoredNativeEvidenceSigner,
+   emptyNativeEvidence,
++  canReplaceInitialJoin,
+   retainNativeEvidenceSigner,
+   pruneNativeEvidence,
+ } from "./student-session-store.js";
+@@ -158,7 +159,7 @@ export function createStudentSessionCoordinator(options: {
+   let issuedAdmission: FreshStudentAdmission | null = null;
+   let observationSequence = 0;
+   let ownedRenewal = false;
+-  let priorProcessUncertain = false;
++  let nativeOwnershipUncertain = false;
+   const ownedProtectionAttempts = new Set<string>();
+   type ReadOwner = {
+     sequence: number | null;
+@@ -427,7 +428,9 @@ export function createStudentSessionCoordinator(options: {
+       return false;
+     }
+     if (loaded.kind === "recovery_required") {
+-      if (firstLoad) priorProcessUncertain = true;
++      // A rejected record cannot establish native ownership, even when this
++      // process previously read a valid record before an uncertain write.
++      nativeOwnershipUncertain = true;
+       storeGeneration = loaded.generation;
+       needsReload = false;
+       record = null;
+@@ -452,7 +455,7 @@ export function createStudentSessionCoordinator(options: {
+               "disposed_without_terminal_observation")
+         )
+       )
+-        priorProcessUncertain = true;
++        nativeOwnershipUncertain = true;
+     }
+     needsReload = false;
+     capabilityDeadline = 0; // A process restart cannot inherit a monotonic lease.
+@@ -472,7 +475,7 @@ export function createStudentSessionCoordinator(options: {
+     publish(
+       record?.terminal === true
+         ? "forfeited"
+-        : record === null
++        : record === null || canReplaceInitialJoin(record)
+           ? "entry"
+           : "unconfirmed",
+     );
+@@ -518,6 +521,9 @@ export function createStudentSessionCoordinator(options: {
+       return;
+     const pending = record.pending;
+     const device = record.device;
++    // Only this invocation can know that no earlier join may have committed.
++    // A recovered or retried uncertain intent never regains that permission.
++    const replaceableInitial = canReplaceInitialJoin(record);
+     const digest = options.crypto.digestLogicalOperation({
+       kind: "join",
+       admissionMode: pending.admissionMode,
+@@ -539,7 +545,7 @@ export function createStudentSessionCoordinator(options: {
+     );
+     if (!alive(generation)) return;
+     if (!("challengeId" in challenge)) {
+-      publish(resultPhase(challenge));
++      publish(replaceableInitial ? "entry" : resultPhase(challenge));
+       return;
+     }
+     const deviceProof = options.crypto.signBootstrap(device, {
+@@ -559,12 +565,36 @@ export function createStudentSessionCoordinator(options: {
+       reconnectDigest: pending.candidates.reconnectDigest,
+       deviceProof,
+     };
++    if (
++      replaceableInitial &&
++      !(await write(
++        {
++          ...successor(record),
++          pending: { ...pending, outcome: "uncertain" },
++        },
++        generation,
++      ))
++    )
++      return;
+     const sentAt = now();
+     if (!alive(generation)) return;
+     const accepted = await options.transport.join(request, digest, signal);
+     if (!alive(generation)) return;
+     if (accepted.status !== "accepted") {
+-      publish(resultPhase(accepted));
++      if (replaceableInitial && accepted.status === "denied") {
++        if (
++          await write(
++            {
++              ...successor(record),
++              pending: { ...pending, outcome: "denied" },
++            },
++            generation,
++          )
++        )
++          publish("entry");
++      } else {
++        publish(resultPhase(accepted));
++      }
+       return;
+     }
+     const next = {
+@@ -1296,7 +1326,7 @@ export function createStudentSessionCoordinator(options: {
+     let categories = facts.at(-1)?.categories;
+     if (command.kind === "engaging") {
+       if (
+-        priorProcessUncertain ||
++        nativeOwnershipUncertain ||
+         !isCurrentAdmission(command.authority) ||
+         facts.length > protectionFactCapacity - protectionFactReservation ||
+         facts.some((fact) => fact.attemptId === command.attemptId) ||
+@@ -1431,7 +1461,7 @@ export function createStudentSessionCoordinator(options: {
+           break;
+         case "disposed_without_terminal_observation":
+           if (
+-            priorProcessUncertain ||
++            nativeOwnershipUncertain ||
+             !ownedProtectionAttempts.has(command.attemptId) ||
+             oldFact("native_terminal") !== undefined
+           )
+@@ -1601,19 +1631,23 @@ export function createStudentSessionCoordinator(options: {
+         const parsedCode = parseStudentJoinCode(code);
+         if (
+           !initialized ||
++          needsReload ||
++          recoveryLatched ||
++          nativeOwnershipUncertain ||
+           view.phase !== "entry" ||
+-          record !== null ||
++          (record !== null && !canReplaceInitialJoin(record)) ||
+           parsedCode === null
+         )
+           return;
+         const next: StudentSessionSuccessor = {
+-          version: 3,
++          version: 4,
+           apiOrigin: options.apiOrigin,
+-          device: options.crypto.createEnrollment(),
++          device: record?.device ?? options.crypto.createEnrollment(),
+           current: null,
+           pending: {
+             kind: "join",
+             admissionMode: "initial",
++            outcome: "not_dispatched",
+             requestId: requestId(),
+             joinCode: parsedCode,
+             candidates: options.crypto.createCandidates(),
+@@ -1632,7 +1666,7 @@ export function createStudentSessionCoordinator(options: {
+         const parsedCode = parseStudentJoinCode(code);
+         if (
+           !initialized ||
+-          priorProcessUncertain ||
++          nativeOwnershipUncertain ||
+           view.revision !== snapshotRevision ||
+           !["recovery_required", "unavailable", "forfeited"].includes(
+             view.phase,
+@@ -1653,8 +1687,9 @@ export function createStudentSessionCoordinator(options: {
+         )
+           return;
+         if (
+-          record?.nativeProtection?.latestAttempt != null &&
+-          record.nativeProtection.latestAttempt.cleanup !== "complete"
++          nativeOwnershipUncertain ||
++          (record?.nativeProtection?.latestAttempt != null &&
++            record.nativeProtection.latestAttempt.cleanup !== "complete")
+         )
+           return;
+         const retainedProtection = record?.nativeProtection ?? null;
+@@ -1682,13 +1717,14 @@ export function createStudentSessionCoordinator(options: {
+         attemptedWrite = null;
+         capabilityDeadline = 0;
+         const next: StudentSessionSuccessor = {
+-          version: 3,
++          version: 4,
+           apiOrigin: options.apiOrigin,
+           device: options.crypto.createEnrollment(),
+           current: null,
+           pending: {
+             kind: "join",
+             admissionMode: "readmission",
++            outcome: "uncertain",
+             requestId: requestId(),
+             joinCode: parsedCode,
+             candidates: options.crypto.createCandidates(),
+diff --git a/apps/desktop/src/main/student-session-store.ts b/apps/desktop/src/main/student-session-store.ts
+index e18d9a4d25240d94e447f990373fbd91fdd033e8..4816d186320841a273ea061313a0fd894c7db688 100644
+--- a/apps/desktop/src/main/student-session-store.ts
++++ b/apps/desktop/src/main/student-session-store.ts
+@@ -149,6 +149,7 @@ export type PendingStudentIntent =
+   | {
+       readonly kind: "join";
+       readonly admissionMode: StudentAdmissionMode;
++      readonly outcome: "not_dispatched" | "uncertain" | "denied";
+       readonly requestId: string;
+       readonly joinCode: string;
+       readonly candidates: StudentSessionCandidates;
+@@ -166,7 +167,7 @@ export type PendingStudentIntent =
+     };
+ 
+ export interface StudentSessionRecord {
+-  readonly version: 3;
++  readonly version: 4;
+   readonly generation: number;
+   readonly apiOrigin: string;
+   readonly device: StudentSessionDevice;
+@@ -216,6 +217,29 @@ export function emptyNativeEvidence(): StoredNativeEvidence {
+   });
+ }
+ export type StudentSessionSuccessor = Omit<StudentSessionRecord, "generation">;
++
++/** Eligibility only; replacing join material must retain the caller's enrollment. */
++export function canReplaceInitialJoin(
++  record: StudentSessionSuccessor | null,
++): boolean {
++  return (
++    record !== null &&
++    record.pending?.kind === "join" &&
++    record.pending.admissionMode === "initial" &&
++    (record.pending.outcome === "not_dispatched" ||
++      record.pending.outcome === "denied") &&
++    record.current === null &&
++    record.lastReservedCounter === 0 &&
++    !record.terminal &&
++    record.nativeProtection === null &&
++    record.evidence.origins.length === 0 &&
++    record.evidence.acknowledgments.length === 0 &&
++    record.evidence.pendingBatches.length === 0 &&
++    record.evidence.retiredSigners.length === 0 &&
++    record.evidence.lastAttemptedSigner === null
++  );
++}
++
+ export type StudentSessionLoad =
+   | { readonly kind: "empty"; readonly generation: number }
+   | { readonly kind: "ready"; readonly record: StudentSessionRecord }
+@@ -1154,6 +1178,31 @@ export function createStudentSessionStore(options: {
+       "lastReservedCounter",
+       "terminal",
+     ];
++    const stored = allowLegacy
++      ? object(value, [
++          ...keys,
++          "nativeProtection",
++          "evidence",
++          "integritySha256",
++        ])
++      : null;
++    if (stored?.version === 4) {
++      // Detect payload corruption, not forgery: this checksum is unkeyed.
++      // Preserve the stored field order when removing only the checksum.
++      const payload = Object.fromEntries(
++        Object.keys(value as object)
++          .filter((key) => key !== "integritySha256")
++          .map((key) => [key, stored[key]]),
++      );
++      if (
++        parseStudentDigest(stored.integritySha256) === null ||
++        createHash("sha256")
++          .update(JSON.stringify(payload), "utf8")
++          .digest("hex") !== stored.integritySha256
++      )
++        return null;
++      value = payload;
++    }
+     const legacy = allowLegacy ? object(value, keys) : null;
+     const v2 = allowLegacy
+       ? object(value, [...keys, "nativeProtection"])
+@@ -1166,11 +1215,12 @@ export function createStudentSessionStore(options: {
+           : object(value, [...keys, "nativeProtection", "evidence"]);
+     if (
+       row === null ||
++      (allowLegacy && row.version === 4 && stored === null) ||
+       (row === legacy
+         ? row.version !== 1
+         : row === v2
+           ? row.version !== 2
+-          : row.version !== 3) ||
++          : row.version !== 4 && !(allowLegacy && row.version === 3)) ||
+       parseStudentCounter(row.generation) === null ||
+       row.apiOrigin !== options.apiOrigin ||
+       !natural(row.lastReservedCounter) ||
+@@ -1243,6 +1293,7 @@ export function createStudentSessionStore(options: {
+       const join = object(row.pending, [
+         "kind",
+         "admissionMode",
++        ...(row.version === 4 ? ["outcome"] : []),
+         "requestId",
+         "joinCode",
+         "candidates",
+@@ -1262,12 +1313,18 @@ export function createStudentSessionStore(options: {
+         const requestId = parseStudentUuid(join.requestId);
+         const joinCode = parseStudentJoinCode(join.joinCode);
+         const candidates = options.validateCandidates(join.candidates);
++        // Older records never established whether the join reached the server.
++        const outcome = row.version === 4 ? join.outcome : "uncertain";
+         if (
+           requestId === null ||
+           joinCode === null ||
+           candidates === null ||
+           (join.admissionMode !== "initial" &&
+             join.admissionMode !== "readmission") ||
++          (outcome !== "not_dispatched" &&
++            outcome !== "uncertain" &&
++            outcome !== "denied") ||
++          (join.admissionMode === "readmission" && outcome !== "uncertain") ||
+           current !== null ||
+           row.lastReservedCounter !== 0
+         )
+@@ -1275,6 +1332,7 @@ export function createStudentSessionStore(options: {
+         pending = {
+           kind: "join",
+           admissionMode: join.admissionMode,
++          outcome,
+           requestId,
+           joinCode,
+           candidates,
+@@ -1348,8 +1406,8 @@ export function createStudentSessionStore(options: {
+       allowLegacy && row !== legacy && row !== v2,
+     );
+     if (evidence === null) return null;
+-    return Object.freeze({
+-      version: 3,
++    const record: StudentSessionRecord = Object.freeze({
++      version: 4,
+       generation: row.generation as number,
+       apiOrigin: options.apiOrigin,
+       device: Object.freeze(device),
+@@ -1363,6 +1421,13 @@ export function createStudentSessionStore(options: {
+       nativeProtection,
+       evidence,
+     });
++    if (
++      pending?.kind === "join" &&
++      pending.outcome !== "uncertain" &&
++      !canReplaceInitialJoin(record)
++    )
++      return null;
++    return record;
+   }
+ 
+   function validEvidenceSuccessor(next: StudentSessionRecord): boolean {
+@@ -1632,7 +1697,7 @@ export function createStudentSessionStore(options: {
+           throw failure();
+         // The origin's exact scope already belongs to every immutable fact in
+         // the attempt. Store that association once; reconstruct it on load.
+-        const plaintext = JSON.stringify({
++        const payload = {
+           ...record,
+           evidence: {
+             ...record.evidence,
+@@ -1642,6 +1707,12 @@ export function createStudentSessionStore(options: {
+               originBuild: origin.originBuild,
+             })),
+           },
++        };
++        const plaintext = JSON.stringify({
++          ...payload,
++          integritySha256: createHash("sha256")
++            .update(JSON.stringify(payload), "utf8")
++            .digest("hex"),
+         });
+         if (Buffer.byteLength(plaintext, "utf8") > maximumPlaintextBytes)
+           throw failure();
+diff --git a/apps/desktop/src/student-session-view.ts b/apps/desktop/src/student-session-view.ts
+index e6d49aceacc5077137048811229e1e985fc2de64..04c0a96f9d3e4e7686a65fbd575ba30abbc15ca4 100644
+--- a/apps/desktop/src/student-session-view.ts
++++ b/apps/desktop/src/student-session-view.ts
+@@ -501,6 +501,17 @@ export function bindStudentSessionView(
+           failed: "Protection unavailable",
+           recovery_required: "Assessment recovery required",
+         }[state!.phase];
++    const admission = value?.admission;
++    const idleSummary =
++      admission?.phase === "entry"
++        ? "The calculator remains unavailable. Join a Test, then choose Start assessment to check protection."
++        : admission?.phase === "active"
++          ? "The calculator remains unavailable. Choose Start assessment to check protection."
++          : (admission?.phase === "unavailable" ||
++                admission?.phase === "unconfirmed") &&
++              admission.pendingOperation !== null
++            ? "The calculator remains unavailable. Retry or recover your saved session admission, then choose Start assessment to check protection."
++            : "The calculator remains unavailable. Follow the session guidance to confirm or recover admission before choosing Start assessment.";
+     protectionSummary.textContent = !known
+       ? "The calculator remains unavailable. Protection could not be checked. Follow your teacher’s instructions."
+       : state!.phase === "recovery_required"
+@@ -517,7 +528,9 @@ export function bindStudentSessionView(
+               ? "The attempt did not establish confirmed protection. Local cleanup is complete. A new Start checks protection again."
+               : state!.phase === "preflight" || state!.phase === "engaging"
+                 ? "The calculator remains unavailable until native confirmation and all five checks are confirmed."
+-                : "The calculator remains unavailable. Join a Test, then choose Start assessment to check protection.";
++                : state!.phase === "idle"
++                  ? idleSummary
++                  : "The calculator remains unavailable. Join a Test, then choose Start assessment to check protection.";
+     type Code =
+       DesktopStudentView["protection"]["categories"][Category]["code"];
+     const categoryCopy: Record<Code, string> = {
+@@ -664,7 +677,10 @@ export function bindStudentSessionView(
+     summary.textContent = loading
+       ? "Checking this device’s saved session."
+       : {
+-          entry: "Ask your teacher for the Test join code.",
++          entry:
++            snapshot?.admission.pendingOperation === "join"
++              ? "No session was joined. Check the Test join code and try again."
++              : "Ask your teacher for the Test join code.",
+           joining:
+             "Wait while your saved attempt is checked. Your session is not yet confirmed.",
+           active: "Your session admission is confirmed.",
+@@ -675,7 +691,9 @@ export function bindStudentSessionView(
+                 ? "Your session is not currently confirmed. Refresh to check again or ask your teacher for help."
+                 : "Your session is not currently confirmed. Retry the saved attempt without starting a new session.",
+           unavailable:
+-            "Your session cannot currently be confirmed. Refresh to check again or ask your teacher for help.",
++            snapshot?.admission.pendingOperation == null
++              ? "Your session cannot currently be confirmed. Refresh to check again or ask your teacher for help."
++              : "Your saved attempt cannot currently be confirmed. Retry that attempt or ask your teacher for help.",
+           recovery_required: admissionBlocked
+             ? "Local protection recovery is required before session recovery. Ask your teacher or operator for help."
+             : "Ask your teacher for a private re-admission code to restore an existing session.",
+@@ -707,7 +725,7 @@ export function bindStudentSessionView(
+     reviewPanel.hidden = !reviewing;
+     retry.hidden =
+       reviewing ||
+-      phase !== "unconfirmed" ||
++      (phase !== "unconfirmed" && phase !== "unavailable") ||
+       snapshot?.admission.pendingOperation == null;
+     refresh.hidden = reviewing || loading || entry || phase === "joining";
+     leave.hidden = reviewing || phase !== "active";
+@@ -835,7 +853,7 @@ export function bindStudentSessionView(
+       if (
+         snapshot === null ||
+         !live(snapshot) ||
+-        phase !== "unconfirmed" ||
++        (phase !== "unconfirmed" && phase !== "unavailable") ||
+         snapshot.admission.pendingOperation === null ||
+         review !== null ||
+         bridge === undefined
+diff --git a/apps/desktop/tests/student-session-coordinator.test.ts b/apps/desktop/tests/student-session-coordinator.test.ts
+index 49434128a03c171f911c9e4c9c74316addf32928..e43348813e8229a84d10e62e9644f941e5dcab59 100644
+--- a/apps/desktop/tests/student-session-coordinator.test.ts
++++ b/apps/desktop/tests/student-session-coordinator.test.ts
+@@ -1,4 +1,4 @@
+-import { createPublicKey, verify } from "node:crypto";
++import { createHash, createPublicKey, verify } from "node:crypto";
+ import { afterEach, describe, expect, it, vi } from "vitest";
+ 
+ import type {
+@@ -30,6 +30,21 @@ const unavailable = {
+   code: "STUDENT_SESSION_UNAVAILABLE",
+ };
+ 
++function syntheticStoredRecord(value: object): Buffer {
++  const payload: Record<string, unknown> = { ...value };
++  delete payload.integritySha256;
++  const stored =
++    payload.version === 4
++      ? {
++          ...payload,
++          integritySha256: createHash("sha256")
++            .update(JSON.stringify(payload), "utf8")
++            .digest("hex"),
++        }
++      : payload;
++  return Buffer.from(`synthetic:${JSON.stringify(stored)}`);
++}
++
+ function fixtureServer() {
+   return {
+     joins: new Map<string, Record<string, unknown>>(),
+@@ -54,6 +69,8 @@ function harness(
+   let failAfterPublication = false;
+   let droppedJoin = false;
+   let denied = false;
++  let denialRoute: string | null = null;
++  let joinReply: (() => Response) | null = null;
+   let block: Promise<void> | null = null;
+   let blockedFetch: Promise<Response> | null = null;
+   let quarantineFailsOnce = false;
+@@ -133,7 +150,7 @@ function harness(
+     if (blockedFetch !== null) return blockedFetch;
+     await beforeResponse?.(route);
+     elapsed += fetchLatency;
+-    if (denied)
++    if (denied && (denialRoute === null || denialRoute === route))
+       return Response.json(
+         { status: "denied", code: "STUDENT_SESSION_DENIED" },
+         { status: 403 },
+@@ -145,6 +162,7 @@ function harness(
+         expiresAtMs: serverNowMs + 15_000,
+       });
+     if (route === "join") {
++      if (joinReply !== null) return joinReply();
+       const pending = durable.pending;
+       if (pending?.kind !== "join")
+         throw new Error("pending join must precede HTTP");
+@@ -377,12 +395,16 @@ function harness(
+     dropJoinResponse() {
+       droppedJoin = true;
+     },
+-    deny() {
++    deny(route?: string) {
+       denied = true;
++      denialRoute = route ?? null;
+     },
+     allow() {
+       denied = false;
+     },
++    replyToJoin(reply: () => Response) {
++      joinReply = reply;
++    },
+     evidenceResult(
+       signer: string,
+       result: "denied" | "unavailable" | "lost" | null,
+@@ -1563,17 +1585,15 @@ describe("single-writer evidence delivery", () => {
+     await completeEvidenceAttempt(f);
+     const { evidence, ...prior } = f.record();
+     expect(evidence.origins).toHaveLength(1);
+-    const bytes = Buffer.from(
+-      `synthetic:${JSON.stringify({
+-        ...prior,
+-        version: 2,
+-        device: f.options.crypto.createEnrollment(),
+-        current: null,
+-        pending: null,
+-        terminal: true,
+-        lastReservedCounter: 0,
+-      })}`,
+-    );
++    const bytes = syntheticStoredRecord({
++      ...prior,
++      version: 2,
++      device: f.options.crypto.createEnrollment(),
++      current: null,
++      pending: null,
++      terminal: true,
++      lastReservedCounter: 0,
++    });
+     const restored = harness();
+     restored.setBytes(bytes);
+     await restored.coordinator.initialize();
+@@ -2099,7 +2119,7 @@ describe("real desktop crypto/transport coordinator over synthetic private stora
+   it("a failed promotion keeps original authority/pending or recovers the published successor without retrying the old join", async () => {
+     const f = harness();
+     await f.coordinator.initialize();
+-    f.failAtWrite(3, true);
++    f.failAtWrite(4, true);
+     await f.coordinator.joinInitial(code);
+     expect(f.coordinator.readView().phase).toBe("unconfirmed");
+     const device = f.record().device;
+@@ -2114,11 +2134,226 @@ describe("real desktop crypto/transport coordinator over synthetic private stora
+     expect(f.coordinator.readView().phase).toBe("active");
+   });
+ 
+-  it("generic denial exposes no invented end/removal/expiry reason and permits only explicit targeted recovery", async () => {
++  it.each(["challenge", "join"])(
++    "a first %s denial permits a corrected public code with the same enrollment and no protection authority",
++    async (route) => {
++      const f = harness();
++      await f.coordinator.initialize();
++      f.deny(route);
++      await f.coordinator.joinInitial(code);
++      const denied = f.record();
++      expect(f.coordinator.readView()).toMatchObject({
++        phase: "entry",
++        session: null,
++        pendingOperation: "join",
++        calculatorEligible: false,
++      });
++      expect(denied.pending).toMatchObject({
++        kind: "join",
++        admissionMode: "initial",
++        outcome: route === "join" ? "denied" : "not_dispatched",
++      });
++      expect(f.server.joins.size).toBe(0);
++      expect(f.coordinator.readProtectionContext().admission).toBeNull();
++      const before = f.requests.length;
++      f.allow();
++      await f.coordinator.joinInitial("0123456789AC");
++      expect(f.requests.slice(before).map((request) => request.route)).toEqual([
++        "challenge",
++        "join",
++      ]);
++      const corrected = f.requests.at(-1)!.durable;
++      expect(corrected.device).toEqual(denied.device);
++      expect(corrected.lastReservedCounter).toBe(0);
++      expect(corrected.nativeProtection).toBeNull();
++      expect(corrected.evidence).toEqual(denied.evidence);
++      expect(corrected.pending).toMatchObject({
++        kind: "join",
++        admissionMode: "initial",
++        joinCode: "0123456789AC",
++        outcome: "uncertain",
++      });
++      if (denied.pending?.kind !== "join" || corrected.pending?.kind !== "join")
++        throw new Error("Expected initial join records");
++      expect(corrected.pending.requestId).not.toBe(denied.pending.requestId);
++      expect(corrected.pending.candidates).not.toEqual(
++        denied.pending.candidates,
++      );
++      expect(f.preserved).toHaveLength(0);
++      expect(f.server.joins.size).toBe(1);
++      expect(f.coordinator.readView().phase).toBe("active");
++      expect(f.coordinator.readProtectionContext().freshAdmission).toBeNull();
++      expect(JSON.stringify(f.coordinator.readView())).not.toMatch(
++        /removed|ended|expired/,
++      );
++    },
++  );
++
++  it("a durably denied initial attempt remains replaceable after restart without replacing its device", async () => {
+     const f = harness();
+     await f.coordinator.initialize();
+-    f.deny();
++    f.deny("join");
++    await f.coordinator.joinInitial(code);
++    const denied = f.record();
++    expect(await f.coordinator.dispose()).toBe(true);
++    const restarted = harness(f.server);
++    restarted.setBytes(f.storedBytes()!);
++    await restarted.coordinator.initialize();
++    expect(restarted.coordinator.readView().phase).toBe("entry");
++    expect(restarted.requests).toHaveLength(0);
++    await restarted.coordinator.joinInitial("0123456789AC");
++    expect(restarted.record().device).toEqual(denied.device);
++    expect(restarted.record().current).not.toBeNull();
++    expect(restarted.preserved).toHaveLength(0);
++  });
++
++  it.each([false, true])(
++    "an uncertain pre-egress barrier emits no join and restart respects its possibly published marker: %s",
++    async (published) => {
++      const f = harness();
++      await f.coordinator.initialize();
++      f.failAtWrite(3, published);
++      await f.coordinator.joinInitial(code);
++      expect(f.requests.map((request) => request.route)).toEqual(["challenge"]);
++      expect(f.coordinator.readView().phase).toBe("unconfirmed");
++      const before = f.record();
++      expect(before.pending).toMatchObject({
++        outcome: published ? "uncertain" : "not_dispatched",
++      });
++      await f.coordinator.joinInitial("0123456789AC");
++      expect(f.requests).toHaveLength(1);
++      expect(await f.coordinator.dispose()).toBe(true);
++      const restarted = harness();
++      restarted.setBytes(f.storedBytes()!);
++      await restarted.coordinator.initialize();
++      expect(restarted.coordinator.readView().phase).toBe(
++        published ? "unconfirmed" : "entry",
++      );
++      await restarted.coordinator.joinInitial("0123456789AC");
++      if (published) {
++        expect(restarted.requests).toHaveLength(0);
++        restarted.deny("join");
++        await restarted.coordinator.retryPending();
++        expect(restarted.record().pending).toEqual(before.pending);
++        expect(restarted.coordinator.readView().phase).toBe("unavailable");
++      } else {
++        expect(restarted.record().device).toEqual(before.device);
++        expect(restarted.coordinator.readView().phase).toBe("active");
++      }
++    },
++  );
++
++  it.each([false, true])(
++    "a failed denial publication never enables replacement until durable recovery: %s",
++    async (published) => {
++      const f = harness();
++      await f.coordinator.initialize();
++      f.deny("join");
++      f.beforeResponse(async (route) => {
++        if (route === "join") f.failNextWrite(published);
++      });
++      await f.coordinator.joinInitial(code);
++      expect(f.coordinator.readView().phase).toBe("unconfirmed");
++      expect(f.record().pending).toMatchObject({
++        outcome: published ? "denied" : "uncertain",
++      });
++      await f.coordinator.joinInitial("0123456789AC");
++      expect(f.requests.map((request) => request.route)).toEqual([
++        "challenge",
++        "join",
++      ]);
++      expect(await f.coordinator.dispose()).toBe(true);
++      const restarted = harness();
++      restarted.setBytes(f.storedBytes()!);
++      await restarted.coordinator.initialize();
++      expect(restarted.coordinator.readView().phase).toBe(
++        published ? "entry" : "unconfirmed",
++      );
++      await restarted.coordinator.joinInitial("0123456789AC");
++      expect(restarted.requests).toHaveLength(published ? 2 : 0);
++    },
++  );
++
++  it.each(["challenge", "join"])(
++    "a lost successful join followed by %s denial preserves the original uncertain intent across restart",
++    async (route) => {
++      const f = harness();
++      await f.coordinator.initialize();
++      f.dropJoinResponse();
++      await f.coordinator.joinInitial(code);
++      const pending = f.record();
++      expect(f.server.joins.size).toBe(1);
++      expect(pending.pending).toMatchObject({ outcome: "uncertain" });
++      f.deny(route);
++      await f.coordinator.retryPending();
++      expect(f.coordinator.readView()).toMatchObject({
++        phase: "unavailable",
++        pendingOperation: "join",
++      });
++      const before = f.requests.length;
++      await f.coordinator.joinInitial("0123456789AC");
++      expect(f.requests).toHaveLength(before);
++      expect(f.record().pending).toEqual(pending.pending);
++      expect(f.record().device).toEqual(pending.device);
++      expect(await f.coordinator.dispose()).toBe(true);
++      const restarted = harness(f.server);
++      restarted.setBytes(f.storedBytes()!);
++      await restarted.coordinator.initialize();
++      expect(restarted.coordinator.readView().phase).toBe("unconfirmed");
++      await restarted.coordinator.joinInitial("0123456789AC");
++      expect(restarted.requests).toHaveLength(0);
++      await restarted.coordinator.retryPending();
++      expect(restarted.requests.at(-1)?.durable.pending).toEqual(
++        pending.pending,
++      );
++      expect(restarted.record().device).toEqual(pending.device);
++      expect(restarted.coordinator.readView().phase).toBe("active");
++      expect(f.server.joins.size).toBe(1);
++    },
++  );
++
++  it("a malformed 403 remains uncertain and cannot authorize a corrected initial request", async () => {
++    const f = harness();
++    await f.coordinator.initialize();
++    f.replyToJoin(() =>
++      Response.json(
++        { status: "denied", code: "STUDENT_SESSION_DENIED", extra: true },
++        { status: 403 },
++      ),
++    );
+     await f.coordinator.joinInitial(code);
++    expect(f.coordinator.readView().phase).toBe("unconfirmed");
++    expect(f.record().pending).toMatchObject({ outcome: "uncertain" });
++    await f.coordinator.joinInitial("0123456789AC");
++    expect(f.requests).toHaveLength(2);
++  });
++
++  it("concurrent corrected-code commands retain one enrollment and admit only the first owned intent", async () => {
++    const f = harness();
++    await f.coordinator.initialize();
++    f.deny("join");
++    await f.coordinator.joinInitial(code);
++    const device = f.record().device;
++    f.allow();
++    await Promise.all([
++      f.coordinator.joinInitial("0123456789AC"),
++      f.coordinator.joinInitial("0123456789AD"),
++    ]);
++    expect(f.requests).toHaveLength(4);
++    expect(f.requests.at(-1)?.durable.pending).toMatchObject({
++      joinCode: "0123456789AC",
++    });
++    expect(f.record().device).toEqual(device);
++    expect(f.server.joins.size).toBe(1);
++  });
++
++  it("generic denial of admitted authority retains only explicit targeted recovery and exact retry", async () => {
++    const f = harness();
++    await f.coordinator.initialize();
++    await f.coordinator.joinInitial(code);
++    f.deny();
++    f.advance(15_000);
++    await f.coordinator.refresh();
+     expect(f.coordinator.readView().phase).toBe("unavailable");
+     const before = f.requests.length;
+     await f.coordinator.joinInitial(code);
+@@ -2178,6 +2413,113 @@ describe("real desktop crypto/transport coordinator over synthetic private stora
+     expect(restarted.coordinator.readProtectionContext().admission).toBeNull();
+   });
+ 
++  it.each(["missing", "generation", "counter", "version"])(
++    "a v4 integrity failure (%s) preserves the original ciphertext and blocks every admission path",
++    async (mutation) => {
++      const f = harness();
++      await f.coordinator.initialize();
++      await f.coordinator.joinInitial(code);
++      const payload = JSON.parse(
++        f.storedBytes()!.toString().slice(10),
++      ) as Record<string, unknown>;
++      if (mutation === "missing") delete payload.integritySha256;
++      if (mutation === "generation")
++        payload.generation = Number(payload.generation) + 1;
++      if (mutation === "counter")
++        payload.lastReservedCounter = Number(payload.lastReservedCounter) + 1;
++      if (mutation === "version") payload.version = 3;
++      const corrupted = Buffer.from(`synthetic:${JSON.stringify(payload)}`);
++      expect(await f.coordinator.dispose()).toBe(true);
++      const restarted = harness();
++      restarted.setBytes(corrupted);
++      await restarted.coordinator.initialize();
++      expect(restarted.coordinator.readView().phase).toBe("recovery_required");
++      await restarted.coordinator.joinInitial("0123456789AC");
++      await restarted.coordinator.retryPending();
++      await restarted.coordinator.beginTargetedReadmission(
++        code,
++        restarted.coordinator.readView().revision,
++      );
++      await restarted.coordinator.refresh();
++      expect(restarted.requests).toHaveLength(0);
++      expect(restarted.preserved).toHaveLength(0);
++      expect(restarted.events.some((event) => event.startsWith("write:"))).toBe(
++        false,
++      );
++      expect(
++        restarted.coordinator.readProtectionContext().admission,
++      ).toBeNull();
++      expect(restarted.storedBytes()).toEqual(corrupted);
++      expect(await restarted.coordinator.dispose()).toBe(true);
++      expect(restarted.storedBytes()).toEqual(corrupted);
++    },
++  );
++
++  it("a same-process checksum failure after an uncertain write blocks targeted recovery without quarantining bytes", async () => {
++    const f = harness();
++    await f.coordinator.initialize();
++    await f.coordinator.joinInitial(code);
++    f.advance(15_000);
++    f.failNextWrite(true);
++    await f.coordinator.refresh();
++    const payload = JSON.parse(f.storedBytes()!.toString().slice(10)) as Record<
++      string,
++      unknown
++    >;
++    payload.generation = Number(payload.generation) + 1;
++    const corrupted = Buffer.from(`synthetic:${JSON.stringify(payload)}`);
++    f.setBytes(corrupted);
++    await f.coordinator.retryPending();
++    expect(f.coordinator.readView().phase).toBe("recovery_required");
++    const events = [...f.events];
++    const requests = f.requests.length;
++    await f.coordinator.beginTargetedReadmission(
++      code,
++      f.coordinator.readView().revision,
++    );
++    await f.coordinator.joinInitial("0123456789AC");
++    await f.coordinator.retryPending();
++    await f.coordinator.refresh();
++    expect(f.preserved).toHaveLength(0);
++    expect(f.events).toEqual(events);
++    expect(f.requests).toHaveLength(requests);
++    expect(f.storedBytes()).toEqual(corrupted);
++    expect(f.coordinator.readProtectionContext().admission).toBeNull();
++  });
++
++  it("targeted recovery rechecks integrity uncertainty discovered by its own reload before quarantine", async () => {
++    const f = harness();
++    await f.coordinator.initialize();
++    await f.coordinator.joinInitial(code);
++    await f.coordinator.forfeit(f.coordinator.readView().revision);
++    f.failQuarantineOnce();
++    await f.coordinator.beginTargetedReadmission(
++      code,
++      f.coordinator.readView().revision,
++    );
++    const payload = JSON.parse(f.storedBytes()!.toString().slice(10)) as Record<
++      string,
++      unknown
++    >;
++    payload.generation = Number(payload.generation) + 1;
++    const corrupted = Buffer.from(`synthetic:${JSON.stringify(payload)}`);
++    f.setBytes(corrupted);
++    const writes = f.events.filter((event) => event.startsWith("write:"));
++    const requests = f.requests.length;
++    await f.coordinator.beginTargetedReadmission(
++      code,
++      f.coordinator.readView().revision,
++    );
++    expect(f.coordinator.readView().phase).toBe("recovery_required");
++    expect(f.preserved).toHaveLength(0);
++    expect(f.events.filter((event) => event.startsWith("write:"))).toEqual(
++      writes,
++    );
++    expect(f.requests).toHaveLength(requests);
++    expect(f.storedBytes()).toEqual(corrupted);
++    expect(f.coordinator.readProtectionContext().admission).toBeNull();
++  });
++
+   it("forfeit is revision-reviewed and durable before HTTP; acknowledgment promotes a terminal local record", async () => {
+     const f = harness();
+     await f.coordinator.initialize();
+@@ -2315,9 +2657,11 @@ describe("real desktop crypto/transport coordinator over synthetic private stora
+     f.failNextWrite(true);
+     await f.coordinator.refresh();
+     f.setBytes(
+-      Buffer.from(
+-        `synthetic:${JSON.stringify({ ...previous, generation: previous.generation + 4, lastReservedCounter: 7 })}`,
+-      ),
++      syntheticStoredRecord({
++        ...previous,
++        generation: previous.generation + 4,
++        lastReservedCounter: 7,
++      }),
+     );
+     await f.coordinator.retryPending();
+     expect(f.coordinator.readView().phase).toBe("recovery_required");
+diff --git a/apps/desktop/tests/student-session-store.test.ts b/apps/desktop/tests/student-session-store.test.ts
+index 79ba135d68f9919d7f3a482b8fbcc21123b43317..551adfc3395110aadb7e72846392e1fe42a116b1 100644
+--- a/apps/desktop/tests/student-session-store.test.ts
++++ b/apps/desktop/tests/student-session-store.test.ts
+@@ -9,6 +9,7 @@ import {
+ import { createStudentSessionCrypto } from "../src/main/student-session-crypto.js";
+ import {
+   createStudentSessionStore,
++  canReplaceInitialJoin,
+   emptyNativeEvidence,
+   retainNativeEvidenceSigner,
+   pruneNativeEvidence,
+@@ -35,15 +36,18 @@ const configuration = {
+ const crypto = createStudentSessionCrypto(configuration);
+ const requestId = "10000000-0000-4000-8000-000000000001";
+ 
+-function pending(): StudentSessionSuccessor {
++function pending(
++  outcome: "not_dispatched" | "uncertain" | "denied" = "not_dispatched",
++): StudentSessionSuccessor {
+   return {
+-    version: 3,
++    version: 4,
+     apiOrigin: configuration.url,
+     device: crypto.createEnrollment(),
+     current: null,
+     pending: {
+       kind: "join",
+       admissionMode: "initial",
++      outcome,
+       requestId,
+       joinCode: "0123456789AB",
+       candidates: crypto.createCandidates(),
+@@ -327,13 +331,22 @@ function batchFor(
+   };
+ }
+ 
++function checksumPayload(payload: object): object {
++  return {
++    ...payload,
++    integritySha256: createHash("sha256")
++      .update(JSON.stringify(payload), "utf8")
++      .digest("hex"),
++  };
++}
++
+ function persisted(value: unknown): Buffer {
+   let disk = value;
+   if (
+     typeof value === "object" &&
+     value !== null &&
+     "version" in value &&
+-    value.version === 3 &&
++    (value.version === 3 || value.version === 4) &&
+     "evidence" in value
+   ) {
+     const record = value as StudentSessionRecord;
+@@ -349,6 +362,13 @@ function persisted(value: unknown): Buffer {
+       },
+     };
+   }
++  if (
++    typeof disk === "object" &&
++    disk !== null &&
++    "version" in disk &&
++    disk.version === 4
++  )
++    disk = checksumPayload(disk);
+   return Buffer.from(`synthetic:${JSON.stringify(disk)}`);
+ }
+ 
+@@ -596,7 +616,307 @@ function worstEvidenceRecord(attemptCount: number): StudentSessionRecord {
+   return record;
+ }
+ 
+-describe("version 3 bounded native evidence retention", () => {
++describe("version 4 whole-payload corruption checksum", () => {
++  it("stores the compact payload SHA-256 while keeping the in-memory record checksum-free", async () => {
++    const f = fixture();
++    await f.store.load();
++    const record = await f.store.commitDurably(0, withProtection());
++    const disk = JSON.parse(f.getBytes()!.toString().slice(10)) as Record<
++      string,
++      unknown
++    >;
++    const digest = disk.integritySha256;
++    delete disk.integritySha256;
++    expect(digest).toBe(
++      createHash("sha256").update(JSON.stringify(disk), "utf8").digest("hex"),
++    );
++    expect(record).not.toHaveProperty("integritySha256");
++    expect(Object.keys(disk)).toEqual(Object.keys(record));
++    expect(await createStudentSessionStore(f.options).load()).toEqual({
++      kind: "ready",
++      record,
++    });
++  });
++
++  it.each(["generation", "device", "counter", "outcome", "native", "evidence"])(
++    "rejects schema-valid %s corruption with the original checksum and retains all bytes",
++    async (field) => {
++      const base: StudentSessionRecord = {
++        ...(field === "device" || field === "outcome"
++          ? pending("uncertain")
++          : withProtection()),
++        generation: 5,
++      };
++      let changed: StudentSessionRecord = base;
++      if (field === "generation") changed = { ...base, generation: 6 };
++      if (field === "device")
++        changed = { ...base, device: crypto.createEnrollment() };
++      if (field === "counter") changed = { ...base, lastReservedCounter: 20 };
++      if (field === "outcome") {
++        if (base.pending?.kind !== "join") throw new Error("fixture");
++        changed = { ...base, pending: { ...base.pending, outcome: "denied" } };
++      }
++      if (field === "native") {
++        if (base.nativeProtection === null) throw new Error("fixture");
++        changed = {
++          ...base,
++          nativeProtection: {
++            ...base.nativeProtection,
++            revision: base.nativeProtection.revision + 1,
++          },
++        };
++      }
++      if (field === "evidence")
++        changed = {
++          ...base,
++          evidence: {
++            ...base.evidence,
++            lastAttemptedSigner: base.device.keyThumbprint,
++          },
++        };
++      const valid = fixture();
++      valid.setBytes(persisted(changed));
++      expect(await valid.store.load()).toEqual({
++        kind: "ready",
++        record: changed,
++      });
++      const originalDisk = JSON.parse(
++        persisted(base).toString().slice(10),
++      ) as Record<string, unknown>;
++      const corruptDisk = JSON.parse(
++        persisted(changed).toString().slice(10),
++      ) as Record<string, unknown>;
++      corruptDisk.integritySha256 = originalDisk.integritySha256;
++      const corruptBytes = Buffer.from(
++        `synthetic:${JSON.stringify(corruptDisk)}`,
++      );
++      const f = fixture();
++      f.setBytes(corruptBytes);
++      expect(await f.store.load()).toEqual({
++        kind: "recovery_required",
++        generation: 0,
++      });
++      await expect(f.store.commitDurably(0, changed)).rejects.toThrow();
++      expect(f.events).toEqual(["lock", "load", "decrypt"]);
++      expect(f.getBytes()).toEqual(corruptBytes);
++      expect(f.preserved).toEqual([]);
++    },
++  );
++
++  it.each([
++    undefined,
++    null,
++    0,
++    "",
++    "a".repeat(63),
++    "A".repeat(64),
++    "0".repeat(64),
++    "a".repeat(64) + "\n",
++  ])(
++    "rejects missing, malformed or mismatched checksum %j without rewriting or quarantining",
++    async (integritySha256) => {
++      const disk = JSON.parse(
++        persisted({ ...admitted(), generation: 1 })
++          .toString()
++          .slice(10),
++      ) as Record<string, unknown>;
++      disk.integritySha256 = integritySha256;
++      const bytes = Buffer.from(`synthetic:${JSON.stringify(disk)}`);
++      const f = fixture();
++      f.setBytes(bytes);
++      expect(await f.store.load()).toEqual({
++        kind: "recovery_required",
++        generation: 0,
++      });
++      expect(f.getBytes()).toEqual(bytes);
++      expect(f.events).toEqual(["lock", "load", "decrypt"]);
++      expect(f.preserved).toEqual([]);
++    },
++  );
++
++  it("rejects a version downgrade retaining the checksum and extra fields even with a recomputed checksum", async () => {
++    const disk = JSON.parse(
++      persisted({ ...admitted(), generation: 1 })
++        .toString()
++        .slice(10),
++    ) as Record<string, unknown>;
++    const downgraded = { ...disk, version: 3 };
++    delete disk.integritySha256;
++    const extra = checksumPayload({ ...disk, unexpected: false });
++    for (const payload of [downgraded, extra]) {
++      const bytes = Buffer.from(`synthetic:${JSON.stringify(payload)}`);
++      const f = fixture();
++      f.setBytes(bytes);
++      expect(await f.store.load()).toEqual({
++        kind: "recovery_required",
++        generation: 0,
++      });
++      expect(f.getBytes()).toEqual(bytes);
++      expect(f.events).toEqual(["lock", "load", "decrypt"]);
++    }
++  });
++});
++
++describe("version 4 initial join outcome", () => {
++  it.each(["not_dispatched", "uncertain", "denied"] as const)(
++    "round-trips initial outcome %s without changing the enrollment or stored payload",
++    async (outcome) => {
++      const f = fixture();
++      const record = pending(outcome);
++      await f.store.load();
++      const written = await f.store.commitDurably(0, record);
++      expect(written).toEqual({ ...record, generation: 1 });
++      expect(f.getBytes()).toEqual(persisted(written));
++      expect(await createStudentSessionStore(f.options).load()).toEqual({
++        kind: "ready",
++        record: written,
++      });
++      expect(written.device).toEqual(record.device);
++      expect(Object.isFrozen(written.pending)).toBe(true);
++    },
++  );
++
++  it.each([1, 2, 3])(
++    "normalizes v%i initial and readmission joins as uncertain without rewriting bytes",
++    async (version) => {
++      for (const admissionMode of ["initial", "readmission"] as const) {
++        const record = pending("uncertain");
++        if (record.pending?.kind !== "join") throw new Error("fixture");
++        const expected = {
++          ...record,
++          generation: 7,
++          pending: { ...record.pending, admissionMode },
++        };
++        const oldJoin: Record<string, unknown> = { ...expected.pending };
++        delete oldJoin.outcome;
++        const legacy: Record<string, unknown> = {
++          ...expected,
++          version,
++          pending: oldJoin,
++        };
++        if (version < 3) delete legacy.evidence;
++        if (version === 1) delete legacy.nativeProtection;
++        const original = persisted(legacy);
++        const f = fixture();
++        f.setBytes(original);
++        expect(await f.store.load()).toEqual({
++          kind: "ready",
++          record: expected,
++        });
++        expect(f.getBytes()).toEqual(original);
++        expect(f.events).toEqual(["lock", "load", "decrypt"]);
++        expect(canReplaceInitialJoin(expected)).toBe(false);
++        const written = await f.store.commitDurably(7, expected);
++        expect(written.version).toBe(4);
++        expect(written.pending).toEqual(expected.pending);
++        expect(f.getBytes()).toEqual(persisted(written));
++      }
++    },
++  );
++
++  it("normalizes compact v3 evidence without rewriting origins, counters or bytes", async () => {
++    const record = worstEvidenceRecord(5);
++    const original = persisted({ ...record, version: 3 });
++    const f = fixture();
++    f.setBytes(original);
++    expect(await f.store.load()).toEqual({ kind: "ready", record });
++    expect(f.getBytes()).toEqual(original);
++    expect(f.events).toEqual(["lock", "load", "decrypt"]);
++  });
++
++  it.each([undefined, null, false, 0, "", "accepted", "DENIED", {}])(
++    "preserves v4 bytes and rejects malformed initial outcome %j before publication",
++    async (outcome) => {
++      const record = pending();
++      const malformed = {
++        ...record,
++        pending: { ...record.pending, outcome },
++      };
++      const f = fixture();
++      await f.store.load();
++      await expect(
++        f.store.commitDurably(0, malformed as StudentSessionSuccessor),
++      ).rejects.toThrow();
++      expect(f.events).toEqual(["lock", "load"]);
++      const original = persisted({ ...malformed, generation: 1 });
++      f.setBytes(original);
++      expect(await f.store.load()).toEqual({
++        kind: "recovery_required",
++        generation: 0,
++      });
++      expect(f.getBytes()).toEqual(original);
++    },
++  );
++
++  it.each(["not_dispatched", "denied"] as const)(
++    "requires no prior state for replaceable outcome %s",
++    async (outcome) => {
++      const base = pending(outcome);
++      const history = worstEvidenceRecord(5);
++      const emptyJournal: StoredNativeProtection = {
++        policyVersion: 1,
++        revision: 0,
++        latestAttempt: null,
++        nextFactSequence: 1,
++        facts: [],
++      };
++      const evidenceVariants: StoredNativeEvidence[] = [
++        { ...base.evidence, origins: history.evidence.origins },
++        { ...base.evidence, acknowledgments: history.evidence.acknowledgments },
++        { ...base.evidence, pendingBatches: history.evidence.pendingBatches },
++        { ...base.evidence, retiredSigners: history.evidence.retiredSigners },
++        { ...base.evidence, lastAttemptedSigner: base.device.keyThumbprint },
++      ];
++      const variants: StudentSessionSuccessor[] = [
++        { ...base, current: admitted().current },
++        { ...base, lastReservedCounter: 1 },
++        { ...base, terminal: true },
++        { ...base, nativeProtection: emptyJournal },
++        ...evidenceVariants.map((evidence) => ({ ...base, evidence })),
++      ];
++      if (base.pending?.kind !== "join") throw new Error("fixture");
++      variants.push({
++        ...base,
++        pending: { ...base.pending, admissionMode: "readmission" },
++      });
++      expect(canReplaceInitialJoin(base)).toBe(true);
++      for (const variant of variants) {
++        expect(canReplaceInitialJoin(variant)).toBe(false);
++        const f = fixture();
++        await f.store.load();
++        await expect(f.store.commitDurably(0, variant)).rejects.toThrow();
++        expect(f.events).toEqual(["lock", "load"]);
++        const original = persisted({ ...variant, generation: 1 });
++        f.setBytes(original);
++        expect((await f.store.load()).kind).toBe("recovery_required");
++        expect(f.getBytes()).toEqual(original);
++      }
++    },
++  );
++
++  it("never marks absent, uncertain, admitted, terminal or targeted records as replaceable", async () => {
++    const initial = pending("uncertain");
++    if (initial.pending?.kind !== "join") throw new Error("fixture");
++    const targeted: StudentSessionSuccessor = {
++      ...initial,
++      pending: { ...initial.pending, admissionMode: "readmission" },
++    };
++    for (const record of [
++      null,
++      initial,
++      admitted(),
++      { ...initial, current: null, pending: null, terminal: true },
++      targeted,
++    ])
++      expect(canReplaceInitialJoin(record)).toBe(false);
++    const f = fixture();
++    await f.store.load();
++    const written = await f.store.commitDurably(0, targeted);
++    expect(await f.store.load()).toEqual({ kind: "ready", record: written });
++  });
++});
++
++describe("version 4 bounded native evidence retention", () => {
+   it("fits 32 facts, five signers/pending prefixes and all ACKs across worst origin-count shapes without raising byte limits", async () => {
+     const sizes: number[] = [];
+     for (let attempts = 5; attempts <= 16; attempts += 1) {
+@@ -642,7 +962,7 @@ describe("version 3 bounded native evidence retention", () => {
+       const loaded = await f.store.load();
+       if (loaded.kind !== "ready")
+         throw new Error("Expected legacy normalization");
+-      expect(loaded.record.version).toBe(3);
++      expect(loaded.record.version).toBe(4);
+       expect(loaded.record.nativeProtection).toEqual(record.nativeProtection);
+       expect(loaded.record.lastReservedCounter).toBe(
+         record.lastReservedCounter,
+@@ -663,17 +983,19 @@ describe("version 3 bounded native evidence retention", () => {
+     },
+   );
+ 
+-  it("accepts only compact v3 disk origins and reconstructs exact immutable scope from retained facts", async () => {
++  it("accepts only compact v4 disk origins and reconstructs exact immutable scope from retained facts", async () => {
+     const record = { ...withProtection(), generation: 7 };
+     const f = fixture();
+-    const inflated = Buffer.from(`synthetic:${JSON.stringify(record)}`);
++    const inflated = Buffer.from(
++      `synthetic:${JSON.stringify(checksumPayload(record))}`,
++    );
+     f.setBytes(inflated);
+     expect((await f.store.load()).kind).toBe("recovery_required");
+     expect(f.getBytes()).toEqual(inflated);
+     const valid = fixture();
+     valid.setBytes(persisted(record));
+     const loaded = await valid.store.load();
+-    if (loaded.kind !== "ready") throw new Error("Expected compact v3 record");
++    if (loaded.kind !== "ready") throw new Error("Expected compact v4 record");
+     expect(loaded.record).toEqual(record);
+     expect(Object.isFrozen(loaded.record.evidence.origins[0]!.scope)).toBe(
+       true,
+@@ -1081,7 +1403,7 @@ describe("version 3 bounded native evidence retention", () => {
+       { device: accepted.device, lastReservedCounter: 19 },
+     ]);
+     if (evidence === null) throw new Error("Expected signer retention");
+-    const replacement = pending();
++    const replacement = pending("uncertain");
+     if (replacement.pending?.kind !== "join") throw new Error("fixture");
+     const generation = await f.store.preserveForTargetedRecovery(2);
+     const replaced = await f.store.commitDurably(generation, {
+@@ -1228,7 +1550,7 @@ describe("version 3 bounded native evidence retention", () => {
+     const retained = retainNativeEvidenceSigner(loaded.record);
+     expect(retained?.retiredSigners.at(-1)?.lastReservedCounter).toBe(22);
+     if (retained === null) throw new Error("Expected available retention slot");
+-    const replacement = pending();
++    const replacement = pending("uncertain");
+     if (replacement.pending?.kind !== "join") throw new Error("fixture");
+     const generation = await f.store.preserveForTargetedRecovery(1);
+     const next = {
+@@ -1361,7 +1683,7 @@ describe("private Student record durability adapter (synthetic codec/native)", (
+     await expect(
+       f.store.commitDurably(nextGeneration, pending()),
+     ).rejects.toThrow();
+-    const next = pending();
++    const next = pending("uncertain");
+     if (next.pending?.kind !== "join") throw new Error("fixture");
+     const targeted = {
+       ...next,
+@@ -1411,7 +1733,7 @@ describe("private Student record durability adapter (synthetic codec/native)", (
+       const base = { ...pending(), generation: 1 };
+       const mutated =
+         kind === "version"
+-          ? { ...base, version: 4 }
++          ? { ...base, version: 5 }
+           : kind === "origin"
+             ? { ...base, apiOrigin: "https://other.example" }
+             : kind === "key"
+@@ -1441,7 +1763,7 @@ describe("private Student record durability adapter (synthetic codec/native)", (
+                         },
+                       }
+                     : { ...base, extra: true };
+-      const original = Buffer.from(`synthetic:${JSON.stringify(mutated)}`);
++      const original = persisted(mutated);
+       f.setBytes(original);
+       expect((await f.store.load()).kind).toBe("recovery_required");
+       expect(f.getBytes()).toEqual(original);
+@@ -1472,7 +1794,7 @@ describe("versioned native protection record (synthetic codec/native)", () => {
+     "normalizes exact v1 %s without writing or changing identity, pending material or counters",
+     async (kind) => {
+       const f = fixture();
+-      let record = kind === "join" ? pending() : admitted();
++      let record = kind === "join" ? pending("uncertain") : admitted();
+       if (kind === "reconnect")
+         record = {
+           ...record,
+@@ -1501,6 +1823,11 @@ describe("versioned native protection record (synthetic codec/native)", () => {
+       };
+       delete legacy.nativeProtection;
+       delete legacy.evidence;
++      if (record.pending?.kind === "join") {
++        const legacyJoin: Record<string, unknown> = { ...record.pending };
++        delete legacyJoin.outcome;
++        legacy.pending = legacyJoin;
++      }
+       const original = persisted(legacy);
+       f.setBytes(original);
+       const loaded = await f.store.load();
+@@ -1529,7 +1856,7 @@ describe("versioned native protection record (synthetic codec/native)", () => {
+         record.extra = false;
+       }
+       if (kind === "v2-missing-native") delete record.nativeProtection;
+-      if (kind === "future") record.version = 4;
++      if (kind === "future") record.version = 5;
+       const original = persisted(record);
+       f.setBytes(original);
+       expect(await f.store.load()).toEqual({
+@@ -1716,7 +2043,7 @@ describe("versioned native protection record (synthetic codec/native)", () => {
+       facts: [],
+     };
+     const written = await f.store.commitDurably(0, {
+-      ...pending(),
++      ...pending("uncertain"),
+       nativeProtection,
+     });
+     expect(await f.store.load()).toEqual({ kind: "ready", record: written });
+diff --git a/apps/desktop/tests/student-session-view.test.ts b/apps/desktop/tests/student-session-view.test.ts
+index 768c5ba5eed5e96dc78387cce441e45713b661e4..1aaa2279825cbc52ce590f9e95576092b9bcede0 100644
+--- a/apps/desktop/tests/student-session-view.test.ts
++++ b/apps/desktop/tests/student-session-view.test.ts
+@@ -477,6 +477,52 @@ describe("Student desktop session view", () => {
+     expect(view.heading()).toBe("Session unavailable");
+   });
+ 
++  it("returns a definitively unadmitted attempt to public code entry and submits the corrected code without private recovery", async () => {
++    const view = setup();
++    await settle();
++    view.bridge.joinTest.mockResolvedValueOnce(
++      state("entry", 2, { pendingOperation: "join" }),
++    );
++    view.input().value = "123456789ABC";
++    view.form().fire("submit");
++    await settle();
++    expect(view.heading()).toBe("Join a Test");
++    expect(view.text()).toContain("Check the Test join code and try again");
++    expect(visible(view.form())).toBe(true);
++    expect(visible(view.action("retry"))).toBe(false);
++    expect(visible(view.action("open-recovery"))).toBe(false);
++    expect(view.text()).not.toContain("Private re-admission code");
++    view.bridge.joinTest.mockResolvedValueOnce(state("active", 3));
++    view.input().value = "123456789ABD";
++    view.form().fire("submit");
++    await settle();
++    expect(view.bridge.joinTest.mock.calls).toEqual([
++      [{ code: "123456789ABC" }],
++      [{ code: "123456789ABD" }],
++    ]);
++    expect(view.bridge.beginTargetedReadmission).not.toHaveBeenCalled();
++    expect(view.bridge.retryStudentSession).not.toHaveBeenCalled();
++    expect(view.heading()).toBe("Session confirmed");
++  });
++
++  it("keeps exact retry visible after an uncertain attempt is denied without exposing fresh public entry", async () => {
++    const view = setup(state("unavailable", 2, { pendingOperation: "join" }));
++    await settle();
++    expect(view.text()).toContain("Retry that attempt or ask your teacher");
++    expect(visible(view.form())).toBe(false);
++    expect(visible(view.action("retry"))).toBe(true);
++    expect(visible(view.action("open-recovery"))).toBe(true);
++    view.bridge.retryStudentSession.mockResolvedValueOnce(
++      state("unconfirmed", 3, { pendingOperation: "join" }),
++    );
++    view.action("retry").fire("click");
++    await settle();
++    expect(view.bridge.retryStudentSession).toHaveBeenCalledTimes(1);
++    expect(view.bridge.joinTest).not.toHaveBeenCalled();
++    expect(view.bridge.beginTargetedReadmission).not.toHaveBeenCalled();
++    expect(view.heading()).toBe("Session result unconfirmed");
++  });
++
+   it("does not let an older mutation result overwrite a newer unconfirmed projection", async () => {
+     const view = setup();
+     await settle();
+@@ -836,6 +882,64 @@ describe("Student desktop session view", () => {
+ });
+ 
+ describe("Student desktop protection presentation", () => {
++  it.each(["unavailable", "unconfirmed"] as const)(
++    "idle protection guidance preserves the saved %s admission instead of suggesting a new join",
++    async (phase) => {
++      const view = setup(state(phase, 3, { pendingOperation: "join" }));
++      await settle();
++      expect(view.text()).toContain(
++        "Retry or recover your saved session admission, then choose Start assessment",
++      );
++      expect(view.text()).not.toContain(
++        "Join a Test, then choose Start assessment",
++      );
++      expect(visible(view.form())).toBe(false);
++      expect(visible(view.action("retry"))).toBe(true);
++      expect(view.action("start-assessment").disabled).toBe(true);
++      expect(view.bridge.joinTest).not.toHaveBeenCalled();
++      expect(view.bridge.startAssessment).not.toHaveBeenCalled();
++    },
++  );
++
++  it("idle protection guidance joins from entry and checks protection directly after admission", async () => {
++    const view = setup(state("entry", 1));
++    await settle();
++    expect(view.text()).toContain("Join a Test, then choose Start assessment");
++    expect(view.action("start-assessment").disabled).toBe(true);
++    view.publish(state("active", 2));
++    expect(view.text()).toContain(
++      "The calculator remains unavailable. Choose Start assessment to check protection.",
++    );
++    expect(view.text()).not.toContain(
++      "Join a Test, then choose Start assessment",
++    );
++    expect(view.action("start-assessment").disabled).toBe(false);
++    expect(view.bridge.startAssessment).not.toHaveBeenCalled();
++  });
++
++  it.each([
++    [
++      "recovery_required",
++      "The previous assessment’s end could not be confirmed",
++    ],
++    ["failed", "The attempt did not establish confirmed protection"],
++  ] as const)(
++    "%s protection guidance keeps native recovery ahead of uncertain admission guidance",
++    async (phase, copy) => {
++      const view = setup({
++        ...nativeState(phase, 3),
++        admission: state("unconfirmed", 3, { pendingOperation: "join" })
++          .admission,
++      });
++      await settle();
++      expect(view.text()).toContain(copy);
++      expect(view.text()).not.toContain(
++        "Retry or recover your saved session admission",
++      );
++      expect(view.action("start-assessment").disabled).toBe(true);
++    },
++  );
++
+   it("adds no renderer timer or polling authority to passive protection publication", async () => {
+     const interval = vi.spyOn(globalThis, "setInterval");
+     const timeout = vi.spyOn(globalThis, "setTimeout");
+diff --git a/docs/product-completion/native-assessment-protection.md b/docs/product-completion/native-assessment-protection.md
+index b018ce163b6d212b252559eb7322d916440fd00e..731d655e4eb6ce396311e87df1ecb08ac24cf274 100644
+--- a/docs/product-completion/native-assessment-protection.md
++++ b/docs/product-completion/native-assessment-protection.md
+@@ -70,11 +70,20 @@ receipt or native end when either result is unknown.
+ 
+ ## Durable recovery
+ 
+-The encrypted version-3 record retains one admission, counter and evidence writer.
+-Exact version-1 and version-2 decoding normalizes in memory without an implicit
++The encrypted version-4 record retains one admission, counter and evidence writer.
++Exact version-1, version-2 and version-3 decoding normalizes in memory without an implicit
+ write. Native facts occupy a bounded immutable journal of 32 slots, with eight
+ reserved before engaging. Plaintext remains limited to 48 KiB and ciphertext to
+ 64 KiB. Unknown durability preserves possibly published bytes and blocks promotion.
++Version 4 also records initial-join uncertainty, as described in the
++[admission recovery contract](student-session-admission.md#desktop-persistence-and-protection-state).
++Earlier version-3 readers cannot read a version-4 write. A rollback must retain
++version-4 read support and the current ciphertext, lock and counter history.
++The whole compact version-4 payload carries an unkeyed SHA-256 checksum for
++corruption detection, verified before accepting the record. The checksum is not
++hostile-host authentication, and its serialized field counts toward the existing
++plaintext ceiling. A failed check retains the original ciphertext and blocks
++recovery writes and egress.
+ 
+ Cleanup completion requires confirmed native quiescence, detached/destroyed
+ calculator content, owned window/shortcut restoration and durable completion.
+diff --git a/docs/product-completion/student-session-admission.md b/docs/product-completion/student-session-admission.md
+index 1691cc9f7cecfd4b70ef1e8542c96b5fffd890fd..1f1685b4534ccf9627058c3c28e76064b964e799 100644
+--- a/docs/product-completion/student-session-admission.md
++++ b/docs/product-completion/student-session-admission.md
+@@ -63,7 +63,35 @@ remains generic and cannot establish whether the Test ended or a grant expired.
+ ## Desktop persistence and protection state
+ 
+ Main owns the encrypted versioned record, committed authority, one exact pending
+-mutation and reserved counter. The selected macOS store uses a separate fixed
++mutation and reserved counter. Version 4 records whether an initial join has not
++been dispatched, may have committed, or was definitively denied. Before sending
++the join request, main durably records uncertainty. Only a first-known definitive
++denial can durably restore public-code entry; any earlier uncertain dispatch
++remains uncertain even if a later request is denied. Challenge failures before
++any join dispatch can also return to entry. A corrected code retains the same
++device enrollment and replaces only the pending request and credential candidates.
++Replacement requires no admitted authority, reserved counter, native protection
++or retained evidence. Uncertain attempts keep exact retry and explicit targeted
++re-admission; a generic denial never proves an earlier admission did not commit.
++
++Version-1, version-2 and version-3 records normalize in memory without writing;
++legacy pending joins are always uncertain. A successful version-4 write is a
++forward format transition: earlier version-3 readers reject it and must not be
++used for rollback. Rollback needs a version-4-compatible reader while preserving
++the current encrypted record, lock and counter history; restoring older ciphertext
++or clearing the record is not a recovery procedure.
++
++Each persisted version-4 record appends `integritySha256`, the SHA-256 digest of
++the UTF-8 JSON serialization of the complete compact record before that field is
++added. It covers the version, generation, device material, pending intent,
++authority, counters, protection facts and compact evidence. Loading verifies the
++digest before semantic validation or legacy normalization. A missing or mismatched
++digest preserves the ciphertext and blocks admission and targeted recovery.
++The digest provides corruption detection, not authenticated integrity against a
++hostile host. The unchanged 48 KiB plaintext budget includes the checksum field;
++the ciphertext ceiling remains 64 KiB.
++
++The selected macOS store uses a separate fixed
+ process-lifetime advisory-lock inode, exclusive temporary writes, exact
+ `F_FULLFSYNC` file and parent-directory barriers, and atomic replacement. It
+ retains possibly published bytes on uncertain durability; no failed barrier may
