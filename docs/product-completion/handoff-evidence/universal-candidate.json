@@ -1,0 +1,228 @@
+{
+  "artifacts": {
+    "checkpoint": {
+      "bytes": 4032,
+      "path": "/Users/nicky/workspace/projects/desmoslock-canonical-universal-61ec-43-7-v1/artifacts/universal-artifact-runs/643f07f1-e170-400e-9dde-5afa69b859cc/checkpoint/student-session.record",
+      "sha256": "b50e8a92452ed6d065731bf9c470faccbb2c5356f199aa053537acdaac457f62"
+    },
+    "createResult": {
+      "bytes": 135016,
+      "path": "/Users/nicky/workspace/projects/desmoslock-canonical-universal-61ec-43-7-v1/artifacts/local-tool-tmp/canonical-collector-supervisor/create-result.json",
+      "sha256": "67620f1f0a6bd2b3e955d8ca10ebb4e9f5e0f886a2709b31aca1ee57526bd6c7"
+    },
+    "fuseEvidence": {
+      "bytes": 360,
+      "path": "/Users/nicky/workspace/projects/desmoslock-canonical-universal-61ec-43-7-v1/artifacts/universal-artifact-runs/643f07f1-e170-400e-9dde-5afa69b859cc/evidence/fcac9d50e14c124c037cdd861818ee2a147ea21eba22c53b7b174434d7925d89",
+      "sha256": "fcac9d50e14c124c037cdd861818ee2a147ea21eba22c53b7b174434d7925d89"
+    },
+    "launchPolicy": {
+      "bytes": 998,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/canonical-universal-61ec-43.7-v1/candidate-policy-boundary-receipt.json",
+      "sha256": "fd001d001dedfe912b6f5869444da438ed449aae7ee8bc4111c5245048d6f22e"
+    },
+    "localLaunch": {
+      "bytes": 835,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/canonical-universal-61ec-43.7-v1/physical-candidate-launch-receipt.json",
+      "sha256": "7615018af4704c051b735b8410d397afe63230bca60a1a134710120bc0bf9377"
+    },
+    "preflightReview": {
+      "bytes": 1250,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/canonical-universal-61ec-43.7-v1/independent-preflight-review.json",
+      "sha256": "c6c5ba0082612eb8e25f0148ae914b268b05def5c3db0704ec5e43ee94779c7b"
+    },
+    "preparation": {
+      "bytes": 3930,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/canonical-universal-61ec-43.7-v1/runner-preparation-receipt.json",
+      "sha256": "ab46e28e444ce5b5459e541b26f9ad81d1da9969129c60050a705a9ff5842b23"
+    },
+    "resumeResult": {
+      "bytes": 134839,
+      "path": "/Users/nicky/workspace/projects/desmoslock-canonical-universal-61ec-43-7-v1/artifacts/local-tool-tmp/canonical-collector-supervisor/resume-result.json",
+      "sha256": "3fcb3ac28d96887f7f268db2ea2ffc905667cf32bfcd4b70fcc8f81329218836"
+    },
+    "visualAttempt": {
+      "bytes": 1188,
+      "path": "/Users/nicky/.openclaw/workspace/state/execution-packets/desmoslock-astra-2026-09-04/canonical-universal-61ec-43.7-v1/visual-candidate-launch-receipt.json",
+      "sha256": "ca6ba7dc85feebcd2c4d1f14f2f7badc1dd6d64a918e2afd310eca640da9bb2b"
+    }
+  },
+  "candidate": {
+    "architectures": {
+      "aacProtectionAddon": ["x86_64", "arm64"],
+      "durableRecordAddon": ["x86_64", "arm64"],
+      "electronFramework": ["x86_64", "arm64"],
+      "mainExecutable": ["x86_64", "arm64"],
+      "mainHelper": ["x86_64", "arm64"]
+    },
+    "deepStrictCodeSignVerification": "pass",
+    "fuses": {
+      "arm64": {
+        "EnableNodeCliInspectArguments": "DISABLE",
+        "EnableNodeOptionsEnvironmentVariable": "DISABLE",
+        "RunAsNode": "DISABLE"
+      },
+      "x64": {
+        "EnableNodeCliInspectArguments": "DISABLE",
+        "EnableNodeOptionsEnvironmentVariable": "DISABLE",
+        "RunAsNode": "DISABLE"
+      }
+    },
+    "gatekeeperAssessment": "rejected_unsigned_expected",
+    "path": "/Users/nicky/workspace/projects/desmoslock-canonical-universal-61ec-43-7-v1/artifacts/universal-artifact-runs/643f07f1-e170-400e-9dde-5afa69b859cc/candidate/DesmosLock Internal.app",
+    "signature": "ad-hoc",
+    "sizeBytes": 522838191,
+    "teamIdentifier": null
+  },
+  "collector": {
+    "buildId": "3318d38c5f17ad35c20db81ac4f272a57f08f63e1f214797bd112ccc473eee76",
+    "checkoutLeaseAbsent": true,
+    "checkpointRevision": 26,
+    "collectorTreeSha256": "0e0acab8fa52cdf8714de8f8e3509bb4a7ff22bcd84d31cfea0e53761ac836a7",
+    "createAndResumeIdentical": true,
+    "gitFenceUnchanged": true,
+    "inputPinsUnchanged": true,
+    "observedPassCases": [
+      "source-inputs",
+      "distribution-inventory",
+      "packaged-inventory",
+      "packaged-fuses",
+      "native-inventory",
+      "checkpoint-readback",
+      "source-inputs",
+      "packaged-inventory",
+      "packaged-fuses",
+      "native-inventory",
+      "checkpoint-readback"
+    ],
+    "ownedProcessGroupsGone": true,
+    "runId": "643f07f1-e170-400e-9dde-5afa69b859cc",
+    "runnerInventoryEntries": 605,
+    "runnerInventorySha256": "b70e0b7c1ebf5ca1ce22e1df0f6a6aae6684639eeef54143443dc9cccbb670be"
+  },
+  "pending": {
+    "collectorPhysicalCaseIds": [
+      "universal-execution",
+      "developer-id-gatekeeper",
+      "install-uninstall-rollback",
+      "two-clean-macs",
+      "synthetic-staff-student-journey",
+      "cross-school-rejection",
+      "acknowledged-event-visibility",
+      "native-aac-categories",
+      "network-backend-loss",
+      "crash-reboot-corruption",
+      "display-prohibited-app",
+      "emergency-teacher-test-end",
+      "calculator-adversarial",
+      "protected-graphing"
+    ],
+    "developerIdSigning": "requires explicit authorization and an existing signing identity",
+    "gatekeeper": "pending a signed and notarized artifact",
+    "notarization": "requires explicit authorization and an existing notarization profile",
+    "twoCleanMacs": "pending clean arm64 and Intel Mac execution",
+    "visualShellInspection": "pending because the app accessibility tree timed out"
+  },
+  "recordedAt": "2026-09-23T03:13:41.727064+00:00",
+  "runtime": {
+    "exactCandidateLaunchPolicy": {
+      "caseId": "exact-candidate-launch-policy",
+      "environmentSandboxControlRejected": true,
+      "executable": "/Users/nicky/workspace/projects/desmoslock-canonical-universal-61ec-43-7-v1/artifacts/universal-artifact-runs/643f07f1-e170-400e-9dde-5afa69b859cc/candidate/DesmosLock Internal.app/Contents/MacOS/desmoslock-internal",
+      "recordedProcessIdentitiesGone": true,
+      "rejectedSwitchCount": 19,
+      "schemaVersion": 1,
+      "state": "observed-pass",
+      "switches": [
+        "--inspect=0",
+        "--remote-debugging-pipe",
+        "--remote-debugging-port=0",
+        "--no-sandbox",
+        "--disable-gpu-sandbox",
+        "--disable-namespace-sandbox",
+        "--disable-sandbox",
+        "--disable-seccomp-filter-sandbox",
+        "--disable-seccomp-sandbox",
+        "--disable-setuid-sandbox",
+        "--in-process-gpu",
+        "--no-zygote",
+        "--single-process",
+        "--no-sandbox=true",
+        "-no-sandbox",
+        " --no-sandbox",
+        "--disable-setuid-sandbox=true",
+        "-disable-setuid-sandbox",
+        " --disable-setuid-sandbox"
+      ]
+    },
+    "localArm64Execution": {
+      "app": "/Users/nicky/workspace/projects/desmoslock-canonical-universal-61ec-43-7-v1/artifacts/universal-artifact-runs/643f07f1-e170-400e-9dde-5afa69b859cc/candidate/DesmosLock Internal.app",
+      "caseId": "universal-execution-local-arm64-host",
+      "executable": "/Users/nicky/workspace/projects/desmoslock-canonical-universal-61ec-43-7-v1/artifacts/universal-artifact-runs/643f07f1-e170-400e-9dde-5afa69b859cc/candidate/DesmosLock Internal.app/Contents/MacOS/desmoslock-internal",
+      "hostArchitecture": "arm64",
+      "outputBytes": 0,
+      "outputSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "platform": "darwin",
+      "recordedProcessIdentitiesGone": true,
+      "sandboxDisablingControlPresent": false,
+      "schemaVersion": 1,
+      "state": "observed-pass",
+      "stayedActive": true,
+      "stopReason": "operator-stop"
+    },
+    "visualInspection": {
+      "accessibilityCapture": "timed_out",
+      "app": "/Users/nicky/workspace/projects/desmoslock-canonical-universal-61ec-43-7-v1/artifacts/universal-artifact-runs/643f07f1-e170-400e-9dde-5afa69b859cc/candidate/DesmosLock Internal.app",
+      "caseId": "visual-shell-local-arm64-host",
+      "executable": "/Users/nicky/workspace/projects/desmoslock-canonical-universal-61ec-43-7-v1/artifacts/universal-artifact-runs/643f07f1-e170-400e-9dde-5afa69b859cc/candidate/DesmosLock Internal.app/Contents/MacOS/desmoslock-internal",
+      "fallbackCapture": {
+        "reason": "The required OpenClaw GUI bridge socket was absent; the local fallback was not used.",
+        "state": "unavailable",
+        "tool": "Peekaboo"
+      },
+      "hostArchitecture": "arm64",
+      "outputBytes": 0,
+      "outputSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "platform": "darwin",
+      "reason": "The app stayed active, but Codex UI automation could not obtain its accessibility tree.",
+      "recordedProcessIdentitiesGone": true,
+      "sandboxDisablingControlPresent": false,
+      "schemaVersion": 1,
+      "state": "inconclusive",
+      "stayedActive": true,
+      "stopReason": "operator-stop",
+      "visualInspectionCompleted": false
+    },
+    "x64Execution": {
+      "reason": "Rosetta is not installed on this arm64 Mac (Bad CPU type in executable).",
+      "state": "not_observed"
+    }
+  },
+  "schemaVersion": 1,
+  "source": {
+    "commit": "61ec25e6e69c43f30be38c95a96efcdcd56d8ec3",
+    "focusedRegressionTests": {
+      "passed": 86
+    },
+    "pullRequest": "https://github.com/danielholguin31/desmoslock/pull/70",
+    "repositoryTests": {
+      "passed": 763,
+      "skipped": 1
+    },
+    "reviews": {
+      "spec": "clean",
+      "standards": "clean"
+    },
+    "security": {
+      "runId": 35811678043,
+      "status": "success",
+      "url": "https://github.com/danielholguin31/desmoslock/actions/runs/35811678043"
+    },
+    "tree": "0e5c1cd6234b7cf64f86d9850cc350133001b78a",
+    "verification": {
+      "runId": 35811678106,
+      "status": "success",
+      "url": "https://github.com/danielholguin31/desmoslock/actions/runs/35811678106"
+    }
+  },
+  "state": "unsigned_universal_candidate_verified_local_arm64"
+}

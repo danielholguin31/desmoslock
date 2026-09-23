@@ -10,6 +10,12 @@ standalone SQL, Vercel configuration, and v1 release material are retained only
 as historical audit evidence. They must not be run, deployed, packaged,
 published, or presented as current product behavior.
 
+## Maintainer handoff
+
+See [Daniel’s takeover checklist](docs/product-completion/daniel-handoff.md) for the
+latest completed work, retained evidence, and remaining GitHub release tickets.
+System-level Apple assessment protection remains required.
+
 ## Canonical source contract
 
 - Repository: `danielholguin31/desmoslock`

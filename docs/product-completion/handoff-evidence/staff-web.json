@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-23T00:09:06Z",
+  "slice": "Staff Vercel staging deployment and live browser QA",
+  "status": "verified",
+  "source": {
+    "repository": "danielholguin31/desmoslock",
+    "sourceCommit": "62c1238812323f830c0640d8ba0d5bec88408d0d",
+    "sourceTree": "1db14a29523c8b03f4e56c25539558321c30f587",
+    "pullRequest": "https://github.com/danielholguin31/desmoslock/pull/69",
+    "mergedAt": "2026-09-23T00:03:49Z",
+    "mergeCommit": "f9b09be664fe8589bd3be6d71cbeb0a37035a8c7",
+    "mergeTree": "1db14a29523c8b03f4e56c25539558321c30f587",
+    "mergeTreeMatchesSource": true
+  },
+  "continuousIntegration": {
+    "source": {
+      "verificationRun": "https://github.com/danielholguin31/desmoslock/actions/runs/35799776756",
+      "securityRun": "https://github.com/danielholguin31/desmoslock/actions/runs/35799776890",
+      "internalJobs": 12,
+      "conclusion": "success"
+    },
+    "main": {
+      "verificationRun": "https://github.com/danielholguin31/desmoslock/actions/runs/35800338141",
+      "securityRun": "https://github.com/danielholguin31/desmoslock/actions/runs/35800338189",
+      "internalJobs": 12,
+      "conclusion": "success"
+    },
+    "qualifiedExternalStatus": {
+      "name": "Vercel",
+      "conclusion": "failure",
+      "reason": "Legacy integration targets the former Vercel account and is outside the selected internal checks and verified deployment path."
+    }
+  },
+  "deployment": {
+    "provider": "Vercel",
+    "team": "nicolasdmolinas-projects",
+    "projectName": "desmoslock-v2-staging",
+    "projectId": "prj_5KTFrF6KiPWNNhJd5fx7uD6V01wi",
+    "rootDirectory": "apps/web",
+    "deploymentId": "dpl_CVK8ZBzguwsuoWWs9mu71zowPoPY",
+    "generatedUrl": "https://desmoslock-v2-staging-gwc0nvzmj-nicolasdmolinas-projects.vercel.app",
+    "publicOrigin": "https://project-1zcn9.vercel.app",
+    "promoted": true,
+    "access": "Production alias public; generated deployment URLs retain Vercel Standard Protection."
+  },
+  "toolchain": {
+    "node": "24.20.0",
+    "npm": "11.12.1",
+    "vercelCli": "59.25.4"
+  },
+  "build": {
+    "cleanArchiveSha256": "0d0500df7514e11df0f821fc5d2bbf28a0c4f15dcc1f1840c84736737e96bca3",
+    "outputFileCount": 7,
+    "sourceMapCount": 0,
+    "auditVulnerabilities": 0,
+    "files": {
+      "index.html": "ed407df5acbcb0d13e6f55fcc6c7afe405335a4fda106be116bbaad12fb2b7a1",
+      "main.js": "7e4f5f72b2458676e9cc1712f64a08a325d3b670617f673f37caeb1b5d7fe967"
+    }
+  },
+  "publicBoundary": {
+    "indexStatus": 200,
+    "mainStatus": 200,
+    "missingStatus": 404,
+    "indexAndMainHashesMatchBuild": true,
+    "headers": {
+      "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff"
+    }
+  },
+  "browserQa": {
+    "desktop": {
+      "viewport": "1440x900",
+      "backendHealthStatus": 200,
+      "uiStatus": "ready",
+      "consoleErrors": 0,
+      "pageErrors": 0,
+      "failedRequests": 0,
+      "httpErrors": 0,
+      "horizontalOverflow": false,
+      "outOfBoundsControls": 0,
+      "undersizedTargets": 0
+    },
+    "mobile": {
+      "viewport": "360x740",
+      "backendHealthStatus": 200,
+      "uiStatus": "ready",
+      "consoleErrors": 0,
+      "pageErrors": 0,
+      "failedRequests": 0,
+      "httpErrors": 0,
+      "horizontalOverflow": false,
+      "outOfBoundsControls": 0,
+      "undersizedTargets": 0
+    },
+    "callback": {
+      "syntheticSensitiveUrlScrubbedToOrigin": true,
+      "sensitiveMaterialPresentAfterScrub": false,
+      "authRequestsBeforeClick": 0,
+      "staticResourceReferrersEmpty": true,
+      "reloadHeading": "Reopen your email",
+      "authRequestsAfterReload": 0
+    },
+    "screenshotsVisuallyInspected": true
+  },
+  "cleanup": {
+    "temporaryAutomationBypassRemoved": true,
+    "redundantNarrowTokenRevoked": true,
+    "ephemeralOidcFilesCleared": true,
+    "retainedTaskToken": "Protected local storage; expires 2026-09-29; value omitted.",
+    "secretValuesRecorded": false
+  },
+  "evidence": {
+    "report.json": "356d0390d70d5de6c020242fa9e792a7032009c47e67945a0d4c141d36bbd785",
+    "desktop.png": "c4b6d6bf249b8509f7d216364946cedcc4c7b78fc1f06302381c7716f5e01d73",
+    "mobile.png": "f96a701c2531fec8440d75035a914a83d3f2ff52d8021c38a2709ec3d9576274",
+    "callback-scrubbed.png": "c5231045ea07841284021c6dd3ac4befc97395cbace0aea663870093da4c99ac",
+    "public-index-headers.txt": "091863f41963cf2aaa718ca7160bbce4a4e00630ed107371a0feb28134cfb94f",
+    "public-main-headers.txt": "5610815bb7a359d6720a4f7c7ed9dd106ff98c31d331c78f690bd54fe9650318",
+    "public-missing-headers.txt": "84dd42ad95657fb7516e78fd3b7ab4024f4cf8652f4e01f7483b92a2da0e184e"
+  },
+  "remainingGates": [
+    "Pristine generation4 export and restore with opaque PostgreSQL authentication, explicit CA and TLS-capable clients",
+    "Remaining Edge, Auth, mail and real client journeys; live mail requires a sender domain",
+    "Apple signing, notarization and AAC",
+    "Same final artifact acceptance on clean arm64 and Intel Macs"
+  ]
+}

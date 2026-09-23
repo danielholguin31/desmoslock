@@ -1,0 +1,2348 @@
+diff --git a/scripts/backend-catalog/README.md b/scripts/backend-catalog/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..43eef6a4157cf51290d9a88ca977dac1f5f96385
+--- /dev/null
++++ b/scripts/backend-catalog/README.md
+@@ -0,0 +1,60 @@
++# Two-migration catalog reference
++
++The disposable backup-roundtrip CI harness captures this fixed `pg_catalog`
++projection after a local reset through `20260828000100` with no seed. It validates
++the projection, emits a separate `DESMOSLOCK_CATALOG_PREFIX_V1` diagnostic, then
++runs the ordinary full reset and complete roundtrip. The restore acceptance
++receipt and its flags are unchanged. No new workflow or hosted connection exists.
++
++`catalog.sql` and `validate.py` are pinned reviewed inputs. The helper checks their
++exact bytes, the source expectations, and both migration files before the prefix
++reset. Query, validator and source changes require deliberate pin review.
++
++- Query SHA256: `d4c00e6330577e42aa0268f113f3d8a2b37e7e9b8f2c50b7c726bf2c0340c1d9`.
++- Validator SHA256: `fd326031c53815b51d8ac56202ec320f505323f1629daa74d4b8d718a9fb4e54`.
++- Prefix: `20260824000100`, `20260828000100`.
++
++The SQL reads catalog metadata only. It emits names, structure, owners, explicit
++and effective privileges, membership/default-ACL context, and hashes. It returns
++no application rows, comments, routine bodies, expression text, passwords or
++arbitrary configuration values. No server deparser runs: deparsers can invoke a
++custom type output routine while rendering a constant. Raw catalog-node hashes
++can vary across equivalent databases because of embedded OIDs or locations;
++every mismatch remains unresolved evidence and is never normalized away.
++
++The source expectations are necessary checks, not an observed database baseline.
++A reference is usable only after the exact CI commit's full reset, pinned-image
++checks, roundtrip and cleanup all pass. This projection does not establish
++fixture-row, Auth/API, global-platform or rollout readiness. Hosted use requires
++its own reviewed execution boundary; this harness supports disposable CI only.
++
++## Bounds and transport
++
++The query rejects more than 2,048 records, 1 MiB aggregate record text, or 16 KiB
++per record. The client caps combined command output at 1,100,000 bytes, uses a
++30-second deadline, and does not relay stderr. Its read-only transaction fixes
++`search_path=pg_catalog`, statement timeout 10 seconds, and lock timeout 1 second.
++The pinned Python standard-library validator rejects malformed or duplicate JSON,
++extra fields, invalid types/hashes/identities, overflow and missing linked ACLs.
++
++The independent diagnostic is one newline-terminated line, at most 1,104,096
++UTF-8 bytes, with the fixed prefix followed by exactly `observation_version`,
++`query_sha256`, `source_commit`, `source_files`, `prefix_versions`, and `projection`.
++Version is 1. Retrieval must reject missing/duplicate records and unexpected
++fields; any known test-runner log prefix must be removed explicitly. Preserve the
++CI run identity and complete-job verdict alongside the observation.
++
++## Pure local checks
++
++From this directory:
++
++```sh
++PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_validate.py
++python3 validate.py validate reference.json --expectations catalog-source-expectations.json
++python3 validate.py compare reference.json target.json --expectations catalog-source-expectations.json
++```
++
++From the repository root, the ordinary Node harness unit tests also exercise the
++capture and real cleanup boundary with inert commands. They start no databases.
++The separate `npm run test:backup:roundtrip` execution remains restricted to its
++fresh disposable Linux GitHub CI environment.
+diff --git a/scripts/backend-catalog/catalog-source-expectations.json b/scripts/backend-catalog/catalog-source-expectations.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..8d746886b8c216b95007514a48735997404e94bb
+--- /dev/null
++++ b/scripts/backend-catalog/catalog-source-expectations.json
+@@ -0,0 +1,124 @@
++{
++  "schemaVersion": 1,
++  "publishedComparisonCommit": "76e339e7ffeb8ae650e9000b53e4e7e0b0388f5e",
++  "observedHistoryPrefixVersions": ["20260824000100", "20260828000100"],
++  "sourceFiles": [
++    {
++      "path": "supabase/migrations/20260824000100_v2_foundation.sql",
++      "sha256": "03cc111602a4dc8bc196b5bfb53b87ab1ae902096642af3fd7f45ad9428e951d"
++    },
++    {
++      "path": "supabase/migrations/20260828000100_internal_release_backend.sql",
++      "sha256": "1a60d2fb308a8e2cfad102f9c218c319bacd95c33a40801d5b0b731119434f2f"
++    }
++  ],
++  "schema": "desmoslock_v2",
++  "tables": [
++    {
++      "schema": "desmoslock_v2",
++      "name": "foundation_seed",
++      "kind": "table",
++      "source": "supabase/migrations/20260824000100_v2_foundation.sql",
++      "line": 11
++    },
++    {
++      "schema": "desmoslock_v2",
++      "name": "internal_release_attestation",
++      "kind": "table",
++      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
++      "line": 20
++    },
++    {
++      "schema": "desmoslock_v2",
++      "name": "local_restore_target_attestation",
++      "kind": "table",
++      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
++      "line": 38
++    },
++    {
++      "schema": "desmoslock_v2",
++      "name": "workspaces",
++      "kind": "table",
++      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
++      "line": 55
++    },
++    {
++      "schema": "desmoslock_v2",
++      "name": "profiles",
++      "kind": "table",
++      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
++      "line": 65
++    },
++    {
++      "schema": "desmoslock_v2",
++      "name": "memberships",
++      "kind": "table",
++      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
++      "line": 72
++    },
++    {
++      "schema": "desmoslock_v2",
++      "name": "tests",
++      "kind": "table",
++      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
++      "line": 82
++    },
++    {
++      "schema": "desmoslock_v2",
++      "name": "student_sessions",
++      "kind": "table",
++      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
++      "line": 94
++    },
++    {
++      "schema": "desmoslock_v2",
++      "name": "baseline_fixture_state",
++      "kind": "table",
++      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
++      "line": 106
++    }
++  ],
++  "functions": [
++    {
++      "schema": "desmoslock_v2",
++      "name": "expected_migration_set_sha256",
++      "sourceArguments": "",
++      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
++      "line": 7,
++      "sourceDollarQuotedBodySha256": "6de09e0a6b6f7db2196412e0c3d1912efd17146df79011cccd4757590d870f0e",
++      "bodyHashIsServerCatalogObservation": false
++    },
++    {
++      "schema": "desmoslock_v2",
++      "name": "current_school_summary",
++      "sourceArguments": "",
++      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
++      "line": 150,
++      "sourceDollarQuotedBodySha256": "0747cea89aab06e87ce6a0297054baae239f7c2f36f8fdf50e06fe5e0daa13d0",
++      "bodyHashIsServerCatalogObservation": false
++    },
++    {
++      "schema": "desmoslock_v2",
++      "name": "internal_frame_text",
++      "sourceArguments": "parts text[]",
++      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
++      "line": 190,
++      "sourceDollarQuotedBodySha256": "73503956b51f119e83d6f5b573ef0f58eca037b78ffc9716c8a3c63890f9ba04",
++      "bodyHashIsServerCatalogObservation": false
++    },
++    {
++      "schema": "desmoslock_v2",
++      "name": "internal_baseline_status",
++      "sourceArguments": "",
++      "source": "supabase/migrations/20260828000100_internal_release_backend.sql",
++      "line": 211,
++      "sourceDollarQuotedBodySha256": "98a49da66cc31a5c9a6cf3fe3f22465bb3f360df4d1059f4a030a7e9259fe2d7",
++      "bodyHashIsServerCatalogObservation": false
++    }
++  ],
++  "expectedRlsEveryTable": true,
++  "expectedUserPolicies": 0,
++  "expectedUserTriggers": 0,
++  "expectedCustomSequencesViewsEnumsDomains": 0,
++  "limits": "Names and exact source body digests are source-derived expectations, not a generated PostgreSQL catalog baseline or observed hosted schema. Implicit object owners/default ACLs require comparison under the actual migration role; do not erase such differences."
++}
+diff --git a/scripts/backend-catalog/catalog.sql b/scripts/backend-catalog/catalog.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..f6c147e87281cbc767003f1ccaaa735b877d7e44
+--- /dev/null
++++ b/scripts/backend-catalog/catalog.sql
+@@ -0,0 +1,304 @@
++-- Preparation only. One fixed SELECT; never executes an application routine.
++-- Run with search_path=pg_catalog, read-only transaction, statement_timeout=10s,
++-- lock_timeout=1s. Raw node hashes require the same PG17 patch; differences stop.
++-- No server deparsers: they can invoke custom type output routines. Raw node
++-- hashes can differ for semantically identical OID-bearing expressions; never
++-- normalize such differences away. Only the built-in-only prefix is acceptable.
++-- OIDs are never output identities. No body/expression text or rows are returned.
++WITH RECURSIVE
++ns AS MATERIALIZED (
++  SELECT oid, nspname, nspowner, nspacl FROM pg_catalog.pg_namespace
++  WHERE nspname = 'desmoslock_v2'
++),
++rels AS MATERIALIZED (
++  SELECT c.* FROM pg_catalog.pg_class c JOIN ns n ON n.oid = c.relnamespace
++),
++type_names AS MATERIALIZED (
++  SELECT t.oid, pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(t.typname) AS name
++  FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
++),
++types AS MATERIALIZED (
++  SELECT t.* FROM pg_catalog.pg_type t JOIN ns n ON n.oid = t.typnamespace
++),
++routines AS MATERIALIZED (
++  SELECT p.*, COALESCE((SELECT pg_catalog.string_agg(t.name, ',' ORDER BY a.ord)
++    FROM pg_catalog.unnest(p.proargtypes::oid[]) WITH ORDINALITY a(oid, ord)
++    JOIN type_names t ON t.oid = a.oid), '') AS signature
++  FROM pg_catalog.pg_proc p JOIN ns n ON n.oid = p.pronamespace
++),
++columns AS MATERIALIZED (
++  SELECT a.*, c.relname, c.relowner FROM pg_catalog.pg_attribute a
++  JOIN rels c ON c.oid = a.attrelid WHERE a.attnum > 0 AND NOT a.attisdropped
++),
++acl_objects(kind, id, object_oid, subid, owner_oid, acl_type, acl) AS MATERIALIZED (
++  SELECT 'schema', ARRAY[nspname::text], oid, 0, nspowner, 'n'::"char", nspacl FROM ns
++  UNION ALL SELECT 'relation', ARRAY['desmoslock_v2', relname::text], oid, 0, relowner,
++    CASE WHEN relkind = 'S' THEN 's' ELSE 'r' END::"char", relacl FROM rels
++  WHERE relkind IN ('r','p','v','m','f','S')
++  UNION ALL SELECT 'column', ARRAY['desmoslock_v2',relname::text,attname::text],
++    attrelid, attnum, relowner, 'c'::"char", attacl FROM columns
++  WHERE attrelid IN (SELECT oid FROM rels WHERE relkind IN ('r','p','v','m','f'))
++  UNION ALL SELECT 'routine', ARRAY['desmoslock_v2',proname::text,signature], oid, 0,
++    proowner, 'f'::"char", proacl FROM routines
++  UNION ALL SELECT 'type', ARRAY['desmoslock_v2',typname::text], oid, 0,
++    typowner, 'T'::"char", typacl FROM types
++),
++creation_roles AS MATERIALIZED (
++  SELECT owner_oid AS oid FROM acl_objects UNION
++  SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user
++  UNION SELECT r.oid FROM pg_catalog.pg_roles r CROSS JOIN ns n
++    WHERE pg_catalog.has_schema_privilege(r.oid,n.oid,'CREATE')
++),
++default_acls AS MATERIALIZED (
++  SELECT d.*, CASE WHEN d.defaclnamespace = 0 THEN '<global>' ELSE n.nspname::text END AS scope
++  FROM pg_catalog.pg_default_acl d LEFT JOIN ns n ON n.oid = d.defaclnamespace
++  WHERE d.defaclrole IN (SELECT oid FROM creation_roles)
++    AND (d.defaclnamespace = 0 OR n.oid IS NOT NULL)
++),
++principals AS MATERIALIZED (
++  SELECT owner_oid AS oid FROM acl_objects
++  UNION SELECT oid FROM creation_roles
++  UNION SELECT o FROM pg_catalog.pg_policy p JOIN rels r ON r.oid = p.polrelid
++    CROSS JOIN LATERAL pg_catalog.unnest(p.polroles) o
++  UNION SELECT a.grantee FROM acl_objects o CROSS JOIN LATERAL pg_catalog.aclexplode(o.acl) a
++  UNION SELECT a.grantor FROM acl_objects o CROSS JOIN LATERAL pg_catalog.aclexplode(o.acl) a
++  UNION SELECT a.grantee FROM default_acls d CROSS JOIN LATERAL pg_catalog.aclexplode(d.defaclacl) a
++  UNION SELECT a.grantor FROM default_acls d CROSS JOIN LATERAL pg_catalog.aclexplode(d.defaclacl) a
++  UNION SELECT oid FROM pg_catalog.pg_roles
++    WHERE rolname IN ('anon','authenticated','service_role',current_user)
++),
++membership_scope(oid) AS (
++  SELECT oid FROM principals WHERE oid <> 0
++  UNION
++  SELECT CASE WHEN m.roleid = s.oid THEN m.member ELSE m.roleid END
++  FROM membership_scope s JOIN pg_catalog.pg_auth_members m ON m.roleid = s.oid OR m.member = s.oid
++),
++roles AS MATERIALIZED (
++  SELECT oid, rolname::text AS name, rolsuper, rolinherit, rolbypassrls
++  FROM pg_catalog.pg_roles WHERE oid IN (SELECT oid FROM membership_scope)
++),
++probe_roles AS MATERIALIZED (
++  SELECT name FROM roles WHERE oid IN (SELECT oid FROM principals) UNION SELECT 'public'
++),
++privileges AS MATERIALIZED (
++  SELECT o.*, r.name AS role, p.privilege,
++    CASE o.acl_type
++      WHEN 'n' THEN pg_catalog.has_schema_privilege(r.name::name,o.object_oid,p.privilege)
++      WHEN 's' THEN pg_catalog.has_sequence_privilege(r.name::name,o.object_oid,p.privilege)
++      WHEN 'r' THEN pg_catalog.has_table_privilege(r.name::name,o.object_oid,p.privilege)
++      WHEN 'c' THEN pg_catalog.has_column_privilege(r.name::name,o.object_oid,o.subid::smallint,p.privilege)
++      WHEN 'f' THEN pg_catalog.has_function_privilege(r.name::name,o.object_oid,p.privilege)
++      WHEN 'T' THEN pg_catalog.has_type_privilege(r.name::name,o.object_oid,p.privilege)
++    END AS allowed,
++    CASE o.acl_type
++      WHEN 'n' THEN pg_catalog.has_schema_privilege(r.name::name,o.object_oid,p.privilege || ' WITH GRANT OPTION')
++      WHEN 's' THEN pg_catalog.has_sequence_privilege(r.name::name,o.object_oid,p.privilege || ' WITH GRANT OPTION')
++      WHEN 'r' THEN pg_catalog.has_table_privilege(r.name::name,o.object_oid,p.privilege || ' WITH GRANT OPTION')
++      WHEN 'c' THEN pg_catalog.has_column_privilege(r.name::name,o.object_oid,o.subid::smallint,p.privilege || ' WITH GRANT OPTION')
++      WHEN 'f' THEN pg_catalog.has_function_privilege(r.name::name,o.object_oid,p.privilege || ' WITH GRANT OPTION')
++      WHEN 'T' THEN pg_catalog.has_type_privilege(r.name::name,o.object_oid,p.privilege || ' WITH GRANT OPTION')
++    END AS grantable
++  FROM acl_objects o CROSS JOIN probe_roles r
++  CROSS JOIN LATERAL pg_catalog.unnest(CASE o.acl_type
++    WHEN 'n' THEN ARRAY['CREATE','USAGE']
++    WHEN 's' THEN ARRAY['SELECT','UPDATE','USAGE']
++    WHEN 'r' THEN ARRAY['DELETE','INSERT','MAINTAIN','REFERENCES','SELECT','TRIGGER','TRUNCATE','UPDATE']
++    WHEN 'c' THEN ARRAY['INSERT','REFERENCES','SELECT','UPDATE']
++    WHEN 'f' THEN ARRAY['EXECUTE'] WHEN 'T' THEN ARRAY['USAGE'] END) p(privilege)
++),
++unsupported_objects(kind,name) AS (
++  SELECT 'operator',o.oprname::text || '(' || COALESCE(l.name,'<none>') || ',' || COALESCE(r.name,'<none>') || ')'
++  FROM pg_catalog.pg_operator o JOIN ns n ON n.oid = o.oprnamespace
++  LEFT JOIN type_names l ON l.oid = o.oprleft LEFT JOIN type_names r ON r.oid = o.oprright
++  UNION ALL SELECT 'operator_class',a.amname::text || '.' || o.opcname::text FROM pg_catalog.pg_opclass o JOIN ns n ON n.oid=o.opcnamespace JOIN pg_catalog.pg_am a ON a.oid=o.opcmethod
++  UNION ALL SELECT 'operator_family',a.amname::text || '.' || o.opfname::text FROM pg_catalog.pg_opfamily o JOIN ns n ON n.oid=o.opfnamespace JOIN pg_catalog.pg_am a ON a.oid=o.opfmethod
++  UNION ALL SELECT 'collation',c.collname::text || ':' || c.collencoding::text FROM pg_catalog.pg_collation c JOIN ns n ON n.oid=c.collnamespace
++  UNION ALL SELECT 'conversion',c.conname::text FROM pg_catalog.pg_conversion c JOIN ns n ON n.oid=c.connamespace
++  UNION ALL SELECT 'text_search_config',c.cfgname::text FROM pg_catalog.pg_ts_config c JOIN ns n ON n.oid=c.cfgnamespace
++  UNION ALL SELECT 'text_search_dictionary',c.dictname::text FROM pg_catalog.pg_ts_dict c JOIN ns n ON n.oid=c.dictnamespace
++  UNION ALL SELECT 'text_search_parser',c.prsname::text FROM pg_catalog.pg_ts_parser c JOIN ns n ON n.oid=c.prsnamespace
++  UNION ALL SELECT 'text_search_template',c.tmplname::text FROM pg_catalog.pg_ts_template c JOIN ns n ON n.oid=c.tmplnamespace
++),
++records(kind, id, data) AS (
++  SELECT 'context', ARRAY['desmoslock_v2'], pg_catalog.jsonb_build_object(
++    'server_version_num', pg_catalog.current_setting('server_version_num')::integer,
++    'database', pg_catalog.current_database(), 'query_role', current_user, 'session_role', session_user,
++    'search_path', pg_catalog.current_setting('search_path'),
++    'read_only', pg_catalog.current_setting('transaction_read_only') = 'on',
++    'required_roles_present', (SELECT pg_catalog.count(*) = 3 FROM roles
++      WHERE name IN ('anon','authenticated','service_role')),
++    'default_acl_roles', ARRAY(SELECT pg_catalog.pg_get_userbyid(oid)::text FROM creation_roles ORDER BY 1))
++  UNION ALL
++  SELECT 'unsupported_object', ARRAY['desmoslock_v2',kind,name], '{}'::jsonb FROM unsupported_objects
++  UNION ALL
++  SELECT 'schema', ARRAY[nspname::text], pg_catalog.jsonb_build_object(
++    'owner', pg_catalog.pg_get_userbyid(nspowner)) FROM ns
++  UNION ALL
++  SELECT 'relation', ARRAY['desmoslock_v2',c.relname::text], pg_catalog.jsonb_build_object(
++    'kind', c.relkind, 'owner', pg_catalog.pg_get_userbyid(c.relowner),
++    'persistence', c.relpersistence, 'is_partition', c.relispartition,
++    'rls', c.relrowsecurity, 'force_rls', c.relforcerowsecurity,
++    'replica_identity', c.relreplident,
++    'has_rules', c.relhasrules, 'has_triggers', c.relhastriggers,
++    'parents', ARRAY(SELECT pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(p.relname)
++      FROM pg_catalog.pg_inherits i JOIN pg_catalog.pg_class p ON p.oid = i.inhparent
++      JOIN pg_catalog.pg_namespace n ON n.oid = p.relnamespace
++      WHERE i.inhrelid = c.oid ORDER BY i.inhseqno),
++    'partition_hash', CASE WHEN c.relpartbound IS NOT NULL THEN
++      pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(c.relpartbound::text,'UTF8')),'hex') END,
++    'options_hash', pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(COALESCE(c.reloptions::text,'<null>'),'UTF8')),'hex'))
++  FROM rels c
++  UNION ALL
++  SELECT 'column', ARRAY['desmoslock_v2',a.relname::text,a.attname::text], pg_catalog.jsonb_build_object(
++    'position', a.attnum, 'type', t.name, 'typmod', a.atttypmod,
++    'not_null', a.attnotnull, 'identity', a.attidentity, 'generated', a.attgenerated,
++    'collation', CASE WHEN co.oid IS NOT NULL THEN pg_catalog.quote_ident(cn.nspname) || '.' || pg_catalog.quote_ident(co.collname) END,
++    'has_default', d.oid IS NOT NULL,
++    'default_hash', CASE WHEN d.oid IS NOT NULL THEN
++      pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(d.adbin::text,'UTF8')),'hex') END)
++  FROM columns a JOIN type_names t ON t.oid = a.atttypid
++  LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
++  LEFT JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation
++  LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid = co.collnamespace
++  UNION ALL
++  SELECT 'constraint', ARRAY[CASE WHEN c.conrelid = 0 THEN 'type' ELSE 'relation' END,
++    'desmoslock_v2',COALESCE(r.relname,t.typname)::text,c.conname::text], pg_catalog.jsonb_build_object(
++    'kind', c.contype, 'validated', c.convalidated, 'deferrable', c.condeferrable,
++    'deferred', c.condeferred, 'no_inherit', c.connoinherit, 'is_local', c.conislocal,
++    'supporting_index', (SELECT pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(i.relname)
++      FROM pg_catalog.pg_class i JOIN pg_catalog.pg_namespace n ON n.oid = i.relnamespace WHERE i.oid = c.conindid),
++    'columns', ARRAY(SELECT a.attname::text FROM pg_catalog.unnest(c.conkey) WITH ORDINALITY k(num,ord)
++      JOIN pg_catalog.pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.num ORDER BY k.ord),
++    'referenced_table', CASE WHEN fr.oid IS NOT NULL THEN pg_catalog.quote_ident(fn.nspname) || '.' || pg_catalog.quote_ident(fr.relname) END,
++    'referenced_columns', ARRAY(SELECT a.attname::text FROM pg_catalog.unnest(c.confkey) WITH ORDINALITY k(num,ord)
++      JOIN pg_catalog.pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.num ORDER BY k.ord),
++    'definition_hash', pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(pg_catalog.jsonb_build_object('expression_node',c.conbin::text,'fk_match',c.confmatchtype,'fk_update',c.confupdtype,'fk_delete',c.confdeltype)::text,'UTF8')),'hex'))
++  FROM pg_catalog.pg_constraint c LEFT JOIN rels r ON r.oid = c.conrelid
++  LEFT JOIN types t ON t.oid = c.contypid
++  LEFT JOIN pg_catalog.pg_class fr ON fr.oid = c.confrelid
++  LEFT JOIN pg_catalog.pg_namespace fn ON fn.oid = fr.relnamespace
++  WHERE r.oid IS NOT NULL OR t.oid IS NOT NULL
++  UNION ALL
++  SELECT 'index', ARRAY['desmoslock_v2',r.relname::text], pg_catalog.jsonb_build_object(
++    'table', pg_catalog.quote_ident(tn.nspname) || '.' || pg_catalog.quote_ident(t.relname),
++    'unique', i.indisunique, 'primary', i.indisprimary, 'exclusion', i.indisexclusion,
++    'valid', i.indisvalid, 'ready', i.indisready, 'live', i.indislive,
++    'nulls_not_distinct', i.indnullsnotdistinct, 'replica_identity', i.indisreplident,
++    'key_count', i.indnkeyatts, 'column_count', i.indnatts,
++    'columns', ARRAY(SELECT COALESCE(a.attname::text,'<expression>')
++      FROM pg_catalog.unnest(i.indkey::smallint[]) WITH ORDINALITY k(num,ord)
++      LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.num ORDER BY k.ord),
++    'definition_hash', pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(pg_catalog.jsonb_build_object('access_method',(SELECT amname FROM pg_catalog.pg_am WHERE oid = r.relam),'opclasses',ARRAY(SELECT pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(o.opcname) FROM pg_catalog.unnest(i.indclass::oid[]) WITH ORDINALITY a(oid,ord) JOIN pg_catalog.pg_opclass o ON o.oid = a.oid JOIN pg_catalog.pg_namespace n ON n.oid = o.opcnamespace ORDER BY a.ord),'collations',ARRAY(SELECT COALESCE(pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(c.collname),'<none>') FROM pg_catalog.unnest(i.indcollation::oid[]) WITH ORDINALITY a(oid,ord) LEFT JOIN pg_catalog.pg_collation c ON c.oid = a.oid LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.collnamespace ORDER BY a.ord),'keys',i.indkey::text,'options',i.indoption::text,'expressions_node',i.indexprs::text,'predicate_node',i.indpred::text)::text,'UTF8')),'hex'))
++  FROM pg_catalog.pg_index i JOIN rels r ON r.oid = i.indexrelid
++  JOIN pg_catalog.pg_class t ON t.oid = i.indrelid JOIN pg_catalog.pg_namespace tn ON tn.oid = t.relnamespace
++  UNION ALL
++  SELECT 'routine', ARRAY['desmoslock_v2',p.proname::text,p.signature], pg_catalog.jsonb_build_object(
++    'kind', p.prokind, 'owner', pg_catalog.pg_get_userbyid(p.proowner), 'language', l.lanname,
++    'return_type', rt.name, 'returns_set', p.proretset,
++    'all_argument_types', ARRAY(SELECT t.name FROM pg_catalog.unnest(COALESCE(p.proallargtypes,p.proargtypes::oid[]))
++      WITH ORDINALITY a(oid,ord) JOIN type_names t ON t.oid = a.oid ORDER BY a.ord),
++    'argument_names', COALESCE(p.proargnames,ARRAY[]::text[]),
++    'argument_modes', COALESCE(p.proargmodes::text[],ARRAY[]::text[]),
++    'default_count', p.pronargdefaults, 'security_definer', p.prosecdef,
++    'volatility', p.provolatile, 'strict', p.proisstrict, 'leakproof', p.proleakproof, 'parallel', p.proparallel,
++    'body_hash', pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(p.prosrc,'UTF8')),'hex'),
++    'binary_hash', CASE WHEN p.probin IS NOT NULL THEN pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(p.probin,'UTF8')),'hex') END,
++    'has_sql_body', p.prosqlbody IS NOT NULL,
++    'definition_hash', CASE WHEN p.prokind <> 'a' THEN
++      pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(pg_catalog.jsonb_build_object('source',p.prosrc,'binary',p.probin,'defaults_node',p.proargdefaults::text,'sql_body_node',p.prosqlbody::text,'cost',p.procost,'rows',p.prorows,'has_support',p.prosupport <> 0,'transform_count',COALESCE(pg_catalog.cardinality(p.protrftypes),0),'variadic',(SELECT name FROM type_names WHERE oid = p.provariadic))::text,'UTF8')),'hex') END,
++    'config_names', ARRAY(SELECT pg_catalog.split_part(v,'=',1) FROM pg_catalog.unnest(p.proconfig) v ORDER BY v COLLATE "C"),
++    'config_hash', pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(COALESCE(p.proconfig::text,'<null>'),'UTF8')),'hex'),
++    'sole_empty_search_path', COALESCE(p.proconfig = ARRAY['search_path=""']::text[],false))
++  FROM routines p JOIN pg_catalog.pg_language l ON l.oid = p.prolang JOIN type_names rt ON rt.oid = p.prorettype
++  UNION ALL
++  SELECT 'type', ARRAY['desmoslock_v2',t.typname::text], pg_catalog.jsonb_build_object(
++    'kind', t.typtype, 'owner', pg_catalog.pg_get_userbyid(t.typowner),
++    'companion', CASE WHEN EXISTS(SELECT 1 FROM pg_catalog.pg_type b WHERE b.typarray = t.oid) THEN 'array'
++      WHEN t.typrelid <> 0 AND EXISTS(SELECT 1 FROM rels r WHERE r.oid = t.typrelid AND r.relkind <> 'c') THEN 'relation' ELSE 'user' END,
++    'base_type', bt.name, 'element_type', et.name, 'not_null', t.typnotnull, 'typmod', t.typtypmod,
++    'relation', (SELECT r.relname FROM rels r WHERE r.oid = t.typrelid),
++    'default_hash', CASE WHEN t.typdefault IS NOT NULL THEN pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(t.typdefault,'UTF8')),'hex') END,
++    'enum_hash', CASE WHEN t.typtype = 'e' THEN pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
++      (SELECT pg_catalog.jsonb_agg(e.enumlabel ORDER BY e.enumsortorder)::text FROM pg_catalog.pg_enum e WHERE e.enumtypid = t.oid),'UTF8')),'hex') END)
++  FROM types t LEFT JOIN type_names bt ON bt.oid = t.typbasetype LEFT JOIN type_names et ON et.oid = t.typelem
++  UNION ALL
++  SELECT 'policy', ARRAY['desmoslock_v2',r.relname::text,p.polname::text], pg_catalog.jsonb_build_object(
++    'command', p.polcmd, 'permissive', p.polpermissive,
++    'roles', ARRAY(SELECT CASE WHEN o = 0 THEN 'public' ELSE pg_catalog.pg_get_userbyid(o)::text END AS role_name
++      FROM pg_catalog.unnest(p.polroles) o ORDER BY role_name),
++    'using_hash', CASE WHEN p.polqual IS NOT NULL THEN pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(p.polqual::text,'UTF8')),'hex') END,
++    'check_hash', CASE WHEN p.polwithcheck IS NOT NULL THEN pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(p.polwithcheck::text,'UTF8')),'hex') END)
++  FROM pg_catalog.pg_policy p JOIN rels r ON r.oid = p.polrelid
++  UNION ALL
++  SELECT 'trigger', ARRAY['desmoslock_v2',r.relname::text,
++    CASE WHEN t.tgisinternal AND c.oid IS NOT NULL THEN 'constraint' ELSE 'named' END,
++    CASE WHEN t.tgisinternal AND c.oid IS NOT NULL THEN c.conname::text ELSE t.tgname::text END,
++    t.tgtype::text], pg_catalog.jsonb_build_object(
++    'internal', t.tgisinternal, 'enabled', t.tgenabled,
++    'deferrable', t.tgdeferrable, 'initially_deferred', t.tginitdeferred,
++    'routine', pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(p.proname),
++    'constraint_table', CASE WHEN cr.oid IS NOT NULL THEN pg_catalog.quote_ident(cn.nspname) || '.' || pg_catalog.quote_ident(cr.relname) END,
++    'arguments_hash', pg_catalog.encode(pg_catalog.sha256(t.tgargs),'hex'),
++    'when_hash', CASE WHEN t.tgqual IS NOT NULL THEN pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(t.tgqual::text,'UTF8')),'hex') END,
++    'definition_hash', CASE WHEN NOT t.tgisinternal THEN pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(pg_catalog.jsonb_build_object('type',t.tgtype,'args',pg_catalog.encode(t.tgargs,'hex'),'columns',t.tgattr::text,'when_node',t.tgqual::text,'old_transition_name',t.tgoldtable,'new_transition_name',t.tgnewtable)::text,'UTF8')),'hex') END)
++  FROM pg_catalog.pg_trigger t JOIN rels r ON r.oid = t.tgrelid
++  JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
++  LEFT JOIN pg_catalog.pg_constraint c ON c.oid = t.tgconstraint
++  LEFT JOIN pg_catalog.pg_class cr ON cr.oid = c.conrelid LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid = cr.relnamespace
++  UNION ALL
++  SELECT 'rule', ARRAY['desmoslock_v2',r.relname::text,w.rulename::text], pg_catalog.jsonb_build_object(
++    'enabled', w.ev_enabled, 'event', w.ev_type, 'instead', w.is_instead,
++    'definition_hash', pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(pg_catalog.jsonb_build_object('qual_node',w.ev_qual::text,'action_node',w.ev_action::text)::text,'UTF8')),'hex'))
++  FROM pg_catalog.pg_rewrite w JOIN rels r ON r.oid = w.ev_class
++  UNION ALL
++  SELECT 'acl', ARRAY[o.kind] || o.id, pg_catalog.jsonb_build_object(
++    'is_null', o.acl IS NULL,
++    'entries', COALESCE((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
++      'grantor', pg_catalog.pg_get_userbyid(a.grantor),
++      'grantee', CASE WHEN a.grantee = 0 THEN 'public' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END,
++      'privilege', a.privilege_type, 'grantable', a.is_grantable)
++      ORDER BY pg_catalog.pg_get_userbyid(a.grantor) COLLATE "C", CASE WHEN a.grantee = 0 THEN 'public' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END COLLATE "C", a.privilege_type COLLATE "C", a.is_grantable)
++      FROM pg_catalog.aclexplode(COALESCE(o.acl,pg_catalog.acldefault(o.acl_type,o.owner_oid))) a),'[]'::jsonb))
++  FROM acl_objects o
++  UNION ALL
++  SELECT 'effective_acl', ARRAY[kind] || id || ARRAY[role], pg_catalog.jsonb_build_object(
++    'privileges', COALESCE(pg_catalog.jsonb_agg(privilege ORDER BY privilege COLLATE "C") FILTER (WHERE allowed),'[]'::jsonb),
++    'grant_options', COALESCE(pg_catalog.jsonb_agg(privilege ORDER BY privilege COLLATE "C") FILTER (WHERE grantable),'[]'::jsonb))
++  FROM privileges GROUP BY kind,id,role
++  UNION ALL
++  SELECT 'role', ARRAY[name], pg_catalog.jsonb_build_object(
++    'effective_probe', r.oid IN (SELECT oid FROM principals), 'superuser', rolsuper, 'inherit', rolinherit, 'bypass_rls', rolbypassrls,
++    'inherits_roles', ARRAY(SELECT p.rolname::text FROM pg_catalog.pg_roles p
++      WHERE p.oid <> r.oid AND pg_catalog.pg_has_role(r.oid,p.oid,'USAGE') ORDER BY p.rolname COLLATE "C"),
++    'can_set_roles', ARRAY(SELECT p.rolname::text FROM pg_catalog.pg_roles p
++      WHERE p.oid <> r.oid AND pg_catalog.pg_has_role(r.oid,p.oid,'SET') ORDER BY p.rolname COLLATE "C"))
++  FROM roles r
++  UNION ALL
++  SELECT 'membership', ARRAY[pg_catalog.pg_get_userbyid(m.roleid)::text,pg_catalog.pg_get_userbyid(m.member)::text,pg_catalog.pg_get_userbyid(m.grantor)::text],
++    pg_catalog.jsonb_build_object('admin_option',m.admin_option,'inherit_option',m.inherit_option,'set_option',m.set_option)
++  FROM pg_catalog.pg_auth_members m WHERE m.roleid IN (SELECT oid FROM membership_scope) OR m.member IN (SELECT oid FROM membership_scope)
++  UNION ALL
++  SELECT 'default_acl', ARRAY[pg_catalog.pg_get_userbyid(d.defaclrole)::text,d.scope,d.defaclobjtype::text],
++    pg_catalog.jsonb_build_object('entries', COALESCE((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
++      'grantor', pg_catalog.pg_get_userbyid(a.grantor),
++      'grantee', CASE WHEN a.grantee = 0 THEN 'public' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END,
++      'privilege', a.privilege_type, 'grantable', a.is_grantable)
++      ORDER BY pg_catalog.pg_get_userbyid(a.grantor) COLLATE "C", CASE WHEN a.grantee = 0 THEN 'public' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END COLLATE "C", a.privilege_type COLLATE "C", a.is_grantable)
++      FROM pg_catalog.aclexplode(d.defaclacl) a),'[]'::jsonb))
++  FROM default_acls d
++),
++bounded AS MATERIALIZED (
++  SELECT kind,id,data,pg_catalog.jsonb_build_object('kind',kind,'id',id,'data',data) AS record
++  FROM records LIMIT 2049
++),
++measure AS (
++  SELECT pg_catalog.count(*) AS count, COALESCE(pg_catalog.sum(pg_catalog.octet_length(record::text)),0) AS bytes,
++    COALESCE(pg_catalog.max(pg_catalog.octet_length(record::text)),0) AS largest FROM bounded
++)
++SELECT pg_catalog.jsonb_build_object(
++  'format_version', 1, 'schema', 'desmoslock_v2',
++  'overflow', m.count > 2048 OR m.bytes > 1048576 OR m.largest > 16384,
++  'records', CASE WHEN m.count > 2048 OR m.bytes > 1048576 OR m.largest > 16384 THEN '[]'::jsonb
++    ELSE COALESCE((SELECT pg_catalog.jsonb_agg(record ORDER BY kind COLLATE "C",id::text COLLATE "C") FROM bounded),'[]'::jsonb) END
++) AS catalog_projection
++FROM measure m;
+diff --git a/scripts/backend-catalog/test_validate.py b/scripts/backend-catalog/test_validate.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f1ad2aede3c66fa3d67d5ba8578fa63ccd2d7d17
+--- /dev/null
++++ b/scripts/backend-catalog/test_validate.py
+@@ -0,0 +1,213 @@
++import copy
++import json
++import re
++import unittest
++from pathlib import Path
++
++import validate as v
++
++
++def record(kind, identity, data):
++    return {"kind": kind, "id": identity, "data": data}
++
++
++def fixture():
++    roles = ["anon", "authenticated", "service_role", "supabase_admin"]
++    rows = [record("context", ["desmoslock_v2"], {
++        "server_version_num": 170006, "database": "postgres", "query_role": "supabase_admin",
++        "session_role": "supabase_admin", "search_path": "pg_catalog", "read_only": True,
++        "required_roles_present": True, "default_acl_roles": ["supabase_admin"]}),
++        record("schema", ["desmoslock_v2"], {"owner": "supabase_admin"}),
++        record("acl", ["schema", "desmoslock_v2"], {"is_null": False, "entries": []})]
++    for role in roles:
++        rows.append(record("role", [role], {"effective_probe": True, "superuser": role == "supabase_admin",
++            "inherit": True, "bypass_rls": role == "service_role", "inherits_roles": [], "can_set_roles": []}))
++    for role in roles + ["public"]:
++        rows.append(record("effective_acl", ["schema", "desmoslock_v2", role], {"privileges": [], "grant_options": []}))
++    return {"format_version": 1, "schema": "desmoslock_v2", "overflow": False, "records": rows}
++
++
++class ValidationTests(unittest.TestCase):
++    def assert_rejected(self, mutate):
++        value = fixture()
++        mutate(value)
++        with self.assertRaises(v.Invalid):
++            v.decode(json.dumps(value).encode())
++
++    def test_positive_synthetic_shape_and_identity_compare(self):
++        value = fixture()
++        self.assertEqual(v.decode(json.dumps(value).encode()), value)
++        self.assertEqual(v.compare(value, copy.deepcopy(value))["status"], "match")
++
++    def test_closed_envelope_record_and_nested_fields(self):
++        for mutate in (
++            lambda x: x.update(secret="not permitted"),
++            lambda x: x["records"][0].update(oid=123),
++            lambda x: x["records"][1]["data"].update(body="not permitted"),
++            lambda x: x["records"][2]["data"]["entries"].append({"grantor": "a", "grantee": "b", "privilege": "USAGE", "grantable": False, "extra": 1}),
++        ):
++            with self.subTest(mutate=mutate):
++                self.assert_rejected(mutate)
++
++    def test_malformed_duplicate_nonfinite_and_trailing_json(self):
++        for raw in (b"{", b"{}{}", b'\xff', b'{"a":1,"a":2}', b'{"n":NaN}'):
++            with self.subTest(raw=raw), self.assertRaises(v.Invalid):
++                v.decode(raw)
++        malformed = json.dumps(fixture()).replace('"supabase_admin"', '"\\ud800"').encode()
++        with self.assertRaises(v.Invalid):
++            v.decode(malformed)
++
++    def test_missing_hash_invalid_enum_and_changed_body_are_visible(self):
++        def routine():
++            data = {}
++            for field, descriptor in v.FIELDS["routine"].items():
++                data[field] = {"str": "x", "str?": None, "strings": [], "int": 0,
++                               "bool": False, "hash": "0" * 64, "hash?": None}[descriptor]
++            data.update(kind="f", owner="supabase_admin", language="sql", return_type="pg_catalog.text",
++                        volatility="s", parallel="s", definition_hash="1" * 64)
++            return record("routine", ["desmoslock_v2", "example", ""], data)
++        ref = fixture()
++        ref["records"].append(routine())
++        ref["records"].append(record("acl", ["routine", "desmoslock_v2", "example", ""], {"is_null": False, "entries": []}))
++        for role in ["anon", "authenticated", "service_role", "supabase_admin", "public"]:
++            ref["records"].append(record("effective_acl", ["routine", "desmoslock_v2", "example", "", role], {"privileges": [], "grant_options": []}))
++        target = copy.deepcopy(ref)
++        next(r for r in target["records"] if r["kind"] == "routine")["data"]["body_hash"] = "2" * 64
++        result = v.compare(ref, target)
++        self.assertEqual(set(result["differences"][0]["fields"]), {"body_hash"})
++        for field, invalid in [("body_hash", "bad"), ("definition_hash", None), ("volatility", "unknown")]:
++            bad = copy.deepcopy(ref)
++            next(r for r in bad["records"] if r["kind"] == "routine")["data"][field] = invalid
++            with self.subTest(field=field), self.assertRaises(v.Invalid):
++                v.validate(bad)
++
++    def test_source_prefix_checks_are_necessary_but_not_equivalence(self):
++        expected = json.loads(Path(__file__).with_name("catalog-source-expectations.json").read_text())
++        value = fixture()
++        def add_object(category, identity, **overrides):
++            defaults = {"str": "", "str?": None, "strings": [], "int": 0, "bool": False,
++                        "hash": "0" * 64, "hash?": None}
++            data = {f: copy.deepcopy(defaults[d]) for f, d in v.FIELDS[category].items()}
++            data.update(overrides)
++            value["records"].append(record(category, identity, data))
++            value["records"].append(record("acl", [category] + identity, {"is_null": False, "entries": []}))
++            for role in ["anon", "authenticated", "service_role", "supabase_admin", "public"]:
++                value["records"].append(record("effective_acl", [category] + identity + [role], {"privileges": [], "grant_options": []}))
++        for table in expected["tables"]:
++            add_object("relation", ["desmoslock_v2", table["name"]], kind="r", owner="supabase_admin",
++                       persistence="p", rls=True, replica_identity="d")
++        for function in expected["functions"]:
++            signature = "pg_catalog._text" if function["name"] == "internal_frame_text" else ""
++            add_object("routine", ["desmoslock_v2", function["name"], signature], kind="f",
++                       owner="supabase_admin", language="sql", return_type="pg_catalog.text",
++                       volatility="s", parallel="u", definition_hash="1" * 64,
++                       body_hash=function["sourceDollarQuotedBodySha256"])
++        self.assertEqual(v.check_prefix(value, expected)["catalog_equivalence"], "not_established")
++        changed = copy.deepcopy(value)
++        next(r for r in changed["records"] if r["kind"] == "routine")["data"]["body_hash"] = "2" * 64
++        with self.assertRaisesRegex(v.Invalid, "source body hash"):
++            v.check_prefix(changed, expected)
++        changed = copy.deepcopy(value)
++        changed["records"].append(record("unsupported_object", ["desmoslock_v2", "operator", "unexpected"], {}))
++        with self.assertRaisesRegex(v.Invalid, "unexpected unsupported"):
++            v.check_prefix(changed, expected)
++
++    def test_invalid_types_and_missing_context(self):
++        for mutate in (
++            lambda x: x.update(format_version=True),
++            lambda x: x.update(overflow="false"),
++            lambda x: x["records"][0]["data"].update(server_version_num=True),
++            lambda x: x["records"][0]["data"].update(read_only=False),
++            lambda x: x["records"][0]["data"].update(search_path="public"),
++            lambda x: x["records"].pop(0),
++            lambda x: x["records"][1].update(kind="unknown"),
++            lambda x: x["records"][1].update(id=["elsewhere"]),
++            lambda x: x["records"][1]["data"].update(owner="x\nsecret"),
++            lambda x: x["records"][1]["data"].update(owner="x" * 2049),
++        ):
++            with self.subTest(mutate=mutate):
++                self.assert_rejected(mutate)
++
++    def test_overflow_and_all_size_caps(self):
++        with self.assertRaises(v.Invalid):
++            v.decode(b" " * (v.MAX_BYTES + 1))
++        self.assert_rejected(lambda x: x.update(overflow=True))
++        self.assert_rejected(lambda x: x.update(records=x["records"] * v.MAX_RECORDS))
++        self.assert_rejected(lambda x: x["records"][3]["data"].update(inherits_roles=["x" * 2048] * 128))
++        self.assert_rejected(lambda x: x["records"][3]["data"].update(inherits_roles=["x"] * 129))
++
++    def test_duplicates_truncation_and_orphan_acl(self):
++        self.assert_rejected(lambda x: x["records"].append(copy.deepcopy(x["records"][1])))
++        self.assert_rejected(lambda x: x["records"].pop())
++        self.assert_rejected(lambda x: x["records"][2].update(id=["relation", "desmoslock_v2", "unknown"]))
++        self.assert_rejected(lambda x: x["records"][1]["data"].update(owner="missing_role"))
++
++    def test_null_versus_empty_acl_and_grant_options(self):
++        ref, target = fixture(), fixture()
++        target["records"][2]["data"]["is_null"] = True
++        result = v.compare(ref, target)
++        self.assertEqual(result["status"], "review_required")
++        self.assertEqual(result["differences"][0]["fields"]["is_null"], {"reference": False, "target": True})
++        self.assert_rejected(lambda x: x["records"][-1]["data"].update(grant_options=["USAGE"]))
++        self.assert_rejected(lambda x: x["records"][-1]["data"].update(privileges=["USAGE", "USAGE"]))
++        self.assert_rejected(lambda x: x["records"][-1]["data"].update(privileges=["PASSWORD"]))
++
++    def test_owner_and_membership_drift_are_visible(self):
++        ref, target = fixture(), fixture()
++        target["records"][1]["data"]["owner"] = "authenticated"
++        target["records"].append(record("membership", ["authenticated", "anon", "supabase_admin"],
++            {"admin_option": True, "inherit_option": True, "set_option": True}))
++        changes = v.compare(ref, target)["differences"]
++        self.assertEqual({x["kind"] for x in changes}, {"schema", "membership"})
++
++    def test_same_major_different_patch_requires_review(self):
++        target = fixture()
++        target["records"][0]["data"]["server_version_num"] += 1
++        result = v.compare(fixture(), target)
++        self.assertEqual(result["status"], "review_required")
++        self.assertFalse(result["node_hash_version_compatible"])
++
++    def test_default_acl_scope_difference_is_not_a_match(self):
++        target = fixture()
++        target["records"][0]["data"]["default_acl_roles"] = ["authenticated", "supabase_admin"]
++        result = v.compare(fixture(), target)
++        self.assertEqual(result["status"], "review_required")
++        self.assertEqual(set(result["differences"][0]["fields"]), {"default_acl_roles"})
++        self.assert_rejected(lambda x: x["records"][0]["data"].update(default_acl_roles=["supabase_admin", "supabase_admin"]))
++        self.assert_rejected(lambda x: x["records"][0]["data"].update(default_acl_roles=["absent_role"]))
++
++    def test_unexpected_objects_retained_in_diff(self):
++        target = fixture()
++        target["records"].append(record("unsupported_object", ["desmoslock_v2", "conversion", "unexpected"], {}))
++        result = v.compare(fixture(), target)
++        self.assertEqual(result["differences"][0]["id"], ["desmoslock_v2", "conversion", "unexpected"])
++
++    def test_difference_report_is_bounded(self):
++        target = fixture()
++        for i in range(v.MAX_DIFFS + 1):
++            target["records"].append(record("unsupported_object", ["desmoslock_v2", "conversion", f"extra_{i}"], {}))
++        result = v.compare(fixture(), target)
++        self.assertEqual(result["status"], "review_required")
++        self.assertEqual(len(result["differences"]), v.MAX_DIFFS)
++        self.assertTrue(result["differences_truncated"])
++
++    def test_query_has_no_deparsers_or_mutations(self):
++        sql = Path(__file__).with_name("catalog.sql").read_text()
++        code = "\n".join(line for line in sql.splitlines() if not line.lstrip().startswith("--"))
++        self.assertEqual(code.count(";"), 1)
++        self.assertTrue(code.startswith("WITH RECURSIVE"))
++        for forbidden in ("pg_get_expr", "pg_get_functiondef", "pg_get_constraintdef", "pg_get_indexdef",
++                          "pg_get_triggerdef", "pg_get_ruledef", "pg_authid", "rolpassword", "set_config",
++                          "desmoslock_v2.", "information_schema", "pg_read_file", "pg_stat_"):
++            self.assertNotIn(forbidden, code)
++        self.assertIn("LIMIT 2049", code)
++        self.assertIn("m.bytes > 1048576", code)
++        ctes = re.findall(r"^([a-z_]+)(?:\([^\n]*\))? AS(?: MATERIALIZED)? \($", code, re.M)
++        self.assertEqual(len(ctes), len(set(ctes)))
++        self.assertEqual(set(ctes), {"ns", "rels", "type_names", "types", "routines", "columns",
++            "acl_objects", "creation_roles", "default_acls", "principals", "membership_scope",
++            "roles", "probe_roles", "privileges", "unsupported_objects", "records", "bounded", "measure"})
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/scripts/backend-catalog/validate.py b/scripts/backend-catalog/validate.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d27a3c0bf53c7713b84da208b7f6f4751cfc816f
+--- /dev/null
++++ b/scripts/backend-catalog/validate.py
+@@ -0,0 +1,328 @@
++#!/usr/bin/env python3
++"""Pure, fail-closed validator/comparator. No database or network capability."""
++import argparse
++import hashlib
++import json
++import re
++from pathlib import Path
++
++MAX_BYTES = 1_100_000
++MAX_RECORDS = 2048
++MAX_RECORD_BYTES = 16384
++MAX_DATA_BYTES = 1048576
++MAX_DIFFS = 500
++MAX_DIFF_BYTES = 131072
++HASH = re.compile(r"[0-9a-f]{64}\Z")
++PRIVILEGES = {"CREATE", "USAGE", "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE",
++              "REFERENCES", "TRIGGER", "MAINTAIN", "EXECUTE"}
++# Every object is closed: a new field or catalog category requires explicit review.
++FIELDS = {
++    "context": {"server_version_num": "int", "database": "str", "query_role": "str",
++                "session_role": "str", "search_path": "str", "read_only": "bool",
++                "required_roles_present": "bool", "default_acl_roles": "strings"},
++    "schema": {"owner": "str"},
++    "relation": {"kind": "str", "owner": "str", "persistence": "str", "is_partition": "bool",
++                 "rls": "bool", "force_rls": "bool", "replica_identity": "str",
++                 "has_rules": "bool", "has_triggers": "bool", "parents": "strings",
++                 "partition_hash": "hash?", "options_hash": "hash"},
++    "column": {"position": "int", "type": "str", "typmod": "int", "not_null": "bool",
++               "identity": "str", "generated": "str", "collation": "str?", "has_default": "bool",
++               "default_hash": "hash?"},
++    "constraint": {"kind": "str", "validated": "bool", "deferrable": "bool", "deferred": "bool",
++                   "no_inherit": "bool", "is_local": "bool", "supporting_index": "str?", "columns": "strings",
++                   "referenced_table": "str?", "referenced_columns": "strings", "definition_hash": "hash"},
++    "index": {"table": "str", "unique": "bool", "primary": "bool", "exclusion": "bool",
++              "valid": "bool", "ready": "bool", "live": "bool", "nulls_not_distinct": "bool",
++              "replica_identity": "bool", "key_count": "int", "column_count": "int", "columns": "strings", "definition_hash": "hash"},
++    "routine": {"kind": "str", "owner": "str", "language": "str", "return_type": "str",
++                "returns_set": "bool", "all_argument_types": "strings", "argument_names": "strings",
++                "argument_modes": "strings", "default_count": "int", "security_definer": "bool",
++                "volatility": "str", "strict": "bool", "leakproof": "bool", "parallel": "str",
++                "body_hash": "hash", "binary_hash": "hash?", "has_sql_body": "bool",
++                "definition_hash": "hash?", "config_names": "strings", "config_hash": "hash",
++                "sole_empty_search_path": "bool"},
++    "type": {"kind": "str", "owner": "str", "companion": "str", "base_type": "str?",
++             "element_type": "str?", "not_null": "bool", "typmod": "int", "relation": "str?",
++             "default_hash": "hash?", "enum_hash": "hash?"},
++    "policy": {"command": "str", "permissive": "bool", "roles": "strings", "using_hash": "hash?", "check_hash": "hash?"},
++    "trigger": {"internal": "bool", "enabled": "str", "deferrable": "bool", "initially_deferred": "bool",
++                "routine": "str", "constraint_table": "str?", "arguments_hash": "hash",
++                "when_hash": "hash?", "definition_hash": "hash?"},
++    "rule": {"enabled": "str", "event": "str", "instead": "bool", "definition_hash": "hash"},
++    "acl": {"is_null": "bool", "entries": "acl_entries"},
++    "effective_acl": {"privileges": "privileges", "grant_options": "privileges"},
++    "role": {"effective_probe": "bool", "superuser": "bool", "inherit": "bool", "bypass_rls": "bool",
++             "inherits_roles": "strings", "can_set_roles": "strings"},
++    "membership": {"admin_option": "bool", "inherit_option": "bool", "set_option": "bool"},
++    "unsupported_object": {},
++    "default_acl": {"entries": "acl_entries"},
++}
++ID_LENGTH = {"context": 1, "schema": 1, "relation": 2, "column": 3, "constraint": 4,
++             "index": 2, "routine": 3, "type": 2, "policy": 3, "trigger": 5,
++             "rule": 3, "role": 1, "default_acl": 3, "membership": 3, "unsupported_object": 3}
++OBJECT_ID_LENGTH = {"schema": 1, "relation": 2, "column": 3, "routine": 3, "type": 2}
++ENUMS = {
++    ("relation", "kind"): set("ripvmtfcIS"), ("relation", "persistence"): set("put"),
++    ("relation", "replica_identity"): set("dnfi"),
++    ("column", "identity"): {"", "a", "d"}, ("column", "generated"): {"", "s"},
++    ("constraint", "kind"): set("cfpux t".replace(" ", "")),
++    ("routine", "kind"): set("fpaw"), ("routine", "volatility"): set("isv"),
++    ("routine", "parallel"): set("sru"), ("type", "kind"): set("bcdepmr"),
++    ("type", "companion"): {"array", "relation", "user"},
++    ("policy", "command"): set("*rawd"), ("trigger", "enabled"): set("ODRA"),
++    ("rule", "enabled"): set("ODRA"), ("rule", "event"): set("1234"),
++}
++
++
++class Invalid(ValueError):
++    pass
++
++
++def require(ok, message):
++    if not ok:
++        raise Invalid(message)
++
++
++def canonical(value):
++    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
++
++
++def sha(value):
++    return hashlib.sha256(canonical(value).encode()).hexdigest()
++
++
++def unique_object(pairs):
++    result = {}
++    for key, value in pairs:
++        require(key not in result, "duplicate JSON field")
++        result[key] = value
++    return result
++
++
++def decode(raw):
++    require(isinstance(raw, bytes) and len(raw) <= MAX_BYTES, "input byte cap")
++    try:
++        value = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object,
++                           parse_constant=lambda _: (_ for _ in ()).throw(Invalid("nonfinite number")))
++    except (UnicodeError, ValueError, RecursionError) as error:
++        raise Invalid("malformed JSON") from error
++    try:
++        return validate(value)
++    except (UnicodeError, RecursionError) as error:
++        raise Invalid("malformed JSON string or nesting") from error
++
++
++def read(path):
++    with Path(path).open("rb") as stream:
++        return decode(stream.read(MAX_BYTES + 1))
++
++
++def scalar(value, descriptor):
++    if descriptor.endswith("?"):
++        return value is None or scalar(value, descriptor[:-1])
++    if descriptor == "str":
++        return isinstance(value, str) and len(value.encode("utf-8")) <= 2048 and not any(ord(c) < 32 for c in value)
++    if descriptor == "int":
++        return type(value) is int and -(2**31) <= value < 2**31
++    if descriptor == "bool":
++        return type(value) is bool
++    if descriptor == "hash":
++        return isinstance(value, str) and bool(HASH.fullmatch(value))
++    if descriptor in ("strings", "privileges"):
++        if not isinstance(value, list) or len(value) > 128 or not all(scalar(v, "str") for v in value):
++            return False
++        return descriptor == "strings" or (value == sorted(set(value)) and set(value) <= PRIVILEGES)
++    if descriptor == "acl_entries":
++        if not isinstance(value, list) or len(value) > 256:
++            return False
++        for entry in value:
++            if not isinstance(entry, dict) or set(entry) != {"grantor", "grantee", "privilege", "grantable"}:
++                return False
++            if not all(scalar(entry[k], "str") and entry[k] for k in ("grantor", "grantee", "privilege")):
++                return False
++            if type(entry["grantable"]) is not bool or entry["privilege"] not in PRIVILEGES:
++                return False
++        keys = [(e["grantor"], e["grantee"], e["privilege"], e["grantable"]) for e in value]
++        return keys == sorted(set(keys))
++    raise AssertionError(descriptor)
++
++
++def key(record):
++    return record["kind"], tuple(record["id"])
++
++
++def validate(value):
++    require(isinstance(value, dict) and set(value) == {"format_version", "schema", "overflow", "records"}, "closed envelope")
++    require(type(value["format_version"]) is int and value["format_version"] == 1, "format version")
++    require(value["schema"] == "desmoslock_v2" and value["overflow"] is False, "scope or server overflow")
++    rows = value["records"]
++    require(isinstance(rows, list) and 1 <= len(rows) <= MAX_RECORDS, "record cap")
++    require(sum(len(canonical(r).encode()) for r in rows) <= MAX_DATA_BYTES, "record byte cap")
++    seen = set()
++    for r in rows:
++        require(isinstance(r, dict) and set(r) == {"kind", "id", "data"}, "closed record")
++        require(isinstance(r["kind"], str) and r["kind"] in FIELDS, "unknown record kind")
++        kind, identity, data = r["kind"], r["id"], r["data"]
++        require(len(canonical(r).encode()) <= MAX_RECORD_BYTES, "single record byte cap")
++        require(isinstance(identity, list) and all(scalar(v, "str") for v in identity), "identity shape")
++        if kind in ("acl", "effective_acl"):
++            require(bool(identity) and identity[0] in OBJECT_ID_LENGTH, "ACL object kind")
++            expected = 1 + OBJECT_ID_LENGTH[identity[0]] + (kind == "effective_acl")
++            require(len(identity) == expected and identity[1] == "desmoslock_v2", "ACL identity")
++        else:
++            require(len(identity) == ID_LENGTH[kind], "identity length")
++            if kind not in ("role", "membership", "default_acl"):
++                require(identity[1 if kind == "constraint" else 0] == "desmoslock_v2", "object schema")
++        require(all(v != "" for i, v in enumerate(identity) if not (
++            (kind == "routine" and i == 2) or
++            (kind in ("acl", "effective_acl") and identity[0] == "routine" and i == 3))), "empty identity")
++        if kind == "constraint":
++            require(identity[0] in ("relation", "type"), "constraint object kind")
++        if kind == "default_acl":
++            require(identity[1] in ("<global>", "desmoslock_v2") and identity[2] in set("rSfTn"), "default ACL scope")
++        require(key(r) not in seen, "duplicate object identity")
++        seen.add(key(r))
++        require(isinstance(data, dict) and set(data) == set(FIELDS[kind]), "closed data fields")
++        for field, descriptor in FIELDS[kind].items():
++            require(scalar(data[field], descriptor), f"invalid {kind}.{field}")
++            if (kind, field) in ENUMS:
++                require(data[field] in ENUMS[kind, field], f"invalid enum {kind}.{field}")
++        if kind == "column":
++            require(1 <= data["position"] <= 1600 and data["has_default"] == (data["default_hash"] is not None), "column invariant")
++        if kind == "routine":
++            require(0 <= data["default_count"] <= len(data["all_argument_types"]), "routine default count")
++            require(all(v in set("iobvt") for v in data["argument_modes"]), "argument modes")
++            require((data["kind"] == "a") == (data["definition_hash"] is None), "routine definition invariant")
++        if kind == "effective_acl":
++            require(set(data["grant_options"]) <= set(data["privileges"]), "grant option without privilege")
++    contexts = [r for r in rows if r["kind"] == "context"]
++    require(len(contexts) == 1, "one context required")
++    context = contexts[0]["data"]
++    require(170000 <= context["server_version_num"] < 180000, "PG17 required")
++    require(context["search_path"] == "pg_catalog" and context["read_only"] is True, "unsafe query session")
++    require(context["required_roles_present"], "required roles absent")
++    require(len(context["default_acl_roles"]) == len(set(context["default_acl_roles"])), "duplicate default ACL role")
++    require(len([r for r in rows if r["kind"] == "schema"]) == 1, "one schema required")
++    # Cross-record checks catch missing linked ACLs; full completeness additionally
++    # requires a trusted SAME QUERY reference and exact source-prefix checks.
++    for r in rows:
++        kind, identity = r["kind"], tuple(r["id"])
++        if kind in ("acl", "effective_acl"):
++            base_id = identity[1:-1] if kind == "effective_acl" else identity[1:]
++            require((identity[0], base_id) in seen, "orphan ACL")
++        if kind in ("column", "policy", "trigger", "rule"):
++            require(("relation", identity[:2]) in seen, "orphan relation child")
++    role_names = {r["id"][0] for r in rows if r["kind"] == "role"}
++    probe_names = {r["id"][0] for r in rows if r["kind"] == "role" and r["data"]["effective_probe"]}
++    require({"anon", "authenticated", "service_role", context["query_role"]} <= role_names, "role inventory incomplete")
++    require(set(context["default_acl_roles"]) <= probe_names, "default ACL role inventory incomplete")
++    for r in rows:
++        kind, identity, data = r["kind"], tuple(r["id"]), r["data"]
++        if kind in ("schema", "routine", "type") or (kind == "relation" and data["kind"] in set("rpvmfS")) or (
++            kind == "column" and next(x for x in rows if key(x) == ("relation", identity[:2]))["data"]["kind"] in set("rpvmf")):
++            require(("acl", (kind,) + identity) in seen, "explicit ACL inventory incomplete")
++            for role in probe_names | {"public"}:
++                require(("effective_acl", (kind,) + identity + (role,)) in seen, "effective ACL inventory incomplete")
++        if "owner" in data:
++            require(data["owner"] in role_names, "owner role inventory incomplete")
++    return value
++
++
++def check_prefix(value, expectations):
++    """Source checks are necessary only; they never assert catalog equivalence."""
++    validate(value)
++    rows = value["records"]
++    tables = {r["id"][1] for r in rows if r["kind"] == "relation" and r["data"]["kind"] == "r"}
++    require(tables == {t["name"] for t in expectations["tables"]}, "prefix table inventory mismatch")
++    require(all(r["data"]["kind"] in ("r", "i") for r in rows if r["kind"] == "relation"), "unexpected relation kind")
++    require(all(r["data"]["rls"] for r in rows if r["kind"] == "relation" and r["data"]["kind"] == "r"), "prefix RLS mismatch")
++    routines = [r for r in rows if r["kind"] == "routine"]
++    expected = {(f["name"], "pg_catalog._text" if f["name"] == "internal_frame_text" else ""): f for f in expectations["functions"]}
++    require({(r["id"][1], r["id"][2]) for r in routines} == set(expected), "prefix routine inventory mismatch")
++    for r in routines:
++        d, e = r["data"], expected[r["id"][1], r["id"][2]]
++        require(d["kind"] == "f" and d["language"] == "sql" and not d["has_sql_body"] and d["binary_hash"] is None, "prefix routine kind mismatch")
++        require(d["body_hash"] == e["sourceDollarQuotedBodySha256"], "source body hash mismatch")
++    require(not any(r["kind"] in ("policy", "rule") for r in rows), "unexpected policy or rule")
++    require(not any(r["kind"] == "trigger" and not r["data"]["internal"] for r in rows), "unexpected user trigger")
++    require(not any(r["kind"] == "type" and r["data"]["companion"] == "user" for r in rows), "unexpected user type")
++    require(not any(r["kind"] == "unsupported_object" for r in rows), "unexpected unsupported namespace object")
++    return {"source_prefix_checks": "pass", "catalog_equivalence": "not_established"}
++
++
++def compare(reference, target):
++    validate(reference)
++    validate(target)
++    left = {key(r): r["data"] for r in reference["records"]}
++    right = {key(r): r["data"] for r in target["records"]}
++    context_key = ("context", ("desmoslock_v2",))
++    lc, rc = left[context_key], right[context_key]
++    compatible = lc["server_version_num"] == rc["server_version_num"] and lc["search_path"] == rc["search_path"]
++    differences = []
++    for k in sorted(left.keys() | right.keys()):
++        if k[0] == "context":
++            if lc["default_acl_roles"] != rc["default_acl_roles"]:
++                differences.append({"kind": "context", "id": ["desmoslock_v2"], "change": "changed",
++                    "fields": {"default_acl_roles": {"reference": lc["default_acl_roles"], "target": rc["default_acl_roles"]}}})
++            continue  # Database/query/session identities remain visible informational context.
++        if k not in left or k not in right:
++            differences.append({"kind": k[0], "id": list(k[1]), "change": "added" if k not in left else "missing"})
++        elif left[k] != right[k]:
++            changes = {f: {"reference": left[k][f], "target": right[k][f]}
++                       for f in sorted(left[k]) if left[k][f] != right[k][f]}
++            differences.append({"kind": k[0], "id": list(k[1]), "change": "changed", "fields": changes})
++    shown = []
++    shown_bytes = 0
++    for difference in differences:
++        size = len(canonical(difference).encode())
++        if len(shown) == MAX_DIFFS or shown_bytes + size > MAX_DIFF_BYTES:
++            break
++        shown.append(difference)
++        shown_bytes += size
++    return {"format_version": 1, "reference_hash": sha(reference), "target_hash": sha(target),
++            "status": "match" if compatible and not differences else "review_required",
++            "node_hash_version_compatible": compatible,
++            "context": {"reference": lc, "target": rc},
++            "difference_count": len(differences), "differences_truncated": len(shown) < len(differences),
++            "differences": shown,
++            "limit": "Namespace projection only; no fixture-row, Auth/API, platform-global, or rollout-readiness claim."}
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("mode", choices=("validate", "compare"))
++    parser.add_argument("reference")
++    parser.add_argument("target", nargs="?")
++    parser.add_argument("--expectations")
++    args = parser.parse_args()
++    try:
++        ref = read(args.reference)
++        if args.expectations:
++            expected = json.loads(Path(args.expectations).read_text())
++            check_prefix(ref, expected)
++        if args.mode == "compare":
++            require(args.target is not None, "target required")
++            require(args.expectations is not None, "comparison requires source expectations")
++            target = read(args.target)
++            result = compare(ref, target)
++            try:
++                check_prefix(target, expected)
++                result["target_source_prefix"] = "pass"
++            except Invalid as error:
++                result["target_source_prefix"] = str(error)
++                result["status"] = "review_required"
++            code = 0 if result["status"] == "match" else 2
++        else:
++            require(args.target is None, "unexpected target argument")
++            result = {"status": "valid", "records": len(ref["records"]), "sha256": sha(ref),
++                      "catalog_equivalence": "not_established"}
++            code = 0
++        print(json.dumps(result, sort_keys=True, indent=2))
++        return code
++    except (Invalid, OSError, ValueError) as error:
++        print(json.dumps({"status": "rejected", "reason": str(error)}))
++        return 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tests/acceptance/synthetic-backup-runtime.mjs b/tests/acceptance/synthetic-backup-runtime.mjs
+index 63f7e2a4769ea94c72a115fdef6c3603c15c1482..1d8a251b81e25e474affc51323df07a185332782 100644
+--- a/tests/acceptance/synthetic-backup-runtime.mjs
++++ b/tests/acceptance/synthetic-backup-runtime.mjs
+@@ -1,5 +1,5 @@
+ import { spawn } from "node:child_process";
+-import { randomBytes, randomUUID } from "node:crypto";
++import { createHash, randomBytes, randomUUID } from "node:crypto";
+ import fs from "node:fs/promises";
+ import os from "node:os";
+ import path from "node:path";
+@@ -19,6 +19,28 @@ const MAX_COMMAND_BYTES = 2 * 1024 * 1024;
+ const PG_BINARY_ROOT = "/usr/lib/postgresql/bin";
+ const DOCKER_BINARY = "/usr/bin/docker";
+ const STAFF_SUITE_DIAGNOSTICS = Symbol("staff-suite-diagnostics");
++const CATALOG_MAX_BYTES = 1_100_000;
++const CATALOG_QUERY_SHA256 =
++  "d4c00e6330577e42aa0268f113f3d8a2b37e7e9b8f2c50b7c726bf2c0340c1d9";
++const CATALOG_INPUTS = Object.freeze([
++  ["scripts/backend-catalog/catalog.sql", CATALOG_QUERY_SHA256],
++  [
++    "scripts/backend-catalog/validate.py",
++    "fd326031c53815b51d8ac56202ec320f505323f1629daa74d4b8d718a9fb4e54",
++  ],
++  [
++    "scripts/backend-catalog/catalog-source-expectations.json",
++    "1dd57f0e6a35529a30aa9f1f25c6c44d9c98778ae8ab054c7b47b90c40a584d9",
++  ],
++  [
++    "supabase/migrations/20260824000100_v2_foundation.sql",
++    "03cc111602a4dc8bc196b5bfb53b87ab1ae902096642af3fd7f45ad9428e951d",
++  ],
++  [
++    "supabase/migrations/20260828000100_internal_release_backend.sql",
++    "1a60d2fb308a8e2cfad102f9c218c319bacd95c33a40801d5b0b731119434f2f",
++  ],
++]);
+ 
+ export class FixtureFailure extends Error {
+   constructor(code) {
+@@ -70,6 +92,169 @@ function decodeJson(bytes) {
+   }
+ }
+ 
++function canonicalCatalogJson(value) {
++  if (Array.isArray(value)) return value.map(canonicalCatalogJson);
++  if (value !== null && typeof value === "object")
++    return Object.fromEntries(
++      Object.keys(value)
++        .sort()
++        .map((key) => [key, canonicalCatalogJson(value[key])]),
++    );
++  return value;
++}
++
++// Called only inside the owned disposable target lifecycle. Effects are explicit
++// so unit controls can exercise the exact path without a database or Docker.
++export async function captureBackendCatalogPrefix({
++  repositoryRoot,
++  workspaceDirectory,
++  cli,
++  run,
++  docker,
++  readFile = fs.readFile,
++  writeFile = fs.writeFile,
++}) {
++  requireFixture(
++    path.isAbsolute(repositoryRoot) &&
++      path.isAbsolute(workspaceDirectory) &&
++      cli === path.join(repositoryRoot, "node_modules/.bin/supabase") &&
++      typeof run === "function" &&
++      typeof docker === "function",
++    "CATALOG_SCOPE_INVALID",
++  );
++  const inputs = await Promise.all(
++    CATALOG_INPUTS.map(async ([relative, expected]) => {
++      const bytes = await readFile(path.join(repositoryRoot, relative));
++      requireFixture(
++        Buffer.isBuffer(bytes) &&
++          bytes.length <= 100_000 &&
++          createHash("sha256").update(bytes).digest("hex") === expected,
++        "CATALOG_INPUT_INVALID",
++      );
++      return bytes;
++    }),
++  );
++  const commitBytes = await run("/usr/bin/git", ["rev-parse", "HEAD"], {
++    timeoutMs: 10_000,
++    maxBytes: 128,
++  });
++  requireFixture(
++    Buffer.isBuffer(commitBytes) &&
++      /^[a-f0-9]{40}\n$/u.test(commitBytes.toString("utf8")),
++    "CATALOG_COMMIT_INVALID",
++  );
++  await run(
++    cli,
++    ["db", "reset", "--local", "--version", "20260828000100", "--no-seed"],
++    { timeoutMs: 300_000 },
++  );
++  const bytes = await docker(
++    [
++      "exec",
++      "--user",
++      "postgres",
++      "--interactive",
++      `supabase_db_${TARGET_PROJECT}`,
++      `${PG_BINARY_ROOT}/psql`,
++      "--no-psqlrc",
++      "--quiet",
++      "--tuples-only",
++      "--no-align",
++      "--set",
++      "ON_ERROR_STOP=1",
++      "--host",
++      "/var/run/postgresql",
++      "--port",
++      "5432",
++      "--username",
++      "supabase_admin",
++      "--dbname",
++      "postgres",
++    ],
++    {
++      input:
++        "BEGIN READ ONLY;\nSET LOCAL search_path = pg_catalog;\n" +
++        "SET LOCAL statement_timeout = '10s';\nSET LOCAL lock_timeout = '1s';\n" +
++        inputs[0].toString("utf8") +
++        "\nROLLBACK;\n",
++      timeoutMs: 30_000,
++      maxBytes: CATALOG_MAX_BYTES,
++    },
++  );
++  requireFixture(
++    Buffer.isBuffer(bytes) &&
++      bytes.length > 0 &&
++      bytes.length <= CATALOG_MAX_BYTES,
++    "CATALOG_OUTPUT_INVALID",
++  );
++  const observationPath = path.join(workspaceDirectory, "catalog-prefix.json");
++  await writeFile(observationPath, bytes, { mode: 0o600, flag: "wx" });
++  const validationBytes = await run(
++    "/usr/bin/python3",
++    [
++      "-I",
++      "-B",
++      path.join(repositoryRoot, "scripts/backend-catalog/validate.py"),
++      "validate",
++      observationPath,
++      "--expectations",
++      path.join(
++        repositoryRoot,
++        "scripts/backend-catalog/catalog-source-expectations.json",
++      ),
++    ],
++    { timeoutMs: 10_000, maxBytes: 8192 },
++  );
++  requireFixture(
++    Buffer.isBuffer(validationBytes) && validationBytes.length <= 8192,
++    "CATALOG_VALIDATION_INVALID",
++  );
++  const validation = decodeJson(validationBytes);
++  requireFixture(
++    validation !== null &&
++      typeof validation === "object" &&
++      !Array.isArray(validation) &&
++      isDeepStrictEqual(Object.keys(validation).sort(), [
++        "catalog_equivalence",
++        "records",
++        "sha256",
++        "status",
++      ]) &&
++      validation.status === "valid" &&
++      validation.catalog_equivalence === "not_established" &&
++      Number.isSafeInteger(validation.records) &&
++      validation.records > 0 &&
++      validation.records <= 2048 &&
++      /^[a-f0-9]{64}$/u.test(validation.sha256),
++    "CATALOG_VALIDATION_INVALID",
++  );
++  // The pinned Python parser rejects duplicate JSON keys before this parse.
++  const projection = decodeJson(bytes);
++  requireFixture(
++    projection?.records?.length === validation.records &&
++      createHash("sha256")
++        .update(JSON.stringify(canonicalCatalogJson(projection)))
++        .digest("hex") === validation.sha256,
++    "CATALOG_VALIDATION_MISMATCH",
++  );
++  const observation = {
++    observation_version: 1,
++    query_sha256: CATALOG_QUERY_SHA256,
++    source_commit: commitBytes.toString("utf8").slice(0, -1),
++    source_files: CATALOG_INPUTS.slice(3).map(([relative, sha256]) => ({
++      path: relative,
++      sha256,
++    })),
++    prefix_versions: ["20260824000100", "20260828000100"],
++    projection,
++  };
++  const diagnostic = Buffer.from(
++    `DESMOSLOCK_CATALOG_PREFIX_V1 ${JSON.stringify(observation)}\n`,
++  );
++  requireFixture(diagnostic.length <= 1_104_096, "CATALOG_DIAGNOSTIC_OVERFLOW");
++  return diagnostic;
++}
++
+ // Deliberately narrow: this fixture supplies an existing empty /dev/null file.
+ // PostgreSQL libpq reports this exact root-file load error before authentication.
+ // Unknown diagnostics fail closed and never become a successful TLS assertion.
+@@ -402,19 +587,115 @@ async function removeOwnedDirectory(owned) {
+   await fs.rm(owned.directory, { recursive: true });
+ }
+ 
+-/** Owns the complete target lifecycle; invoke only on a fresh dedicated CI job. */
+-export async function runBackupRoundtrip(repositoryRoot, testSignal) {
++export function requireDisposableCi({
++  platform,
++  githubActions,
++  ci,
++  nodeVersion,
++  uid,
++}) {
+   requireFixture(
+-    process.platform === "linux" &&
+-      process.env.GITHUB_ACTIONS === "true" &&
+-      process.env.CI === "true" &&
+-      process.version === "v24.20.0",
++    platform === "linux" &&
++      githubActions === "true" &&
++      ci === "true" &&
++      nodeVersion === "v24.20.0",
+     "DISPOSABLE_CI_REQUIRED",
+   );
+   requireFixture(
+-    Number.isInteger(process.getuid?.()) && process.getuid() !== 0,
++    Number.isInteger(uid) && uid !== 0,
+     "UNPRIVILEGED_CI_RUNNER_REQUIRED",
+   );
++}
++
++// The production lifecycle and pure controls share the same failure/cleanup path.
++export async function withRoundtripCleanup(
++  work,
++  { state, run, docker, cli, toolContainer, removeDirectory, detach },
++) {
++  let primaryFailure, result;
++  const cleanupFailures = [];
++  try {
++    result = await work();
++  } catch (error) {
++    const { stage } = state();
++    primaryFailure =
++      error instanceof FixtureFailure
++        ? error.withCode(`${stage}_${error.code}`)
++        : new FixtureFailure(`${stage}_FAILED`);
++  } finally {
++    const { ownsTool, ownsSource, ownsTarget, workspace, tlsRoot } = state();
++    const cleanup = async (action) => {
++      try {
++        await action();
++      } catch {
++        cleanupFailures.push("CLEANUP_FAILED");
++      }
++    };
++    if (ownsTool)
++      await cleanup(async () => {
++        const found = (
++          await docker(
++            [
++              "ps",
++              "--all",
++              "--filter",
++              `name=^/${toolContainer}$`,
++              "--format",
++              "{{.Names}}",
++            ],
++            { signal: undefined },
++          )
++        )
++          .toString()
++          .trim();
++        if (found === "") return;
++        requireFixture(
++          found === toolContainer,
++          "TOOL_CLEANUP_IDENTITY_CHANGED",
++        );
++        await docker(["rm", "--force", toolContainer], { signal: undefined });
++      });
++    if (ownsSource)
++      await cleanup(() =>
++        run(cli, ["stop", "--no-backup"], {
++          cwd: path.join(workspace.directory, "source"),
++          signal: undefined,
++          timeoutMs: 120_000,
++        }),
++      );
++    if (ownsTarget)
++      await cleanup(() =>
++        run(cli, ["stop", "--no-backup"], {
++          signal: undefined,
++          timeoutMs: 120_000,
++        }),
++      );
++    await cleanup(() => removeDirectory(tlsRoot));
++    // Preserve the nonsecret source configuration if stack cleanup failed.
++    // The ephemeral CI runner owns final destruction; never erase recovery paths.
++    if (cleanupFailures.length === 0)
++      await cleanup(() => removeDirectory(workspace));
++    detach();
++  }
++  if (primaryFailure)
++    throw primaryFailure.withCode(
++      cleanupFailures.length
++        ? `${primaryFailure.code}_AND_CLEANUP_FAILED`
++        : primaryFailure.code,
++    );
++  requireFixture(cleanupFailures.length === 0, "CLEANUP_FAILED");
++  return result;
++}
++
++/** Owns the complete target lifecycle; invoke only on a fresh dedicated CI job. */
++export async function runBackupRoundtrip(repositoryRoot, testSignal) {
++  requireDisposableCi({
++    platform: process.platform,
++    githubActions: process.env.GITHUB_ACTIONS,
++    ci: process.env.CI,
++    nodeVersion: process.version,
++    uid: process.getuid?.(),
++  });
+   repositoryRoot = await fs.realpath(repositoryRoot);
+   const cli = path.join(repositoryRoot, "node_modules/.bin/supabase");
+   const node = await fs.realpath(process.execPath);
+@@ -460,10 +741,9 @@ export async function runBackupRoundtrip(repositoryRoot, testSignal) {
+   let ownsTarget = false,
+     ownsSource = false,
+     ownsTool = false;
+-  let primaryFailure, receipt;
++  let receipt;
+   let stage = "PREFLIGHT";
+-  const cleanupFailures = [];
+-  try {
++  const work = async () => {
+     const endpoint = (
+       await docker([
+         "context",
+@@ -516,6 +796,17 @@ export async function runBackupRoundtrip(repositoryRoot, testSignal) {
+       timeoutMs: 600_000,
+       maxBytes: 16 * 1024 * 1024,
+     });
++    stage = "FOUNDATION_CATALOG";
++    process.stdout.write(
++      await captureBackendCatalogPrefix({
++        repositoryRoot,
++        workspaceDirectory: workspace.directory,
++        cli,
++        run,
++        docker,
++      }),
++    );
++    stage = "TARGET_SETUP";
+     await run(cli, ["db", "reset", "--no-seed"], { timeoutMs: 300_000 });
+     stage = "SOURCE_SETUP";
+     ownsSource = true;
+@@ -733,74 +1024,27 @@ export async function runBackupRoundtrip(repositoryRoot, testSignal) {
+       timeoutMs: 600_000,
+     });
+     receipt = { ...receipt, staffAuthSuiteOnRestoredTarget: true };
+-  } catch (error) {
+-    primaryFailure =
+-      error instanceof FixtureFailure
+-        ? error.withCode(`${stage}_${error.code}`)
+-        : new FixtureFailure(`${stage}_FAILED`);
+-  } finally {
+-    const cleanup = async (action) => {
+-      try {
+-        await action();
+-      } catch {
+-        cleanupFailures.push("CLEANUP_FAILED");
+-      }
+-    };
+-    if (ownsTool)
+-      await cleanup(async () => {
+-        const found = (
+-          await docker(
+-            [
+-              "ps",
+-              "--all",
+-              "--filter",
+-              `name=^/${toolContainer}$`,
+-              "--format",
+-              "{{.Names}}",
+-            ],
+-            { signal: undefined },
+-          )
+-        )
+-          .toString()
+-          .trim();
+-        if (found === "") return;
+-        requireFixture(
+-          found === toolContainer,
+-          "TOOL_CLEANUP_IDENTITY_CHANGED",
+-        );
+-        await docker(["rm", "--force", toolContainer], { signal: undefined });
+-      });
+-    if (ownsSource)
+-      await cleanup(() =>
+-        run(cli, ["stop", "--no-backup"], {
+-          cwd: path.join(workspace.directory, "source"),
+-          signal: undefined,
+-          timeoutMs: 120_000,
+-        }),
+-      );
+-    if (ownsTarget)
+-      await cleanup(() =>
+-        run(cli, ["stop", "--no-backup"], {
+-          signal: undefined,
+-          timeoutMs: 120_000,
+-        }),
+-      );
+-    await cleanup(() => removeOwnedDirectory(tlsRoot));
+-    // Preserve the nonsecret source configuration if stack cleanup failed.
+-    // The ephemeral CI runner owns final destruction; never erase recovery paths.
+-    if (cleanupFailures.length === 0)
+-      await cleanup(() => removeOwnedDirectory(workspace));
+-    process.removeListener("SIGTERM", interrupt);
+-    process.removeListener("SIGINT", interrupt);
+-  }
+-  if (primaryFailure)
+-    throw primaryFailure.withCode(
+-      cleanupFailures.length
+-        ? `${primaryFailure.code}_AND_CLEANUP_FAILED`
+-        : primaryFailure.code,
+-    );
+-  requireFixture(cleanupFailures.length === 0, "CLEANUP_FAILED");
+-  return receipt;
++    return receipt;
++  };
++  return withRoundtripCleanup(work, {
++    state: () => ({
++      stage,
++      ownsTool,
++      ownsSource,
++      ownsTarget,
++      workspace,
++      tlsRoot,
++    }),
++    run,
++    docker,
++    cli,
++    toolContainer,
++    removeDirectory: removeOwnedDirectory,
++    detach: () => {
++      process.removeListener("SIGTERM", interrupt);
++      process.removeListener("SIGINT", interrupt);
++    },
++  });
+ }
+ 
+ function pgEnvironment(connection, sslMode, sslRootCert) {
+diff --git a/tests/acceptance/synthetic-backup-runtime.test.mjs b/tests/acceptance/synthetic-backup-runtime.test.mjs
+index 5ddb400dd6da7aed042a60fa76404972bea121fa..420e3295b65c01e0f98232eb7efa79e04f3f7c64 100644
+--- a/tests/acceptance/synthetic-backup-runtime.test.mjs
++++ b/tests/acceptance/synthetic-backup-runtime.test.mjs
+@@ -7,15 +7,18 @@ import { CURRENT_MIGRATION_FILES } from "../../scripts/synthetic-backup/operator
+ import "./staff-suite-diagnostics-reporter.test.mjs";
+ import {
+   boundedCommand,
++  captureBackendCatalogPrefix,
+   connectionFromStatus,
+   FixtureFailure,
+   isExpectedInvalidRootCertificate,
+   materializeSourceFixture,
+   nativeClientWrapper,
++  requireDisposableCi,
+   requireRestoredWorkerReceipt,
+   runStaffSuite,
+   sourceConfiguration,
+   StaffSuiteCommandFailure,
++  withRoundtripCleanup,
+   withSessionTimezone,
+ } from "./synthetic-backup-runtime.mjs";
+ 
+@@ -25,6 +28,805 @@ const failure = (code) => (error) =>
+   error.code === code &&
+   error.message === code;
+ 
++const repositoryRoot = path.resolve(import.meta.dirname, "../..");
++const catalogRoot = path.join(repositoryRoot, "scripts/backend-catalog");
++const catalogCli = path.join(repositoryRoot, "node_modules/.bin/supabase");
++const catalogCommit = "7e351815" + "0".repeat(32);
++const catalogRoles = [
++  "anon",
++  "authenticated",
++  "service_role",
++  "supabase_admin",
++];
++
++// Artificial shape controls only: these rows are not a PostgreSQL observation.
++// The real pure validator checks the capture boundary using the pinned source
++// inventory, without starting a database or invoking an application routine.
++async function artificialCatalogProjection() {
++  const expectations = JSON.parse(
++    await fs.readFile(
++      path.join(catalogRoot, "catalog-source-expectations.json"),
++    ),
++  );
++  const records = [];
++  const add = (kind, id, data) => records.push({ kind, id, data });
++  const object = (kind, id, data) => {
++    add(kind, id, data);
++    add("acl", [kind, ...id], { is_null: false, entries: [] });
++    for (const role of [...catalogRoles, "public"])
++      add("effective_acl", [kind, ...id, role], {
++        privileges: [],
++        grant_options: [],
++      });
++  };
++  add("context", ["desmoslock_v2"], {
++    server_version_num: 170006,
++    database: "postgres",
++    query_role: "supabase_admin",
++    session_role: "supabase_admin",
++    search_path: "pg_catalog",
++    read_only: true,
++    required_roles_present: true,
++    default_acl_roles: ["supabase_admin"],
++  });
++  for (const role of catalogRoles)
++    add("role", [role], {
++      effective_probe: true,
++      superuser: role === "supabase_admin",
++      inherit: true,
++      bypass_rls: role === "service_role",
++      inherits_roles: [],
++      can_set_roles: [],
++    });
++  object("schema", ["desmoslock_v2"], { owner: "supabase_admin" });
++  for (const table of expectations.tables)
++    object("relation", ["desmoslock_v2", table.name], {
++      kind: "r",
++      owner: "supabase_admin",
++      persistence: "p",
++      is_partition: false,
++      rls: true,
++      force_rls: false,
++      replica_identity: "d",
++      has_rules: false,
++      has_triggers: false,
++      parents: [],
++      partition_hash: null,
++      options_hash: "0".repeat(64),
++    });
++  for (const routine of expectations.functions)
++    object(
++      "routine",
++      [
++        "desmoslock_v2",
++        routine.name,
++        routine.name === "internal_frame_text" ? "pg_catalog._text" : "",
++      ],
++      {
++        kind: "f",
++        owner: "supabase_admin",
++        language: "sql",
++        return_type: "pg_catalog.text",
++        returns_set: false,
++        all_argument_types: [],
++        argument_names: [],
++        argument_modes: [],
++        default_count: 0,
++        security_definer: false,
++        volatility: "s",
++        strict: false,
++        leakproof: false,
++        parallel: "u",
++        body_hash: routine.sourceDollarQuotedBodySha256,
++        binary_hash: null,
++        has_sql_body: false,
++        definition_hash: "1".repeat(64),
++        config_names: [],
++        config_hash: "0".repeat(64),
++        sole_empty_search_path: false,
++      },
++    );
++  return {
++    format_version: 1,
++    schema: "desmoslock_v2",
++    overflow: false,
++    records,
++  };
++}
++
++async function catalogHarness(t, rawProjection) {
++  const directory = await fs.mkdtemp(
++    path.join(os.tmpdir(), "catalog-control-"),
++  );
++  t.after(() => fs.rm(directory, { recursive: true, force: true }));
++  const projection = await artificialCatalogProjection();
++  const raw = rawProjection ?? Buffer.from(`${JSON.stringify(projection)}\n`);
++  const calls = [];
++  const capture = {
++    repositoryRoot,
++    workspaceDirectory: directory,
++    cli: catalogCli,
++    run: async (executable, args, options) => {
++      calls.push({ operation: "run", executable, args, options });
++      if (executable === "/usr/bin/git")
++        return Buffer.from(`${catalogCommit}\n`);
++      if (executable === catalogCli) return Buffer.alloc(0);
++      assert.equal(executable, "/usr/bin/python3");
++      return boundedCommand(executable, args, options);
++    },
++    docker: async (args, options) => {
++      calls.push({ operation: "docker", args, options });
++      return raw;
++    },
++    readFile: async (file, ...options) => {
++      calls.push({ operation: "read", file });
++      return fs.readFile(file, ...options);
++    },
++    writeFile: async (file, bytes, options) => {
++      calls.push({ operation: "write", file, bytes, options });
++      return fs.writeFile(file, bytes, options);
++    },
++  };
++  return { capture, calls, directory, projection, raw };
++}
++
++function cleanupHarness(capture, calls, overrides = {}) {
++  const workspace = { directory: capture.workspaceDirectory, dev: 1, ino: 2 };
++  const tlsRoot = {
++    directory: "/synthetic-tmpfs/catalog-control",
++    dev: 3,
++    ino: 4,
++  };
++  const state = {
++    stage: "CATALOG_PREFIX",
++    ownsTool: false,
++    ownsSource: false,
++    ownsTarget: true,
++    workspace,
++    tlsRoot,
++  };
++  return {
++    state,
++    options: {
++      state: () => state,
++      run: async (executable, args, options) => {
++        calls.push({ operation: "cleanup-run", executable, args, options });
++        return Buffer.alloc(0);
++      },
++      docker: async () => assert.fail("an unowned tool must not be touched"),
++      cli: catalogCli,
++      toolContainer:
++        "desmoslock-restore-tools-0123456789abcdef0123456789abcdef",
++      removeDirectory: async (owned) => {
++        calls.push({ operation: "remove", owned });
++      },
++      detach: () => calls.push({ operation: "detach" }),
++      ...overrides,
++    },
++  };
++}
++
++test("disposable CI guard accepts only the pinned unprivileged Linux runner", () => {
++  const valid = Object.freeze({
++    platform: "linux",
++    nodeVersion: "v24.20.0",
++    githubActions: "true",
++    ci: "true",
++    uid: 1001,
++  });
++  assert.doesNotThrow(() => requireDisposableCi(valid));
++  for (const [field, values] of [
++    ["platform", ["darwin", "win32", undefined]],
++    ["nodeVersion", ["v24.19.0", "v24.20.1", "24.20.0", undefined]],
++    ["githubActions", [true, "false", "TRUE", undefined]],
++    ["ci", [true, "false", "TRUE", undefined]],
++  ])
++    for (const value of values)
++      assert.throws(
++        () => requireDisposableCi({ ...valid, [field]: value }),
++        failure("DISPOSABLE_CI_REQUIRED"),
++      );
++  for (const uid of [0, undefined, null, "1001", 1.5, NaN])
++    assert.throws(
++      () => requireDisposableCi({ ...valid, uid }),
++      failure("UNPRIVILEGED_CI_RUNNER_REQUIRED"),
++    );
++});
++
++test("catalog prefix capture fixes source pins, command arguments, SQL input, and bounded diagnostic", async (t) => {
++  const { capture, calls, projection, raw, directory } =
++    await catalogHarness(t);
++  const diagnostic = await captureBackendCatalogPrefix(capture);
++  assert.ok(Buffer.isBuffer(diagnostic));
++  assert.ok(diagnostic.length <= 1_104_096);
++  const text = diagnostic.toString("utf8");
++  assert.match(text, /^DESMOSLOCK_CATALOG_PREFIX_V1 \{[^\n]+\}\n$/u);
++  const observation = JSON.parse(
++    text.slice("DESMOSLOCK_CATALOG_PREFIX_V1 ".length),
++  );
++  const expectations = JSON.parse(
++    await fs.readFile(
++      path.join(catalogRoot, "catalog-source-expectations.json"),
++    ),
++  );
++  assert.deepEqual(observation, {
++    observation_version: 1,
++    query_sha256:
++      "d4c00e6330577e42aa0268f113f3d8a2b37e7e9b8f2c50b7c726bf2c0340c1d9",
++    source_commit: catalogCommit,
++    source_files: expectations.sourceFiles,
++    prefix_versions: ["20260824000100", "20260828000100"],
++    projection,
++  });
++  assert.equal(
++    text,
++    `DESMOSLOCK_CATALOG_PREFIX_V1 ${JSON.stringify(observation)}\n`,
++  );
++  assert.deepEqual(
++    calls
++      .filter((call) => call.operation === "read")
++      .map((call) => call.file)
++      .toSorted(),
++    [
++      path.join(catalogRoot, "catalog.sql"),
++      path.join(catalogRoot, "validate.py"),
++      path.join(catalogRoot, "catalog-source-expectations.json"),
++      ...expectations.sourceFiles.map((source) =>
++        path.join(repositoryRoot, source.path),
++      ),
++    ].toSorted(),
++  );
++  const observationPath = path.join(directory, "catalog-prefix.json");
++  assert.deepEqual(
++    calls.filter((call) => call.operation !== "read"),
++    [
++      {
++        operation: "run",
++        executable: "/usr/bin/git",
++        args: ["rev-parse", "HEAD"],
++        options: { timeoutMs: 10_000, maxBytes: 128 },
++      },
++      {
++        operation: "run",
++        executable: catalogCli,
++        args: [
++          "db",
++          "reset",
++          "--local",
++          "--version",
++          "20260828000100",
++          "--no-seed",
++        ],
++        options: { timeoutMs: 300_000 },
++      },
++      {
++        operation: "docker",
++        args: [
++          "exec",
++          "--user",
++          "postgres",
++          "--interactive",
++          "supabase_db_desmoslock-v2",
++          "/usr/lib/postgresql/bin/psql",
++          "--no-psqlrc",
++          "--quiet",
++          "--tuples-only",
++          "--no-align",
++          "--set",
++          "ON_ERROR_STOP=1",
++          "--host",
++          "/var/run/postgresql",
++          "--port",
++          "5432",
++          "--username",
++          "supabase_admin",
++          "--dbname",
++          "postgres",
++        ],
++        options: {
++          input:
++            "BEGIN READ ONLY;\nSET LOCAL search_path = pg_catalog;\n" +
++            "SET LOCAL statement_timeout = '10s';\nSET LOCAL lock_timeout = '1s';\n" +
++            (await fs.readFile(path.join(catalogRoot, "catalog.sql"), "utf8")) +
++            "\nROLLBACK;\n",
++          timeoutMs: 30_000,
++          maxBytes: 1_100_000,
++        },
++      },
++      {
++        operation: "write",
++        file: observationPath,
++        bytes: raw,
++        options: { mode: 0o600, flag: "wx" },
++      },
++      {
++        operation: "run",
++        executable: "/usr/bin/python3",
++        args: [
++          "-I",
++          "-B",
++          path.join(catalogRoot, "validate.py"),
++          "validate",
++          observationPath,
++          "--expectations",
++          path.join(catalogRoot, "catalog-source-expectations.json"),
++        ],
++        options: { timeoutMs: 10_000, maxBytes: 8192 },
++      },
++    ],
++  );
++  assert.deepEqual(await fs.readFile(observationPath), raw);
++  assert.equal((await fs.stat(observationPath)).mode & 0o777, 0o600);
++});
++
++test("catalog pin drift and invalid capture scope stop before command execution", async (t) => {
++  for (const relative of [
++    "scripts/backend-catalog/catalog.sql",
++    "scripts/backend-catalog/validate.py",
++    "scripts/backend-catalog/catalog-source-expectations.json",
++    "supabase/migrations/20260824000100_v2_foundation.sql",
++    "supabase/migrations/20260828000100_internal_release_backend.sql",
++  ]) {
++    const { capture, calls } = await catalogHarness(t);
++    const read = capture.readFile;
++    capture.readFile = async (file) => {
++      const bytes = await read(file);
++      return file === path.join(repositoryRoot, relative)
++        ? Buffer.concat([bytes, Buffer.from("\n")])
++        : bytes;
++    };
++    await assert.rejects(
++      captureBackendCatalogPrefix(capture),
++      failure("CATALOG_INPUT_INVALID"),
++    );
++    assert.equal(
++      calls.some((call) => call.operation !== "read"),
++      false,
++    );
++  }
++  for (const invalid of [
++    { repositoryRoot: "relative" },
++    { workspaceDirectory: "relative" },
++    { cli: "/unowned/supabase" },
++    { run: null },
++    { docker: null },
++  ]) {
++    const { capture, calls } = await catalogHarness(t);
++    await assert.rejects(
++      captureBackendCatalogPrefix({ ...capture, ...invalid }),
++      failure("CATALOG_SCOPE_INVALID"),
++    );
++    assert.deepEqual(calls, []);
++  }
++});
++
++test("catalog capture rejects malformed commit identity before resetting the target", async (t) => {
++  for (const commit of [
++    `${catalogCommit}`,
++    `${catalogCommit}\nextra\n`,
++    `${"A".repeat(40)}\n`,
++    "7e351815\n",
++    "synthetic-private-value\n",
++  ]) {
++    const { capture, calls } = await catalogHarness(t);
++    capture.run = async (executable, args) => {
++      calls.push({ operation: "run", executable, args });
++      assert.equal(executable, "/usr/bin/git");
++      return Buffer.from(commit);
++    };
++    await assert.rejects(
++      captureBackendCatalogPrefix(capture),
++      failure("CATALOG_COMMIT_INVALID"),
++    );
++    assert.equal(calls.filter((call) => call.operation === "run").length, 1);
++    assert.equal(
++      calls.some((call) => call.operation === "docker"),
++      false,
++    );
++  }
++});
++
++test("real catalog validator rejects malformed, missing, duplicate, and oversized projections with target cleanup", async (t) => {
++  const value = await artificialCatalogProjection();
++  const missing = structuredClone(value);
++  missing.records = missing.records.filter(
++    (record) => record.kind !== "context",
++  );
++  const duplicate = structuredClone(value);
++  duplicate.records.push(structuredClone(duplicate.records[0]));
++  const drift = structuredClone(value);
++  drift.records.find((record) => record.kind === "routine").data.body_hash =
++    "2".repeat(64);
++  const cases = [
++    ["invalid JSON", Buffer.from("{"), "FIXTURE_COMMAND_FAILED"],
++    [
++      "missing context",
++      Buffer.from(JSON.stringify(missing)),
++      "FIXTURE_COMMAND_FAILED",
++    ],
++    [
++      "duplicate record",
++      Buffer.from(JSON.stringify(duplicate)),
++      "FIXTURE_COMMAND_FAILED",
++    ],
++    [
++      "duplicate JSON field",
++      Buffer.from(
++        JSON.stringify(value).replace(
++          '"format_version":1',
++          '"format_version":1,"format_version":1',
++        ),
++      ),
++      "FIXTURE_COMMAND_FAILED",
++    ],
++    [
++      "source body drift",
++      Buffer.from(JSON.stringify(drift)),
++      "FIXTURE_COMMAND_FAILED",
++    ],
++    [
++      "server overflow",
++      Buffer.from(JSON.stringify({ ...value, overflow: true })),
++      "FIXTURE_COMMAND_FAILED",
++    ],
++    ["missing output", Buffer.alloc(0), "CATALOG_OUTPUT_INVALID"],
++    ["byte cap", Buffer.alloc(1_100_001, " "), "CATALOG_OUTPUT_INVALID"],
++  ];
++  for (const [name, raw, code] of cases)
++    await t.test(name, async (t) => {
++      const { capture, calls } = await catalogHarness(t, raw);
++      const cleanup = cleanupHarness(capture, calls);
++      await assert.rejects(
++        withRoundtripCleanup(async () => {
++          await captureBackendCatalogPrefix(capture);
++          assert.fail(
++            "a rejected catalog must not return a diagnostic or continue setup",
++          );
++        }, cleanup.options),
++        failure(`CATALOG_PREFIX_${code}`),
++      );
++      assert.deepEqual(
++        calls.filter((call) => call.operation === "cleanup-run"),
++        [
++          {
++            operation: "cleanup-run",
++            executable: catalogCli,
++            args: ["stop", "--no-backup"],
++            options: { signal: undefined, timeoutMs: 120_000 },
++          },
++        ],
++      );
++      assert.deepEqual(
++        calls
++          .filter((call) => call.operation === "remove")
++          .map((call) => call.owned),
++        [cleanup.state.tlsRoot, cleanup.state.workspace],
++      );
++      assert.equal(
++        calls.filter((call) => call.operation === "detach").length,
++        1,
++      );
++      if (code === "CATALOG_OUTPUT_INVALID")
++        assert.equal(
++          calls.some((call) => call.operation === "write"),
++          false,
++        );
++      else
++        assert.equal(
++          calls.filter((call) => call.executable === "/usr/bin/python3").length,
++          1,
++        );
++    });
++});
++
++test("prefix reset, query, and validator command failures use the real cleanup wrapper exactly once", async (t) => {
++  for (const command of ["prefix reset", "query", "validator"])
++    await t.test(command, async (t) => {
++      const { capture, calls } = await catalogHarness(t);
++      const run = capture.run;
++      const docker = capture.docker;
++      capture.docker = async (...args) => {
++        const output = await docker(...args);
++        if (command === "query")
++          throw new FixtureFailure("FIXTURE_COMMAND_FAILED");
++        return output;
++      };
++      capture.run = async (executable, args, options) => {
++        if (
++          (command === "prefix reset" && executable === catalogCli) ||
++          (command === "validator" && executable === "/usr/bin/python3")
++        ) {
++          calls.push({ operation: "run", executable, args, options });
++          throw new FixtureFailure("FIXTURE_COMMAND_FAILED");
++        }
++        return run(executable, args, options);
++      };
++      const cleanup = cleanupHarness(capture, calls);
++      await assert.rejects(
++        withRoundtripCleanup(async () => {
++          const diagnostic = await captureBackendCatalogPrefix(capture);
++          calls.push({ operation: "diagnostic", bytes: diagnostic });
++          await capture.run(catalogCli, ["db", "reset", "--no-seed"], {
++            timeoutMs: 300_000,
++          });
++          calls.push({ operation: "source-setup" });
++        }, cleanup.options),
++        failure("CATALOG_PREFIX_FIXTURE_COMMAND_FAILED"),
++      );
++      const stops = calls.filter((call) => call.operation === "cleanup-run");
++      assert.equal(stops.length, 1);
++      assert.deepEqual(stops[0].args, ["stop", "--no-backup"]);
++      assert.equal(Object.hasOwn(stops[0].options, "signal"), true);
++      assert.equal(stops[0].options.signal, undefined);
++      assert.equal(
++        calls.some((call) =>
++          ["diagnostic", "source-setup"].includes(call.operation),
++        ),
++        false,
++      );
++      assert.equal(
++        calls.some(
++          (call) =>
++            call.operation === "run" &&
++            call.executable === catalogCli &&
++            call.args.join(" ") === "db reset --no-seed",
++        ),
++        false,
++      );
++      if (command === "prefix reset") {
++        assert.equal(
++          calls.some(
++            (call) =>
++              ["docker", "write"].includes(call.operation) ||
++              call.executable === "/usr/bin/python3",
++          ),
++          false,
++        );
++        assert.deepEqual(
++          calls.filter((call) => call.operation === "run"),
++          [
++            {
++              operation: "run",
++              executable: "/usr/bin/git",
++              args: ["rev-parse", "HEAD"],
++              options: { timeoutMs: 10_000, maxBytes: 128 },
++            },
++            {
++              operation: "run",
++              executable: catalogCli,
++              args: [
++                "db",
++                "reset",
++                "--local",
++                "--version",
++                "20260828000100",
++                "--no-seed",
++              ],
++              options: { timeoutMs: 300_000 },
++            },
++          ],
++        );
++      }
++      assert.equal(
++        calls.filter((call) => call.operation === "detach").length,
++        1,
++      );
++    });
++});
++
++test("catalog capture requires an exact validator summary tied to the captured projection", async (t) => {
++  for (const [name, mutate, code = "CATALOG_VALIDATION_INVALID"] of [
++    [
++      "missing status",
++      (value) => {
++        delete value.status;
++      },
++    ],
++    [
++      "missing record count",
++      (value) => {
++        delete value.records;
++      },
++    ],
++    [
++      "missing digest",
++      (value) => {
++        delete value.sha256;
++      },
++    ],
++    [
++      "missing limit",
++      (value) => {
++        delete value.catalog_equivalence;
++      },
++    ],
++    [
++      "extra field",
++      (value) => {
++        value.extra = "synthetic-private-value";
++      },
++    ],
++    [
++      "rejected status",
++      (value) => {
++        value.status = "rejected";
++      },
++    ],
++    [
++      "equivalence claim",
++      (value) => {
++        value.catalog_equivalence = "established";
++      },
++    ],
++    [
++      "invalid record type",
++      (value) => {
++        value.records = String(value.records);
++      },
++    ],
++    [
++      "zero records",
++      (value) => {
++        value.records = 0;
++      },
++    ],
++    [
++      "record cap",
++      (value) => {
++        value.records = 2049;
++      },
++    ],
++    [
++      "invalid digest",
++      (value) => {
++        value.sha256 = "synthetic-private-value";
++      },
++    ],
++    [
++      "different record count",
++      (value) => {
++        value.records += 1;
++      },
++      "CATALOG_VALIDATION_MISMATCH",
++    ],
++    [
++      "different digest",
++      (value) => {
++        value.sha256 = "0".repeat(64);
++      },
++      "CATALOG_VALIDATION_MISMATCH",
++    ],
++  ])
++    await t.test(name, async (t) => {
++      const { capture } = await catalogHarness(t);
++      const run = capture.run;
++      capture.run = async (executable, ...args) => {
++        const bytes = await run(executable, ...args);
++        if (executable !== "/usr/bin/python3") return bytes;
++        const validation = JSON.parse(bytes);
++        mutate(validation);
++        return Buffer.from(JSON.stringify(validation));
++      };
++      await assert.rejects(captureBackendCatalogPrefix(capture), failure(code));
++    });
++});
++
++test("cleanup failure preserves recovery workspace and suffixes the original catalog failure", async (t) => {
++  const { capture, calls } = await catalogHarness(t);
++  capture.docker = async () => {
++    throw new FixtureFailure("FIXTURE_COMMAND_TIMEOUT");
++  };
++  const cleanup = cleanupHarness(capture, calls, {
++    run: async (executable, args, options) => {
++      calls.push({ operation: "cleanup-run", executable, args, options });
++      throw new FixtureFailure("FIXTURE_COMMAND_FAILED");
++    },
++  });
++  await assert.rejects(
++    withRoundtripCleanup(
++      () => captureBackendCatalogPrefix(capture),
++      cleanup.options,
++    ),
++    failure("CATALOG_PREFIX_FIXTURE_COMMAND_TIMEOUT_AND_CLEANUP_FAILED"),
++  );
++  assert.equal(
++    calls.filter((call) => call.operation === "cleanup-run").length,
++    1,
++  );
++  assert.deepEqual(
++    calls
++      .filter((call) => call.operation === "remove")
++      .map((call) => call.owned),
++    [cleanup.state.tlsRoot],
++  );
++  assert.equal(calls.filter((call) => call.operation === "detach").length, 1);
++});
++
++test("cancelled catalog work still stops the owned target with cancellation detached", async (t) => {
++  const { capture, calls } = await catalogHarness(t);
++  const cancellation = new AbortController();
++  cancellation.abort();
++  capture.docker = () =>
++    boundedCommand("/not-an-executable", [], { signal: cancellation.signal });
++  const cleanup = cleanupHarness(capture, calls);
++  await assert.rejects(
++    withRoundtripCleanup(
++      () => captureBackendCatalogPrefix(capture),
++      cleanup.options,
++    ),
++    failure("CATALOG_PREFIX_FIXTURE_COMMAND_ABORTED"),
++  );
++  const stops = calls.filter((call) => call.operation === "cleanup-run");
++  assert.equal(stops.length, 1);
++  assert.deepEqual(stops[0].args, ["stop", "--no-backup"]);
++  assert.equal(Object.hasOwn(stops[0].options, "signal"), true);
++  assert.equal(stops[0].options.signal, undefined);
++  assert.equal(calls.filter((call) => call.operation === "detach").length, 1);
++});
++
++test("inert roundtrip callback returns the validated diagnostic before full reset and source setup", async (t) => {
++  const { capture, calls } = await catalogHarness(t);
++  const cleanup = cleanupHarness(capture, calls);
++  const result = await withRoundtripCleanup(async () => {
++    const diagnostic = await captureBackendCatalogPrefix(capture);
++    calls.push({ operation: "diagnostic", bytes: diagnostic });
++    await capture.run(catalogCli, ["db", "reset", "--no-seed"], {
++      timeoutMs: 300_000,
++    });
++    cleanup.state.stage = "SOURCE_SETUP";
++    cleanup.state.ownsSource = true;
++    calls.push({ operation: "source-setup" });
++    return "synthetic-roundtrip-result";
++  }, cleanup.options);
++  assert.equal(result, "synthetic-roundtrip-result");
++  assert.deepEqual(
++    calls
++      .filter((call) =>
++        ["run", "docker", "diagnostic", "source-setup"].includes(
++          call.operation,
++        ),
++      )
++      .map((call) =>
++        call.operation === "run"
++          ? call.executable === catalogCli
++            ? call.args.join(" ")
++            : call.executable
++          : call.operation,
++      ),
++    [
++      "/usr/bin/git",
++      "db reset --local --version 20260828000100 --no-seed",
++      "docker",
++      "/usr/bin/python3",
++      "diagnostic",
++      "db reset --no-seed",
++      "source-setup",
++    ],
++  );
++  assert.deepEqual(
++    calls.filter((call) => call.operation === "cleanup-run"),
++    [
++      {
++        operation: "cleanup-run",
++        executable: catalogCli,
++        args: ["stop", "--no-backup"],
++        options: {
++          cwd: path.join(capture.workspaceDirectory, "source"),
++          signal: undefined,
++          timeoutMs: 120_000,
++        },
++      },
++      {
++        operation: "cleanup-run",
++        executable: catalogCli,
++        args: ["stop", "--no-backup"],
++        options: { signal: undefined, timeoutMs: 120_000 },
++      },
++    ],
++  );
++  assert.equal(calls.filter((call) => call.operation === "detach").length, 1);
++});
++
+ test("worker receipt requires explicit metadata and empty authority-store evidence", () => {
+   const receipt = Object.freeze({
+     status: "restored",

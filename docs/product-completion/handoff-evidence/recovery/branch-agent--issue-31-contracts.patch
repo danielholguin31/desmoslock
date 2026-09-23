@@ -1,0 +1,4134 @@
+diff --git a/packages/contracts/src/exact-record.ts b/packages/contracts/src/exact-record.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b4b7136eb5a6efda25a8a25281b54157569749bd
+--- /dev/null
++++ b/packages/contracts/src/exact-record.ts
+@@ -0,0 +1,93 @@
++export function parseExactRecord(
++  value: unknown,
++  expectedKeys: readonly string[],
++): Record<string, unknown> | null {
++  try {
++    if (typeof value !== "object" || value === null || Array.isArray(value)) {
++      return null;
++    }
++
++    const prototype = Object.getPrototypeOf(value) as unknown;
++    if (prototype !== Object.prototype && prototype !== null) return null;
++
++    const actualKeys = Reflect.ownKeys(value);
++    if (
++      actualKeys.length !== expectedKeys.length ||
++      actualKeys.some(
++        (key) => typeof key !== "string" || !expectedKeys.includes(key),
++      )
++    ) {
++      return null;
++    }
++
++    const snapshot = Object.create(null) as Record<string, unknown>;
++    for (const key of expectedKeys) {
++      const descriptor = Object.getOwnPropertyDescriptor(value, key);
++      if (
++        descriptor === undefined ||
++        !("value" in descriptor) ||
++        !descriptor.enumerable
++      ) {
++        return null;
++      }
++
++      snapshot[key] = descriptor.value as unknown;
++    }
++
++    return snapshot;
++  } catch {
++    return null;
++  }
++}
++
++export function parseExactArray(
++  value: unknown,
++  maximumLength: number,
++): readonly unknown[] | null {
++  try {
++    if (!Array.isArray(value)) return null;
++
++    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
++    if (
++      lengthDescriptor === undefined ||
++      !("value" in lengthDescriptor) ||
++      !Number.isSafeInteger(lengthDescriptor.value) ||
++      lengthDescriptor.value < 0 ||
++      lengthDescriptor.value > maximumLength
++    ) {
++      return null;
++    }
++
++    const length = lengthDescriptor.value as number;
++    const ownKeys = Reflect.ownKeys(value);
++    if (
++      ownKeys.length !== length + 1 ||
++      !ownKeys.includes("length") ||
++      ownKeys.some(
++        (key) =>
++          typeof key !== "string" ||
++          (key !== "length" &&
++            (!/^(?:0|[1-9][0-9]*)$/u.test(key) || Number(key) >= length)),
++      )
++    ) {
++      return null;
++    }
++
++    const snapshot: unknown[] = [];
++    for (let index = 0; index < length; index += 1) {
++      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
++      if (
++        descriptor === undefined ||
++        !("value" in descriptor) ||
++        !descriptor.enumerable
++      ) {
++        return null;
++      }
++      snapshot.push(descriptor.value as unknown);
++    }
++
++    return snapshot;
++  } catch {
++    return null;
++  }
++}
+diff --git a/packages/contracts/src/index.ts b/packages/contracts/src/index.ts
+index 3e20016964ee0a4dbf0e75b2f27c6f0c92284fdd..dc3d69b2b83ebd6c7773a2bef89fd466809714a7 100644
+--- a/packages/contracts/src/index.ts
++++ b/packages/contracts/src/index.ts
+@@ -61,3 +61,75 @@ export {
+   verifyReleaseProvenance,
+ } from "./release-provenance.js";
+ export type { ReleaseProvenanceInput } from "./release-provenance.js";
++export {
++  STAFF_AUTH_MANAGEMENT_LIST_MAXIMUM_ITEMS,
++  mapCreateStaffInvitationInternalResult,
++  mapCurrentManageableStaffInvitationsRpcRows,
++  mapCurrentManageableStaffRpcRows,
++  mapRequestStaffPasswordRecoveryInternalResult,
++  mapStaffAuthInternalFailure,
++  mapStaffPasswordRecoveryRpcFailure,
++  parseAcceptStaffInvitationRequest,
++  parseAcceptStaffInvitationResponse,
++  parseBeginStaffPasswordRecoveryOperationRequest,
++  parseBeginStaffPasswordRecoveryRpcResult,
++  parseCreateStaffInvitationRequest,
++  parseCreateStaffInvitationResponse,
++  parseFinishStaffPasswordRecoveryOperationRequest,
++  parseFinishStaffPasswordRecoveryRpcResult,
++  parseManageableStaffInvitationListResponse,
++  parseManageableStaffListResponse,
++  parsePublicStaffAuthConfiguration,
++  parseRequestStaffPasswordRecoveryRequest,
++  parseRequestStaffPasswordRecoveryResponse,
++  parseRevokeStaffInvitationRequest,
++  parseRevokeStaffMembershipRequest,
++  parseRevokeStaffInvitationResponse,
++  parseRevokeStaffMembershipResponse,
++  parseSelectStaffSchoolRequest,
++  parseSelectStaffSchoolResponse,
++  parseStaffDisplayName,
++  parseStaffEmailVerificationResponse,
++  parseStaffLoginResponse,
++  parseStaffPasswordRecoveryCompletionResponse,
++  staffAuthErrorCodes,
++  staffAuthProviderFailureCodes,
++  staffAuthRpcFailureCodes,
++  staffAuthWireSuccessCodes,
++  staffPasswordRecoveryDownstreamOutcomes,
++  staffPasswordRecoveryRpcFailureCodes,
++} from "./staff-auth.js";
++export type {
++  AcceptStaffInvitationRequest,
++  AcceptStaffInvitationResponse,
++  BeginStaffPasswordRecoveryRpcResult,
++  CreateStaffInvitationInternalResult,
++  CreateStaffInvitationRequest,
++  CreateStaffInvitationResponse,
++  FinishStaffPasswordRecoveryRpcResult,
++  ManageableStaffInvitation,
++  ManageableStaffInvitationListResponse,
++  ManageableStaffListResponse,
++  ManageableStaffMember,
++  PublicStaffAuthConfiguration,
++  RequestStaffPasswordRecoveryInternalResult,
++  RequestStaffPasswordRecoveryRequest,
++  RequestStaffPasswordRecoveryResponse,
++  RevokeStaffInvitationRequest,
++  RevokeStaffInvitationResponse,
++  RevokeStaffMembershipRequest,
++  RevokeStaffMembershipResponse,
++  SelectStaffSchoolRequest,
++  SelectStaffSchoolResponse,
++  StaffAuthErrorCode,
++  StaffAuthInternalFailure,
++  StaffAuthProviderFailureCode,
++  StaffAuthRpcFailureCode,
++  StaffAuthWireSuccessCode,
++  StaffEmailVerificationResponse,
++  StaffLoginResponse,
++  StaffPasswordRecoveryCompletionResponse,
++  StaffPasswordRecoveryDownstreamOutcome,
++  StaffPasswordRecoveryOperationRequest,
++  StaffPasswordRecoveryRpcFailureCode,
++} from "./staff-auth.js";
+diff --git a/packages/contracts/src/staff-auth.ts b/packages/contracts/src/staff-auth.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6c8ac84b5cea7563c081f7fa2beb01a66a73fbe8
+--- /dev/null
++++ b/packages/contracts/src/staff-auth.ts
+@@ -0,0 +1,1258 @@
++import { staffAuthErrorCodes } from "@desmoslock/domain";
++import type {
++  InvitableStaffRole,
++  StaffAuthErrorCode,
++  StaffAuthFailure,
++} from "@desmoslock/domain";
++
++import { parseExactArray, parseExactRecord } from "./exact-record.js";
++
++export { staffAuthErrorCodes };
++export type { StaffAuthErrorCode };
++
++export interface CreateStaffInvitationRequest {
++  readonly email: string;
++  readonly role: InvitableStaffRole;
++  readonly schoolId: string;
++}
++
++export interface AcceptStaffInvitationRequest {
++  readonly displayName: string;
++  readonly invitationId: string;
++}
++
++export interface RevokeStaffMembershipRequest {
++  readonly profileId: string;
++  readonly schoolId: string;
++}
++
++export interface RevokeStaffInvitationRequest {
++  readonly invitationId: string;
++}
++
++export interface RequestStaffPasswordRecoveryRequest {
++  /** Transient RFC 7636 S256 challenge; never persist it in product state. */
++  readonly codeChallenge: string;
++  readonly email: string;
++  /** Transient browser correlation identity; not a provider token. */
++  readonly flowId: string;
++  /** Transient callback binding; never render or log it. */
++  readonly state: string;
++}
++
++export interface SelectStaffSchoolRequest {
++  readonly schoolId: string;
++}
++
++export interface StaffPasswordRecoveryOperationRequest {
++  readonly operationId: string;
++}
++
++/** Web-only key fragment; compose it with an already-validated backend URL. */
++export interface PublicStaffAuthConfiguration {
++  readonly publishableKey: string;
++}
++
++/**
++ * #31 is deliberately unpaginated. DB selectors return row 501 only as an
++ * overflow sentinel; adapters reject it instead of silently truncating.
++ */
++export const STAFF_AUTH_MANAGEMENT_LIST_MAXIMUM_ITEMS = 500;
++
++export interface ManageableStaffMember {
++  readonly displayName: string;
++  readonly email: string;
++  readonly profileId: string;
++  readonly role: InvitableStaffRole;
++  readonly schoolId: string;
++}
++
++export interface ManageableStaffInvitation {
++  readonly email: string;
++  readonly expiresAt: string;
++  readonly invitationId: string;
++  readonly role: InvitableStaffRole;
++  readonly schoolId: string;
++  readonly state: "pending";
++}
++
++export const staffAuthWireSuccessCodes = [
++  "email_verified",
++  "invitation_accepted",
++  "invitation_created",
++  "invitation_revoked",
++  "login_succeeded",
++  "manageable_invitations_listed",
++  "manageable_staff_listed",
++  "membership_revoked",
++  "recovery_completed",
++  "recovery_requested",
++  "school_selected",
++] as const;
++
++export type StaffAuthWireSuccessCode =
++  (typeof staffAuthWireSuccessCodes)[number];
++
++type StaffAuthOperationResponse<
++  Success extends StaffAuthWireSuccessCode,
++  Error extends StaffAuthErrorCode,
++> = { readonly code: Success; readonly ok: true } | StaffAuthFailure<Error>;
++
++const managementListErrorCodes = [
++  "authentication_required",
++  "authorization_denied",
++  "service_unavailable",
++  "session_expired",
++  "session_revoked",
++  "step_up_required",
++] as const satisfies readonly StaffAuthErrorCode[];
++
++export type ManageableStaffListResponse =
++  | {
++      readonly code: "manageable_staff_listed";
++      readonly items: readonly ManageableStaffMember[];
++      readonly ok: true;
++    }
++  | StaffAuthFailure<(typeof managementListErrorCodes)[number]>;
++
++export type ManageableStaffInvitationListResponse =
++  | {
++      readonly code: "manageable_invitations_listed";
++      readonly items: readonly ManageableStaffInvitation[];
++      readonly ok: true;
++    }
++  | StaffAuthFailure<(typeof managementListErrorCodes)[number]>;
++
++const createStaffInvitationErrorCodes = staffAuthErrorCodes;
++const acceptStaffInvitationErrorCodes = [
++  "authentication_required",
++  "authorization_denied",
++  "existing_confirmed_user_unsupported",
++  "invalid_request",
++  "invitation_expired",
++  "invitation_not_found",
++  "rate_limited",
++  "service_unavailable",
++  "session_expired",
++  "session_revoked",
++  "step_up_required",
++] as const satisfies readonly StaffAuthErrorCode[];
++const revokeStaffInvitationErrorCodes = [
++  "authentication_required",
++  "authorization_denied",
++  "invalid_request",
++  "invitation_expired",
++  "invitation_not_found",
++  "rate_limited",
++  "service_unavailable",
++  "session_expired",
++  "session_revoked",
++  "step_up_required",
++] as const satisfies readonly StaffAuthErrorCode[];
++const revokeStaffMembershipErrorCodes = [
++  "authentication_required",
++  "authorization_denied",
++  "invalid_request",
++  "rate_limited",
++  "service_unavailable",
++  "session_expired",
++  "session_revoked",
++  "step_up_required",
++] as const satisfies readonly StaffAuthErrorCode[];
++const requestStaffPasswordRecoveryErrorCodes = [
++  "invalid_request",
++  "rate_limited",
++  "service_unavailable",
++] as const satisfies readonly StaffAuthErrorCode[];
++const staffPasswordRecoveryCompletionErrorCodes = [
++  "authentication_required",
++  "authorization_denied",
++  "invalid_request",
++  "service_unavailable",
++  "session_expired",
++] as const satisfies readonly StaffAuthErrorCode[];
++const selectStaffSchoolErrorCodes = [
++  "authentication_required",
++  "authorization_denied",
++  "invalid_request",
++  "service_unavailable",
++  "session_expired",
++  "session_revoked",
++] as const satisfies readonly StaffAuthErrorCode[];
++const staffLoginErrorCodes = [
++  "authorization_denied",
++  "invalid_request",
++  "rate_limited",
++  "service_unavailable",
++] as const satisfies readonly StaffAuthErrorCode[];
++const staffEmailVerificationErrorCodes = [
++  "authorization_denied",
++  "invalid_request",
++  "rate_limited",
++  "service_unavailable",
++] as const satisfies readonly StaffAuthErrorCode[];
++
++export type CreateStaffInvitationResponse = StaffAuthOperationResponse<
++  "invitation_created",
++  (typeof createStaffInvitationErrorCodes)[number]
++>;
++export type AcceptStaffInvitationResponse = StaffAuthOperationResponse<
++  "invitation_accepted",
++  (typeof acceptStaffInvitationErrorCodes)[number]
++>;
++export type RevokeStaffInvitationResponse = StaffAuthOperationResponse<
++  "invitation_revoked",
++  (typeof revokeStaffInvitationErrorCodes)[number]
++>;
++export type RevokeStaffMembershipResponse = StaffAuthOperationResponse<
++  "membership_revoked",
++  (typeof revokeStaffMembershipErrorCodes)[number]
++>;
++export type RequestStaffPasswordRecoveryResponse = StaffAuthOperationResponse<
++  "recovery_requested",
++  (typeof requestStaffPasswordRecoveryErrorCodes)[number]
++>;
++export type StaffPasswordRecoveryCompletionResponse =
++  StaffAuthOperationResponse<
++    "recovery_completed",
++    (typeof staffPasswordRecoveryCompletionErrorCodes)[number]
++  >;
++export type SelectStaffSchoolResponse = StaffAuthOperationResponse<
++  "school_selected",
++  (typeof selectStaffSchoolErrorCodes)[number]
++>;
++export type StaffLoginResponse = StaffAuthOperationResponse<
++  "login_succeeded",
++  (typeof staffLoginErrorCodes)[number]
++>;
++export type StaffEmailVerificationResponse = StaffAuthOperationResponse<
++  "email_verified",
++  (typeof staffEmailVerificationErrorCodes)[number]
++>;
++
++export const staffPasswordRecoveryRpcFailureCodes = [
++  "conflict",
++  "email_unverified",
++  "forbidden",
++  "invalid_request",
++  "membership_inactive",
++  "recovery_expired",
++  "session_expired",
++  "unauthenticated",
++] as const;
++
++export type StaffPasswordRecoveryRpcFailureCode =
++  (typeof staffPasswordRecoveryRpcFailureCodes)[number];
++
++type BeginStaffPasswordRecoveryRpcFailureCode =
++  StaffPasswordRecoveryRpcFailureCode;
++type FinishStaffPasswordRecoveryRpcFailureCode = Exclude<
++  StaffPasswordRecoveryRpcFailureCode,
++  "membership_inactive"
++>;
++
++export type BeginStaffPasswordRecoveryRpcResult =
++  | {
++      readonly code: "recovery_completed" | "recovery_sessions_revoked";
++      readonly expiresAt: string;
++      readonly ok: true;
++      readonly operationId: string;
++    }
++  | {
++      readonly code: BeginStaffPasswordRecoveryRpcFailureCode;
++      readonly ok: false;
++    };
++
++export type FinishStaffPasswordRecoveryRpcResult =
++  | { readonly code: "recovery_completed"; readonly ok: true }
++  | {
++      readonly code: FinishStaffPasswordRecoveryRpcFailureCode;
++      readonly ok: false;
++    };
++
++export const staffPasswordRecoveryDownstreamOutcomes = [
++  "accepted",
++  "account_absent",
++  "dependency_unavailable",
++  "delivery_failed",
++  "rate_limited",
++  "rejected",
++  "timed_out",
++  "unknown",
++] as const;
++
++export type StaffPasswordRecoveryDownstreamOutcome =
++  (typeof staffPasswordRecoveryDownstreamOutcomes)[number];
++
++export type RequestStaffPasswordRecoveryInternalResult =
++  | {
++      readonly code: "invalid_request" | "rate_limited" | "service_unavailable";
++      readonly ok: false;
++      readonly source: "perimeter";
++    }
++  | {
++      readonly outcome: StaffPasswordRecoveryDownstreamOutcome;
++      readonly source: "downstream";
++    };
++
++export const staffAuthRpcFailureCodes = [
++  "conflict",
++  "dependency_unavailable",
++  "email_unverified",
++  "forbidden",
++  "invalid_request",
++  "invitation_consumed",
++  "invitation_expired",
++  "invitation_not_found",
++  "membership_inactive",
++  "rate_limited",
++  "session_expired",
++  "session_revoked",
++  "step_up_required",
++  "unauthenticated",
++  "unknown",
++] as const;
++
++export type StaffAuthRpcFailureCode = (typeof staffAuthRpcFailureCodes)[number];
++
++export const staffAuthProviderFailureCodes = [
++  "dependency_unavailable",
++  "existing_user_conflict",
++  "rate_limited",
++  "unknown",
++] as const;
++
++export type StaffAuthProviderFailureCode =
++  (typeof staffAuthProviderFailureCodes)[number];
++
++export type StaffAuthInternalFailure =
++  | {
++      readonly code: StaffAuthRpcFailureCode;
++      readonly source: "rpc";
++    }
++  | {
++      readonly code: StaffAuthProviderFailureCode;
++      readonly source: "provider";
++    };
++
++export type CreateStaffInvitationInternalResult =
++  | { readonly code: "invitation_usable"; readonly ok: true }
++  | (StaffAuthInternalFailure & { readonly ok: false });
++
++const rpcFailureToProductCode = {
++  conflict: "service_unavailable",
++  dependency_unavailable: "service_unavailable",
++  email_unverified: "authorization_denied",
++  forbidden: "authorization_denied",
++  invalid_request: "invalid_request",
++  invitation_consumed: "invitation_not_found",
++  invitation_expired: "invitation_expired",
++  invitation_not_found: "invitation_not_found",
++  membership_inactive: "authorization_denied",
++  rate_limited: "rate_limited",
++  session_expired: "session_expired",
++  session_revoked: "session_revoked",
++  step_up_required: "step_up_required",
++  unauthenticated: "authentication_required",
++  unknown: "service_unavailable",
++} as const satisfies Record<StaffAuthRpcFailureCode, StaffAuthErrorCode>;
++
++const providerFailureToProductCode = {
++  dependency_unavailable: "service_unavailable",
++  existing_user_conflict: "existing_confirmed_user_unsupported",
++  rate_limited: "rate_limited",
++  unknown: "service_unavailable",
++} as const satisfies Record<StaffAuthProviderFailureCode, StaffAuthErrorCode>;
++
++export function mapStaffAuthInternalFailure(
++  failure: StaffAuthInternalFailure,
++): StaffAuthFailure {
++  const code =
++    failure.source === "rpc"
++      ? rpcFailureToProductCode[failure.code]
++      : providerFailureToProductCode[failure.code];
++  return { code, ok: false };
++}
++
++export function mapCreateStaffInvitationInternalResult(
++  result: CreateStaffInvitationInternalResult,
++): CreateStaffInvitationResponse {
++  return result.ok
++    ? { code: "invitation_created", ok: true }
++    : mapStaffAuthInternalFailure(result);
++}
++
++const staffPasswordRecoveryRpcFailureToProductCode = {
++  conflict: "service_unavailable",
++  email_unverified: "authorization_denied",
++  forbidden: "authorization_denied",
++  invalid_request: "invalid_request",
++  membership_inactive: "authorization_denied",
++  recovery_expired: "session_expired",
++  session_expired: "session_expired",
++  unauthenticated: "authentication_required",
++} as const satisfies Record<
++  StaffPasswordRecoveryRpcFailureCode,
++  StaffAuthErrorCode
++>;
++
++export function mapStaffPasswordRecoveryRpcFailure(
++  code: StaffPasswordRecoveryRpcFailureCode,
++): StaffAuthFailure {
++  return {
++    code: staffPasswordRecoveryRpcFailureToProductCode[code],
++    ok: false,
++  };
++}
++
++export function mapRequestStaffPasswordRecoveryInternalResult(
++  result: RequestStaffPasswordRecoveryInternalResult,
++): RequestStaffPasswordRecoveryResponse {
++  return result.source === "perimeter"
++    ? { code: result.code, ok: false }
++    : { code: "recovery_requested", ok: true };
++}
++
++const canonicalUuidPattern =
++  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
++const emailPattern =
++  /^[a-z0-9!#$%&'*+/=?^_{}|~-]+(?:\.[a-z0-9!#$%&'*+/=?^_{}|~-]+)*@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/u;
++const publishableKeyPattern =
++  /^sb_publishable_([A-Za-z0-9_-]{22})_([A-Za-z0-9_-]{8})$/u;
++const privilegedKeyLabelPattern = /secret|service|operator|database/iu;
++const recoveryFlowIdPattern = /^[A-Za-z0-9_-]{22}$/u;
++const recoveryBindingPattern = /^[A-Za-z0-9_-]{43}$/u;
++
++function parseCanonicalUuid(value: unknown): string | null {
++  return typeof value === "string" && canonicalUuidPattern.test(value)
++    ? value
++    : null;
++}
++
++function parseCanonicalEmail(value: unknown): string | null {
++  if (
++    typeof value !== "string" ||
++    value.length > 254 ||
++    value !== value.trim() ||
++    value !== value.toLowerCase() ||
++    !emailPattern.test(value)
++  ) {
++    return null;
++  }
++
++  return value;
++}
++
++export function parseStaffDisplayName(value: unknown): string | null {
++  const containsControlCharacter =
++    typeof value === "string" &&
++    [...value].some((character) => {
++      const codePoint = character.codePointAt(0);
++      return (
++        codePoint !== undefined &&
++        (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f))
++      );
++    });
++  if (
++    typeof value !== "string" ||
++    value !== value.trim() ||
++    value.length === 0 ||
++    new TextEncoder().encode(value).byteLength > 160 ||
++    containsControlCharacter
++  ) {
++    return null;
++  }
++
++  return value;
++}
++
++function parseSupabasePublishableKey(value: unknown): string | null {
++  if (typeof value !== "string" || privilegedKeyLabelPattern.test(value)) {
++    return null;
++  }
++
++  const match = publishableKeyPattern.exec(value);
++  const random = match?.[1];
++  const checksum = match?.[2];
++  if (
++    random === undefined ||
++    checksum === undefined ||
++    !/[A-Za-z0-9]/u.test(random) ||
++    !/[A-Za-z0-9]/u.test(checksum)
++  ) {
++    return null;
++  }
++
++  return value;
++}
++
++const managementRpcFailureCodes = [
++  "email_unverified",
++  "forbidden",
++  "membership_inactive",
++  "session_expired",
++  "session_revoked",
++  "step_up_required",
++  "unauthenticated",
++] as const;
++
++type ManagementRpcFailureCode = (typeof managementRpcFailureCodes)[number];
++type ManagementListErrorCode = (typeof managementListErrorCodes)[number];
++
++const managementRpcFailureToProductCode = {
++  email_unverified: "authorization_denied",
++  forbidden: "authorization_denied",
++  membership_inactive: "authorization_denied",
++  session_expired: "session_expired",
++  session_revoked: "session_revoked",
++  step_up_required: "step_up_required",
++  unauthenticated: "authentication_required",
++} as const satisfies Record<ManagementRpcFailureCode, ManagementListErrorCode>;
++
++const manageableStaffRpcKeys = [
++  "code",
++  "display_name",
++  "email",
++  "membership_role",
++  "profile_id",
++  "school_id",
++] as const;
++const manageableInvitationRpcKeys = [
++  "code",
++  "expires_at",
++  "invitation_id",
++  "invitation_status",
++  "invited_email",
++  "invited_role",
++  "school_id",
++] as const;
++const manageableStaffItemKeys = [
++  "displayName",
++  "email",
++  "profileId",
++  "role",
++  "schoolId",
++] as const;
++const manageableInvitationItemKeys = [
++  "email",
++  "expiresAt",
++  "invitationId",
++  "role",
++  "schoolId",
++  "state",
++] as const;
++const revocableInvitationRpcStates = [
++  "delivery_ready",
++  "pending_acceptance",
++  "pending_delivery",
++] as const;
++
++function isManagementRpcFailureCode(
++  value: unknown,
++): value is ManagementRpcFailureCode {
++  return (
++    typeof value === "string" &&
++    managementRpcFailureCodes.some((code) => code === value)
++  );
++}
++
++function mapManagementRpcFailure(
++  code: ManagementRpcFailureCode,
++): StaffAuthFailure<ManagementListErrorCode> {
++  return { code: managementRpcFailureToProductCode[code], ok: false };
++}
++
++function invalidManagementList(): StaffAuthFailure<"service_unavailable"> {
++  return { code: "service_unavailable", ok: false };
++}
++
++function hasOnlyNullData(
++  row: Readonly<Record<string, unknown>>,
++  keys: readonly string[],
++): boolean {
++  return keys.every((key) => key === "code" || row[key] === null);
++}
++
++function parseRpcTimestamp(value: unknown): string | null {
++  if (typeof value !== "string") return null;
++  const match =
++    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|([+-])(\d{2}):(\d{2}))$/u.exec(
++      value,
++    );
++  if (match === null) return null;
++
++  const year = Number(match[1]);
++  const month = Number(match[2]);
++  const day = Number(match[3]);
++  const hour = Number(match[4]);
++  const minute = Number(match[5]);
++  const second = Number(match[6]);
++  const milliseconds = Number((match[7] ?? "").padEnd(3, "0").slice(0, 3));
++  const offsetHour = match[8] === "Z" ? 0 : Number(match[10]);
++  const offsetMinute = match[8] === "Z" ? 0 : Number(match[11]);
++  const isLeapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
++  const maximumDay = [
++    0,
++    31,
++    isLeapYear ? 29 : 28,
++    31,
++    30,
++    31,
++    30,
++    31,
++    31,
++    30,
++    31,
++    30,
++    31,
++  ][month];
++  if (
++    year < 1 ||
++    month < 1 ||
++    month > 12 ||
++    maximumDay === undefined ||
++    day < 1 ||
++    day > maximumDay ||
++    hour > 23 ||
++    minute > 59 ||
++    second > 59 ||
++    offsetHour > 14 ||
++    offsetMinute > 59 ||
++    (offsetHour === 14 && offsetMinute !== 0)
++  ) {
++    return null;
++  }
++
++  const date = new Date(0);
++  date.setUTCFullYear(year, month - 1, day);
++  date.setUTCHours(hour, minute, second, milliseconds);
++  const offsetDirection = match[9] === "-" ? -1 : 1;
++  const offsetMilliseconds =
++    offsetDirection * (offsetHour * 60 + offsetMinute) * 60_000;
++  const normalized = new Date(date.getTime() - offsetMilliseconds);
++  if (!Number.isFinite(normalized.getTime())) return null;
++
++  const canonical = normalized.toISOString();
++  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(canonical)
++    ? canonical
++    : null;
++}
++
++function parseCanonicalTimestamp(value: unknown): string | null {
++  const normalized = parseRpcTimestamp(value);
++  return normalized !== null && normalized === value ? normalized : null;
++}
++
++function parseManageableStaffItems(
++  value: unknown,
++): readonly ManageableStaffMember[] | null {
++  const rows = parseExactArray(value, STAFF_AUTH_MANAGEMENT_LIST_MAXIMUM_ITEMS);
++  if (rows === null) return null;
++
++  const items: ManageableStaffMember[] = [];
++  const seenMemberships = new Set<string>();
++  const profileByEmail = new Map<string, string>();
++  const profileFacts = new Map<
++    string,
++    { readonly displayName: string; readonly email: string }
++  >();
++  for (const valueRow of rows) {
++    const row = parseExactRecord(valueRow, manageableStaffItemKeys);
++    if (row === null) return null;
++    const displayName = parseStaffDisplayName(row.displayName);
++    const email = parseCanonicalEmail(row.email);
++    const profileId = parseCanonicalUuid(row.profileId);
++    const schoolId = parseCanonicalUuid(row.schoolId);
++    if (
++      displayName === null ||
++      email === null ||
++      profileId === null ||
++      schoolId === null ||
++      (row.role !== "administrator" && row.role !== "teacher")
++    ) {
++      return null;
++    }
++
++    const membershipIdentity = `${schoolId}:${profileId}`;
++    if (seenMemberships.has(membershipIdentity)) return null;
++    seenMemberships.add(membershipIdentity);
++    const knownFacts = profileFacts.get(profileId);
++    if (
++      knownFacts !== undefined &&
++      (knownFacts.displayName !== displayName || knownFacts.email !== email)
++    ) {
++      return null;
++    }
++    const knownProfileId = profileByEmail.get(email);
++    if (knownProfileId !== undefined && knownProfileId !== profileId) {
++      return null;
++    }
++    profileByEmail.set(email, profileId);
++    profileFacts.set(profileId, { displayName, email });
++    items.push({ displayName, email, profileId, role: row.role, schoolId });
++  }
++
++  return items;
++}
++
++function parseManageableInvitationItems(
++  value: unknown,
++): readonly ManageableStaffInvitation[] | null {
++  const rows = parseExactArray(value, STAFF_AUTH_MANAGEMENT_LIST_MAXIMUM_ITEMS);
++  if (rows === null) return null;
++
++  const items: ManageableStaffInvitation[] = [];
++  const seenInvitations = new Set<string>();
++  const seenSchoolEmails = new Set<string>();
++  for (const valueRow of rows) {
++    const row = parseExactRecord(valueRow, manageableInvitationItemKeys);
++    if (row === null) return null;
++    const email = parseCanonicalEmail(row.email);
++    const expiresAt = parseCanonicalTimestamp(row.expiresAt);
++    const invitationId = parseCanonicalUuid(row.invitationId);
++    const schoolId = parseCanonicalUuid(row.schoolId);
++    if (
++      email === null ||
++      expiresAt === null ||
++      invitationId === null ||
++      schoolId === null ||
++      (row.role !== "administrator" && row.role !== "teacher") ||
++      row.state !== "pending"
++    ) {
++      return null;
++    }
++
++    const schoolEmail = `${schoolId}:${email}`;
++    if (
++      seenInvitations.has(invitationId) ||
++      seenSchoolEmails.has(schoolEmail)
++    ) {
++      return null;
++    }
++    seenInvitations.add(invitationId);
++    seenSchoolEmails.add(schoolEmail);
++    items.push({
++      email,
++      expiresAt,
++      invitationId,
++      role: row.role,
++      schoolId,
++      state: "pending",
++    });
++  }
++
++  return items;
++}
++
++export function parsePublicStaffAuthConfiguration(
++  value: unknown,
++): PublicStaffAuthConfiguration | null {
++  const configuration = parseExactRecord(value, ["publishableKey"]);
++  if (configuration === null) return null;
++
++  const publishableKey = parseSupabasePublishableKey(
++    configuration.publishableKey,
++  );
++  return publishableKey === null ? null : { publishableKey };
++}
++
++export function mapCurrentManageableStaffRpcRows(
++  value: unknown,
++): ManageableStaffListResponse {
++  const rows = parseExactArray(
++    value,
++    STAFF_AUTH_MANAGEMENT_LIST_MAXIMUM_ITEMS + 1,
++  );
++  if (rows === null || rows.length > STAFF_AUTH_MANAGEMENT_LIST_MAXIMUM_ITEMS) {
++    return invalidManagementList();
++  }
++  if (rows.length === 0) {
++    return { code: "manageable_staff_listed", items: [], ok: true };
++  }
++
++  const parsedRows = rows.map((row) =>
++    parseExactRecord(row, manageableStaffRpcKeys),
++  );
++  if (parsedRows.some((row) => row === null)) return invalidManagementList();
++  const exactRows = parsedRows as ReadonlyArray<Record<string, unknown>>;
++  const nonSuccessRows = exactRows.filter((row) => row.code !== "ok");
++  if (nonSuccessRows.length > 0) {
++    const failure = nonSuccessRows[0];
++    return exactRows.length === 1 &&
++      failure !== undefined &&
++      isManagementRpcFailureCode(failure.code) &&
++      hasOnlyNullData(failure, manageableStaffRpcKeys)
++      ? mapManagementRpcFailure(failure.code)
++      : invalidManagementList();
++  }
++
++  const items: ManageableStaffMember[] = [];
++  const seenMemberships = new Set<string>();
++  const profileByEmail = new Map<string, string>();
++  const profileFacts = new Map<
++    string,
++    { readonly displayName: string; readonly email: string }
++  >();
++  for (const row of exactRows) {
++    const displayName = parseStaffDisplayName(row.display_name);
++    const email = parseCanonicalEmail(row.email);
++    const profileId = parseCanonicalUuid(row.profile_id);
++    const schoolId = parseCanonicalUuid(row.school_id);
++    const role =
++      row.membership_role === "admin"
++        ? "administrator"
++        : row.membership_role === "teacher"
++          ? "teacher"
++          : null;
++    if (
++      displayName === null ||
++      email === null ||
++      profileId === null ||
++      schoolId === null ||
++      role === null
++    ) {
++      return invalidManagementList();
++    }
++
++    const membershipIdentity = `${schoolId}:${profileId}`;
++    if (seenMemberships.has(membershipIdentity)) {
++      return invalidManagementList();
++    }
++    seenMemberships.add(membershipIdentity);
++    const knownFacts = profileFacts.get(profileId);
++    if (
++      knownFacts !== undefined &&
++      (knownFacts.displayName !== displayName || knownFacts.email !== email)
++    ) {
++      return invalidManagementList();
++    }
++    const knownProfileId = profileByEmail.get(email);
++    if (knownProfileId !== undefined && knownProfileId !== profileId) {
++      return invalidManagementList();
++    }
++    profileByEmail.set(email, profileId);
++    profileFacts.set(profileId, { displayName, email });
++    items.push({ displayName, email, profileId, role, schoolId });
++  }
++
++  return { code: "manageable_staff_listed", items, ok: true };
++}
++
++export function mapCurrentManageableStaffInvitationsRpcRows(
++  value: unknown,
++): ManageableStaffInvitationListResponse {
++  const rows = parseExactArray(
++    value,
++    STAFF_AUTH_MANAGEMENT_LIST_MAXIMUM_ITEMS + 1,
++  );
++  if (rows === null || rows.length > STAFF_AUTH_MANAGEMENT_LIST_MAXIMUM_ITEMS) {
++    return invalidManagementList();
++  }
++  if (rows.length === 0) {
++    return { code: "manageable_invitations_listed", items: [], ok: true };
++  }
++
++  const parsedRows = rows.map((row) =>
++    parseExactRecord(row, manageableInvitationRpcKeys),
++  );
++  if (parsedRows.some((row) => row === null)) return invalidManagementList();
++  const exactRows = parsedRows as ReadonlyArray<Record<string, unknown>>;
++  const nonSuccessRows = exactRows.filter((row) => row.code !== "ok");
++  if (nonSuccessRows.length > 0) {
++    const failure = nonSuccessRows[0];
++    return exactRows.length === 1 &&
++      failure !== undefined &&
++      isManagementRpcFailureCode(failure.code) &&
++      hasOnlyNullData(failure, manageableInvitationRpcKeys)
++      ? mapManagementRpcFailure(failure.code)
++      : invalidManagementList();
++  }
++
++  const items: ManageableStaffInvitation[] = [];
++  const seenInvitations = new Set<string>();
++  const seenSchoolEmails = new Set<string>();
++  for (const row of exactRows) {
++    const email = parseCanonicalEmail(row.invited_email);
++    const expiresAt = parseRpcTimestamp(row.expires_at);
++    const invitationId = parseCanonicalUuid(row.invitation_id);
++    const schoolId = parseCanonicalUuid(row.school_id);
++    const role =
++      row.invited_role === "admin"
++        ? "administrator"
++        : row.invited_role === "teacher"
++          ? "teacher"
++          : null;
++    if (
++      email === null ||
++      expiresAt === null ||
++      invitationId === null ||
++      schoolId === null ||
++      role === null ||
++      typeof row.invitation_status !== "string" ||
++      !revocableInvitationRpcStates.some(
++        (state) => state === row.invitation_status,
++      )
++    ) {
++      return invalidManagementList();
++    }
++
++    const schoolEmail = `${schoolId}:${email}`;
++    if (
++      seenInvitations.has(invitationId) ||
++      seenSchoolEmails.has(schoolEmail)
++    ) {
++      return invalidManagementList();
++    }
++    seenInvitations.add(invitationId);
++    seenSchoolEmails.add(schoolEmail);
++    items.push({
++      email,
++      expiresAt,
++      invitationId,
++      role,
++      schoolId,
++      state: "pending",
++    });
++  }
++
++  return { code: "manageable_invitations_listed", items, ok: true };
++}
++
++function parseManagementListFailure(
++  value: unknown,
++): StaffAuthFailure<ManagementListErrorCode> | null {
++  const response = parseExactRecord(value, ["code", "ok"]);
++  if (
++    response === null ||
++    response.ok !== false ||
++    typeof response.code !== "string" ||
++    !managementListErrorCodes.some((code) => code === response.code)
++  ) {
++    return null;
++  }
++  return { code: response.code as ManagementListErrorCode, ok: false };
++}
++
++export function parseManageableStaffListResponse(
++  value: unknown,
++): ManageableStaffListResponse | null {
++  const success = parseExactRecord(value, ["code", "items", "ok"]);
++  if (
++    success !== null &&
++    success.code === "manageable_staff_listed" &&
++    success.ok === true
++  ) {
++    const items = parseManageableStaffItems(success.items);
++    return items === null
++      ? null
++      : { code: "manageable_staff_listed", items, ok: true };
++  }
++  return parseManagementListFailure(value);
++}
++
++export function parseManageableStaffInvitationListResponse(
++  value: unknown,
++): ManageableStaffInvitationListResponse | null {
++  const success = parseExactRecord(value, ["code", "items", "ok"]);
++  if (
++    success !== null &&
++    success.code === "manageable_invitations_listed" &&
++    success.ok === true
++  ) {
++    const items = parseManageableInvitationItems(success.items);
++    return items === null
++      ? null
++      : { code: "manageable_invitations_listed", items, ok: true };
++  }
++  return parseManagementListFailure(value);
++}
++
++function parseStaffPasswordRecoveryOperationRequest(
++  value: unknown,
++): StaffPasswordRecoveryOperationRequest | null {
++  const request = parseExactRecord(value, ["operationId"]);
++  if (request === null) return null;
++  const operationId = parseCanonicalUuid(request.operationId);
++  return operationId === null ? null : { operationId };
++}
++
++export function parseBeginStaffPasswordRecoveryOperationRequest(
++  value: unknown,
++): StaffPasswordRecoveryOperationRequest | null {
++  return parseStaffPasswordRecoveryOperationRequest(value);
++}
++
++export function parseFinishStaffPasswordRecoveryOperationRequest(
++  value: unknown,
++): StaffPasswordRecoveryOperationRequest | null {
++  return parseStaffPasswordRecoveryOperationRequest(value);
++}
++
++function isStaffPasswordRecoveryRpcFailureCode(
++  value: unknown,
++): value is StaffPasswordRecoveryRpcFailureCode {
++  return (
++    typeof value === "string" &&
++    staffPasswordRecoveryRpcFailureCodes.some((code) => code === value)
++  );
++}
++
++export function parseBeginStaffPasswordRecoveryRpcResult(
++  value: unknown,
++): BeginStaffPasswordRecoveryRpcResult | null {
++  const result = parseExactRecord(value, [
++    "code",
++    "expires_at",
++    "operation_id",
++  ]);
++  if (result === null) return null;
++
++  if (
++    result.code === "recovery_sessions_revoked" ||
++    result.code === "recovery_completed"
++  ) {
++    const expiresAt = parseRpcTimestamp(result.expires_at);
++    const operationId = parseCanonicalUuid(result.operation_id);
++    return expiresAt === null || operationId === null
++      ? null
++      : { code: result.code, expiresAt, ok: true, operationId };
++  }
++
++  return isStaffPasswordRecoveryRpcFailureCode(result.code) &&
++    result.expires_at === null &&
++    result.operation_id === null
++    ? { code: result.code, ok: false }
++    : null;
++}
++
++export function parseFinishStaffPasswordRecoveryRpcResult(
++  value: unknown,
++): FinishStaffPasswordRecoveryRpcResult | null {
++  const result = parseExactRecord(value, ["code"]);
++  if (result === null) return null;
++  if (result.code === "recovery_completed") {
++    return { code: "recovery_completed", ok: true };
++  }
++  if (
++    isStaffPasswordRecoveryRpcFailureCode(result.code) &&
++    result.code !== "membership_inactive"
++  ) {
++    return { code: result.code, ok: false };
++  }
++  return null;
++}
++
++export function parseCreateStaffInvitationRequest(
++  value: unknown,
++): CreateStaffInvitationRequest | null {
++  const request = parseExactRecord(value, ["email", "role", "schoolId"]);
++  if (request === null) return null;
++
++  const email = parseCanonicalEmail(request.email);
++  const schoolId = parseCanonicalUuid(request.schoolId);
++  if (
++    email === null ||
++    schoolId === null ||
++    (request.role !== "administrator" && request.role !== "teacher")
++  ) {
++    return null;
++  }
++
++  return { email, role: request.role, schoolId };
++}
++
++export function parseAcceptStaffInvitationRequest(
++  value: unknown,
++): AcceptStaffInvitationRequest | null {
++  const request = parseExactRecord(value, ["displayName", "invitationId"]);
++  if (request === null) return null;
++
++  const displayName = parseStaffDisplayName(request.displayName);
++  const invitationId = parseCanonicalUuid(request.invitationId);
++  return displayName === null || invitationId === null
++    ? null
++    : { displayName, invitationId };
++}
++
++export function parseRevokeStaffMembershipRequest(
++  value: unknown,
++): RevokeStaffMembershipRequest | null {
++  const request = parseExactRecord(value, ["profileId", "schoolId"]);
++  if (request === null) return null;
++
++  const profileId = parseCanonicalUuid(request.profileId);
++  const schoolId = parseCanonicalUuid(request.schoolId);
++  return profileId === null || schoolId === null
++    ? null
++    : { profileId, schoolId };
++}
++
++export function parseRevokeStaffInvitationRequest(
++  value: unknown,
++): RevokeStaffInvitationRequest | null {
++  const request = parseExactRecord(value, ["invitationId"]);
++  if (request === null) return null;
++
++  const invitationId = parseCanonicalUuid(request.invitationId);
++  return invitationId === null ? null : { invitationId };
++}
++
++export function parseRequestStaffPasswordRecoveryRequest(
++  value: unknown,
++): RequestStaffPasswordRecoveryRequest | null {
++  const request = parseExactRecord(value, [
++    "codeChallenge",
++    "email",
++    "flowId",
++    "state",
++  ]);
++  if (request === null) return null;
++
++  const email = parseCanonicalEmail(request.email);
++  if (
++    email === null ||
++    typeof request.codeChallenge !== "string" ||
++    !recoveryBindingPattern.test(request.codeChallenge) ||
++    typeof request.flowId !== "string" ||
++    !recoveryFlowIdPattern.test(request.flowId) ||
++    typeof request.state !== "string" ||
++    !recoveryBindingPattern.test(request.state)
++  ) {
++    return null;
++  }
++
++  return {
++    codeChallenge: request.codeChallenge,
++    email,
++    flowId: request.flowId,
++    state: request.state,
++  };
++}
++
++export function parseSelectStaffSchoolRequest(
++  value: unknown,
++): SelectStaffSchoolRequest | null {
++  const request = parseExactRecord(value, ["schoolId"]);
++  if (request === null) return null;
++
++  const schoolId = parseCanonicalUuid(request.schoolId);
++  return schoolId === null ? null : { schoolId };
++}
++
++function parseStaffAuthOperationResponse<
++  Success extends StaffAuthWireSuccessCode,
++  ErrorCodes extends readonly StaffAuthErrorCode[],
++>(
++  value: unknown,
++  successCode: Success,
++  errorCodes: ErrorCodes,
++): StaffAuthOperationResponse<Success, ErrorCodes[number]> | null {
++  const response = parseExactRecord(value, ["code", "ok"]);
++  if (
++    response === null ||
++    typeof response.ok !== "boolean" ||
++    typeof response.code !== "string"
++  ) {
++    return null;
++  }
++
++  if (response.ok === true && response.code === successCode) {
++    return { code: successCode, ok: true };
++  }
++  const errorCode = response.code as ErrorCodes[number];
++  if (response.ok === false && errorCodes.includes(errorCode)) {
++    return { code: errorCode, ok: false };
++  }
++
++  return null;
++}
++
++export function parseCreateStaffInvitationResponse(
++  value: unknown,
++): CreateStaffInvitationResponse | null {
++  return parseStaffAuthOperationResponse(
++    value,
++    "invitation_created",
++    createStaffInvitationErrorCodes,
++  );
++}
++
++export function parseAcceptStaffInvitationResponse(
++  value: unknown,
++): AcceptStaffInvitationResponse | null {
++  return parseStaffAuthOperationResponse(
++    value,
++    "invitation_accepted",
++    acceptStaffInvitationErrorCodes,
++  );
++}
++
++export function parseRevokeStaffInvitationResponse(
++  value: unknown,
++): RevokeStaffInvitationResponse | null {
++  return parseStaffAuthOperationResponse(
++    value,
++    "invitation_revoked",
++    revokeStaffInvitationErrorCodes,
++  );
++}
++
++export function parseRevokeStaffMembershipResponse(
++  value: unknown,
++): RevokeStaffMembershipResponse | null {
++  return parseStaffAuthOperationResponse(
++    value,
++    "membership_revoked",
++    revokeStaffMembershipErrorCodes,
++  );
++}
++
++export function parseRequestStaffPasswordRecoveryResponse(
++  value: unknown,
++): RequestStaffPasswordRecoveryResponse | null {
++  return parseStaffAuthOperationResponse(
++    value,
++    "recovery_requested",
++    requestStaffPasswordRecoveryErrorCodes,
++  );
++}
++
++export function parseStaffPasswordRecoveryCompletionResponse(
++  value: unknown,
++): StaffPasswordRecoveryCompletionResponse | null {
++  return parseStaffAuthOperationResponse(
++    value,
++    "recovery_completed",
++    staffPasswordRecoveryCompletionErrorCodes,
++  );
++}
++
++export function parseSelectStaffSchoolResponse(
++  value: unknown,
++): SelectStaffSchoolResponse | null {
++  return parseStaffAuthOperationResponse(
++    value,
++    "school_selected",
++    selectStaffSchoolErrorCodes,
++  );
++}
++
++export function parseStaffLoginResponse(
++  value: unknown,
++): StaffLoginResponse | null {
++  return parseStaffAuthOperationResponse(
++    value,
++    "login_succeeded",
++    staffLoginErrorCodes,
++  );
++}
++
++export function parseStaffEmailVerificationResponse(
++  value: unknown,
++): StaffEmailVerificationResponse | null {
++  return parseStaffAuthOperationResponse(
++    value,
++    "email_verified",
++    staffEmailVerificationErrorCodes,
++  );
++}
+diff --git a/packages/contracts/tests/staff-auth.test.ts b/packages/contracts/tests/staff-auth.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..92c9b900bf5fe93cb565ce2ba3ec03d515be86aa
+--- /dev/null
++++ b/packages/contracts/tests/staff-auth.test.ts
+@@ -0,0 +1,1498 @@
++import { describe, expect, it } from "vitest";
++
++import { toPersistedStaffRole } from "@desmoslock/domain";
++
++import type { StaffAuthWireSuccessCode } from "../src/index.js";
++import {
++  STAFF_AUTH_MANAGEMENT_LIST_MAXIMUM_ITEMS,
++  mapCreateStaffInvitationInternalResult,
++  mapCurrentManageableStaffInvitationsRpcRows,
++  mapCurrentManageableStaffRpcRows,
++  mapRequestStaffPasswordRecoveryInternalResult,
++  mapStaffPasswordRecoveryRpcFailure,
++  mapStaffAuthInternalFailure,
++  parseAcceptStaffInvitationRequest,
++  parseAcceptStaffInvitationResponse,
++  parseCreateStaffInvitationRequest,
++  parseCreateStaffInvitationResponse,
++  parseBeginStaffPasswordRecoveryOperationRequest,
++  parseBeginStaffPasswordRecoveryRpcResult,
++  parseFinishStaffPasswordRecoveryOperationRequest,
++  parseFinishStaffPasswordRecoveryRpcResult,
++  parseManageableStaffInvitationListResponse,
++  parseManageableStaffListResponse,
++  parsePublicStaffAuthConfiguration,
++  parseRequestStaffPasswordRecoveryRequest,
++  parseRequestStaffPasswordRecoveryResponse,
++  parseRevokeStaffInvitationRequest,
++  parseRevokeStaffInvitationResponse,
++  parseRevokeStaffMembershipRequest,
++  parseRevokeStaffMembershipResponse,
++  parseSelectStaffSchoolRequest,
++  parseSelectStaffSchoolResponse,
++  parseStaffDisplayName,
++  parseStaffEmailVerificationResponse,
++  parseStaffLoginResponse,
++  parseStaffPasswordRecoveryCompletionResponse,
++  staffAuthErrorCodes,
++  staffAuthProviderFailureCodes,
++  staffAuthRpcFailureCodes,
++  staffAuthWireSuccessCodes,
++  staffPasswordRecoveryDownstreamOutcomes,
++  staffPasswordRecoveryRpcFailureCodes,
++} from "../src/index.js";
++
++const alphaSchoolId = "10000000-0000-4000-8000-000000000001";
++const betaSchoolId = "10000000-0000-4000-8000-000000000002";
++const invitationId = "20000000-0000-4000-8000-000000000001";
++const profileId = "30000000-0000-4000-8000-000000000001";
++const secondProfileId = "30000000-0000-4000-8000-000000000002";
++const secondInvitationId = "20000000-0000-4000-8000-000000000002";
++const recoveryCodeChallenge = "c".repeat(43);
++const recoveryFlowId = "f".repeat(22);
++const recoveryOperationId = "50000000-0000-4000-8000-000000000001";
++const recoveryState = "s".repeat(43);
++const syntheticPublishableKey = `sb_${"publishable"}_${"r".repeat(22)}_${"c".repeat(8)}`;
++const expectedWireSuccesses = {
++  email_verified: true,
++  invitation_accepted: true,
++  invitation_created: true,
++  invitation_revoked: true,
++  login_succeeded: true,
++  manageable_invitations_listed: true,
++  manageable_staff_listed: true,
++  membership_revoked: true,
++  recovery_completed: true,
++  recovery_requested: true,
++  school_selected: true,
++} as const satisfies Record<StaffAuthWireSuccessCode, true>;
++
++function manageableStaffRpcRow(
++  overrides: Readonly<Record<string, unknown>> = {},
++): Record<string, unknown> {
++  return {
++    code: "ok",
++    display_name: "Taylor Rivera",
++    email: "taylor@example.invalid",
++    membership_role: "admin",
++    profile_id: profileId,
++    school_id: alphaSchoolId,
++    ...overrides,
++  };
++}
++
++function manageableInvitationRpcRow(
++  overrides: Readonly<Record<string, unknown>> = {},
++): Record<string, unknown> {
++  return {
++    code: "ok",
++    expires_at: "2026-09-04T16:30:00.123456+00:00",
++    invitation_id: invitationId,
++    invitation_status: "pending_acceptance",
++    invited_email: "teacher@example.invalid",
++    invited_role: "teacher",
++    school_id: alphaSchoolId,
++    ...overrides,
++  };
++}
++
++function managementFailureRow(
++  code: string,
++  fields: readonly string[],
++): Record<string, unknown> {
++  return Object.fromEntries([
++    ["code", code],
++    ...fields.map((field) => [field, null] as const),
++  ]);
++}
++
++describe("web-only public staff auth configuration", () => {
++  it("accepts only the exact modern publishable-key grammar", () => {
++    expect(
++      parsePublicStaffAuthConfiguration({
++        publishableKey: syntheticPublishableKey,
++      }),
++    ).toEqual({ publishableKey: syntheticPublishableKey });
++  });
++
++  it.each([
++    `sb_${"publishable"}_${"r".repeat(21)}_${"c".repeat(8)}`,
++    `sb_${"publishable"}_${"r".repeat(23)}_${"c".repeat(8)}`,
++    `sb_${"publishable"}_${"r".repeat(22)}_${"c".repeat(7)}`,
++    `sb_${"publishable"}_${"r".repeat(22)}_${"c".repeat(9)}`,
++    `sb_${"publishable"}_${"_".repeat(22)}_${"_".repeat(8)}`,
++    `sb_${"secret"}_${"r".repeat(22)}_${"c".repeat(8)}`,
++    `eyJ${"x".repeat(40)}`,
++    `service:${syntheticPublishableKey}`,
++    `operator:${syntheticPublishableKey}`,
++    `postgresql://${syntheticPublishableKey}@database.invalid/example`,
++    `"${syntheticPublishableKey}"`,
++    `${syntheticPublishableKey}-wrapped`,
++    `sb_${"publishable"}_${`secret${"r".repeat(16)}`}_${"c".repeat(8)}`,
++    `sb_${"publishable"}_${`service${"r".repeat(15)}`}_${"c".repeat(8)}`,
++    `sb_${"publishable"}_${`operator${"r".repeat(14)}`}_${"c".repeat(8)}`,
++    `sb_${"publishable"}_${`database${"r".repeat(14)}`}_${"c".repeat(8)}`,
++  ])("rejects malformed, wrapped, or disguised key material: %s", (value) => {
++    expect(
++      parsePublicStaffAuthConfiguration({ publishableKey: value }),
++    ).toBeNull();
++  });
++
++  it.each(["databaseUrl", "operatorCredential", "secretKey", "serviceRoleKey"])(
++    "rejects the privileged field %s",
++    (field) => {
++      expect(
++        parsePublicStaffAuthConfiguration({
++          [field]: "synthetic-placeholder",
++          publishableKey: syntheticPublishableKey,
++        }),
++      ).toBeNull();
++    },
++  );
++
++  it("rejects missing and unknown public configuration fields", () => {
++    expect(parsePublicStaffAuthConfiguration({})).toBeNull();
++    expect(
++      parsePublicStaffAuthConfiguration({
++        environment: "staging",
++        publishableKey: syntheticPublishableKey,
++      }),
++    ).toBeNull();
++    expect(
++      parsePublicStaffAuthConfiguration({
++        publishableKey: syntheticPublishableKey,
++        url: "https://synthetic-staging.supabase.co",
++      }),
++    ).toBeNull();
++  });
++});
++
++describe("staff auth request contracts", () => {
++  it("accepts an exact Administrator or Teacher invitation request", () => {
++    const administratorRequest = parseCreateStaffInvitationRequest({
++      email: "administrator@example.invalid",
++      role: "administrator",
++      schoolId: alphaSchoolId,
++    });
++    expect(administratorRequest).toEqual({
++      email: "administrator@example.invalid",
++      role: "administrator",
++      schoolId: alphaSchoolId,
++    });
++    expect(
++      administratorRequest === null
++        ? null
++        : toPersistedStaffRole(administratorRequest.role),
++    ).toBe("admin");
++    expect(
++      parseCreateStaffInvitationRequest({
++        email: "teacher@example.invalid",
++        role: "teacher",
++        schoolId: betaSchoolId,
++      }),
++    ).toEqual({
++      email: "teacher@example.invalid",
++      role: "teacher",
++      schoolId: betaSchoolId,
++    });
++  });
++
++  it("rejects persisted roles, Owner invitations, unknown keys, and missing keys", () => {
++    expect(
++      parseCreateStaffInvitationRequest({
++        email: "administrator@example.invalid",
++        role: "admin",
++        schoolId: alphaSchoolId,
++      }),
++    ).toBeNull();
++    expect(
++      parseCreateStaffInvitationRequest({
++        email: "owner@example.invalid",
++        role: "owner",
++        schoolId: alphaSchoolId,
++      }),
++    ).toBeNull();
++    expect(
++      parseCreateStaffInvitationRequest({
++        email: "teacher@example.invalid",
++        operator: "synthetic-placeholder",
++        role: "teacher",
++        schoolId: alphaSchoolId,
++      }),
++    ).toBeNull();
++    expect(
++      parseCreateStaffInvitationRequest({
++        email: "teacher@example.invalid",
++        schoolId: alphaSchoolId,
++      }),
++    ).toBeNull();
++  });
++
++  it.each([
++    " Teacher@example.invalid",
++    "Teacher@example.invalid",
++    "teacher@example.invalid ",
++    "teacher..name@example.invalid",
++    "teacher@example",
++    "teacher@-example.invalid",
++  ])("rejects a noncanonical email identity: %s", (email) => {
++    expect(
++      parseRequestStaffPasswordRecoveryRequest({
++        codeChallenge: recoveryCodeChallenge,
++        email,
++        flowId: recoveryFlowId,
++        state: recoveryState,
++      }),
++    ).toBeNull();
++  });
++
++  it.each([
++    "10000000-0000-0000-8000-000000000001",
++    "10000000-0000-4000-0000-000000000001",
++    "10000000-0000-4000-8000-00000000000Z",
++    "10000000000040008000000000000001",
++    "10000000-0000-4000-8000-000000000001 ",
++  ])("rejects a malformed or noncanonical identifier: %s", (schoolId) => {
++    expect(parseSelectStaffSchoolRequest({ schoolId })).toBeNull();
++  });
++
++  it("requires an exact, bounded display name when accepting an invitation", () => {
++    expect(parseStaffDisplayName("Taylor Rivera")).toBe("Taylor Rivera");
++    expect(parseStaffDisplayName(" Taylor Rivera ")).toBeNull();
++    expect(parseStaffDisplayName("Taylor\nRivera")).toBeNull();
++    expect(parseStaffDisplayName("é".repeat(81))).toBeNull();
++    expect(
++      parseAcceptStaffInvitationRequest({
++        displayName: "Taylor Rivera",
++        invitationId,
++      }),
++    ).toEqual({ displayName: "Taylor Rivera", invitationId });
++    expect(parseAcceptStaffInvitationRequest({ invitationId })).toBeNull();
++    expect(
++      parseAcceptStaffInvitationRequest({
++        displayName: "Taylor Rivera",
++        invitationId,
++        invitationToken: "forbidden-sensitive-sentinel",
++      }),
++    ).toBeNull();
++    expect(
++      parseAcceptStaffInvitationRequest({
++        displayName: " ",
++        invitationId,
++      }),
++    ).toBeNull();
++    expect(
++      parseAcceptStaffInvitationRequest({
++        displayName: "x".repeat(161),
++        invitationId,
++      }),
++    ).toBeNull();
++    expect(
++      parseAcceptStaffInvitationRequest({
++        displayName: "x".repeat(160),
++        invitationId,
++      }),
++    ).toEqual({ displayName: "x".repeat(160), invitationId });
++    expect(
++      parseAcceptStaffInvitationRequest({
++        displayName: "é".repeat(81),
++        invitationId,
++      }),
++    ).toBeNull();
++    expect(
++      parseAcceptStaffInvitationRequest({
++        displayName: "Taylor\nRivera",
++        invitationId,
++      }),
++    ).toBeNull();
++  });
++
++  it("parses invitation revocation as an identifier-only request", () => {
++    expect(parseRevokeStaffInvitationRequest({ invitationId })).toEqual({
++      invitationId,
++    });
++    expect(
++      parseRevokeStaffInvitationRequest({
++        invitationId,
++        reason: "provider-specific-detail",
++      }),
++    ).toBeNull();
++  });
++
++  it("revokes a Profile in one School without exposing a Membership identifier", () => {
++    expect(
++      parseRevokeStaffMembershipRequest({
++        profileId,
++        schoolId: alphaSchoolId,
++      }),
++    ).toEqual({ profileId, schoolId: alphaSchoolId });
++    expect(
++      parseRevokeStaffMembershipRequest({
++        membershipId: "40000000-0000-4000-8000-000000000001",
++        schoolId: alphaSchoolId,
++      }),
++    ).toBeNull();
++    expect(
++      parseRevokeStaffMembershipRequest({ schoolId: alphaSchoolId }),
++    ).toBeNull();
++    expect(
++      parseRevokeStaffMembershipRequest({
++        profileId,
++        reason: "provider-specific-detail",
++        schoolId: alphaSchoolId,
++      }),
++    ).toBeNull();
++  });
++
++  it("keeps School selection explicitly scoped", () => {
++    expect(parseSelectStaffSchoolRequest({ schoolId: betaSchoolId })).toEqual({
++      schoolId: betaSchoolId,
++    });
++  });
++
++  it("parses a non-enumerating recovery request without credential fields", () => {
++    expect(
++      parseRequestStaffPasswordRecoveryRequest({
++        codeChallenge: recoveryCodeChallenge,
++        email: "unknown@example.invalid",
++        flowId: recoveryFlowId,
++        state: recoveryState,
++      }),
++    ).toEqual({
++      codeChallenge: recoveryCodeChallenge,
++      email: "unknown@example.invalid",
++      flowId: recoveryFlowId,
++      state: recoveryState,
++    });
++    expect(
++      parseRequestStaffPasswordRecoveryRequest({
++        codeChallenge: recoveryCodeChallenge,
++        email: "unknown@example.invalid",
++        flowId: recoveryFlowId,
++        password: "forbidden-sensitive-sentinel",
++        state: recoveryState,
++      }),
++    ).toBeNull();
++  });
++
++  it("requires exact transient PKCE request bindings without a verifier", () => {
++    const valid = {
++      codeChallenge: recoveryCodeChallenge,
++      email: "unknown@example.invalid",
++      flowId: recoveryFlowId,
++      state: recoveryState,
++    };
++
++    for (const request of [
++      { ...valid, flowId: "f".repeat(21) },
++      { ...valid, flowId: "f".repeat(23) },
++      { ...valid, flowId: `${"f".repeat(21)}=` },
++      { ...valid, state: "s".repeat(42) },
++      { ...valid, state: "s".repeat(44) },
++      { ...valid, state: `${"s".repeat(42)}/` },
++      { ...valid, codeChallenge: "c".repeat(42) },
++      { ...valid, codeChallenge: "c".repeat(44) },
++      { ...valid, codeChallenge: `${"c".repeat(42)}+` },
++      { ...valid, verifier: "v".repeat(43) },
++      {
++        codeChallenge: recoveryCodeChallenge,
++        email: "unknown@example.invalid",
++        flowId: recoveryFlowId,
++      },
++    ]) {
++      expect(parseRequestStaffPasswordRecoveryRequest(request)).toBeNull();
++    }
++  });
++
++  it("rejects arrays, inherited fields, accessors, and symbol fields", () => {
++    const inherited = Object.assign(
++      Object.create({ operator: "synthetic-placeholder" }) as Record<
++        string,
++        unknown
++      >,
++      { schoolId: alphaSchoolId },
++    );
++    const accessor = {
++      get schoolId() {
++        return alphaSchoolId;
++      },
++    };
++    const symbolField = {
++      schoolId: alphaSchoolId,
++      [Symbol("operator")]: "synthetic-placeholder",
++    };
++
++    expect(parseSelectStaffSchoolRequest([alphaSchoolId])).toBeNull();
++    expect(parseSelectStaffSchoolRequest(inherited)).toBeNull();
++    expect(parseSelectStaffSchoolRequest(accessor)).toBeNull();
++    expect(parseSelectStaffSchoolRequest(symbolField)).toBeNull();
++  });
++});
++
++describe("password-recovery operation contracts", () => {
++  const recoveryFailures = [
++    ["conflict", "service_unavailable"],
++    ["email_unverified", "authorization_denied"],
++    ["forbidden", "authorization_denied"],
++    ["invalid_request", "invalid_request"],
++    ["membership_inactive", "authorization_denied"],
++    ["recovery_expired", "session_expired"],
++    ["session_expired", "session_expired"],
++    ["unauthenticated", "authentication_required"],
++  ] as const;
++
++  it("parses exact begin and finish operation identities without secrets", () => {
++    expect(
++      parseBeginStaffPasswordRecoveryOperationRequest({
++        operationId: recoveryOperationId,
++      }),
++    ).toEqual({ operationId: recoveryOperationId });
++    expect(
++      parseFinishStaffPasswordRecoveryOperationRequest({
++        operationId: recoveryOperationId,
++      }),
++    ).toEqual({ operationId: recoveryOperationId });
++    expect(
++      parseBeginStaffPasswordRecoveryOperationRequest({
++        operationId: recoveryOperationId,
++        verifier: "forbidden-sensitive-sentinel",
++      }),
++    ).toBeNull();
++    expect(
++      parseFinishStaffPasswordRecoveryOperationRequest({
++        operationId: "not-an-operation-id",
++      }),
++    ).toBeNull();
++  });
++
++  it.each(["recovery_sessions_revoked", "recovery_completed"] as const)(
++    "parses canonical begin success %s with its bounded operation",
++    (code) => {
++      expect(
++        parseBeginStaffPasswordRecoveryRpcResult({
++          code,
++          expires_at: "2026-09-03T18:15:00.987654-04:00",
++          operation_id: recoveryOperationId,
++        }),
++      ).toEqual({
++        code,
++        expiresAt: "2026-09-03T22:15:00.987Z",
++        ok: true,
++        operationId: recoveryOperationId,
++      });
++    },
++  );
++
++  it.each(recoveryFailures)(
++    "parses begin failure %s and maps it to %s",
++    (rpcCode, productCode) => {
++      expect(
++        parseBeginStaffPasswordRecoveryRpcResult({
++          code: rpcCode,
++          expires_at: null,
++          operation_id: null,
++        }),
++      ).toEqual({ code: rpcCode, ok: false });
++      expect(mapStaffPasswordRecoveryRpcFailure(rpcCode)).toEqual({
++        code: productCode,
++        ok: false,
++      });
++    },
++  );
++
++  it("keeps finish operation results exact and operation-specific", () => {
++    expect(
++      parseFinishStaffPasswordRecoveryRpcResult({
++        code: "recovery_completed",
++      }),
++    ).toEqual({ code: "recovery_completed", ok: true });
++    for (const code of [
++      "conflict",
++      "email_unverified",
++      "forbidden",
++      "invalid_request",
++      "recovery_expired",
++      "session_expired",
++      "unauthenticated",
++    ] as const) {
++      expect(parseFinishStaffPasswordRecoveryRpcResult({ code })).toEqual({
++        code,
++        ok: false,
++      });
++    }
++    expect(
++      parseFinishStaffPasswordRecoveryRpcResult({
++        code: "membership_inactive",
++      }),
++    ).toBeNull();
++    expect(
++      parseFinishStaffPasswordRecoveryRpcResult({
++        code: "recovery_sessions_revoked",
++      }),
++    ).toBeNull();
++  });
++
++  it("rejects malformed or mixed-null DB recovery results", () => {
++    expect(
++      parseBeginStaffPasswordRecoveryRpcResult({
++        code: "forbidden",
++        expires_at: null,
++        operation_id: recoveryOperationId,
++      }),
++    ).toBeNull();
++    expect(
++      parseBeginStaffPasswordRecoveryRpcResult({
++        code: "recovery_sessions_revoked",
++        expires_at: null,
++        operation_id: recoveryOperationId,
++      }),
++    ).toBeNull();
++    expect(
++      parseBeginStaffPasswordRecoveryRpcResult({
++        code: "recovery_sessions_revoked",
++        expires_at: "not-a-time",
++        operation_id: recoveryOperationId,
++      }),
++    ).toBeNull();
++    expect(
++      parseFinishStaffPasswordRecoveryRpcResult({
++        code: "recovery_completed",
++        operation_id: recoveryOperationId,
++      }),
++    ).toBeNull();
++  });
++
++  it("exhaustively maps internal recovery failure vocabulary", () => {
++    expect(staffPasswordRecoveryRpcFailureCodes).toEqual(
++      recoveryFailures.map(([code]) => code),
++    );
++  });
++
++  it("parses only a secret-free composite result after adapter cleanup", () => {
++    expect(
++      parseStaffPasswordRecoveryCompletionResponse({
++        code: "recovery_completed",
++        ok: true,
++      }),
++    ).toEqual({ code: "recovery_completed", ok: true });
++    for (const code of [
++      "authentication_required",
++      "authorization_denied",
++      "invalid_request",
++      "service_unavailable",
++      "session_expired",
++    ] as const) {
++      expect(
++        parseStaffPasswordRecoveryCompletionResponse({ code, ok: false }),
++      ).toEqual({ code, ok: false });
++    }
++    expect(
++      parseStaffPasswordRecoveryCompletionResponse({
++        code: "recovery_expired",
++        ok: false,
++      }),
++    ).toBeNull();
++    expect(
++      parseStaffPasswordRecoveryCompletionResponse({
++        code: "recovery_completed",
++        ok: true,
++        operationId: recoveryOperationId,
++      }),
++    ).toBeNull();
++  });
++});
++
++describe("Owner management-list contracts", () => {
++  const staffFailureFields = [
++    "display_name",
++    "email",
++    "membership_role",
++    "profile_id",
++    "school_id",
++  ] as const;
++  const invitationFailureFields = [
++    "expires_at",
++    "invitation_id",
++    "invitation_status",
++    "invited_email",
++    "invited_role",
++    "school_id",
++  ] as const;
++  const failureMappings = [
++    ["unauthenticated", "authentication_required"],
++    ["email_unverified", "authorization_denied"],
++    ["session_expired", "session_expired"],
++    ["session_revoked", "session_revoked"],
++    ["step_up_required", "step_up_required"],
++    ["membership_inactive", "authorization_denied"],
++    ["forbidden", "authorization_denied"],
++  ] as const;
++
++  it("maps authoritative staff rows to product identities and roles", () => {
++    const mapped = mapCurrentManageableStaffRpcRows([
++      manageableStaffRpcRow(),
++      manageableStaffRpcRow({
++        membership_role: "teacher",
++        school_id: betaSchoolId,
++      }),
++      manageableStaffRpcRow({
++        display_name: "Morgan Lee",
++        email: "morgan@example.invalid",
++        membership_role: "teacher",
++        profile_id: secondProfileId,
++      }),
++    ]);
++
++    expect(mapped).toEqual({
++      code: "manageable_staff_listed",
++      items: [
++        {
++          displayName: "Taylor Rivera",
++          email: "taylor@example.invalid",
++          profileId,
++          role: "administrator",
++          schoolId: alphaSchoolId,
++        },
++        {
++          displayName: "Taylor Rivera",
++          email: "taylor@example.invalid",
++          profileId,
++          role: "teacher",
++          schoolId: betaSchoolId,
++        },
++        {
++          displayName: "Morgan Lee",
++          email: "morgan@example.invalid",
++          profileId: secondProfileId,
++          role: "teacher",
++          schoolId: alphaSchoolId,
++        },
++      ],
++      ok: true,
++    });
++    expect(parseManageableStaffListResponse(mapped)).toEqual(mapped);
++  });
++
++  it("normalizes every revocable DB invitation state to product pending", () => {
++    const mapped = mapCurrentManageableStaffInvitationsRpcRows([
++      manageableInvitationRpcRow({
++        invitation_status: "pending_delivery",
++      }),
++      manageableInvitationRpcRow({
++        expires_at: "2026-09-04T12:30:00-04:00",
++        invitation_id: secondInvitationId,
++        invitation_status: "delivery_ready",
++        invited_email: "administrator@example.invalid",
++        invited_role: "admin",
++      }),
++      manageableInvitationRpcRow({
++        expires_at: "2026-09-04T18:30:00+02:00",
++        invitation_id: "20000000-0000-4000-8000-000000000003",
++        invitation_status: "pending_acceptance",
++        invited_email: "other@example.invalid",
++        school_id: betaSchoolId,
++      }),
++    ]);
++
++    expect(mapped).toEqual({
++      code: "manageable_invitations_listed",
++      items: [
++        {
++          email: "teacher@example.invalid",
++          expiresAt: "2026-09-04T16:30:00.123Z",
++          invitationId,
++          role: "teacher",
++          schoolId: alphaSchoolId,
++          state: "pending",
++        },
++        {
++          email: "administrator@example.invalid",
++          expiresAt: "2026-09-04T16:30:00.000Z",
++          invitationId: secondInvitationId,
++          role: "administrator",
++          schoolId: alphaSchoolId,
++          state: "pending",
++        },
++        {
++          email: "other@example.invalid",
++          expiresAt: "2026-09-04T16:30:00.000Z",
++          invitationId: "20000000-0000-4000-8000-000000000003",
++          role: "teacher",
++          schoolId: betaSchoolId,
++          state: "pending",
++        },
++      ],
++      ok: true,
++    });
++    expect(parseManageableStaffInvitationListResponse(mapped)).toEqual(mapped);
++  });
++
++  it.each(failureMappings)(
++    "maps management RPC failure %s to product failure %s",
++    (rpcCode, productCode) => {
++      expect(
++        mapCurrentManageableStaffRpcRows([
++          managementFailureRow(rpcCode, staffFailureFields),
++        ]),
++      ).toEqual({ code: productCode, ok: false });
++      expect(
++        mapCurrentManageableStaffInvitationsRpcRows([
++          managementFailureRow(rpcCode, invitationFailureFields),
++        ]),
++      ).toEqual({ code: productCode, ok: false });
++    },
++  );
++
++  it("treats an authorized empty selector as an exact empty success", () => {
++    expect(mapCurrentManageableStaffRpcRows([])).toEqual({
++      code: "manageable_staff_listed",
++      items: [],
++      ok: true,
++    });
++    expect(mapCurrentManageableStaffInvitationsRpcRows([])).toEqual({
++      code: "manageable_invitations_listed",
++      items: [],
++      ok: true,
++    });
++  });
++
++  it("fails closed on mixed, malformed, privileged, or inconsistent staff rows", () => {
++    const failure = managementFailureRow("forbidden", staffFailureFields);
++    const invalidCases = [
++      [manageableStaffRpcRow(), failure],
++      [manageableStaffRpcRow({ membership_role: "owner" })],
++      [manageableStaffRpcRow({ membership_role: "administrator" })],
++      [manageableStaffRpcRow({ display_name: "Taylor\nRivera" })],
++      [manageableStaffRpcRow({ email: "Taylor@example.invalid" })],
++      [manageableStaffRpcRow({ profile_id: "not-a-profile" })],
++      [manageableStaffRpcRow({ auth_user_id: "forbidden-identity" })],
++      [failure, managementFailureRow("forbidden", staffFailureFields)],
++      [
++        {
++          ...managementFailureRow("forbidden", staffFailureFields),
++          email: "should-be-null@example.invalid",
++        },
++      ],
++      [manageableStaffRpcRow(), manageableStaffRpcRow()],
++      [
++        manageableStaffRpcRow(),
++        manageableStaffRpcRow({
++          display_name: "Morgan Lee",
++          profile_id: secondProfileId,
++        }),
++      ],
++      [
++        manageableStaffRpcRow(),
++        manageableStaffRpcRow({
++          display_name: "Morgan Lee",
++          profile_id: secondProfileId,
++          school_id: betaSchoolId,
++        }),
++      ],
++      [
++        manageableStaffRpcRow(),
++        manageableStaffRpcRow({
++          email: "different@example.invalid",
++          school_id: betaSchoolId,
++        }),
++      ],
++    ];
++
++    for (const rows of invalidCases) {
++      expect(mapCurrentManageableStaffRpcRows(rows)).toEqual({
++        code: "service_unavailable",
++        ok: false,
++      });
++    }
++  });
++
++  it("fails closed on invalid invitation identities, states, timestamps, and leakage", () => {
++    const failure = managementFailureRow(
++      "session_revoked",
++      invitationFailureFields,
++    );
++    const invalidCases = [
++      [manageableInvitationRpcRow(), failure],
++      [manageableInvitationRpcRow({ invited_role: "owner" })],
++      [manageableInvitationRpcRow({ invited_role: "administrator" })],
++      [manageableInvitationRpcRow({ invitation_status: "accepted" })],
++      [manageableInvitationRpcRow({ invitation_status: "revoked" })],
++      [manageableInvitationRpcRow({ expires_at: "2026-02-30T12:00:00Z" })],
++      [manageableInvitationRpcRow({ expires_at: "2026-09-04" })],
++      [
++        manageableInvitationRpcRow({
++          request_key: "forbidden-sensitive-sentinel",
++        }),
++      ],
++      [
++        {
++          ...managementFailureRow("forbidden", invitationFailureFields),
++          invitation_id: invitationId,
++        },
++      ],
++      [manageableInvitationRpcRow(), manageableInvitationRpcRow()],
++      [
++        manageableInvitationRpcRow(),
++        manageableInvitationRpcRow({ invitation_id: secondInvitationId }),
++      ],
++    ];
++
++    for (const rows of invalidCases) {
++      expect(mapCurrentManageableStaffInvitationsRpcRows(rows)).toEqual({
++        code: "service_unavailable",
++        ok: false,
++      });
++    }
++  });
++
++  it("rejects row 501 instead of silently truncating either management list", () => {
++    expect(STAFF_AUTH_MANAGEMENT_LIST_MAXIMUM_ITEMS).toBe(500);
++    const staffRows = Array.from(
++      { length: STAFF_AUTH_MANAGEMENT_LIST_MAXIMUM_ITEMS + 1 },
++      (_, index) =>
++        manageableStaffRpcRow({
++          profile_id: `30000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
++        }),
++    );
++    const invitationRows = Array.from(
++      { length: STAFF_AUTH_MANAGEMENT_LIST_MAXIMUM_ITEMS + 1 },
++      (_, index) =>
++        manageableInvitationRpcRow({
++          invitation_id: `20000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
++          invited_email: `teacher-${index}@example.invalid`,
++        }),
++    );
++
++    expect(mapCurrentManageableStaffRpcRows(staffRows)).toEqual({
++      code: "service_unavailable",
++      ok: false,
++    });
++    expect(mapCurrentManageableStaffInvitationsRpcRows(invitationRows)).toEqual(
++      { code: "service_unavailable", ok: false },
++    );
++    expect(
++      parseManageableStaffListResponse({
++        code: "manageable_staff_listed",
++        items: staffRows.map((row) => ({
++          displayName: row.display_name,
++          email: row.email,
++          profileId: row.profile_id,
++          role: "administrator",
++          schoolId: row.school_id,
++        })),
++        ok: true,
++      }),
++    ).toBeNull();
++  });
++
++  it("strictly parses canonical list responses without raw storage vocabulary", () => {
++    const staffItem = {
++      displayName: "Taylor Rivera",
++      email: "taylor@example.invalid",
++      profileId,
++      role: "administrator",
++      schoolId: alphaSchoolId,
++    };
++    const invitationItem = {
++      email: "teacher@example.invalid",
++      expiresAt: "2026-09-04T16:30:00.123Z",
++      invitationId,
++      role: "teacher",
++      schoolId: alphaSchoolId,
++      state: "pending",
++    };
++
++    expect(
++      parseManageableStaffListResponse({
++        code: "manageable_staff_listed",
++        items: [staffItem],
++        ok: true,
++      }),
++    ).toEqual({
++      code: "manageable_staff_listed",
++      items: [staffItem],
++      ok: true,
++    });
++    expect(
++      parseManageableStaffInvitationListResponse({
++        code: "manageable_invitations_listed",
++        items: [invitationItem],
++        ok: true,
++      }),
++    ).toEqual({
++      code: "manageable_invitations_listed",
++      items: [invitationItem],
++      ok: true,
++    });
++    expect(
++      parseManageableStaffListResponse({
++        code: "manageable_staff_listed",
++        items: [
++          staffItem,
++          {
++            ...staffItem,
++            displayName: "Morgan Lee",
++            profileId: secondProfileId,
++          },
++        ],
++        ok: true,
++      }),
++    ).toBeNull();
++    expect(
++      parseManageableStaffListResponse({
++        code: "authorization_denied",
++        ok: false,
++      }),
++    ).toEqual({ code: "authorization_denied", ok: false });
++    expect(
++      parseManageableStaffInvitationListResponse({
++        code: "step_up_required",
++        ok: false,
++      }),
++    ).toEqual({ code: "step_up_required", ok: false });
++    for (const code of [
++      "authentication_required",
++      "authorization_denied",
++      "service_unavailable",
++      "session_expired",
++      "session_revoked",
++      "step_up_required",
++    ] as const) {
++      expect(parseManageableStaffListResponse({ code, ok: false })).toEqual({
++        code,
++        ok: false,
++      });
++      expect(
++        parseManageableStaffInvitationListResponse({ code, ok: false }),
++      ).toEqual({ code, ok: false });
++    }
++
++    expect(
++      parseManageableStaffListResponse({
++        code: "manageable_staff_listed",
++        items: [{ ...staffItem, membershipId: "forbidden-storage-identity" }],
++        ok: true,
++      }),
++    ).toBeNull();
++    expect(
++      parseManageableStaffListResponse({
++        code: "manageable_staff_listed",
++        items: [{ ...staffItem, role: "admin" }],
++        ok: true,
++      }),
++    ).toBeNull();
++    expect(
++      parseManageableStaffInvitationListResponse({
++        code: "manageable_invitations_listed",
++        items: [
++          { ...invitationItem, providerToken: "forbidden-sensitive-sentinel" },
++        ],
++        ok: true,
++      }),
++    ).toBeNull();
++    expect(
++      parseManageableStaffListResponse({
++        code: "rate_limited",
++        ok: false,
++      }),
++    ).toBeNull();
++    expect(
++      parseManageableStaffInvitationListResponse({
++        code: "invalid_request",
++        ok: false,
++      }),
++    ).toBeNull();
++    expect(
++      parseManageableStaffInvitationListResponse({
++        code: "manageable_invitations_listed",
++        items: [{ ...invitationItem, expiresAt: "2026-09-04T12:30:00-04:00" }],
++        ok: true,
++      }),
++    ).toBeNull();
++    expect(
++      parseManageableStaffListResponse({
++        code: "manageable_staff_listed",
++        ok: true,
++      }),
++    ).toBeNull();
++    expect(
++      parseManageableStaffListResponse({
++        code: "manageable_staff_listed",
++        items: [],
++        ok: false,
++      }),
++    ).toBeNull();
++    expect(
++      parseManageableStaffInvitationListResponse({
++        code: "authorization_denied",
++        items: [],
++        ok: false,
++      }),
++    ).toBeNull();
++  });
++
++  it("snapshots list and row descriptors without invoking Proxy getters", () => {
++    let propertyReads = 0;
++    const row = new Proxy(manageableStaffRpcRow(), {
++      get(target, property, receiver) {
++        propertyReads += 1;
++        return Reflect.get(target, property, receiver) as unknown;
++      },
++    });
++    const rows = new Proxy([row], {
++      get(target, property, receiver) {
++        propertyReads += 1;
++        return Reflect.get(target, property, receiver) as unknown;
++      },
++    });
++
++    expect(mapCurrentManageableStaffRpcRows(rows)).toEqual({
++      code: "manageable_staff_listed",
++      items: [
++        {
++          displayName: "Taylor Rivera",
++          email: "taylor@example.invalid",
++          profileId,
++          role: "administrator",
++          schoolId: alphaSchoolId,
++        },
++      ],
++      ok: true,
++    });
++    expect(propertyReads).toBe(0);
++  });
++
++  it("fails closed on revoked array and object Proxies", () => {
++    const revokedStaffRows = Proxy.revocable([manageableStaffRpcRow()], {});
++    const revokedInvitationRows = Proxy.revocable(
++      [manageableInvitationRpcRow()],
++      {},
++    );
++    const revokedStaffRow = Proxy.revocable(manageableStaffRpcRow(), {});
++    const revokedInvitationRow = Proxy.revocable(
++      manageableInvitationRpcRow(),
++      {},
++    );
++    const revokedProductResponse = Proxy.revocable(
++      {
++        code: "manageable_staff_listed",
++        items: [],
++        ok: true,
++      },
++      {},
++    );
++    const revokedProductItems = Proxy.revocable<unknown[]>([], {});
++    revokedStaffRows.revoke();
++    revokedInvitationRows.revoke();
++    revokedStaffRow.revoke();
++    revokedInvitationRow.revoke();
++    revokedProductResponse.revoke();
++    revokedProductItems.revoke();
++
++    expect(mapCurrentManageableStaffRpcRows(revokedStaffRows.proxy)).toEqual({
++      code: "service_unavailable",
++      ok: false,
++    });
++    expect(
++      mapCurrentManageableStaffInvitationsRpcRows(revokedInvitationRows.proxy),
++    ).toEqual({ code: "service_unavailable", ok: false });
++    expect(mapCurrentManageableStaffRpcRows([revokedStaffRow.proxy])).toEqual({
++      code: "service_unavailable",
++      ok: false,
++    });
++    expect(
++      mapCurrentManageableStaffInvitationsRpcRows([revokedInvitationRow.proxy]),
++    ).toEqual({ code: "service_unavailable", ok: false });
++    expect(
++      parseManageableStaffListResponse(revokedProductResponse.proxy),
++    ).toBeNull();
++    expect(
++      parseManageableStaffListResponse({
++        code: "manageable_staff_listed",
++        items: revokedProductItems.proxy,
++        ok: true,
++      }),
++    ).toBeNull();
++  });
++});
++
++describe("operation-specific staff auth response contracts", () => {
++  it("keeps non-wire domain success codes outside public vocabulary", () => {
++    expect(staffAuthWireSuccessCodes).toEqual(
++      Object.keys(expectedWireSuccesses),
++    );
++    expect(staffAuthWireSuccessCodes).not.toContain("session_ended");
++    expect(staffAuthWireSuccessCodes).not.toContain("step_up_verified");
++  });
++
++  it("accepts each operation's exact success", () => {
++    expect(
++      parseCreateStaffInvitationResponse({
++        code: "invitation_created",
++        ok: true,
++      }),
++    ).toEqual({ code: "invitation_created", ok: true });
++    expect(
++      parseAcceptStaffInvitationResponse({
++        code: "invitation_accepted",
++        ok: true,
++      }),
++    ).toEqual({ code: "invitation_accepted", ok: true });
++    expect(
++      parseRevokeStaffInvitationResponse({
++        code: "invitation_revoked",
++        ok: true,
++      }),
++    ).toEqual({ code: "invitation_revoked", ok: true });
++    expect(
++      parseRevokeStaffMembershipResponse({
++        code: "membership_revoked",
++        ok: true,
++      }),
++    ).toEqual({ code: "membership_revoked", ok: true });
++    expect(
++      parseRequestStaffPasswordRecoveryResponse({
++        code: "recovery_requested",
++        ok: true,
++      }),
++    ).toEqual({ code: "recovery_requested", ok: true });
++    expect(
++      parseSelectStaffSchoolResponse({ code: "school_selected", ok: true }),
++    ).toEqual({ code: "school_selected", ok: true });
++    expect(
++      parseStaffLoginResponse({ code: "login_succeeded", ok: true }),
++    ).toEqual({ code: "login_succeeded", ok: true });
++    expect(
++      parseStaffEmailVerificationResponse({ code: "email_verified", ok: true }),
++    ).toEqual({ code: "email_verified", ok: true });
++  });
++
++  it.each(staffAuthErrorCodes)(
++    "accepts create-invitation product error %s",
++    (code) => {
++      expect(parseCreateStaffInvitationResponse({ code, ok: false })).toEqual({
++        code,
++        ok: false,
++      });
++    },
++  );
++
++  it("accepts only the documented failures for each remaining operation", () => {
++    const cases = [
++      [
++        parseAcceptStaffInvitationResponse,
++        [
++          "authentication_required",
++          "authorization_denied",
++          "existing_confirmed_user_unsupported",
++          "invalid_request",
++          "invitation_expired",
++          "invitation_not_found",
++          "rate_limited",
++          "service_unavailable",
++          "session_expired",
++          "session_revoked",
++          "step_up_required",
++        ],
++      ],
++      [
++        parseRevokeStaffInvitationResponse,
++        [
++          "authentication_required",
++          "authorization_denied",
++          "invalid_request",
++          "invitation_expired",
++          "invitation_not_found",
++          "rate_limited",
++          "service_unavailable",
++          "session_expired",
++          "session_revoked",
++          "step_up_required",
++        ],
++      ],
++      [
++        parseRevokeStaffMembershipResponse,
++        [
++          "authentication_required",
++          "authorization_denied",
++          "invalid_request",
++          "rate_limited",
++          "service_unavailable",
++          "session_expired",
++          "session_revoked",
++          "step_up_required",
++        ],
++      ],
++      [
++        parseSelectStaffSchoolResponse,
++        [
++          "authentication_required",
++          "authorization_denied",
++          "invalid_request",
++          "service_unavailable",
++          "session_expired",
++          "session_revoked",
++        ],
++      ],
++      [
++        parseStaffLoginResponse,
++        [
++          "authorization_denied",
++          "invalid_request",
++          "rate_limited",
++          "service_unavailable",
++        ],
++      ],
++      [
++        parseStaffEmailVerificationResponse,
++        [
++          "authorization_denied",
++          "invalid_request",
++          "rate_limited",
++          "service_unavailable",
++        ],
++      ],
++    ] as const;
++
++    for (const [parse, errorCodes] of cases) {
++      for (const code of errorCodes) {
++        expect(parse({ code, ok: false })).toEqual({ code, ok: false });
++      }
++    }
++
++    expect(
++      parseAcceptStaffInvitationResponse({
++        code: "step_up_required",
++        ok: false,
++      }),
++    ).toEqual({ code: "step_up_required", ok: false });
++    expect(
++      parseRevokeStaffMembershipResponse({
++        code: "invitation_expired",
++        ok: false,
++      }),
++    ).toBeNull();
++    expect(
++      parseSelectStaffSchoolResponse({ code: "rate_limited", ok: false }),
++    ).toBeNull();
++    expect(
++      parseStaffLoginResponse({ code: "session_expired", ok: false }),
++    ).toBeNull();
++    expect(
++      parseStaffEmailVerificationResponse({
++        code: "authentication_required",
++        ok: false,
++      }),
++    ).toBeNull();
++  });
++
++  it("keeps recovery non-enumerating while preserving retry failures", () => {
++    expect(
++      parseRequestStaffPasswordRecoveryResponse({
++        code: "recovery_requested",
++        ok: true,
++      }),
++    ).toEqual({ code: "recovery_requested", ok: true });
++    expect(
++      parseRequestStaffPasswordRecoveryResponse({
++        code: "rate_limited",
++        ok: false,
++      }),
++    ).toEqual({ code: "rate_limited", ok: false });
++    expect(
++      parseRequestStaffPasswordRecoveryResponse({
++        code: "service_unavailable",
++        ok: false,
++      }),
++    ).toEqual({ code: "service_unavailable", ok: false });
++    expect(
++      parseRequestStaffPasswordRecoveryResponse({
++        code: "authorization_denied",
++        ok: false,
++      }),
++    ).toBeNull();
++  });
++
++  it("rejects missing or extra keys, ok/code mismatches, and wrong-operation codes", () => {
++    expect(
++      parseCreateStaffInvitationResponse({ code: "invitation_created" }),
++    ).toBeNull();
++    expect(parseCreateStaffInvitationResponse({ ok: true })).toBeNull();
++    expect(
++      parseCreateStaffInvitationResponse({
++        code: "invitation_created",
++        ok: true,
++        providerDetail: "forbidden-sensitive-sentinel",
++      }),
++    ).toBeNull();
++    expect(
++      parseCreateStaffInvitationResponse({
++        code: "invitation_created",
++        ok: false,
++      }),
++    ).toBeNull();
++    expect(
++      parseCreateStaffInvitationResponse({ code: "invalid_request", ok: true }),
++    ).toBeNull();
++    expect(
++      parseAcceptStaffInvitationResponse({
++        code: "invitation_created",
++        ok: true,
++      }),
++    ).toBeNull();
++    expect(
++      parseStaffLoginResponse({ code: "email_verified", ok: true }),
++    ).toBeNull();
++    expect(
++      parseRevokeStaffInvitationResponse({
++        code: "membership_revoked",
++        ok: true,
++      }),
++    ).toBeNull();
++    expect(
++      parseRevokeStaffInvitationResponse({
++        code: "invitation_consumed",
++        ok: false,
++      }),
++    ).toBeNull();
++  });
++
++  it("snapshots descriptor values instead of rereading a time-varying Proxy", () => {
++    let propertyReads = 0;
++    const source = { code: "invitation_created", ok: true };
++    const timeVarying = new Proxy(source, {
++      get(target, property, receiver) {
++        propertyReads += 1;
++        if (property === "code") return "provider_specific_failure";
++        return Reflect.get(target, property, receiver) as unknown;
++      },
++    });
++
++    const parsed = parseCreateStaffInvitationResponse(timeVarying);
++    source.code = "login_succeeded";
++
++    expect(parsed).toEqual({ code: "invitation_created", ok: true });
++    expect(propertyReads).toBe(0);
++  });
++});
++
++describe("internal staff auth result mapping", () => {
++  const rpcMappings = [
++    ["conflict", "service_unavailable"],
++    ["dependency_unavailable", "service_unavailable"],
++    ["email_unverified", "authorization_denied"],
++    ["forbidden", "authorization_denied"],
++    ["invalid_request", "invalid_request"],
++    ["invitation_consumed", "invitation_not_found"],
++    ["invitation_expired", "invitation_expired"],
++    ["invitation_not_found", "invitation_not_found"],
++    ["membership_inactive", "authorization_denied"],
++    ["rate_limited", "rate_limited"],
++    ["session_expired", "session_expired"],
++    ["session_revoked", "session_revoked"],
++    ["step_up_required", "step_up_required"],
++    ["unauthenticated", "authentication_required"],
++    ["unknown", "service_unavailable"],
++  ] as const;
++  const providerMappings = [
++    ["dependency_unavailable", "service_unavailable"],
++    ["existing_user_conflict", "existing_confirmed_user_unsupported"],
++    ["rate_limited", "rate_limited"],
++    ["unknown", "service_unavailable"],
++  ] as const;
++
++  it("exhaustively translates detailed RPC outcomes to product failures", () => {
++    expect(staffAuthRpcFailureCodes).toEqual(
++      rpcMappings.map(([internalCode]) => internalCode),
++    );
++    for (const [internalCode, productCode] of rpcMappings) {
++      expect(
++        mapStaffAuthInternalFailure({
++          code: internalCode,
++          source: "rpc",
++        }),
++      ).toEqual({ code: productCode, ok: false });
++    }
++  });
++
++  it("exhaustively translates provider outcomes without leaking provider terms", () => {
++    expect(staffAuthProviderFailureCodes).toEqual(
++      providerMappings.map(([internalCode]) => internalCode),
++    );
++    for (const [internalCode, productCode] of providerMappings) {
++      expect(
++        mapStaffAuthInternalFailure({
++          code: internalCode,
++          source: "provider",
++        }),
++      ).toEqual({ code: productCode, ok: false });
++    }
++  });
++
++  it("publishes create success only after the invitation becomes usable", () => {
++    expect(
++      mapCreateStaffInvitationInternalResult({
++        code: "invitation_usable",
++        ok: true,
++      }),
++    ).toEqual({ code: "invitation_created", ok: true });
++    expect(
++      mapCreateStaffInvitationInternalResult({
++        code: "existing_user_conflict",
++        ok: false,
++        source: "provider",
++      }),
++    ).toEqual({ code: "existing_confirmed_user_unsupported", ok: false });
++  });
++
++  it("allows only perimeter failures to select a recovery public error", () => {
++    for (const code of [
++      "invalid_request",
++      "rate_limited",
++      "service_unavailable",
++    ] as const) {
++      expect(
++        mapRequestStaffPasswordRecoveryInternalResult({
++          code,
++          ok: false,
++          source: "perimeter",
++        }),
++      ).toEqual({ code, ok: false });
++    }
++  });
++
++  it.each([
++    "accepted",
++    "account_absent",
++    "dependency_unavailable",
++    "delivery_failed",
++    "rate_limited",
++    "rejected",
++    "timed_out",
++    "unknown",
++  ] as const)(
++    "keeps downstream recovery outcome %s enumeration-neutral",
++    (outcome) => {
++      expect(staffPasswordRecoveryDownstreamOutcomes).toContain(outcome);
++      expect(
++        mapRequestStaffPasswordRecoveryInternalResult({
++          outcome,
++          source: "downstream",
++        }),
++      ).toEqual({ code: "recovery_requested", ok: true });
++    },
++  );
++
++  it("keeps the downstream recovery mapping vocabulary exhaustive", () => {
++    expect(staffPasswordRecoveryDownstreamOutcomes).toEqual([
++      "accepted",
++      "account_absent",
++      "dependency_unavailable",
++      "delivery_failed",
++      "rate_limited",
++      "rejected",
++      "timed_out",
++      "unknown",
++    ]);
++  });
++});
+diff --git a/packages/domain/src/index.ts b/packages/domain/src/index.ts
+index 04e76e1acad124f1fd6791935678aca32a40092e..7486d7c325ff1a2d7a17efec905e336d20bfc2be 100644
+--- a/packages/domain/src/index.ts
++++ b/packages/domain/src/index.ts
+@@ -1,6 +1,8 @@
++import type { ProductStaffRole } from "./staff-auth.js";
++
+ export type WorkspaceKind = "personal" | "school";
+ 
+-export type MembershipRole = "owner" | "administrator" | "teacher";
++export type MembershipRole = ProductStaffRole;
+ 
+ export type MembershipStatus = "active" | "suspended" | "removed";
+ 
+@@ -41,3 +43,48 @@ export type {
+   RestoredStudentSession,
+   StudentSessionLookup,
+ } from "./student-session.js";
++export {
++  acceptStaffInvitation,
++  authorizeStaffInvitation,
++  closeStaffInvitation,
++  completeStaffPasswordRecovery,
++  endStaffApplicationSession,
++  evaluateProtectedStaffSchoolAccess,
++  isSupportedStaffAuthClientSurface,
++  persistedStaffRoles,
++  productStaffRoles,
++  revokeActiveStaffApplicationSessions,
++  revokeStaffMembershipInSchool,
++  requestStaffPasswordRecovery,
++  staffAuthClientSurfaces,
++  staffAuthErrorCodes,
++  staffAuthSuccessCodes,
++  toPersistedStaffRole,
++  toProductStaffRole,
++  verifyStaffMutationStepUp,
++} from "./staff-auth.js";
++export type {
++  InvitableStaffRole,
++  PersistedStaffRole,
++  ProductStaffRole,
++  ProtectedStaffSchoolAccessResult,
++  StaffApplicationSession,
++  StaffApplicationSessionState,
++  StaffAuthClientSurface,
++  StaffAuthDomainFailure,
++  StaffAuthErrorCode,
++  StaffAuthFailure,
++  StaffAuthSuccess,
++  StaffAuthSuccessCode,
++  StaffInvitationAcceptanceResult,
++  StaffInvitationAccountLinkage,
++  StaffInvitationMembershipState,
++  StaffInvitationState,
++  StaffMembershipReference,
++  StaffMembershipRevocationResult,
++  StaffMutationStepUp,
++  StaffPasswordRecoveryResult,
++  StaffPasswordRecoveryState,
++  StaffSessionEndReason,
++  StaffSessionTransitionResult,
++} from "./staff-auth.js";
+diff --git a/packages/domain/src/staff-auth.ts b/packages/domain/src/staff-auth.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3f08e24844e9fc088e65de2eb0705be09b933ffd
+--- /dev/null
++++ b/packages/domain/src/staff-auth.ts
+@@ -0,0 +1,461 @@
++export const persistedStaffRoles = ["owner", "admin", "teacher"] as const;
++
++export type PersistedStaffRole = (typeof persistedStaffRoles)[number];
++
++export const productStaffRoles = ["owner", "administrator", "teacher"] as const;
++
++export type ProductStaffRole = (typeof productStaffRoles)[number];
++
++export type InvitableStaffRole = Exclude<ProductStaffRole, "owner">;
++
++export const staffAuthClientSurfaces = ["web"] as const;
++
++export type StaffAuthClientSurface = (typeof staffAuthClientSurfaces)[number];
++
++export function isSupportedStaffAuthClientSurface(
++  value: unknown,
++): value is StaffAuthClientSurface {
++  return value === "web";
++}
++
++export const staffAuthSuccessCodes = [
++  "email_verified",
++  "invitation_accepted",
++  "invitation_created",
++  "invitation_revoked",
++  "login_succeeded",
++  "membership_revoked",
++  "recovery_completed",
++  "recovery_requested",
++  "school_selected",
++  "session_ended",
++  "step_up_verified",
++] as const;
++
++export type StaffAuthSuccessCode = (typeof staffAuthSuccessCodes)[number];
++
++export const staffAuthErrorCodes = [
++  "authentication_required",
++  "authorization_denied",
++  "existing_confirmed_user_unsupported",
++  "invalid_request",
++  "invitation_expired",
++  "invitation_not_found",
++  "rate_limited",
++  "service_unavailable",
++  "session_expired",
++  "session_revoked",
++  "step_up_required",
++] as const;
++
++export type StaffAuthErrorCode = (typeof staffAuthErrorCodes)[number];
++
++export interface StaffAuthSuccess<
++  Code extends StaffAuthSuccessCode = StaffAuthSuccessCode,
++> {
++  readonly code: Code;
++  readonly ok: true;
++}
++
++export interface StaffAuthFailure<
++  Code extends StaffAuthErrorCode = StaffAuthErrorCode,
++> {
++  readonly code: Code;
++  readonly ok: false;
++}
++
++export interface StaffAuthDomainFailure<Code extends string> {
++  readonly code: Code;
++  readonly ok: false;
++}
++
++const persistedToProductRole = {
++  admin: "administrator",
++  owner: "owner",
++  teacher: "teacher",
++} as const satisfies Record<PersistedStaffRole, ProductStaffRole>;
++
++const productToPersistedRole = {
++  administrator: "admin",
++  owner: "owner",
++  teacher: "teacher",
++} as const satisfies Record<ProductStaffRole, PersistedStaffRole>;
++
++export function toProductStaffRole(role: PersistedStaffRole): ProductStaffRole {
++  return persistedToProductRole[role];
++}
++
++export function toPersistedStaffRole(
++  role: ProductStaffRole,
++): PersistedStaffRole {
++  return productToPersistedRole[role];
++}
++
++export function authorizeStaffInvitation(input: {
++  readonly actorMembershipStatus: "active" | "suspended" | "removed";
++  readonly actorRole: ProductStaffRole;
++  readonly actorSchoolId: string;
++  readonly stepUp: StaffMutationStepUp;
++  readonly targetSchoolId: string;
++  readonly targetRole: ProductStaffRole;
++}):
++  | StaffAuthSuccess<"invitation_created">
++  | StaffAuthDomainFailure<
++      | "authorization_denied"
++      | "invitation_owner_role_unsupported"
++      | "step_up_required"
++    > {
++  if (
++    input.actorMembershipStatus !== "active" ||
++    input.actorRole !== "owner" ||
++    input.actorSchoolId !== input.targetSchoolId
++  ) {
++    return { code: "authorization_denied", ok: false };
++  }
++
++  const stepUp = verifyStaffMutationStepUp(input.stepUp);
++  if (!stepUp.ok) return stepUp;
++
++  if (input.targetRole === "owner") {
++    return { code: "invitation_owner_role_unsupported", ok: false };
++  }
++
++  return { code: "invitation_created", ok: true };
++}
++
++export type StaffInvitationState =
++  "pending" | "accepted" | "revoked" | "expired";
++
++export function closeStaffInvitation(
++  state: StaffInvitationState,
++  reason: "expiry" | "revocation",
++): { readonly changed: boolean; readonly state: StaffInvitationState } {
++  if (state !== "pending") return { changed: false, state };
++
++  return {
++    changed: true,
++    state: reason === "expiry" ? "expired" : "revoked",
++  };
++}
++
++export type StaffInvitationAccountLinkage =
++  "invited_identity" | "existing_confirmed_user";
++
++export type StaffInvitationMembershipState =
++  "absent" | "active" | "suspended" | "removed";
++
++export type StaffInvitationAcceptanceResult =
++  | (StaffAuthSuccess<"invitation_accepted"> & {
++      readonly invitationState: "accepted";
++      readonly membershipState: "active";
++    })
++  | (StaffAuthDomainFailure<
++      | "existing_confirmed_user_unsupported"
++      | "identity_mismatch"
++      | "invitation_already_accepted"
++      | "invitation_expired"
++      | "invitation_link_revoked"
++      | "membership_already_active"
++      | "membership_suspended"
++      | "removed_member_reactivation_unsupported"
++    > & {
++      readonly invitationState: StaffInvitationState;
++      readonly membershipState: StaffInvitationMembershipState;
++    });
++
++export function acceptStaffInvitation(input: {
++  readonly accountLinkage: StaffInvitationAccountLinkage;
++  readonly identityMatches: boolean;
++  readonly invitationState: StaffInvitationState;
++  readonly membershipState: StaffInvitationMembershipState;
++}): StaffInvitationAcceptanceResult {
++  const unchanged = {
++    invitationState: input.invitationState,
++    membershipState: input.membershipState,
++  } as const;
++
++  if (!input.identityMatches) {
++    return { ...unchanged, code: "identity_mismatch", ok: false };
++  }
++
++  if (input.invitationState === "accepted") {
++    return {
++      ...unchanged,
++      code: "invitation_already_accepted",
++      ok: false,
++    };
++  }
++  if (input.invitationState === "expired") {
++    return { ...unchanged, code: "invitation_expired", ok: false };
++  }
++  if (input.invitationState === "revoked") {
++    return { ...unchanged, code: "invitation_link_revoked", ok: false };
++  }
++
++  if (input.accountLinkage === "existing_confirmed_user") {
++    return {
++      ...unchanged,
++      code: "existing_confirmed_user_unsupported",
++      ok: false,
++    };
++  }
++  if (input.membershipState === "active") {
++    return { ...unchanged, code: "membership_already_active", ok: false };
++  }
++  if (input.membershipState === "suspended") {
++    return { ...unchanged, code: "membership_suspended", ok: false };
++  }
++  if (input.membershipState === "removed") {
++    return {
++      ...unchanged,
++      code: "removed_member_reactivation_unsupported",
++      ok: false,
++    };
++  }
++
++  return {
++    code: "invitation_accepted",
++    invitationState: "accepted",
++    membershipState: "active",
++    ok: true,
++  };
++}
++
++export type StaffApplicationSessionState =
++  "active" | "logged_out" | "expired" | "revoked";
++
++export type StaffSessionEndReason = "logout" | "expiry" | "revocation";
++
++export type StaffSessionTransitionResult =
++  | (StaffAuthSuccess<"session_ended"> & {
++      readonly state: Exclude<StaffApplicationSessionState, "active">;
++    })
++  | (StaffAuthDomainFailure<
++      "session_expired" | "session_logged_out" | "session_revoked"
++    > & {
++      readonly state: Exclude<StaffApplicationSessionState, "active">;
++    });
++
++const terminalSessionCode = {
++  expired: "session_expired",
++  logged_out: "session_logged_out",
++  revoked: "session_revoked",
++} as const;
++
++const endReasonState = {
++  expiry: "expired",
++  logout: "logged_out",
++  revocation: "revoked",
++} as const satisfies Record<
++  StaffSessionEndReason,
++  Exclude<StaffApplicationSessionState, "active">
++>;
++
++export function endStaffApplicationSession(
++  state: StaffApplicationSessionState,
++  reason: StaffSessionEndReason,
++): StaffSessionTransitionResult {
++  if (state !== "active") {
++    return { code: terminalSessionCode[state], ok: false, state };
++  }
++
++  return { code: "session_ended", ok: true, state: endReasonState[reason] };
++}
++
++export interface StaffApplicationSession {
++  readonly id: string;
++  readonly state: StaffApplicationSessionState;
++}
++
++export function revokeActiveStaffApplicationSessions(
++  sessions: readonly StaffApplicationSession[],
++): readonly StaffApplicationSession[] {
++  return sessions.map((session) =>
++    session.state === "active" ? { ...session, state: "revoked" } : session,
++  );
++}
++
++export type StaffPasswordRecoveryState =
++  "pending" | "completed" | "expired" | "revoked";
++
++export function requestStaffPasswordRecovery(input: {
++  readonly accountExists: boolean;
++}): StaffAuthSuccess<"recovery_requested"> {
++  void input.accountExists;
++  return { code: "recovery_requested", ok: true };
++}
++
++export type StaffPasswordRecoveryResult =
++  | (StaffAuthSuccess<"recovery_completed"> & {
++      readonly sessions: readonly StaffApplicationSession[];
++      readonly state: "completed";
++    })
++  | (StaffAuthDomainFailure<"recovery_link_invalid_or_expired"> & {
++      readonly sessions: readonly StaffApplicationSession[];
++      readonly state: StaffPasswordRecoveryState;
++    });
++
++export function completeStaffPasswordRecovery(input: {
++  readonly sessions: readonly StaffApplicationSession[];
++  readonly state: StaffPasswordRecoveryState;
++}): StaffPasswordRecoveryResult {
++  if (input.state !== "pending") {
++    return {
++      code: "recovery_link_invalid_or_expired",
++      ok: false,
++      sessions: input.sessions,
++      state: input.state,
++    };
++  }
++
++  return {
++    code: "recovery_completed",
++    ok: true,
++    sessions: revokeActiveStaffApplicationSessions(input.sessions),
++    state: "completed",
++  };
++}
++
++export interface StaffMembershipReference {
++  readonly profileId: string;
++  readonly role: ProductStaffRole;
++  readonly schoolId: string;
++  readonly status: "active" | "suspended" | "removed";
++}
++
++export type StaffMembershipRevocationResult =
++  | (StaffAuthSuccess<"membership_revoked"> & {
++      readonly memberships: readonly StaffMembershipReference[];
++    })
++  | (StaffAuthDomainFailure<
++      "authorization_denied" | "membership_removed" | "step_up_required"
++    > & {
++      readonly memberships: readonly StaffMembershipReference[];
++    });
++
++export function revokeStaffMembershipInSchool(
++  authoritativeMemberships: readonly StaffMembershipReference[],
++  input: {
++    readonly authenticatedActorProfileId: string;
++    readonly profileId: string;
++    readonly schoolId: string;
++    readonly stepUp: StaffMutationStepUp;
++  },
++): StaffMembershipRevocationResult {
++  const actorMembership = authoritativeMemberships.find(
++    (candidate) =>
++      candidate.profileId === input.authenticatedActorProfileId &&
++      candidate.schoolId === input.schoolId,
++  );
++  if (
++    actorMembership === undefined ||
++    actorMembership.status !== "active" ||
++    actorMembership.role !== "owner"
++  ) {
++    return {
++      code: "authorization_denied",
++      memberships: authoritativeMemberships,
++      ok: false,
++    };
++  }
++
++  const stepUp = verifyStaffMutationStepUp(input.stepUp);
++  if (!stepUp.ok) {
++    return { ...stepUp, memberships: authoritativeMemberships };
++  }
++
++  const membership = authoritativeMemberships.find(
++    (candidate) =>
++      candidate.profileId === input.profileId &&
++      candidate.schoolId === input.schoolId,
++  );
++  if (
++    membership === undefined ||
++    membership.profileId === actorMembership.profileId ||
++    (membership.role !== "administrator" && membership.role !== "teacher")
++  ) {
++    return {
++      code: "authorization_denied",
++      memberships: authoritativeMemberships,
++      ok: false,
++    };
++  }
++  if (membership.status === "removed") {
++    return {
++      code: "membership_removed",
++      memberships: authoritativeMemberships,
++      ok: false,
++    };
++  }
++
++  return {
++    code: "membership_revoked",
++    memberships: authoritativeMemberships.map((candidate) =>
++      candidate.profileId === input.profileId &&
++      candidate.schoolId === input.schoolId
++        ? { ...candidate, status: "removed" }
++        : candidate,
++    ),
++    ok: true,
++  };
++}
++
++export type ProtectedStaffSchoolAccessResult =
++  | { readonly allowed: true }
++  | {
++      readonly allowed: false;
++      readonly code:
++        | "authorization_denied"
++        | "session_expired"
++        | "session_logged_out"
++        | "session_revoked";
++    };
++
++export function evaluateProtectedStaffSchoolAccess(input: {
++  readonly membershipEvidence: "live_backend" | "cached_client";
++  readonly membershipSchoolId: string | null;
++  readonly membershipStatus: "active" | "suspended" | "removed" | null;
++  readonly requestedSchoolId: string;
++  readonly sessionState: StaffApplicationSessionState;
++}): ProtectedStaffSchoolAccessResult {
++  if (input.sessionState !== "active") {
++    return {
++      allowed: false,
++      code: terminalSessionCode[input.sessionState],
++    };
++  }
++
++  if (
++    input.membershipEvidence !== "live_backend" ||
++    input.membershipStatus !== "active" ||
++    input.membershipSchoolId !== input.requestedSchoolId
++  ) {
++    return { allowed: false, code: "authorization_denied" };
++  }
++
++  return { allowed: true };
++}
++
++export interface StaffMutationStepUp {
++  readonly assuranceLevel: "aal1" | "aal2";
++  readonly evidenceSource: "signed_session_claims" | "untrusted_client";
++  readonly factorStatus: "unverified" | "verified" | null;
++  readonly factorType: "totp" | null;
++  readonly isCurrentSession: boolean;
++}
++
++export function verifyStaffMutationStepUp(
++  stepUp: StaffMutationStepUp,
++): StaffAuthSuccess<"step_up_verified"> | StaffAuthFailure<"step_up_required"> {
++  if (
++    stepUp.assuranceLevel !== "aal2" ||
++    stepUp.evidenceSource !== "signed_session_claims" ||
++    stepUp.factorType !== "totp" ||
++    stepUp.factorStatus !== "verified" ||
++    !stepUp.isCurrentSession
++  ) {
++    return { code: "step_up_required", ok: false };
++  }
++
++  return { code: "step_up_verified", ok: true };
++}
+diff --git a/packages/domain/tests/staff-auth.test.ts b/packages/domain/tests/staff-auth.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7de8ce0884782d5e542735abcad9e596099d2ac0
+--- /dev/null
++++ b/packages/domain/tests/staff-auth.test.ts
+@@ -0,0 +1,651 @@
++import { describe, expect, it } from "vitest";
++
++import {
++  acceptStaffInvitation,
++  authorizeStaffInvitation,
++  closeStaffInvitation,
++  completeStaffPasswordRecovery,
++  endStaffApplicationSession,
++  evaluateProtectedStaffSchoolAccess,
++  isSupportedStaffAuthClientSurface,
++  persistedStaffRoles,
++  productStaffRoles,
++  revokeActiveStaffApplicationSessions,
++  revokeStaffMembershipInSchool,
++  requestStaffPasswordRecovery,
++  staffAuthClientSurfaces,
++  staffAuthErrorCodes,
++  staffAuthSuccessCodes,
++  toPersistedStaffRole,
++  toProductStaffRole,
++  verifyStaffMutationStepUp,
++} from "../src/index.js";
++
++const verifiedTotp = {
++  assuranceLevel: "aal2",
++  evidenceSource: "signed_session_claims",
++  factorStatus: "verified",
++  factorType: "totp",
++  isCurrentSession: true,
++} as const;
++
++describe("staff role boundary", () => {
++  it("keeps staff authentication on the web surface", () => {
++    expect(staffAuthClientSurfaces).toEqual(["web"]);
++    expect(isSupportedStaffAuthClientSurface("web")).toBe(true);
++    expect(isSupportedStaffAuthClientSurface("desktop")).toBe(false);
++  });
++
++  it("maps the persisted admin role to the administrator product role", () => {
++    expect(
++      persistedStaffRoles.map((role) => [role, toProductStaffRole(role)]),
++    ).toEqual([
++      ["owner", "owner"],
++      ["admin", "administrator"],
++      ["teacher", "teacher"],
++    ]);
++    expect(
++      productStaffRoles.map((role) => [role, toPersistedStaffRole(role)]),
++    ).toEqual([
++      ["owner", "owner"],
++      ["administrator", "admin"],
++      ["teacher", "teacher"],
++    ]);
++  });
++
++  it("allows only an active same-School Owner with current TOTP step-up", () => {
++    expect(
++      authorizeStaffInvitation({
++        actorMembershipStatus: "active",
++        actorRole: "owner",
++        actorSchoolId: "alpha-school",
++        stepUp: verifiedTotp,
++        targetSchoolId: "alpha-school",
++        targetRole: "administrator",
++      }),
++    ).toEqual({ code: "invitation_created", ok: true });
++    expect(
++      authorizeStaffInvitation({
++        actorMembershipStatus: "active",
++        actorRole: "administrator",
++        actorSchoolId: "alpha-school",
++        stepUp: verifiedTotp,
++        targetSchoolId: "alpha-school",
++        targetRole: "teacher",
++      }),
++    ).toEqual({ code: "authorization_denied", ok: false });
++    expect(
++      authorizeStaffInvitation({
++        actorMembershipStatus: "active",
++        actorRole: "owner",
++        actorSchoolId: "alpha-school",
++        stepUp: verifiedTotp,
++        targetSchoolId: "alpha-school",
++        targetRole: "owner",
++      }),
++    ).toEqual({ code: "invitation_owner_role_unsupported", ok: false });
++  });
++
++  it("denies cross-School scope before considering target details", () => {
++    expect(
++      authorizeStaffInvitation({
++        actorMembershipStatus: "active",
++        actorRole: "owner",
++        actorSchoolId: "alpha-school",
++        stepUp: verifiedTotp,
++        targetSchoolId: "beta-school",
++        targetRole: "teacher",
++      }),
++    ).toEqual({ code: "authorization_denied", ok: false });
++  });
++
++  it("requires signed AAL2 from the current verified TOTP factor", () => {
++    expect(
++      authorizeStaffInvitation({
++        actorMembershipStatus: "active",
++        actorRole: "owner",
++        actorSchoolId: "alpha-school",
++        stepUp: { ...verifiedTotp, isCurrentSession: false },
++        targetSchoolId: "alpha-school",
++        targetRole: "teacher",
++      }),
++    ).toEqual({ code: "step_up_required", ok: false });
++  });
++
++  it("denies invitation authority to Teachers and inactive memberships", () => {
++    expect(
++      authorizeStaffInvitation({
++        actorMembershipStatus: "active",
++        actorRole: "teacher",
++        actorSchoolId: "alpha-school",
++        stepUp: verifiedTotp,
++        targetSchoolId: "alpha-school",
++        targetRole: "teacher",
++      }),
++    ).toEqual({ code: "authorization_denied", ok: false });
++
++    for (const actorMembershipStatus of ["suspended", "removed"] as const) {
++      expect(
++        authorizeStaffInvitation({
++          actorMembershipStatus,
++          actorRole: "owner",
++          actorSchoolId: "alpha-school",
++          stepUp: verifiedTotp,
++          targetSchoolId: "alpha-school",
++          targetRole: "teacher",
++        }),
++      ).toEqual({ code: "authorization_denied", ok: false });
++    }
++  });
++});
++
++describe("staff invitation lifecycle", () => {
++  const pendingInvitation = {
++    accountLinkage: "invited_identity",
++    identityMatches: true,
++    invitationState: "pending",
++    membershipState: "absent",
++  } as const;
++
++  it("accepts the intended invited identity exactly once", () => {
++    const accepted = acceptStaffInvitation(pendingInvitation);
++    expect(accepted).toEqual({
++      code: "invitation_accepted",
++      invitationState: "accepted",
++      membershipState: "active",
++      ok: true,
++    });
++
++    expect(
++      acceptStaffInvitation({
++        ...pendingInvitation,
++        invitationState: accepted.invitationState,
++        membershipState: accepted.membershipState,
++      }),
++    ).toEqual({
++      code: "invitation_already_accepted",
++      invitationState: "accepted",
++      membershipState: "active",
++      ok: false,
++    });
++  });
++
++  it("rejects the wrong identity before changing invitation state", () => {
++    expect(
++      acceptStaffInvitation({
++        ...pendingInvitation,
++        identityMatches: false,
++      }),
++    ).toEqual({
++      code: "identity_mismatch",
++      invitationState: "pending",
++      membershipState: "absent",
++      ok: false,
++    });
++  });
++
++  it("fails closed for every terminal invitation state", () => {
++    expect(
++      acceptStaffInvitation({
++        ...pendingInvitation,
++        invitationState: "accepted",
++      }),
++    ).toMatchObject({ code: "invitation_already_accepted", ok: false });
++    expect(
++      acceptStaffInvitation({
++        ...pendingInvitation,
++        invitationState: "expired",
++      }),
++    ).toMatchObject({ code: "invitation_expired", ok: false });
++    expect(
++      acceptStaffInvitation({
++        ...pendingInvitation,
++        invitationState: "revoked",
++      }),
++    ).toMatchObject({ code: "invitation_link_revoked", ok: false });
++  });
++
++  it("expires or revokes a pending invitation without replaying a terminal transition", () => {
++    expect(closeStaffInvitation("pending", "expiry")).toEqual({
++      changed: true,
++      state: "expired",
++    });
++    expect(closeStaffInvitation("pending", "revocation")).toEqual({
++      changed: true,
++      state: "revoked",
++    });
++    expect(closeStaffInvitation("accepted", "revocation")).toEqual({
++      changed: false,
++      state: "accepted",
++    });
++    expect(closeStaffInvitation("expired", "revocation")).toEqual({
++      changed: false,
++      state: "expired",
++    });
++  });
++
++  it("does not link an existing confirmed identity or reactivate a removed member", () => {
++    expect(
++      acceptStaffInvitation({
++        ...pendingInvitation,
++        accountLinkage: "existing_confirmed_user",
++      }),
++    ).toMatchObject({
++      code: "existing_confirmed_user_unsupported",
++      ok: false,
++    });
++    expect(
++      acceptStaffInvitation({
++        ...pendingInvitation,
++        membershipState: "suspended",
++      }),
++    ).toMatchObject({
++      code: "membership_suspended",
++      ok: false,
++    });
++    expect(
++      acceptStaffInvitation({
++        ...pendingInvitation,
++        membershipState: "removed",
++      }),
++    ).toMatchObject({
++      code: "removed_member_reactivation_unsupported",
++      ok: false,
++    });
++    expect(
++      acceptStaffInvitation({
++        ...pendingInvitation,
++        membershipState: "active",
++      }),
++    ).toMatchObject({ code: "membership_already_active", ok: false });
++  });
++});
++
++describe("staff sessions and recovery", () => {
++  it.each([
++    ["logout", "logged_out"],
++    ["expiry", "expired"],
++    ["revocation", "revoked"],
++  ] as const)("ends an active session for %s", (reason, state) => {
++    expect(endStaffApplicationSession("active", reason)).toEqual({
++      code: "session_ended",
++      ok: true,
++      state,
++    });
++  });
++
++  it.each([
++    ["logged_out", "session_logged_out"],
++    ["expired", "session_expired"],
++    ["revoked", "session_revoked"],
++  ] as const)("does not replay the terminal %s transition", (state, code) => {
++    expect(endStaffApplicationSession(state, "revocation")).toEqual({
++      code,
++      ok: false,
++      state,
++    });
++  });
++
++  it("revokes active application sessions while preserving terminal history", () => {
++    expect(
++      revokeActiveStaffApplicationSessions([
++        { id: "current", state: "active" },
++        { id: "older", state: "expired" },
++        { id: "other-client", state: "logged_out" },
++        { id: "previously-revoked", state: "revoked" },
++      ]),
++    ).toEqual([
++      { id: "current", state: "revoked" },
++      { id: "older", state: "expired" },
++      { id: "other-client", state: "logged_out" },
++      { id: "previously-revoked", state: "revoked" },
++    ]);
++  });
++
++  it("never reveals whether a recovery identity exists", () => {
++    expect(requestStaffPasswordRecovery({ accountExists: true })).toEqual({
++      code: "recovery_requested",
++      ok: true,
++    });
++    expect(requestStaffPasswordRecovery({ accountExists: false })).toEqual({
++      code: "recovery_requested",
++      ok: true,
++    });
++  });
++
++  it("completes recovery once and revokes every active application session", () => {
++    const sessions = [
++      { id: "current", state: "active" },
++      { id: "other-client", state: "active" },
++      { id: "historical", state: "expired" },
++    ] as const;
++    const completed = completeStaffPasswordRecovery({
++      sessions,
++      state: "pending",
++    });
++    expect(completed).toEqual({
++      code: "recovery_completed",
++      ok: true,
++      sessions: [
++        { id: "current", state: "revoked" },
++        { id: "other-client", state: "revoked" },
++        { id: "historical", state: "expired" },
++      ],
++      state: "completed",
++    });
++
++    expect(
++      completeStaffPasswordRecovery({
++        sessions: completed.sessions,
++        state: completed.state,
++      }),
++    ).toEqual({
++      code: "recovery_link_invalid_or_expired",
++      ok: false,
++      sessions: completed.sessions,
++      state: "completed",
++    });
++  });
++
++  it.each(["expired", "revoked"] as const)(
++    "collapses the terminal %s recovery state to one public failure",
++    (state) => {
++      expect(completeStaffPasswordRecovery({ sessions: [], state })).toEqual({
++        code: "recovery_link_invalid_or_expired",
++        ok: false,
++        sessions: [],
++        state,
++      });
++    },
++  );
++});
++
++describe("School-scoped Membership revocation", () => {
++  const memberships = [
++    {
++      profileId: "owner-profile",
++      role: "owner",
++      schoolId: "alpha-school",
++      status: "active",
++    },
++    {
++      profileId: "admin-profile",
++      role: "administrator",
++      schoolId: "alpha-school",
++      status: "active",
++    },
++    {
++      profileId: "teacher-profile",
++      role: "teacher",
++      schoolId: "alpha-school",
++      status: "active",
++    },
++    {
++      profileId: "beta-teacher-profile",
++      role: "teacher",
++      schoolId: "beta-school",
++      status: "active",
++    },
++  ] as const;
++  const authorizedOwner = {
++    authenticatedActorProfileId: "owner-profile",
++    stepUp: verifiedTotp,
++  } as const;
++
++  it("allows an active same-School Owner to revoke Administrator or Teacher", () => {
++    expect(
++      revokeStaffMembershipInSchool(memberships, {
++        ...authorizedOwner,
++        profileId: "admin-profile",
++        schoolId: "alpha-school",
++      }),
++    ).toMatchObject({
++      code: "membership_revoked",
++      memberships: [
++        { profileId: "owner-profile", status: "active" },
++        { profileId: "admin-profile", status: "removed" },
++        { profileId: "teacher-profile", status: "active" },
++        { profileId: "beta-teacher-profile", status: "active" },
++      ],
++      ok: true,
++    });
++    expect(
++      revokeStaffMembershipInSchool(memberships, {
++        ...authorizedOwner,
++        profileId: "teacher-profile",
++        schoolId: "alpha-school",
++      }),
++    ).toMatchObject({ code: "membership_revoked", ok: true });
++  });
++
++  it("uses one denial for cross-School, absent, and unauthorized targets", () => {
++    const denial = {
++      code: "authorization_denied",
++      memberships,
++      ok: false,
++    } as const;
++
++    expect(
++      revokeStaffMembershipInSchool(memberships, {
++        ...authorizedOwner,
++        profileId: "beta-teacher-profile",
++        schoolId: "alpha-school",
++      }),
++    ).toEqual(denial);
++    expect(
++      revokeStaffMembershipInSchool(memberships, {
++        ...authorizedOwner,
++        profileId: "absent-profile",
++        schoolId: "alpha-school",
++      }),
++    ).toEqual(denial);
++    expect(
++      revokeStaffMembershipInSchool(memberships, {
++        ...authorizedOwner,
++        profileId: "teacher-profile",
++        schoolId: "beta-school",
++      }),
++    ).toEqual(denial);
++    expect(
++      revokeStaffMembershipInSchool(memberships, {
++        ...authorizedOwner,
++        authenticatedActorProfileId: "teacher-profile",
++        profileId: "admin-profile",
++        schoolId: "alpha-school",
++      }),
++    ).toEqual(denial);
++  });
++
++  it("ignores forged actor claims and denies every Administrator mutation", () => {
++    const forgedAdministrator = {
++      ...authorizedOwner,
++      actorMembershipStatus: "active",
++      actorRole: "owner",
++      actorSchoolId: "alpha-school",
++      authenticatedActorProfileId: "admin-profile",
++      profileId: "teacher-profile",
++      schoolId: "alpha-school",
++    } as const;
++
++    expect(
++      revokeStaffMembershipInSchool(memberships, forgedAdministrator),
++    ).toEqual({ code: "authorization_denied", memberships, ok: false });
++  });
++
++  it("rejects Owner, self, and forged target-role mutations", () => {
++    expect(
++      revokeStaffMembershipInSchool(memberships, {
++        ...authorizedOwner,
++        profileId: "owner-profile",
++        schoolId: "alpha-school",
++      }),
++    ).toEqual({ code: "authorization_denied", memberships, ok: false });
++
++    const ownershipMemberships = [
++      ...memberships,
++      {
++        profileId: "secondary-owner-profile",
++        role: "owner",
++        schoolId: "alpha-school",
++        status: "active",
++      },
++    ] as const;
++    const forgedOwnerTarget = {
++      ...authorizedOwner,
++      profileId: "secondary-owner-profile",
++      schoolId: "alpha-school",
++      targetProfileId: "teacher-profile",
++      targetRole: "teacher",
++    } as const;
++    expect(
++      revokeStaffMembershipInSchool(ownershipMemberships, forgedOwnerTarget),
++    ).toEqual({
++      code: "authorization_denied",
++      memberships: ownershipMemberships,
++      ok: false,
++    });
++
++    const selfTargetMemberships = [
++      ...memberships,
++      {
++        profileId: "owner-profile",
++        role: "teacher",
++        schoolId: "alpha-school",
++        status: "active",
++      },
++    ] as const;
++    expect(
++      revokeStaffMembershipInSchool(selfTargetMemberships, {
++        ...authorizedOwner,
++        profileId: "owner-profile",
++        schoolId: "alpha-school",
++      }),
++    ).toEqual({
++      code: "authorization_denied",
++      memberships: selfTargetMemberships,
++      ok: false,
++    });
++
++    const unknownRoleMemberships = memberships.map((membership) =>
++      membership.profileId === "admin-profile"
++        ? { ...membership, role: "superuser" }
++        : membership,
++    ) as unknown as Parameters<typeof revokeStaffMembershipInSchool>[0];
++    expect(
++      revokeStaffMembershipInSchool(unknownRoleMemberships, {
++        ...authorizedOwner,
++        profileId: "admin-profile",
++        schoolId: "alpha-school",
++      }),
++    ).toEqual({
++      code: "authorization_denied",
++      memberships: unknownRoleMemberships,
++      ok: false,
++    });
++  });
++
++  it("requires current verified TOTP step-up before target lookup", () => {
++    expect(
++      revokeStaffMembershipInSchool(memberships, {
++        ...authorizedOwner,
++        profileId: "absent-profile",
++        schoolId: "alpha-school",
++        stepUp: { ...verifiedTotp, assuranceLevel: "aal1" },
++      }),
++    ).toEqual({ code: "step_up_required", memberships, ok: false });
++  });
++
++  it("denies the next protected request without globally ending the session", () => {
++    const revoked = revokeStaffMembershipInSchool(memberships, {
++      ...authorizedOwner,
++      profileId: "admin-profile",
++      schoolId: "alpha-school",
++    });
++    expect(revoked.ok).toBe(true);
++    const alphaMembership = revoked.memberships.find(
++      (membership) =>
++        membership.profileId === "admin-profile" &&
++        membership.schoolId === "alpha-school",
++    );
++
++    expect(
++      evaluateProtectedStaffSchoolAccess({
++        membershipEvidence: "live_backend",
++        membershipSchoolId: alphaMembership?.schoolId ?? null,
++        membershipStatus: alphaMembership?.status ?? null,
++        requestedSchoolId: "alpha-school",
++        sessionState: "active",
++      }),
++    ).toEqual({ allowed: false, code: "authorization_denied" });
++    expect(
++      evaluateProtectedStaffSchoolAccess({
++        membershipEvidence: "live_backend",
++        membershipSchoolId: "beta-school",
++        membershipStatus: "active",
++        requestedSchoolId: "beta-school",
++        sessionState: "active",
++      }),
++    ).toEqual({ allowed: true });
++    expect(
++      evaluateProtectedStaffSchoolAccess({
++        membershipEvidence: "cached_client",
++        membershipSchoolId: "beta-school",
++        membershipStatus: "active",
++        requestedSchoolId: "beta-school",
++        sessionState: "active",
++      }),
++    ).toEqual({ allowed: false, code: "authorization_denied" });
++  });
++});
++
++describe("privileged Membership mutation step-up", () => {
++  it("requires AAL2 from a current verified TOTP factor", () => {
++    expect(verifyStaffMutationStepUp(verifiedTotp)).toEqual({
++      code: "step_up_verified",
++      ok: true,
++    });
++  });
++
++  it.each([
++    { ...verifiedTotp, assuranceLevel: "aal1" as const },
++    { ...verifiedTotp, evidenceSource: "untrusted_client" as const },
++    { ...verifiedTotp, factorStatus: "unverified" as const },
++    { ...verifiedTotp, factorType: null },
++    { ...verifiedTotp, isCurrentSession: false },
++  ])("fails closed when one assurance condition is absent", (stepUp) => {
++    expect(verifyStaffMutationStepUp(stepUp)).toEqual({
++      code: "step_up_required",
++      ok: false,
++    });
++  });
++});
++
++describe("staff auth public code stability", () => {
++  it("exposes only the stable non-enumerating product errors", () => {
++    expect(staffAuthErrorCodes).toEqual([
++      "authentication_required",
++      "authorization_denied",
++      "existing_confirmed_user_unsupported",
++      "invalid_request",
++      "invitation_expired",
++      "invitation_not_found",
++      "rate_limited",
++      "service_unavailable",
++      "session_expired",
++      "session_revoked",
++      "step_up_required",
++    ]);
++  });
++
++  it("keeps success and error codes unique and disjoint", () => {
++    expect(new Set(staffAuthSuccessCodes).size).toBe(
++      staffAuthSuccessCodes.length,
++    );
++    expect(new Set(staffAuthErrorCodes).size).toBe(staffAuthErrorCodes.length);
++    expect(
++      staffAuthSuccessCodes.filter((code) =>
++        (staffAuthErrorCodes as readonly string[]).includes(code),
++      ),
++    ).toEqual([]);
++  });
++});

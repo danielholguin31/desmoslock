@@ -1,0 +1,3992 @@
+diff --git a/packages/domain/src/evidence-outbox.ts b/packages/domain/src/evidence-outbox.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5adcdd10721b9adc559ba01fe09f9766272de6c7
+--- /dev/null
++++ b/packages/domain/src/evidence-outbox.ts
+@@ -0,0 +1,812 @@
++export interface EvidenceScopeIdentity {
++  readonly schoolId: string;
++  readonly testId: string;
++  readonly studentSessionId: string;
++  readonly deviceSessionId: string;
++  readonly releaseId: string;
++  readonly buildId: string;
++}
++
++export const evidenceOutboxMaximumPendingEvents = 4_096;
++export const evidenceOutboxMaximumAcknowledgedTombstones = 65_536;
++
++export type EvidencePayload =
++  | null
++  | boolean
++  | number
++  | string
++  | readonly EvidencePayload[]
++  | { readonly [key: string]: EvidencePayload };
++
++export interface EvidenceAcknowledgement {
++  readonly eventId: string;
++  readonly identity: EvidenceScopeIdentity;
++  readonly sequence: number;
++  readonly payloadDigest: string;
++}
++
++export interface PreparedEvidenceEvent extends EvidenceAcknowledgement {
++  readonly payload: EvidencePayload;
++}
++
++export interface PendingEvidenceEvent extends EvidenceAcknowledgement {
++  readonly canonicalPayload: string;
++}
++
++export interface EvidenceOutbox {
++  readonly schemaVersion: 1;
++  readonly identity: EvidenceScopeIdentity;
++  readonly capacity: number;
++  readonly tombstoneCapacity: number;
++  /** Active outboxes never discard exact tombstones; exhaustion is explicit. */
++  readonly acknowledgementRetention: "exact-until-session-archive";
++  readonly revision: number;
++  readonly nextSequence: number;
++  readonly pending: readonly PendingEvidenceEvent[];
++  readonly acknowledged: readonly EvidenceAcknowledgement[];
++}
++
++export type EvidenceOutboxCreation =
++  | { readonly status: "created"; readonly outbox: EvidenceOutbox }
++  | {
++      readonly status: "rejected";
++      readonly reason:
++        "invalid-capacity" | "invalid-identity" | "invalid-tombstone-capacity";
++    };
++
++export type EvidenceEventPreparation =
++  | { readonly status: "prepared"; readonly event: PreparedEvidenceEvent }
++  | {
++      readonly status: "rejected";
++      readonly reason: "invalid-outbox" | "invalid-payload";
++    };
++
++interface EvidenceOutboxCommandBase {
++  readonly operationId: string;
++  readonly expectedRevision: number;
++}
++
++export type EvidenceOutboxCommand =
++  | (EvidenceOutboxCommandBase & {
++      readonly type: "enqueue";
++      readonly event: PreparedEvidenceEvent;
++    })
++  | (EvidenceOutboxCommandBase & {
++      readonly type: "acknowledge";
++      readonly acknowledgements: readonly EvidenceAcknowledgement[];
++    });
++
++export type EvidenceOutboxRejectionCode =
++  | "acknowledgement-collision"
++  | "event-identity-collision"
++  | "identity-mismatch"
++  | "invalid-command"
++  | "invalid-event"
++  | "invalid-outbox"
++  | "queue-exhausted"
++  | "revision-mismatch"
++  | "sequence-exhausted"
++  | "tombstone-capacity-exhausted"
++  | "unknown-event";
++
++export type EvidenceOutboxOutcome =
++  | { readonly kind: "enqueued"; readonly sequence: number }
++  | { readonly kind: "already-enqueued"; readonly sequence: number }
++  | { readonly kind: "already-acknowledged"; readonly count: number }
++  | {
++      readonly kind: "acknowledged";
++      readonly count: number;
++      readonly alreadyAcknowledgedCount: number;
++    };
++
++export interface EvidenceOutboxWritePlan {
++  readonly status: "write-required";
++  readonly operationId: string;
++  readonly previousState: EvidenceOutbox;
++  readonly state: EvidenceOutbox;
++  readonly outcome: EvidenceOutboxOutcome;
++}
++
++export type EvidenceOutboxPlan =
++  | EvidenceOutboxWritePlan
++  | {
++      readonly status: "unchanged";
++      readonly state: EvidenceOutbox;
++      readonly outcome: EvidenceOutboxOutcome;
++    }
++  | {
++      readonly status: "rejected";
++      readonly state: EvidenceOutbox;
++      readonly rejection: { readonly code: EvidenceOutboxRejectionCode };
++    };
++
++export type EvidenceOutboxWriteResult =
++  | {
++      readonly status: "applied";
++      readonly state: EvidenceOutbox;
++      readonly outcome: EvidenceOutboxOutcome;
++    }
++  | {
++      readonly status: "write-failed";
++      readonly state: EvidenceOutbox;
++      readonly failure: {
++        readonly code: "storage-write-failed";
++        readonly cause: string;
++        readonly operationId: string;
++      };
++    };
++
++export type EvidenceOutboxWriteOutcome =
++  | { readonly status: "stored" }
++  | { readonly status: "failed"; readonly failureCode: string };
++
++const sha256DigestPattern = /^sha256:[0-9a-f]{64}$/;
++const evidenceEventIdPattern =
++  /^evidence-v1:[1-9][0-9]*:[0-9a-f]{64}:[0-9a-f]{64}$/;
++const evidencePayloadMaximumUtf8Bytes = 262_144;
++const evidencePayloadMaximumDepth = 64;
++
++const sha256RoundConstants = [
++  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
++  0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
++  0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
++  0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
++  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
++  0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
++  0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
++  0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
++  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
++  0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
++  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
++] as const;
++
++function hasText(value: string): boolean {
++  return value.trim().length > 0;
++}
++
++function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
++  return typeof value === "object" && value !== null;
++}
++
++function isPositiveSafeInteger(value: number): boolean {
++  return Number.isSafeInteger(value) && value > 0;
++}
++
++function identityIsValid(value: unknown): value is EvidenceScopeIdentity {
++  return (
++    isRecord(value) &&
++    typeof value.schoolId === "string" &&
++    typeof value.testId === "string" &&
++    typeof value.studentSessionId === "string" &&
++    typeof value.deviceSessionId === "string" &&
++    typeof value.releaseId === "string" &&
++    typeof value.buildId === "string" &&
++    hasText(value.schoolId) &&
++    hasText(value.testId) &&
++    hasText(value.studentSessionId) &&
++    hasText(value.deviceSessionId) &&
++    hasText(value.releaseId) &&
++    hasText(value.buildId)
++  );
++}
++
++function identitiesMatch(
++  left: EvidenceScopeIdentity,
++  right: EvidenceScopeIdentity,
++): boolean {
++  return (
++    left.schoolId === right.schoolId &&
++    left.testId === right.testId &&
++    left.studentSessionId === right.studentSessionId &&
++    left.deviceSessionId === right.deviceSessionId &&
++    left.releaseId === right.releaseId &&
++    left.buildId === right.buildId
++  );
++}
++
++function copyIdentity(identity: EvidenceScopeIdentity): EvidenceScopeIdentity {
++  return {
++    schoolId: identity.schoolId,
++    testId: identity.testId,
++    studentSessionId: identity.studentSessionId,
++    deviceSessionId: identity.deviceSessionId,
++    releaseId: identity.releaseId,
++    buildId: identity.buildId,
++  };
++}
++
++function rotateRight(value: number, shift: number): number {
++  return (value >>> shift) | (value << (32 - shift));
++}
++
++function sha256(value: string): string {
++  const input = new TextEncoder().encode(value);
++  const paddedLength = Math.ceil((input.length + 9) / 64) * 64;
++  const padded = new Uint8Array(paddedLength);
++  padded.set(input);
++  padded[input.length] = 0x80;
++  const dataView = new DataView(padded.buffer);
++  const bitLength = input.length * 8;
++  dataView.setUint32(paddedLength - 8, Math.floor(bitLength / 0x1_0000_0000));
++  dataView.setUint32(paddedLength - 4, bitLength >>> 0);
++
++  let hash0 = 0x6a09e667;
++  let hash1 = 0xbb67ae85;
++  let hash2 = 0x3c6ef372;
++  let hash3 = 0xa54ff53a;
++  let hash4 = 0x510e527f;
++  let hash5 = 0x9b05688c;
++  let hash6 = 0x1f83d9ab;
++  let hash7 = 0x5be0cd19;
++  const words = new Uint32Array(64);
++
++  for (let offset = 0; offset < paddedLength; offset += 64) {
++    for (let index = 0; index < 16; index += 1) {
++      words[index] = dataView.getUint32(offset + index * 4);
++    }
++    for (let index = 16; index < 64; index += 1) {
++      const word15 = words[index - 15] ?? 0;
++      const word2 = words[index - 2] ?? 0;
++      const sigma0 =
++        rotateRight(word15, 7) ^ rotateRight(word15, 18) ^ (word15 >>> 3);
++      const sigma1 =
++        rotateRight(word2, 17) ^ rotateRight(word2, 19) ^ (word2 >>> 10);
++      words[index] =
++        ((words[index - 16] ?? 0) +
++          sigma0 +
++          (words[index - 7] ?? 0) +
++          sigma1) >>>
++        0;
++    }
++
++    let a = hash0;
++    let b = hash1;
++    let c = hash2;
++    let d = hash3;
++    let e = hash4;
++    let f = hash5;
++    let g = hash6;
++    let h = hash7;
++    for (let index = 0; index < 64; index += 1) {
++      const sum1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25);
++      const choice = (e & f) ^ (~e & g);
++      const temporary1 =
++        (h +
++          sum1 +
++          choice +
++          (sha256RoundConstants[index] ?? 0) +
++          (words[index] ?? 0)) >>>
++        0;
++      const sum0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22);
++      const majority = (a & b) ^ (a & c) ^ (b & c);
++      const temporary2 = (sum0 + majority) >>> 0;
++      h = g;
++      g = f;
++      f = e;
++      e = (d + temporary1) >>> 0;
++      d = c;
++      c = b;
++      b = a;
++      a = (temporary1 + temporary2) >>> 0;
++    }
++    hash0 = (hash0 + a) >>> 0;
++    hash1 = (hash1 + b) >>> 0;
++    hash2 = (hash2 + c) >>> 0;
++    hash3 = (hash3 + d) >>> 0;
++    hash4 = (hash4 + e) >>> 0;
++    hash5 = (hash5 + f) >>> 0;
++    hash6 = (hash6 + g) >>> 0;
++    hash7 = (hash7 + h) >>> 0;
++  }
++
++  return [hash0, hash1, hash2, hash3, hash4, hash5, hash6, hash7]
++    .map((word) => word.toString(16).padStart(8, "0"))
++    .join("");
++}
++
++function canonicalize(
++  value: unknown,
++  ancestors: ReadonlySet<object>,
++  depth: number,
++): string | null {
++  if (depth > evidencePayloadMaximumDepth) return null;
++  if (value === null) return "null";
++  if (typeof value === "string" || typeof value === "boolean") {
++    return JSON.stringify(value);
++  }
++  if (typeof value === "number") {
++    return Number.isFinite(value)
++      ? JSON.stringify(Object.is(value, -0) ? 0 : value)
++      : null;
++  }
++  if (typeof value !== "object" || ancestors.has(value)) return null;
++
++  const nextAncestors = new Set(ancestors);
++  nextAncestors.add(value);
++  if (Array.isArray(value)) {
++    if (
++      value.length > evidencePayloadMaximumUtf8Bytes ||
++      Object.getOwnPropertySymbols(value).length > 0
++    ) {
++      return null;
++    }
++    const descriptors = Object.getOwnPropertyDescriptors(value);
++    // `length` plus exactly one own data property for every array index.
++    // This rejects holes, accessors, and extra properties without invoking a
++    // caller-controlled getter during canonicalization.
++    if (Object.keys(descriptors).length !== value.length + 1) return null;
++    const entries: string[] = [];
++    for (let index = 0; index < value.length; index += 1) {
++      const descriptor = descriptors[String(index)];
++      if (
++        descriptor === undefined ||
++        !descriptor.enumerable ||
++        !("value" in descriptor)
++      ) {
++        return null;
++      }
++      const canonicalValue = canonicalize(
++        descriptor.value,
++        nextAncestors,
++        depth + 1,
++      );
++      if (canonicalValue === null) return null;
++      entries.push(canonicalValue);
++    }
++    return `[${entries.join(",")}]`;
++  }
++  const prototype = Object.getPrototypeOf(value);
++  if (prototype !== Object.prototype && prototype !== null) return null;
++  if (Object.getOwnPropertySymbols(value).length > 0) return null;
++  const descriptors = Object.getOwnPropertyDescriptors(value);
++  const keys = Object.keys(descriptors).sort();
++  const entries: string[] = [];
++  for (const key of keys) {
++    const descriptor = descriptors[key];
++    if (
++      descriptor === undefined ||
++      !descriptor.enumerable ||
++      !("value" in descriptor)
++    ) {
++      return null;
++    }
++    const canonicalValue = canonicalize(
++      descriptor.value,
++      nextAncestors,
++      depth + 1,
++    );
++    if (canonicalValue === null) return null;
++    entries.push(`${JSON.stringify(key)}:${canonicalValue}`);
++  }
++  return `{${entries.join(",")}}`;
++}
++
++function canonicalPayload(value: unknown): string | null {
++  const canonical = canonicalize(value, new Set(), 0);
++  if (canonical === null) return null;
++  return new TextEncoder().encode(canonical).length <=
++    evidencePayloadMaximumUtf8Bytes
++    ? canonical
++    : null;
++}
++
++function scopeDigest(identity: EvidenceScopeIdentity): string {
++  const canonical = canonicalize(identity, new Set(), 0);
++  if (canonical === null) throw new Error("Evidence identity is malformed");
++  return sha256(canonical);
++}
++
++function eventIdFor(
++  identity: EvidenceScopeIdentity,
++  sequence: number,
++  payloadDigest: string,
++): string {
++  return `evidence-v1:${sequence}:${scopeDigest(identity)}:${payloadDigest.slice(7)}`;
++}
++
++function acknowledgementIsValid(
++  value: unknown,
++): value is EvidenceAcknowledgement {
++  return (
++    isRecord(value) &&
++    identityIsValid(value.identity) &&
++    typeof value.sequence === "number" &&
++    isPositiveSafeInteger(value.sequence) &&
++    typeof value.payloadDigest === "string" &&
++    sha256DigestPattern.test(value.payloadDigest) &&
++    typeof value.eventId === "string" &&
++    evidenceEventIdPattern.test(value.eventId) &&
++    value.eventId ===
++      eventIdFor(value.identity, value.sequence, value.payloadDigest)
++  );
++}
++
++function acknowledgementIdentitiesMatch(
++  left: EvidenceAcknowledgement,
++  right: EvidenceAcknowledgement,
++): boolean {
++  return (
++    left.eventId === right.eventId &&
++    identitiesMatch(left.identity, right.identity) &&
++    left.sequence === right.sequence &&
++    left.payloadDigest === right.payloadDigest
++  );
++}
++
++function pendingEventIsValid(event: unknown): event is PendingEvidenceEvent {
++  if (!isRecord(event) || typeof event.canonicalPayload !== "string") {
++    return false;
++  }
++  const recanonicalized = (() => {
++    try {
++      return canonicalPayload(JSON.parse(event.canonicalPayload));
++    } catch {
++      return null;
++    }
++  })();
++  return (
++    acknowledgementIsValid(event) &&
++    recanonicalized === event.canonicalPayload &&
++    event.payloadDigest === `sha256:${sha256(event.canonicalPayload)}`
++  );
++}
++
++function outboxIsValid(outbox: EvidenceOutbox): boolean {
++  if (
++    outbox.schemaVersion !== 1 ||
++    !identityIsValid(outbox.identity) ||
++    !isPositiveSafeInteger(outbox.capacity) ||
++    outbox.capacity > evidenceOutboxMaximumPendingEvents ||
++    !isPositiveSafeInteger(outbox.tombstoneCapacity) ||
++    outbox.tombstoneCapacity > evidenceOutboxMaximumAcknowledgedTombstones ||
++    outbox.acknowledgementRetention !== "exact-until-session-archive" ||
++    !Number.isSafeInteger(outbox.revision) ||
++    outbox.revision < 0 ||
++    !isPositiveSafeInteger(outbox.nextSequence) ||
++    !Array.isArray(outbox.pending) ||
++    !Array.isArray(outbox.acknowledged) ||
++    outbox.pending.length > outbox.capacity ||
++    outbox.acknowledged.length > outbox.tombstoneCapacity
++  ) {
++    return false;
++  }
++
++  const records: readonly EvidenceAcknowledgement[] = [
++    ...outbox.pending,
++    ...outbox.acknowledged,
++  ];
++  if (
++    records.length !== outbox.nextSequence - 1 ||
++    outbox.pending.some(
++      (record) =>
++        !pendingEventIsValid(record) ||
++        !identitiesMatch(record.identity, outbox.identity),
++    ) ||
++    outbox.acknowledged.some(
++      (record) =>
++        !acknowledgementIsValid(record) ||
++        !identitiesMatch(record.identity, outbox.identity),
++    ) ||
++    records.some((record) => record.sequence >= outbox.nextSequence)
++  ) {
++    return false;
++  }
++  const sequences = new Set(records.map((record) => record.sequence));
++  const eventIds = new Set(records.map((record) => record.eventId));
++  if (sequences.size !== records.length || eventIds.size !== records.length) {
++    return false;
++  }
++  for (let sequence = 1; sequence < outbox.nextSequence; sequence += 1) {
++    if (!sequences.has(sequence)) return false;
++  }
++  return true;
++}
++
++function reject(
++  state: EvidenceOutbox,
++  code: EvidenceOutboxRejectionCode,
++): EvidenceOutboxPlan {
++  return { status: "rejected", state, rejection: { code } };
++}
++
++function unchanged(
++  state: EvidenceOutbox,
++  outcome: EvidenceOutboxOutcome,
++): EvidenceOutboxPlan {
++  return { status: "unchanged", state, outcome };
++}
++
++function writePlan(
++  previousState: EvidenceOutbox,
++  state: EvidenceOutbox,
++  operationId: string,
++  outcome: EvidenceOutboxOutcome,
++): EvidenceOutboxWritePlan {
++  return {
++    status: "write-required",
++    operationId,
++    previousState,
++    state,
++    outcome,
++  };
++}
++
++function commandIsValid(command: unknown): boolean {
++  return (
++    isRecord(command) &&
++    typeof command.operationId === "string" &&
++    hasText(command.operationId) &&
++    typeof command.expectedRevision === "number" &&
++    Number.isSafeInteger(command.expectedRevision) &&
++    command.expectedRevision >= 0
++  );
++}
++
++export function createEvidenceOutbox(input: {
++  readonly identity: EvidenceScopeIdentity;
++  readonly capacity: number;
++  readonly tombstoneCapacity: number;
++}): EvidenceOutboxCreation {
++  if (!identityIsValid(input.identity)) {
++    return { status: "rejected", reason: "invalid-identity" };
++  }
++  if (!isPositiveSafeInteger(input.capacity)) {
++    return { status: "rejected", reason: "invalid-capacity" };
++  }
++  if (input.capacity > evidenceOutboxMaximumPendingEvents) {
++    return { status: "rejected", reason: "invalid-capacity" };
++  }
++  if (
++    !isPositiveSafeInteger(input.tombstoneCapacity) ||
++    input.tombstoneCapacity > evidenceOutboxMaximumAcknowledgedTombstones
++  ) {
++    return { status: "rejected", reason: "invalid-tombstone-capacity" };
++  }
++  return {
++    status: "created",
++    outbox: {
++      schemaVersion: 1,
++      identity: copyIdentity(input.identity),
++      capacity: input.capacity,
++      tombstoneCapacity: input.tombstoneCapacity,
++      acknowledgementRetention: "exact-until-session-archive",
++      revision: 0,
++      nextSequence: 1,
++      pending: [],
++      acknowledged: [],
++    },
++  };
++}
++
++export function prepareEvidenceEvent(
++  outbox: EvidenceOutbox,
++  payload: EvidencePayload,
++): EvidenceEventPreparation {
++  if (!outboxIsValid(outbox)) {
++    return { status: "rejected", reason: "invalid-outbox" };
++  }
++  const canonical = canonicalPayload(payload);
++  if (canonical === null) {
++    return { status: "rejected", reason: "invalid-payload" };
++  }
++  const payloadDigest = `sha256:${sha256(canonical)}`;
++  return {
++    status: "prepared",
++    event: {
++      eventId: eventIdFor(outbox.identity, outbox.nextSequence, payloadDigest),
++      identity: copyIdentity(outbox.identity),
++      sequence: outbox.nextSequence,
++      payloadDigest,
++      payload,
++    },
++  };
++}
++
++function planEnqueue(
++  state: EvidenceOutbox,
++  command: Extract<EvidenceOutboxCommand, { readonly type: "enqueue" }>,
++): EvidenceOutboxPlan {
++  if (
++    !identityIsValid(command.event.identity) ||
++    !identitiesMatch(command.event.identity, state.identity)
++  ) {
++    return reject(state, "identity-mismatch");
++  }
++  const canonical = canonicalPayload(command.event.payload);
++  if (canonical === null) return reject(state, "invalid-event");
++  const computedPayloadDigest = `sha256:${sha256(canonical)}`;
++  const computedEventId = eventIdFor(
++    state.identity,
++    command.event.sequence,
++    computedPayloadDigest,
++  );
++  if (
++    command.event.payloadDigest !== computedPayloadDigest ||
++    command.event.eventId !== computedEventId
++  ) {
++    return reject(state, "event-identity-collision");
++  }
++
++  const existingBySequence = [...state.pending, ...state.acknowledged].find(
++    (event) => event.sequence === command.event.sequence,
++  );
++  if (existingBySequence !== undefined) {
++    if (!acknowledgementIdentitiesMatch(existingBySequence, command.event)) {
++      return reject(state, "event-identity-collision");
++    }
++    return state.pending.includes(existingBySequence as PendingEvidenceEvent)
++      ? unchanged(state, {
++          kind: "already-enqueued",
++          sequence: existingBySequence.sequence,
++        })
++      : unchanged(state, { kind: "already-acknowledged", count: 1 });
++  }
++  if (command.event.sequence !== state.nextSequence) {
++    return reject(state, "invalid-event");
++  }
++  if (command.expectedRevision !== state.revision) {
++    return reject(state, "revision-mismatch");
++  }
++  if (state.acknowledged.length >= state.tombstoneCapacity) {
++    return reject(state, "tombstone-capacity-exhausted");
++  }
++  if (state.pending.length >= state.capacity) {
++    return reject(state, "queue-exhausted");
++  }
++  if (state.nextSequence >= Number.MAX_SAFE_INTEGER) {
++    return reject(state, "sequence-exhausted");
++  }
++
++  const event: PendingEvidenceEvent = {
++    eventId: command.event.eventId,
++    identity: state.identity,
++    sequence: command.event.sequence,
++    payloadDigest: computedPayloadDigest,
++    canonicalPayload: canonical,
++  };
++  return writePlan(
++    state,
++    {
++      ...state,
++      revision: state.revision + 1,
++      nextSequence: state.nextSequence + 1,
++      pending: [...state.pending, event],
++    },
++    command.operationId,
++    { kind: "enqueued", sequence: event.sequence },
++  );
++}
++
++function planAcknowledgement(
++  state: EvidenceOutbox,
++  command: Extract<EvidenceOutboxCommand, { readonly type: "acknowledge" }>,
++): EvidenceOutboxPlan {
++  if (command.acknowledgements.length === 0) {
++    return reject(state, "invalid-command");
++  }
++
++  const acknowledgementsByEventId = new Map<string, EvidenceAcknowledgement>();
++  for (const acknowledgement of command.acknowledgements) {
++    if (!acknowledgementIsValid(acknowledgement)) {
++      return reject(state, "invalid-command");
++    }
++    if (!identitiesMatch(acknowledgement.identity, state.identity)) {
++      return reject(state, "identity-mismatch");
++    }
++    const duplicate = acknowledgementsByEventId.get(acknowledgement.eventId);
++    if (
++      duplicate !== undefined &&
++      !acknowledgementIdentitiesMatch(duplicate, acknowledgement)
++    ) {
++      return reject(state, "acknowledgement-collision");
++    }
++    acknowledgementsByEventId.set(acknowledgement.eventId, acknowledgement);
++  }
++
++  const pendingToAcknowledge = new Set<string>();
++  let alreadyAcknowledgedCount = 0;
++  for (const acknowledgement of acknowledgementsByEventId.values()) {
++    const existingBySequence = [...state.pending, ...state.acknowledged].find(
++      (event) => event.sequence === acknowledgement.sequence,
++    );
++    if (existingBySequence === undefined) {
++      return reject(state, "unknown-event");
++    }
++    if (!acknowledgementIdentitiesMatch(existingBySequence, acknowledgement)) {
++      return reject(state, "acknowledgement-collision");
++    }
++    if (
++      state.pending.some((event) => event.eventId === acknowledgement.eventId)
++    ) {
++      pendingToAcknowledge.add(acknowledgement.eventId);
++    } else {
++      alreadyAcknowledgedCount += 1;
++    }
++  }
++
++  if (pendingToAcknowledge.size === 0) {
++    return unchanged(state, {
++      kind: "already-acknowledged",
++      count: alreadyAcknowledgedCount,
++    });
++  }
++  if (command.expectedRevision !== state.revision) {
++    return reject(state, "revision-mismatch");
++  }
++  if (
++    state.acknowledged.length + pendingToAcknowledge.size >
++    state.tombstoneCapacity
++  ) {
++    return reject(state, "tombstone-capacity-exhausted");
++  }
++
++  const newlyAcknowledged = state.pending
++    .filter((event) => pendingToAcknowledge.has(event.eventId))
++    .map(({ eventId, identity, sequence, payloadDigest }) => ({
++      eventId,
++      identity,
++      sequence,
++      payloadDigest,
++    }));
++  return writePlan(
++    state,
++    {
++      ...state,
++      revision: state.revision + 1,
++      pending: state.pending.filter(
++        (event) => !pendingToAcknowledge.has(event.eventId),
++      ),
++      acknowledged: [...state.acknowledged, ...newlyAcknowledged],
++    },
++    command.operationId,
++    {
++      kind: "acknowledged",
++      count: newlyAcknowledged.length,
++      alreadyAcknowledgedCount,
++    },
++  );
++}
++
++export function planEvidenceOutboxCommand(
++  state: EvidenceOutbox,
++  command: EvidenceOutboxCommand,
++): EvidenceOutboxPlan {
++  if (!outboxIsValid(state)) {
++    return reject(state, "invalid-outbox");
++  }
++  if (!commandIsValid(command)) {
++    return reject(state, "invalid-command");
++  }
++  switch (command.type) {
++    case "enqueue":
++      if (!isRecord(command.event)) {
++        return reject(state, "invalid-command");
++      }
++      return planEnqueue(state, command);
++    case "acknowledge":
++      if (!Array.isArray(command.acknowledgements)) {
++        return reject(state, "invalid-command");
++      }
++      return planAcknowledgement(state, command);
++    default:
++      return reject(state, "invalid-command");
++  }
++}
++
++export function settleEvidenceOutboxWrite(
++  plan: EvidenceOutboxWritePlan,
++  outcome: EvidenceOutboxWriteOutcome,
++): EvidenceOutboxWriteResult {
++  if (outcome.status === "stored") {
++    return { status: "applied", state: plan.state, outcome: plan.outcome };
++  }
++  return {
++    status: "write-failed",
++    state: plan.previousState,
++    failure: {
++      code: "storage-write-failed",
++      cause: hasText(outcome.failureCode) ? outcome.failureCode : "unspecified",
++      operationId: plan.operationId,
++    },
++  };
++}
+diff --git a/packages/domain/src/index.ts b/packages/domain/src/index.ts
+index 04e76e1acad124f1fd6791935678aca32a40092e..7a1b286588a785052563caa3131529529e912de5 100644
+--- a/packages/domain/src/index.ts
++++ b/packages/domain/src/index.ts
+@@ -31,6 +31,83 @@ export const retentionMaximumDays = {
+ export const backupDeletionMaximumAdditionalDays = 35;
+ export const calculatorStateMaximumHoursAfterTestEnd = 24;
+ 
++export {
++  createLockLifecycle,
++  initializeLockLifecycle,
++  lockEngagementProtections,
++  reduceLockLifecycle,
++  settleLockLifecycleWrite,
++} from "./lock-lifecycle.js";
++export type {
++  EngagementProof,
++  EngagementProtection,
++  LocalReleaseProof,
++  LockEngagementOutcome,
++  LockIdentity,
++  LockLifecycleCommand,
++  LockLifecycleRejectionCode,
++  LockLifecycleState,
++  LockLifecycleWriteOutcome,
++  LockLifecycleWritePlan,
++  LockLifecycleWriteResult,
++  LockStartupRecord,
++  ReleaseAuthorization,
++} from "./lock-lifecycle.js";
++export {
++  createOfflineLease,
++  createOfflineLeaseAuthorizationChallenge,
++  createOfflineLeaseAuthorizationLedger,
++  evaluateOfflineLease,
++  offlineLeaseAuthorizationFreshnessMaximumMilliseconds,
++  offlineLeaseAuthorizationLedgerMaximumEntries,
++  planOfflineLeaseAuthorization,
++  settleOfflineLeaseAuthorization,
++} from "./offline-lease.js";
++export type {
++  OfflineLease,
++  OfflineLeaseAuthorization,
++  OfflineLeaseAuthorizationChallenge,
++  OfflineLeaseAuthorizationLedger,
++  OfflineLeaseAuthorizationLedgerCreation,
++  OfflineLeaseAuthorizationPlan,
++  OfflineLeaseAuthorizationRejectionReason,
++  OfflineLeaseAuthorizationRequest,
++  OfflineLeaseAuthorizationWriteOutcome,
++  OfflineLeaseAuthorizationWritePlan,
++  OfflineLeaseAuthorizationWriteResult,
++  OfflineLeaseChallengeCreation,
++  OfflineLeaseCreation,
++  OfflineLeaseEvaluation,
++  OfflineLeaseObservation,
++  OfflineLeaseRecoveryReason,
++  TrustedOfflineLeaseAuthorization,
++} from "./offline-lease.js";
++export {
++  createEvidenceOutbox,
++  evidenceOutboxMaximumAcknowledgedTombstones,
++  evidenceOutboxMaximumPendingEvents,
++  planEvidenceOutboxCommand,
++  prepareEvidenceEvent,
++  settleEvidenceOutboxWrite,
++} from "./evidence-outbox.js";
++export type {
++  EvidenceAcknowledgement,
++  EvidenceEventPreparation,
++  EvidenceOutbox,
++  EvidenceOutboxCommand,
++  EvidenceOutboxCreation,
++  EvidenceOutboxOutcome,
++  EvidenceOutboxPlan,
++  EvidenceOutboxRejectionCode,
++  EvidenceOutboxWriteOutcome,
++  EvidenceOutboxWritePlan,
++  EvidenceOutboxWriteResult,
++  EvidencePayload,
++  PendingEvidenceEvent,
++  PreparedEvidenceEvent,
++  EvidenceScopeIdentity,
++} from "./evidence-outbox.js";
++
+ export {
+   clearStaleLockedState,
+   engagePersistedLock,
+diff --git a/packages/domain/src/lock-lifecycle.ts b/packages/domain/src/lock-lifecycle.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a68a4c66cc27063f53c76b9057a3ddcb28b3ed3b
+--- /dev/null
++++ b/packages/domain/src/lock-lifecycle.ts
+@@ -0,0 +1,734 @@
++export const lockEngagementProtections = [
++  "shortcut-registration",
++  "application-scan",
++  "persistence",
++  "window",
++  "network",
++] as const;
++
++export type EngagementProtection = (typeof lockEngagementProtections)[number];
++
++export interface LockIdentity {
++  readonly schoolId: string;
++  readonly testId: string;
++  readonly studentSessionId: string;
++  readonly deviceSessionId: string;
++}
++
++export interface EngagementProof {
++  readonly protection: EngagementProtection;
++  readonly proofId: string;
++}
++
++interface LockLifecycleBase {
++  readonly schemaVersion: 1;
++  readonly identity: LockIdentity;
++  readonly revision: number;
++  readonly appliedTransitionIds: readonly string[];
++}
++
++export interface LockPreflightState extends LockLifecycleBase {
++  readonly phase: "preflight";
++}
++
++export interface LockEngagingState extends LockLifecycleBase {
++  readonly phase: "engaging";
++  readonly confirmedProtections: readonly EngagementProof[];
++}
++
++export interface LockLockedState extends LockLifecycleBase {
++  readonly phase: "locked";
++  readonly engagementProofs: readonly EngagementProof[];
++}
++
++export type LockRecoveryReason =
++  | "application-crash"
++  | "backend-outage"
++  | "corrupt-state"
++  | "engagement-failure"
++  | "identity-mismatch"
++  | "incompatible-state"
++  | "lease-untrusted"
++  | "operating-system-reboot"
++  | "partial-state"
++  | "persistence-write-failure"
++  | "process-crash"
++  | "renderer-reload"
++  | "startup-interrupted";
++
++export interface LockRecoveryState extends LockLifecycleBase {
++  readonly phase: "recovery";
++  readonly reason: LockRecoveryReason;
++  readonly lastKnownPhase: LockLifecycleState["phase"] | "unknown";
++  readonly confirmedProtections: readonly EngagementProof[];
++  readonly failure?:
++    | {
++        readonly kind: "engagement-protection";
++        readonly protection: EngagementProtection;
++        readonly code: string;
++      }
++    | {
++        readonly kind: "persistence-write";
++        readonly code: string;
++      };
++}
++
++export type ReleaseAuthorization =
++  | {
++      readonly kind: "teacher-capability";
++      readonly authorizationId: string;
++      readonly identity: LockIdentity;
++      readonly provenance: {
++        readonly kind: "validated-server-capability";
++        readonly issuer: "desmoslock-backend";
++        readonly capabilityId: string;
++      };
++    }
++  | {
++      readonly kind: "documented-emergency-action";
++      readonly actionId: string;
++      readonly identity: LockIdentity;
++      readonly provenance: {
++        readonly kind: "trusted-local-procedure";
++        readonly procedureId: string;
++        readonly invocationId: string;
++      };
++    };
++
++export interface LockReleasingState extends LockLifecycleBase {
++  readonly phase: "releasing";
++  readonly authorization: ReleaseAuthorization;
++}
++
++export interface LocalReleaseProof {
++  readonly persistenceClearedProofId: string;
++  readonly shortcutsRestoredProofId: string;
++  readonly windowReleasedProofId: string;
++  readonly networkRestoredProofId: string;
++}
++
++export interface LockReleasedState extends LockLifecycleBase {
++  readonly phase: "released";
++  readonly authorization: ReleaseAuthorization;
++  readonly releaseProof: LocalReleaseProof;
++}
++
++export interface LockTerminalFailureState extends LockLifecycleBase {
++  readonly phase: "terminal-failure";
++  readonly failureCode: string;
++  readonly lockDisposition: "not-engaged" | "unknown-must-recover";
++}
++
++export type LockLifecycleState =
++  | LockPreflightState
++  | LockEngagingState
++  | LockLockedState
++  | LockRecoveryState
++  | LockReleasingState
++  | LockReleasedState
++  | LockTerminalFailureState;
++
++interface LockLifecycleCommandBase {
++  readonly identity: LockIdentity;
++  readonly expectedRevision: number;
++  readonly transitionId: string;
++}
++
++export type LockLifecycleCommand =
++  | (LockLifecycleCommandBase & { readonly type: "begin-engagement" })
++  | (LockLifecycleCommandBase & {
++      readonly type: "confirm-protection";
++      readonly proof: EngagementProof;
++    })
++  | (LockLifecycleCommandBase & {
++      readonly type: "report-engagement-failure";
++      readonly protection: EngagementProtection;
++      readonly failureCode: string;
++    })
++  | (LockLifecycleCommandBase & {
++      readonly type: "request-recovery";
++      readonly reason: Exclude<
++        LockRecoveryReason,
++        | "corrupt-state"
++        | "engagement-failure"
++        | "identity-mismatch"
++        | "incompatible-state"
++        | "partial-state"
++        | "persistence-write-failure"
++        | "startup-interrupted"
++      >;
++    })
++  | (LockLifecycleCommandBase & {
++      readonly type: "authorize-release";
++      readonly authorization: ReleaseAuthorization;
++    })
++  | (LockLifecycleCommandBase & {
++      readonly type: "confirm-release";
++      readonly proof: LocalReleaseProof;
++    })
++  | (LockLifecycleCommandBase & {
++      readonly type: "declare-terminal-failure";
++      readonly failureCode: string;
++    });
++
++export type LockLifecycleRejectionCode =
++  | "duplicate-protection"
++  | "identity-mismatch"
++  | "invalid-command"
++  | "invalid-transition"
++  | "proof-id-collision"
++  | "release-authority-mismatch"
++  | "revision-mismatch"
++  | "transition-replay";
++
++export type LockEngagementOutcome =
++  | "not-confirmed"
++  | "pending-durability"
++  | "confirmed"
++  | "recovery-required"
++  | "released";
++
++export interface LockLifecycleWritePlan {
++  readonly status: "write-required";
++  readonly previousState: LockEngagingState | LockRecoveryState;
++  readonly state: LockLockedState;
++  readonly engagement: "pending-durability";
++  readonly transitionId: string;
++}
++
++export type LockLifecycleTransition =
++  | {
++      readonly status: "accepted";
++      readonly state: LockLifecycleState;
++      readonly engagement: LockEngagementOutcome;
++    }
++  | {
++      readonly status: "rejected";
++      readonly state: LockLifecycleState;
++      readonly engagement: LockEngagementOutcome;
++      readonly rejection: {
++        readonly code: LockLifecycleRejectionCode;
++      };
++    }
++  | LockLifecycleWritePlan;
++
++export type LockLifecycleWriteOutcome =
++  | { readonly status: "stored" }
++  | { readonly status: "failed"; readonly failureCode: string };
++
++export type LockLifecycleWriteResult =
++  | {
++      readonly status: "accepted";
++      readonly state: LockLockedState;
++      readonly engagement: "confirmed";
++    }
++  | {
++      readonly status: "write-failed";
++      readonly state: LockRecoveryState;
++      readonly engagement: "recovery-required";
++      readonly failure: {
++        readonly code: "storage-write-failed";
++        readonly cause: string;
++      };
++    };
++
++export type LockStartupRecord =
++  | { readonly kind: "absent" }
++  | { readonly kind: "corrupt" }
++  | { readonly kind: "partial" }
++  | { readonly kind: "incompatible" }
++  | { readonly kind: "verified"; readonly state: LockLifecycleState };
++
++function hasText(value: string): boolean {
++  return value.trim().length > 0;
++}
++
++function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
++  return typeof value === "object" && value !== null;
++}
++
++function isRuntimeLockIdentity(value: unknown): value is LockIdentity {
++  return (
++    isRecord(value) &&
++    typeof value.schoolId === "string" &&
++    typeof value.testId === "string" &&
++    typeof value.studentSessionId === "string" &&
++    typeof value.deviceSessionId === "string" &&
++    hasText(value.schoolId) &&
++    hasText(value.testId) &&
++    hasText(value.studentSessionId) &&
++    hasText(value.deviceSessionId)
++  );
++}
++
++function isIdentityValid(identity: LockIdentity): boolean {
++  return (
++    hasText(identity.schoolId) &&
++    hasText(identity.testId) &&
++    hasText(identity.studentSessionId) &&
++    hasText(identity.deviceSessionId)
++  );
++}
++
++function identitiesMatch(left: LockIdentity, right: LockIdentity): boolean {
++  return (
++    left.schoolId === right.schoolId &&
++    left.testId === right.testId &&
++    left.studentSessionId === right.studentSessionId &&
++    left.deviceSessionId === right.deviceSessionId
++  );
++}
++
++function engagementFor(state: LockLifecycleState): LockEngagementOutcome {
++  switch (state.phase) {
++    case "locked":
++    case "releasing":
++      return "confirmed";
++    case "recovery":
++      return "recovery-required";
++    case "released":
++      return "released";
++    case "engaging":
++    case "preflight":
++    case "terminal-failure":
++      return "not-confirmed";
++  }
++}
++
++function reject(
++  state: LockLifecycleState,
++  code: LockLifecycleRejectionCode,
++): LockLifecycleTransition {
++  return {
++    status: "rejected",
++    state,
++    engagement: engagementFor(state),
++    rejection: { code },
++  };
++}
++
++function nextBase(
++  state: LockLifecycleState,
++  command: LockLifecycleCommand,
++): LockLifecycleBase {
++  return {
++    schemaVersion: 1,
++    identity: state.identity,
++    revision: state.revision + 1,
++    appliedTransitionIds: [...state.appliedTransitionIds, command.transitionId],
++  };
++}
++
++function accepted(state: LockLifecycleState): LockLifecycleTransition {
++  return {
++    status: "accepted",
++    state,
++    engagement: engagementFor(state),
++  };
++}
++
++function orderedProofs(
++  proofs: readonly EngagementProof[],
++): readonly EngagementProof[] {
++  return lockEngagementProtections.flatMap((protection) => {
++    const proof = proofs.find(
++      (candidate) => candidate.protection === protection,
++    );
++    return proof === undefined ? [] : [proof];
++  });
++}
++
++function isEngagementProtection(value: unknown): value is EngagementProtection {
++  return lockEngagementProtections.some((protection) => protection === value);
++}
++
++const commandRecoveryReasons = [
++  "application-crash",
++  "backend-outage",
++  "lease-untrusted",
++  "operating-system-reboot",
++  "process-crash",
++  "renderer-reload",
++] as const;
++
++function isCommandRecoveryReason(
++  value: unknown,
++): value is (typeof commandRecoveryReasons)[number] {
++  return commandRecoveryReasons.some((reason) => reason === value);
++}
++
++function isReleaseProofValid(proof: unknown): proof is LocalReleaseProof {
++  if (!isRecord(proof)) return false;
++  const ids = [
++    proof.persistenceClearedProofId,
++    proof.shortcutsRestoredProofId,
++    proof.windowReleasedProofId,
++    proof.networkRestoredProofId,
++  ];
++  return (
++    ids.every((value) => typeof value === "string" && hasText(value)) &&
++    new Set(ids).size === ids.length
++  );
++}
++
++function isReleaseAuthorizationValid(
++  authorization: unknown,
++  identity: LockIdentity,
++): boolean {
++  if (
++    !isRecord(authorization) ||
++    !isRuntimeLockIdentity(authorization.identity) ||
++    !identitiesMatch(authorization.identity, identity) ||
++    !isRecord(authorization.provenance)
++  ) {
++    return false;
++  }
++  switch (authorization.kind) {
++    case "teacher-capability":
++      return (
++        typeof authorization.authorizationId === "string" &&
++        hasText(authorization.authorizationId) &&
++        authorization.provenance.kind === "validated-server-capability" &&
++        authorization.provenance.issuer === "desmoslock-backend" &&
++        authorization.provenance.capabilityId === authorization.authorizationId
++      );
++    case "documented-emergency-action":
++      return (
++        typeof authorization.actionId === "string" &&
++        hasText(authorization.actionId) &&
++        authorization.provenance.kind === "trusted-local-procedure" &&
++        typeof authorization.provenance.procedureId === "string" &&
++        hasText(authorization.provenance.procedureId) &&
++        authorization.provenance.invocationId === authorization.actionId
++      );
++    default:
++      return false;
++  }
++}
++
++function releaseAuthorizationHasShape(value: unknown): boolean {
++  if (
++    !isRecord(value) ||
++    !isRuntimeLockIdentity(value.identity) ||
++    !isRecord(value.provenance)
++  ) {
++    return false;
++  }
++  switch (value.kind) {
++    case "teacher-capability":
++      return (
++        typeof value.authorizationId === "string" &&
++        hasText(value.authorizationId) &&
++        typeof value.provenance.kind === "string" &&
++        typeof value.provenance.issuer === "string" &&
++        typeof value.provenance.capabilityId === "string"
++      );
++    case "documented-emergency-action":
++      return (
++        typeof value.actionId === "string" &&
++        hasText(value.actionId) &&
++        typeof value.provenance.kind === "string" &&
++        typeof value.provenance.procedureId === "string" &&
++        typeof value.provenance.invocationId === "string"
++      );
++    default:
++      return false;
++  }
++}
++
++function lockLifecycleCommandIsValid(
++  value: unknown,
++): value is LockLifecycleCommand {
++  if (
++    !isRecord(value) ||
++    !isRuntimeLockIdentity(value.identity) ||
++    typeof value.transitionId !== "string" ||
++    !hasText(value.transitionId) ||
++    typeof value.expectedRevision !== "number" ||
++    !Number.isSafeInteger(value.expectedRevision) ||
++    value.expectedRevision < 0
++  ) {
++    return false;
++  }
++  switch (value.type) {
++    case "begin-engagement":
++      return true;
++    case "confirm-protection":
++      return (
++        isRecord(value.proof) &&
++        isEngagementProtection(value.proof.protection) &&
++        typeof value.proof.proofId === "string" &&
++        hasText(value.proof.proofId)
++      );
++    case "report-engagement-failure":
++      return (
++        isEngagementProtection(value.protection) &&
++        typeof value.failureCode === "string" &&
++        hasText(value.failureCode)
++      );
++    case "request-recovery":
++      return isCommandRecoveryReason(value.reason);
++    case "authorize-release":
++      return releaseAuthorizationHasShape(value.authorization);
++    case "confirm-release":
++      return isReleaseProofValid(value.proof);
++    case "declare-terminal-failure":
++      return (
++        typeof value.failureCode === "string" && hasText(value.failureCode)
++      );
++    default:
++      return false;
++  }
++}
++
++export function createLockLifecycle(
++  identity: LockIdentity,
++): LockPreflightState {
++  if (!isIdentityValid(identity)) {
++    throw new Error("Lock lifecycle identity is malformed");
++  }
++  return {
++    schemaVersion: 1,
++    identity,
++    phase: "preflight",
++    revision: 0,
++    appliedTransitionIds: [],
++  };
++}
++
++export function initializeLockLifecycle(
++  identity: LockIdentity,
++  record: LockStartupRecord,
++): LockLifecycleState {
++  const fresh = createLockLifecycle(identity);
++  if (record.kind === "absent") return fresh;
++
++  if (record.kind === "verified") {
++    if (!identitiesMatch(record.state.identity, identity)) {
++      return {
++        ...fresh,
++        phase: "recovery",
++        reason: "identity-mismatch",
++        lastKnownPhase: record.state.phase,
++        confirmedProtections: [],
++      };
++    }
++    if (
++      record.state.phase === "released" ||
++      (record.state.phase === "terminal-failure" &&
++        record.state.lockDisposition === "not-engaged")
++    ) {
++      return record.state;
++    }
++    return {
++      schemaVersion: 1,
++      identity,
++      phase: "recovery",
++      revision: record.state.revision + 1,
++      appliedTransitionIds: record.state.appliedTransitionIds,
++      reason: "startup-interrupted",
++      lastKnownPhase: record.state.phase,
++      confirmedProtections: [],
++    };
++  }
++
++  const reason = {
++    corrupt: "corrupt-state",
++    partial: "partial-state",
++    incompatible: "incompatible-state",
++  }[record.kind] as Extract<
++    LockRecoveryReason,
++    "corrupt-state" | "partial-state" | "incompatible-state"
++  >;
++  return {
++    ...fresh,
++    phase: "recovery",
++    reason,
++    lastKnownPhase: "unknown",
++    confirmedProtections: [],
++  };
++}
++
++export function reduceLockLifecycle(
++  state: LockLifecycleState,
++  command: LockLifecycleCommand,
++): LockLifecycleTransition {
++  if (!lockLifecycleCommandIsValid(command)) {
++    return reject(state, "invalid-command");
++  }
++  if (!identitiesMatch(state.identity, command.identity)) {
++    return reject(state, "identity-mismatch");
++  }
++  if (state.appliedTransitionIds.includes(command.transitionId)) {
++    return reject(state, "transition-replay");
++  }
++  if (state.revision !== command.expectedRevision) {
++    return reject(state, "revision-mismatch");
++  }
++  switch (command.type) {
++    case "begin-engagement": {
++      if (state.phase !== "preflight") {
++        return reject(state, "invalid-transition");
++      }
++      return accepted({
++        ...nextBase(state, command),
++        phase: "engaging",
++        confirmedProtections: [],
++      });
++    }
++    case "confirm-protection": {
++      if (state.phase !== "engaging" && state.phase !== "recovery") {
++        return reject(state, "invalid-transition");
++      }
++      if (
++        state.confirmedProtections.some(
++          (proof) => proof.protection === command.proof.protection,
++        )
++      ) {
++        return reject(state, "duplicate-protection");
++      }
++      if (
++        state.confirmedProtections.some(
++          (proof) => proof.proofId === command.proof.proofId,
++        )
++      ) {
++        return reject(state, "proof-id-collision");
++      }
++      const confirmedProtections = orderedProofs([
++        ...state.confirmedProtections,
++        command.proof,
++      ]);
++      if (confirmedProtections.length === lockEngagementProtections.length) {
++        return {
++          status: "write-required",
++          previousState: state,
++          state: {
++            ...nextBase(state, command),
++            phase: "locked",
++            engagementProofs: confirmedProtections,
++          },
++          engagement: "pending-durability",
++          transitionId: command.transitionId,
++        };
++      }
++      if (state.phase === "engaging") {
++        return accepted({
++          ...nextBase(state, command),
++          phase: "engaging",
++          confirmedProtections,
++        });
++      }
++      return accepted({
++        ...nextBase(state, command),
++        phase: "recovery",
++        reason: state.reason,
++        lastKnownPhase: state.lastKnownPhase,
++        confirmedProtections,
++        ...(state.failure === undefined ? {} : { failure: state.failure }),
++      });
++    }
++    case "report-engagement-failure": {
++      if (state.phase !== "engaging") {
++        return reject(state, "invalid-transition");
++      }
++      return accepted({
++        ...nextBase(state, command),
++        phase: "recovery",
++        reason: "engagement-failure",
++        lastKnownPhase: state.phase,
++        confirmedProtections: [],
++        failure: {
++          kind: "engagement-protection",
++          protection: command.protection,
++          code: command.failureCode,
++        },
++      });
++    }
++    case "request-recovery": {
++      if (
++        state.phase !== "engaging" &&
++        state.phase !== "locked" &&
++        state.phase !== "releasing"
++      ) {
++        return reject(state, "invalid-transition");
++      }
++      return accepted({
++        ...nextBase(state, command),
++        phase: "recovery",
++        reason: command.reason,
++        lastKnownPhase: state.phase,
++        confirmedProtections: [],
++      });
++    }
++    case "authorize-release": {
++      if (state.phase !== "locked" && state.phase !== "recovery") {
++        return reject(state, "invalid-transition");
++      }
++      if (!isReleaseAuthorizationValid(command.authorization, state.identity)) {
++        return reject(state, "release-authority-mismatch");
++      }
++      return accepted({
++        ...nextBase(state, command),
++        phase: "releasing",
++        authorization: command.authorization,
++      });
++    }
++    case "confirm-release": {
++      if (state.phase !== "releasing") {
++        return reject(state, "invalid-transition");
++      }
++      return accepted({
++        ...nextBase(state, command),
++        phase: "released",
++        authorization: state.authorization,
++        releaseProof: command.proof,
++      });
++    }
++    case "declare-terminal-failure": {
++      if (state.phase !== "preflight" && state.phase !== "recovery") {
++        return reject(state, "invalid-transition");
++      }
++      return accepted({
++        ...nextBase(state, command),
++        phase: "terminal-failure",
++        failureCode: command.failureCode,
++        lockDisposition:
++          state.phase === "preflight" ? "not-engaged" : "unknown-must-recover",
++      });
++    }
++    default:
++      return reject(state, "invalid-command");
++  }
++}
++
++export function settleLockLifecycleWrite(
++  plan: LockLifecycleWritePlan,
++  outcome: LockLifecycleWriteOutcome,
++): LockLifecycleWriteResult {
++  if (outcome.status === "stored") {
++    return {
++      status: "accepted",
++      state: plan.state,
++      engagement: "confirmed",
++    };
++  }
++  const cause = hasText(outcome.failureCode)
++    ? outcome.failureCode
++    : "unspecified";
++  return {
++    status: "write-failed",
++    state: {
++      schemaVersion: 1,
++      identity: plan.previousState.identity,
++      phase: "recovery",
++      revision: plan.previousState.revision,
++      appliedTransitionIds: plan.previousState.appliedTransitionIds,
++      reason: "persistence-write-failure",
++      lastKnownPhase: plan.previousState.phase,
++      confirmedProtections: [],
++      failure: { kind: "persistence-write", code: cause },
++    },
++    engagement: "recovery-required",
++    failure: { code: "storage-write-failed", cause },
++  };
++}
+diff --git a/packages/domain/src/offline-lease.ts b/packages/domain/src/offline-lease.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f872a8eefe34e494c8fba4e9fbcfa7d9ad2eb2cf
+--- /dev/null
++++ b/packages/domain/src/offline-lease.ts
+@@ -0,0 +1,696 @@
++import type { LockIdentity } from "./lock-lifecycle.js";
++
++export const offlineLeaseAuthorizationFreshnessMaximumMilliseconds = 60_000;
++export const offlineLeaseAuthorizationLedgerMaximumEntries = 1_024;
++
++export interface OfflineLeaseObservation {
++  readonly identity: LockIdentity;
++  readonly bootId: string;
++  readonly monotonicMilliseconds: number;
++  readonly trust: "trusted" | "untrusted";
++  /** Deliberately excluded from all lease calculations. */
++  readonly wallClockMilliseconds?: number;
++}
++
++/**
++ * A client-generated, single-use challenge sent to the authorization server.
++ * The server-signed authorization claims must contain this complete value.
++ */
++export interface OfflineLeaseAuthorizationChallenge {
++  readonly schemaVersion: 1;
++  readonly challengeId: string;
++  readonly identity: LockIdentity;
++  readonly bootId: string;
++  readonly monotonicRequestedMilliseconds: number;
++}
++
++/**
++ * Output of the trusted signature-verification adapter. The adapter may produce
++ * this tag only after verifying that the signature covers all `claims`,
++ * including the complete client challenge.
++ */
++export interface TrustedOfflineLeaseAuthorization {
++  readonly verification: {
++    readonly status: "trusted";
++    readonly kind: "verified-server-signature";
++    readonly issuer: "desmoslock-backend";
++    readonly keyId: string;
++    readonly signatureId: string;
++  };
++  readonly claims: {
++    readonly schemaVersion: 1;
++    readonly authorizationId: string;
++    readonly challenge: OfflineLeaseAuthorizationChallenge;
++    readonly serverAuthorizedAtMilliseconds: number;
++    readonly serverObservedAtMilliseconds: number;
++    readonly serverExpiresAtMilliseconds: number;
++  };
++}
++
++/** Durable, independent replay protection for server authorizations. */
++export interface OfflineLeaseAuthorizationLedger {
++  readonly schemaVersion: 1;
++  readonly identity: LockIdentity;
++  readonly revision: number;
++  readonly consumedAuthorizationIds: readonly string[];
++}
++
++export interface OfflineLease {
++  readonly schemaVersion: 1;
++  readonly identity: LockIdentity;
++  readonly authorizationId: string;
++  readonly challengeId: string;
++  readonly serverAuthorizedAtMilliseconds: number;
++  readonly serverObservedAtMilliseconds: number;
++  readonly serverExpiresAtMilliseconds: number;
++  /** Conservative request-to-verification elapsed evidence. */
++  readonly authorizationRoundTripElapsedMilliseconds: number;
++  readonly authorizedRemainingDurationMilliseconds: number;
++  readonly bootId: string;
++  readonly monotonicRequestedMilliseconds: number;
++  readonly monotonicStartedMilliseconds: number;
++  readonly monotonicLastObservedMilliseconds: number;
++}
++
++export interface OfflineLeaseAuthorizationRequest {
++  readonly ledger: OfflineLeaseAuthorizationLedger;
++  readonly authorization: TrustedOfflineLeaseAuthorization;
++  readonly observation: OfflineLeaseObservation;
++}
++
++/** Compatibility name for the now ledger-backed authorization request. */
++export type OfflineLeaseAuthorization = OfflineLeaseAuthorizationRequest;
++
++export type OfflineLeaseAuthorizationRejectionReason =
++  | "authorization-history-exhausted"
++  | "authorization-replay"
++  | "expired-server-authorization"
++  | "identity-mismatch"
++  | "invalid-authorization-challenge"
++  | "invalid-authorization-id"
++  | "invalid-authorization-ledger"
++  | "invalid-boot-identity"
++  | "invalid-monotonic-evidence"
++  | "invalid-server-authorization"
++  | "stale-authorization-response"
++  | "stale-server-authorization"
++  | "untrusted-authorization-verification"
++  | "untrusted-time-evidence";
++
++export interface OfflineLeaseAuthorizationWritePlan {
++  readonly status: "write-required";
++  readonly expectedLedgerRevision: number;
++  readonly previousLedger: OfflineLeaseAuthorizationLedger;
++  readonly ledger: OfflineLeaseAuthorizationLedger;
++  /** This is not an accepted lease until the ledger CAS is settled. */
++  readonly leaseCandidate: OfflineLease;
++}
++
++export type OfflineLeaseAuthorizationPlan =
++  | OfflineLeaseAuthorizationWritePlan
++  | {
++      readonly status: "rejected";
++      readonly reason: OfflineLeaseAuthorizationRejectionReason;
++    };
++
++/** Compatibility name; authorization now deliberately returns a write plan. */
++export type OfflineLeaseCreation = OfflineLeaseAuthorizationPlan;
++
++export type OfflineLeaseAuthorizationWriteOutcome =
++  | {
++      readonly status: "committed";
++      readonly expectedRevision: number;
++      readonly ledger: OfflineLeaseAuthorizationLedger;
++    }
++  | { readonly status: "conflict"; readonly actualRevision: number }
++  | { readonly status: "failed"; readonly failureCode: string };
++
++export type OfflineLeaseAuthorizationWriteResult =
++  | {
++      readonly status: "accepted";
++      readonly lease: OfflineLease;
++      readonly ledger: OfflineLeaseAuthorizationLedger;
++    }
++  | {
++      readonly status: "write-failed";
++      readonly lease: null;
++      readonly ledger: OfflineLeaseAuthorizationLedger;
++      readonly failure: {
++        readonly code:
++          | "authorization-ledger-cas-conflict"
++          | "authorization-ledger-write-failed";
++        readonly cause: string;
++      };
++    };
++
++export type OfflineLeaseRecoveryReason =
++  | "boot-identity-changed"
++  | "identity-mismatch"
++  | "invalid-lease"
++  | "invalid-monotonic-evidence"
++  | "monotonic-regression"
++  | "untrusted-time-evidence";
++
++export type OfflineLeaseEvaluation =
++  | {
++      readonly status: "active";
++      readonly lease: OfflineLease;
++      readonly elapsedMilliseconds: number;
++      readonly remainingMilliseconds: number;
++    }
++  | {
++      readonly status: "expired";
++      readonly lease: OfflineLease;
++      readonly elapsedMilliseconds: number;
++    }
++  | {
++      readonly status: "recovery";
++      readonly lease: OfflineLease;
++      readonly reason: OfflineLeaseRecoveryReason;
++    };
++
++export type OfflineLeaseChallengeCreation =
++  | {
++      readonly status: "created";
++      readonly challenge: OfflineLeaseAuthorizationChallenge;
++    }
++  | {
++      readonly status: "rejected";
++      readonly reason:
++        | "identity-mismatch"
++        | "invalid-boot-identity"
++        | "invalid-challenge-id"
++        | "invalid-identity"
++        | "invalid-monotonic-evidence"
++        | "untrusted-time-evidence";
++    };
++
++export type OfflineLeaseAuthorizationLedgerCreation =
++  | {
++      readonly status: "created";
++      readonly ledger: OfflineLeaseAuthorizationLedger;
++    }
++  | { readonly status: "rejected"; readonly reason: "invalid-identity" };
++
++function hasText(value: string): boolean {
++  return value.trim().length > 0;
++}
++
++function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
++  return typeof value === "object" && value !== null;
++}
++
++function isRuntimeLockIdentity(value: unknown): value is LockIdentity {
++  return (
++    isRecord(value) &&
++    typeof value.schoolId === "string" &&
++    typeof value.testId === "string" &&
++    typeof value.studentSessionId === "string" &&
++    typeof value.deviceSessionId === "string" &&
++    hasText(value.schoolId) &&
++    hasText(value.testId) &&
++    hasText(value.studentSessionId) &&
++    hasText(value.deviceSessionId)
++  );
++}
++
++function copyIdentity(identity: LockIdentity): LockIdentity {
++  return {
++    schoolId: identity.schoolId,
++    testId: identity.testId,
++    studentSessionId: identity.studentSessionId,
++    deviceSessionId: identity.deviceSessionId,
++  };
++}
++
++function identitiesMatch(left: LockIdentity, right: LockIdentity): boolean {
++  return (
++    left.schoolId === right.schoolId &&
++    left.testId === right.testId &&
++    left.studentSessionId === right.studentSessionId &&
++    left.deviceSessionId === right.deviceSessionId
++  );
++}
++
++function isNonnegativeSafeInteger(value: unknown): value is number {
++  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
++}
++
++function isDenseTextArray(value: unknown): value is readonly string[] {
++  if (
++    !Array.isArray(value) ||
++    value.length > offlineLeaseAuthorizationLedgerMaximumEntries ||
++    Object.getOwnPropertySymbols(value).length > 0
++  ) {
++    return false;
++  }
++  const descriptors = Object.getOwnPropertyDescriptors(value);
++  if (Object.keys(descriptors).length !== value.length + 1) return false;
++  for (let index = 0; index < value.length; index += 1) {
++    const descriptor = descriptors[String(index)];
++    if (
++      descriptor === undefined ||
++      !descriptor.enumerable ||
++      !("value" in descriptor) ||
++      typeof descriptor.value !== "string" ||
++      !hasText(descriptor.value)
++    ) {
++      return false;
++    }
++  }
++  return true;
++}
++
++function ledgerIsValid(
++  value: unknown,
++): value is OfflineLeaseAuthorizationLedger {
++  if (
++    !isRecord(value) ||
++    value.schemaVersion !== 1 ||
++    !isRuntimeLockIdentity(value.identity) ||
++    !isNonnegativeSafeInteger(value.revision) ||
++    !isDenseTextArray(value.consumedAuthorizationIds)
++  ) {
++    return false;
++  }
++  const consumedAuthorizationIds = value.consumedAuthorizationIds;
++  return (
++    value.revision === consumedAuthorizationIds.length &&
++    new Set(consumedAuthorizationIds).size === consumedAuthorizationIds.length
++  );
++}
++
++function challengeIsValid(
++  value: unknown,
++): value is OfflineLeaseAuthorizationChallenge {
++  return (
++    isRecord(value) &&
++    value.schemaVersion === 1 &&
++    typeof value.challengeId === "string" &&
++    hasText(value.challengeId) &&
++    isRuntimeLockIdentity(value.identity) &&
++    typeof value.bootId === "string" &&
++    hasText(value.bootId) &&
++    isNonnegativeSafeInteger(value.monotonicRequestedMilliseconds)
++  );
++}
++
++function trustedVerificationIsValid(value: unknown): boolean {
++  return (
++    isRecord(value) &&
++    value.status === "trusted" &&
++    value.kind === "verified-server-signature" &&
++    value.issuer === "desmoslock-backend" &&
++    typeof value.keyId === "string" &&
++    hasText(value.keyId) &&
++    typeof value.signatureId === "string" &&
++    hasText(value.signatureId)
++  );
++}
++
++function serverAuthorizationIsValid(input: {
++  readonly authorizedAt: unknown;
++  readonly observedAt: unknown;
++  readonly expiresAt: unknown;
++}): input is {
++  readonly authorizedAt: number;
++  readonly observedAt: number;
++  readonly expiresAt: number;
++} {
++  return (
++    isNonnegativeSafeInteger(input.authorizedAt) &&
++    isNonnegativeSafeInteger(input.observedAt) &&
++    isNonnegativeSafeInteger(input.expiresAt) &&
++    input.observedAt >= input.authorizedAt &&
++    input.expiresAt > input.observedAt &&
++    Number.isSafeInteger(input.observedAt - input.authorizedAt) &&
++    Number.isSafeInteger(input.expiresAt - input.observedAt)
++  );
++}
++
++function leaseIsValid(value: unknown): value is OfflineLease {
++  if (
++    !isRecord(value) ||
++    value.schemaVersion !== 1 ||
++    !isRuntimeLockIdentity(value.identity) ||
++    typeof value.authorizationId !== "string" ||
++    !hasText(value.authorizationId) ||
++    typeof value.challengeId !== "string" ||
++    !hasText(value.challengeId) ||
++    typeof value.serverAuthorizedAtMilliseconds !== "number" ||
++    typeof value.serverObservedAtMilliseconds !== "number" ||
++    typeof value.serverExpiresAtMilliseconds !== "number" ||
++    !isNonnegativeSafeInteger(
++      value.authorizationRoundTripElapsedMilliseconds,
++    ) ||
++    !isNonnegativeSafeInteger(value.authorizedRemainingDurationMilliseconds) ||
++    typeof value.bootId !== "string" ||
++    !hasText(value.bootId) ||
++    !isNonnegativeSafeInteger(value.monotonicRequestedMilliseconds) ||
++    !isNonnegativeSafeInteger(value.monotonicStartedMilliseconds) ||
++    !isNonnegativeSafeInteger(value.monotonicLastObservedMilliseconds)
++  ) {
++    return false;
++  }
++  const lease = value as unknown as OfflineLease;
++  const roundTripElapsed =
++    lease.monotonicStartedMilliseconds - lease.monotonicRequestedMilliseconds;
++  const remainingAtServerObservation =
++    lease.serverExpiresAtMilliseconds - lease.serverObservedAtMilliseconds;
++  return (
++    serverAuthorizationIsValid({
++      authorizedAt: lease.serverAuthorizedAtMilliseconds,
++      observedAt: lease.serverObservedAtMilliseconds,
++      expiresAt: lease.serverExpiresAtMilliseconds,
++    }) &&
++    lease.serverObservedAtMilliseconds - lease.serverAuthorizedAtMilliseconds <=
++      offlineLeaseAuthorizationFreshnessMaximumMilliseconds &&
++    roundTripElapsed === lease.authorizationRoundTripElapsedMilliseconds &&
++    roundTripElapsed <= offlineLeaseAuthorizationFreshnessMaximumMilliseconds &&
++    lease.authorizedRemainingDurationMilliseconds ===
++      remainingAtServerObservation - roundTripElapsed &&
++    lease.authorizedRemainingDurationMilliseconds > 0 &&
++    lease.monotonicLastObservedMilliseconds >=
++      lease.monotonicStartedMilliseconds
++  );
++}
++
++function ledgersMatch(
++  left: OfflineLeaseAuthorizationLedger,
++  right: OfflineLeaseAuthorizationLedger,
++): boolean {
++  return (
++    ledgerIsValid(left) &&
++    ledgerIsValid(right) &&
++    identitiesMatch(left.identity, right.identity) &&
++    left.revision === right.revision &&
++    left.consumedAuthorizationIds.length ===
++      right.consumedAuthorizationIds.length &&
++    left.consumedAuthorizationIds.every(
++      (authorizationId, index) =>
++        authorizationId === right.consumedAuthorizationIds[index],
++    )
++  );
++}
++
++export function createOfflineLeaseAuthorizationLedger(
++  identity: LockIdentity,
++): OfflineLeaseAuthorizationLedgerCreation {
++  if (!isRuntimeLockIdentity(identity)) {
++    return { status: "rejected", reason: "invalid-identity" };
++  }
++  return {
++    status: "created",
++    ledger: {
++      schemaVersion: 1,
++      identity: copyIdentity(identity),
++      revision: 0,
++      consumedAuthorizationIds: [],
++    },
++  };
++}
++
++export function createOfflineLeaseAuthorizationChallenge(input: {
++  readonly challengeId: string;
++  readonly identity: LockIdentity;
++  readonly observation: OfflineLeaseObservation;
++}): OfflineLeaseChallengeCreation {
++  if (!isRecord(input) || !isRuntimeLockIdentity(input.identity)) {
++    return { status: "rejected", reason: "invalid-identity" };
++  }
++  if (!hasText(input.challengeId)) {
++    return { status: "rejected", reason: "invalid-challenge-id" };
++  }
++  if (
++    !isRecord(input.observation) ||
++    !isRuntimeLockIdentity(input.observation.identity)
++  ) {
++    return { status: "rejected", reason: "identity-mismatch" };
++  }
++  if (!identitiesMatch(input.identity, input.observation.identity)) {
++    return { status: "rejected", reason: "identity-mismatch" };
++  }
++  if (input.observation.trust !== "trusted") {
++    return { status: "rejected", reason: "untrusted-time-evidence" };
++  }
++  if (!hasText(input.observation.bootId)) {
++    return { status: "rejected", reason: "invalid-boot-identity" };
++  }
++  if (!isNonnegativeSafeInteger(input.observation.monotonicMilliseconds)) {
++    return { status: "rejected", reason: "invalid-monotonic-evidence" };
++  }
++  return {
++    status: "created",
++    challenge: {
++      schemaVersion: 1,
++      challengeId: input.challengeId,
++      identity: copyIdentity(input.identity),
++      bootId: input.observation.bootId,
++      monotonicRequestedMilliseconds: input.observation.monotonicMilliseconds,
++    },
++  };
++}
++
++export function planOfflineLeaseAuthorization(
++  input: OfflineLeaseAuthorizationRequest,
++): OfflineLeaseAuthorizationPlan {
++  if (!isRecord(input) || !ledgerIsValid(input.ledger)) {
++    return { status: "rejected", reason: "invalid-authorization-ledger" };
++  }
++  if (
++    !isRecord(input.authorization) ||
++    !trustedVerificationIsValid(input.authorization.verification)
++  ) {
++    return {
++      status: "rejected",
++      reason: "untrusted-authorization-verification",
++    };
++  }
++  if (!isRecord(input.authorization.claims)) {
++    return { status: "rejected", reason: "invalid-server-authorization" };
++  }
++  const claims = input.authorization.claims;
++  if (claims.schemaVersion !== 1) {
++    return { status: "rejected", reason: "invalid-server-authorization" };
++  }
++  if (
++    typeof claims.authorizationId !== "string" ||
++    !hasText(claims.authorizationId)
++  ) {
++    return { status: "rejected", reason: "invalid-authorization-id" };
++  }
++  if (!challengeIsValid(claims.challenge)) {
++    return { status: "rejected", reason: "invalid-authorization-challenge" };
++  }
++  if (!isRecord(input.observation)) {
++    return { status: "rejected", reason: "untrusted-time-evidence" };
++  }
++  if (!isRuntimeLockIdentity(input.observation.identity)) {
++    return { status: "rejected", reason: "identity-mismatch" };
++  }
++  if (
++    !identitiesMatch(input.ledger.identity, claims.challenge.identity) ||
++    !identitiesMatch(input.ledger.identity, input.observation.identity)
++  ) {
++    return { status: "rejected", reason: "identity-mismatch" };
++  }
++  if (input.observation.trust !== "trusted") {
++    return { status: "rejected", reason: "untrusted-time-evidence" };
++  }
++  if (!hasText(input.observation.bootId)) {
++    return { status: "rejected", reason: "invalid-boot-identity" };
++  }
++  if (claims.challenge.bootId !== input.observation.bootId) {
++    return { status: "rejected", reason: "invalid-authorization-challenge" };
++  }
++  if (!isNonnegativeSafeInteger(input.observation.monotonicMilliseconds)) {
++    return { status: "rejected", reason: "invalid-monotonic-evidence" };
++  }
++  if (
++    input.observation.monotonicMilliseconds <
++    claims.challenge.monotonicRequestedMilliseconds
++  ) {
++    return { status: "rejected", reason: "invalid-monotonic-evidence" };
++  }
++  const serverTimes = {
++    authorizedAt: claims.serverAuthorizedAtMilliseconds,
++    observedAt: claims.serverObservedAtMilliseconds,
++    expiresAt: claims.serverExpiresAtMilliseconds,
++  };
++  if (!serverAuthorizationIsValid(serverTimes)) {
++    return { status: "rejected", reason: "invalid-server-authorization" };
++  }
++  if (
++    serverTimes.observedAt - serverTimes.authorizedAt >
++    offlineLeaseAuthorizationFreshnessMaximumMilliseconds
++  ) {
++    return { status: "rejected", reason: "stale-server-authorization" };
++  }
++  const roundTripElapsed =
++    input.observation.monotonicMilliseconds -
++    claims.challenge.monotonicRequestedMilliseconds;
++  if (
++    roundTripElapsed > offlineLeaseAuthorizationFreshnessMaximumMilliseconds
++  ) {
++    return { status: "rejected", reason: "stale-authorization-response" };
++  }
++  if (input.ledger.consumedAuthorizationIds.includes(claims.authorizationId)) {
++    return { status: "rejected", reason: "authorization-replay" };
++  }
++  if (
++    input.ledger.consumedAuthorizationIds.length >=
++    offlineLeaseAuthorizationLedgerMaximumEntries
++  ) {
++    return { status: "rejected", reason: "authorization-history-exhausted" };
++  }
++  const remainingAtServerObservation =
++    serverTimes.expiresAt - serverTimes.observedAt;
++  const authorizedRemainingDurationMilliseconds =
++    remainingAtServerObservation - roundTripElapsed;
++  if (authorizedRemainingDurationMilliseconds <= 0) {
++    return { status: "rejected", reason: "expired-server-authorization" };
++  }
++
++  const previousLedger: OfflineLeaseAuthorizationLedger = {
++    ...input.ledger,
++    identity: copyIdentity(input.ledger.identity),
++    consumedAuthorizationIds: [...input.ledger.consumedAuthorizationIds],
++  };
++  const ledger: OfflineLeaseAuthorizationLedger = {
++    ...previousLedger,
++    revision: previousLedger.revision + 1,
++    consumedAuthorizationIds: [
++      ...previousLedger.consumedAuthorizationIds,
++      claims.authorizationId,
++    ],
++  };
++  const leaseCandidate: OfflineLease = {
++    schemaVersion: 1,
++    identity: copyIdentity(input.ledger.identity),
++    authorizationId: claims.authorizationId,
++    challengeId: claims.challenge.challengeId,
++    serverAuthorizedAtMilliseconds: serverTimes.authorizedAt,
++    serverObservedAtMilliseconds: serverTimes.observedAt,
++    serverExpiresAtMilliseconds: serverTimes.expiresAt,
++    authorizationRoundTripElapsedMilliseconds: roundTripElapsed,
++    authorizedRemainingDurationMilliseconds,
++    bootId: claims.challenge.bootId,
++    monotonicRequestedMilliseconds:
++      claims.challenge.monotonicRequestedMilliseconds,
++    monotonicStartedMilliseconds: input.observation.monotonicMilliseconds,
++    monotonicLastObservedMilliseconds: input.observation.monotonicMilliseconds,
++  };
++  return {
++    status: "write-required",
++    expectedLedgerRevision: previousLedger.revision,
++    previousLedger,
++    ledger,
++    leaseCandidate,
++  };
++}
++
++/**
++ * Compatibility entry point. Callers must settle the returned plan before
++ * treating its lease candidate as accepted.
++ */
++export function createOfflineLease(
++  input: OfflineLeaseAuthorizationRequest,
++): OfflineLeaseCreation {
++  return planOfflineLeaseAuthorization(input);
++}
++
++export function settleOfflineLeaseAuthorization(
++  plan: OfflineLeaseAuthorizationWritePlan,
++  outcome: OfflineLeaseAuthorizationWriteOutcome,
++): OfflineLeaseAuthorizationWriteResult {
++  if (
++    outcome.status === "committed" &&
++    outcome.expectedRevision === plan.expectedLedgerRevision &&
++    ledgersMatch(outcome.ledger, plan.ledger)
++  ) {
++    return {
++      status: "accepted",
++      lease: plan.leaseCandidate,
++      ledger: plan.ledger,
++    };
++  }
++  if (outcome.status === "failed") {
++    return {
++      status: "write-failed",
++      lease: null,
++      ledger: plan.previousLedger,
++      failure: {
++        code: "authorization-ledger-write-failed",
++        cause: hasText(outcome.failureCode)
++          ? outcome.failureCode
++          : "unspecified",
++      },
++    };
++  }
++  const actualRevision =
++    outcome.status === "conflict"
++      ? outcome.actualRevision
++      : outcome.ledger.revision;
++  return {
++    status: "write-failed",
++    lease: null,
++    ledger: plan.previousLedger,
++    failure: {
++      code: "authorization-ledger-cas-conflict",
++      cause: `expected revision ${plan.expectedLedgerRevision}; observed ${actualRevision}`,
++    },
++  };
++}
++
++export function evaluateOfflineLease(
++  lease: OfflineLease,
++  observation: OfflineLeaseObservation,
++): OfflineLeaseEvaluation {
++  if (!leaseIsValid(lease)) {
++    return { status: "recovery", lease, reason: "invalid-lease" };
++  }
++  if (!isRecord(observation)) {
++    return { status: "recovery", lease, reason: "untrusted-time-evidence" };
++  }
++  if (
++    !isRuntimeLockIdentity(observation.identity) ||
++    !identitiesMatch(lease.identity, observation.identity)
++  ) {
++    return { status: "recovery", lease, reason: "identity-mismatch" };
++  }
++  if (observation.trust !== "trusted") {
++    return { status: "recovery", lease, reason: "untrusted-time-evidence" };
++  }
++  if (!isNonnegativeSafeInteger(observation.monotonicMilliseconds)) {
++    return {
++      status: "recovery",
++      lease,
++      reason: "invalid-monotonic-evidence",
++    };
++  }
++  if (lease.bootId !== observation.bootId) {
++    return { status: "recovery", lease, reason: "boot-identity-changed" };
++  }
++  if (
++    observation.monotonicMilliseconds < lease.monotonicLastObservedMilliseconds
++  ) {
++    return { status: "recovery", lease, reason: "monotonic-regression" };
++  }
++
++  const elapsedMilliseconds =
++    observation.monotonicMilliseconds - lease.monotonicStartedMilliseconds;
++  const updatedLease: OfflineLease = {
++    ...lease,
++    monotonicLastObservedMilliseconds: observation.monotonicMilliseconds,
++  };
++  if (elapsedMilliseconds >= lease.authorizedRemainingDurationMilliseconds) {
++    return { status: "expired", lease: updatedLease, elapsedMilliseconds };
++  }
++  return {
++    status: "active",
++    lease: updatedLease,
++    elapsedMilliseconds,
++    remainingMilliseconds:
++      lease.authorizedRemainingDurationMilliseconds - elapsedMilliseconds,
++  };
++}
+diff --git a/packages/domain/tests/evidence-outbox.test.ts b/packages/domain/tests/evidence-outbox.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..52c373529ac240b1899d8487ed62b2186825b056
+--- /dev/null
++++ b/packages/domain/tests/evidence-outbox.test.ts
+@@ -0,0 +1,520 @@
++import { describe, expect, it } from "vitest";
++
++import {
++  createEvidenceOutbox,
++  evidenceOutboxMaximumAcknowledgedTombstones,
++  evidenceOutboxMaximumPendingEvents,
++  planEvidenceOutboxCommand,
++  prepareEvidenceEvent,
++  settleEvidenceOutboxWrite,
++  type EvidenceAcknowledgement,
++  type EvidenceOutbox,
++  type EvidenceOutboxCommand,
++  type EvidenceOutboxWritePlan,
++  type EvidencePayload,
++  type EvidenceScopeIdentity,
++  type PreparedEvidenceEvent,
++} from "../src/index.js";
++
++const identity: EvidenceScopeIdentity = {
++  schoolId: "school-1",
++  testId: "test-1",
++  studentSessionId: "student-session-1",
++  deviceSessionId: "device-session-1",
++  releaseId: "release-1",
++  buildId: "build-1",
++};
++
++function emptyOutbox(capacity = 3, tombstoneCapacity = 8): EvidenceOutbox {
++  const result = createEvidenceOutbox({
++    identity,
++    capacity,
++    tombstoneCapacity,
++  });
++  expect(result.status).toBe("created");
++  if (result.status !== "created") throw new Error(result.reason);
++  return result.outbox;
++}
++
++function preparedEvent(
++  state: EvidenceOutbox,
++  eventName: string,
++): PreparedEvidenceEvent {
++  const result = prepareEvidenceEvent(state, {
++    kind: "lock-transition",
++    eventId: eventName,
++  });
++  expect(result.status).toBe("prepared");
++  if (result.status !== "prepared") throw new Error(result.reason);
++  return result.event;
++}
++
++function enqueueCommand(
++  state: EvidenceOutbox,
++  event: PreparedEvidenceEvent,
++): Extract<EvidenceOutboxCommand, { readonly type: "enqueue" }> {
++  return {
++    type: "enqueue",
++    operationId: `enqueue-${event.eventId}`,
++    expectedRevision: state.revision,
++    event,
++  };
++}
++
++function ackCommand(
++  state: EvidenceOutbox,
++  acknowledgements: readonly EvidenceAcknowledgement[],
++): Extract<EvidenceOutboxCommand, { readonly type: "acknowledge" }> {
++  return {
++    type: "acknowledge",
++    operationId: `ack-${state.revision}`,
++    expectedRevision: state.revision,
++    acknowledgements,
++  };
++}
++
++function stored(
++  state: EvidenceOutbox,
++  command: EvidenceOutboxCommand,
++): EvidenceOutbox {
++  const plan = planEvidenceOutboxCommand(state, command);
++  expect(plan.status).toBe("write-required");
++  if (plan.status !== "write-required") {
++    throw new Error(
++      plan.status === "rejected" ? plan.rejection.code : "unexpected no-op",
++    );
++  }
++  const result = settleEvidenceOutboxWrite(plan, { status: "stored" });
++  expect(result.status).toBe("applied");
++  return result.state;
++}
++
++function enqueue(state: EvidenceOutbox, eventName: string): EvidenceOutbox {
++  const event = preparedEvent(state, eventName);
++  return stored(state, enqueueCommand(state, event));
++}
++
++function ackFor(
++  state: EvidenceOutbox,
++  sequence: number,
++): EvidenceAcknowledgement {
++  const event = state.pending.find(
++    (candidate) => candidate.sequence === sequence,
++  );
++  if (event === undefined) throw new Error(`missing sequence ${sequence}`);
++  return {
++    eventId: event.eventId,
++    identity: event.identity,
++    sequence: event.sequence,
++    payloadDigest: event.payloadDigest,
++  };
++}
++
++describe("evidence outbox", () => {
++  it("binds every event to the full product identity and assigns per-device-session sequences", () => {
++    let state = emptyOutbox();
++    state = enqueue(state, "event-1");
++    state = enqueue(state, "event-2");
++    expect(state).toMatchObject({
++      identity,
++      revision: 2,
++      nextSequence: 3,
++      pending: [
++        { identity, sequence: 1 },
++        { identity, sequence: 2 },
++      ],
++    });
++  });
++
++  it("computes a known SHA-256 digest from canonical immutable payload", () => {
++    const first = prepareEvidenceEvent(emptyOutbox(), {
++      kind: "lock-transition",
++      eventId: "event-1",
++    });
++    const reordered = prepareEvidenceEvent(emptyOutbox(), {
++      eventId: "event-1",
++      kind: "lock-transition",
++    });
++    expect(first).toMatchObject({
++      status: "prepared",
++      event: {
++        payloadDigest:
++          "sha256:277186e6414cbbbb7aaca974927e322435f3a53c464974922559e5ff6bdacd61",
++      },
++    });
++    expect(reordered).toEqual(first);
++  });
++
++  it("makes an exact enqueue retry idempotent without consuming a sequence", () => {
++    const empty = emptyOutbox();
++    const event = preparedEvent(empty, "event-1");
++    const state = stored(empty, enqueueCommand(empty, event));
++    const retry = planEvidenceOutboxCommand(state, {
++      ...enqueueCommand(state, event),
++      expectedRevision: 0,
++    });
++    expect(retry).toMatchObject({
++      status: "unchanged",
++      state,
++      outcome: { kind: "already-enqueued", sequence: 1 },
++    });
++  });
++
++  it("rejects the same event identity when its payload changes after preparation", () => {
++    const empty = emptyOutbox();
++    const event = preparedEvent(empty, "event-1");
++    const state = stored(empty, enqueueCommand(empty, event));
++    const collision = planEvidenceOutboxCommand(
++      state,
++      enqueueCommand(state, {
++        ...event,
++        payload: { kind: "release", eventId: "changed" },
++      }),
++    );
++    expect(collision).toMatchObject({
++      status: "rejected",
++      rejection: { code: "event-identity-collision" },
++    });
++    expect(collision.state).toBe(state);
++  });
++
++  it("rejects a different canonical event claiming an issued sequence", () => {
++    const empty = emptyOutbox();
++    const event = preparedEvent(empty, "event-1");
++    const alternative = preparedEvent(empty, "different-event");
++    const state = stored(empty, enqueueCommand(empty, event));
++    expect(
++      planEvidenceOutboxCommand(state, enqueueCommand(state, alternative)),
++    ).toMatchObject({
++      status: "rejected",
++      rejection: { code: "event-identity-collision" },
++    });
++  });
++
++  it("acknowledges only exact event identities and leaves a partial queue intact", () => {
++    let state = emptyOutbox();
++    state = enqueue(state, "event-1");
++    state = enqueue(state, "event-2");
++    const event1Ack = ackFor(state, 1);
++    state = stored(state, ackCommand(state, [event1Ack]));
++    expect(state.pending.map((event) => event.sequence)).toEqual([2]);
++    expect(state.acknowledged).toEqual([event1Ack]);
++  });
++
++  it("makes an exact acknowledgement retry idempotent", () => {
++    let state = enqueue(emptyOutbox(), "event-1");
++    const acknowledgement = ackFor(state, 1);
++    state = stored(state, ackCommand(state, [acknowledgement]));
++    const retry = planEvidenceOutboxCommand(state, {
++      ...ackCommand(state, [acknowledgement]),
++      expectedRevision: 1,
++    });
++    expect(retry).toMatchObject({
++      status: "unchanged",
++      state,
++      outcome: { kind: "already-acknowledged", count: 1 },
++    });
++  });
++
++  it("supports a mixed partial acknowledgement with exact duplicate receipts", () => {
++    let state = enqueue(emptyOutbox(), "event-1");
++    const firstAck = ackFor(state, 1);
++    state = stored(state, ackCommand(state, [firstAck]));
++    state = enqueue(state, "event-2");
++    const secondAck = ackFor(state, 2);
++
++    const plan = planEvidenceOutboxCommand(
++      state,
++      ackCommand(state, [firstAck, firstAck, secondAck]),
++    );
++    expect(plan).toMatchObject({
++      status: "write-required",
++      outcome: {
++        kind: "acknowledged",
++        count: 1,
++        alreadyAcknowledgedCount: 1,
++      },
++      state: { pending: [] },
++    });
++  });
++
++  it("rejects mismatched and unknown acknowledgements atomically", () => {
++    let state = emptyOutbox();
++    const firstEvent = preparedEvent(state, "event-1");
++    const alternativeFirstEvent = preparedEvent(state, "alternative-event");
++    state = stored(state, enqueueCommand(state, firstEvent));
++    const unknownEvent = preparedEvent(state, "not-enqueued");
++    const mismatch = planEvidenceOutboxCommand(
++      state,
++      ackCommand(state, [alternativeFirstEvent]),
++    );
++    const unknown = planEvidenceOutboxCommand(
++      state,
++      ackCommand(state, [unknownEvent]),
++    );
++    expect(mismatch).toMatchObject({
++      status: "rejected",
++      rejection: { code: "acknowledgement-collision" },
++    });
++    expect(unknown).toMatchObject({
++      status: "rejected",
++      rejection: { code: "unknown-event" },
++    });
++    expect(mismatch.state).toBe(state);
++    expect(unknown.state).toBe(state);
++    expect(state.pending).toHaveLength(1);
++  });
++
++  it.each([
++    "schoolId",
++    "testId",
++    "studentSessionId",
++    "deviceSessionId",
++    "releaseId",
++    "buildId",
++  ] as const)("rejects evidence with a different %s", (field) => {
++    const state = emptyOutbox();
++    const otherIdentity = { ...identity, [field]: `other-${field}` };
++    const otherOutboxResult = createEvidenceOutbox({
++      identity: otherIdentity,
++      capacity: 3,
++      tombstoneCapacity: 8,
++    });
++    if (otherOutboxResult.status !== "created") {
++      throw new Error(otherOutboxResult.reason);
++    }
++    const otherEvent = preparedEvent(otherOutboxResult.outbox, "event-1");
++    expect(
++      planEvidenceOutboxCommand(state, enqueueCommand(state, otherEvent)),
++    ).toMatchObject({
++      status: "rejected",
++      rejection: { code: "identity-mismatch" },
++    });
++  });
++
++  it("reports queue exhaustion without evicting pending evidence", () => {
++    let state = emptyOutbox(1);
++    state = enqueue(state, "event-1");
++    const event2 = preparedEvent(state, "event-2");
++    const result = planEvidenceOutboxCommand(
++      state,
++      enqueueCommand(state, event2),
++    );
++    expect(result).toMatchObject({
++      status: "rejected",
++      rejection: { code: "queue-exhausted" },
++    });
++    expect(result.state).toBe(state);
++    expect(state.pending.map((event) => event.sequence)).toEqual([1]);
++  });
++
++  it("bounds exact tombstone retention and never silently compacts identities", () => {
++    let state = enqueue(emptyOutbox(2, 1), "event-1");
++    const event = state.pending[0];
++    if (event === undefined) throw new Error("missing event");
++    const acknowledgement = ackFor(state, 1);
++    state = stored(state, ackCommand(state, [acknowledgement]));
++    const nextEvent = preparedEvent(state, "event-2");
++    const exhausted = planEvidenceOutboxCommand(
++      state,
++      enqueueCommand(state, nextEvent),
++    );
++    const exactRetry = planEvidenceOutboxCommand(
++      state,
++      enqueueCommand(state, {
++        ...event,
++        payload: JSON.parse(event.canonicalPayload),
++      }),
++    );
++    expect(exhausted).toMatchObject({
++      status: "rejected",
++      rejection: { code: "tombstone-capacity-exhausted" },
++    });
++    expect(state).toMatchObject({
++      acknowledgementRetention: "exact-until-session-archive",
++      acknowledged: [acknowledgement],
++    });
++    expect(exactRetry).toMatchObject({
++      status: "unchanged",
++      outcome: { kind: "already-acknowledged", count: 1 },
++    });
++  });
++
++  it("makes storage write failure visible and keeps the last durable state", () => {
++    const state = emptyOutbox();
++    const event = preparedEvent(state, "event-1");
++    const plan = planEvidenceOutboxCommand(state, enqueueCommand(state, event));
++    expect(plan.status).toBe("write-required");
++    if (plan.status !== "write-required")
++      throw new Error("expected write plan");
++    const failed = settleEvidenceOutboxWrite(plan, {
++      status: "failed",
++      failureCode: "disk-full",
++    });
++    expect(failed).toMatchObject({
++      status: "write-failed",
++      state,
++      failure: { code: "storage-write-failed", cause: "disk-full" },
++    });
++    expect(failed.state).toBe(state);
++    expect(state.pending).toEqual([]);
++  });
++
++  it("keeps the last durable state separate until storage succeeds", () => {
++    const state = emptyOutbox();
++    const event = preparedEvent(state, "event-1");
++    const plan = planEvidenceOutboxCommand(state, enqueueCommand(state, event));
++    expect(plan.status).toBe("write-required");
++    if (plan.status !== "write-required")
++      throw new Error("expected write plan");
++    expect(plan.previousState).toBe(state);
++    expect(plan.state.pending).toHaveLength(1);
++    expect(state.pending).toHaveLength(0);
++  });
++
++  it("rejects invalid payloads before assigning identity", () => {
++    const state = emptyOutbox();
++    const cyclic: Record<string, unknown> = {};
++    cyclic.self = cyclic;
++    const invalidPayloads: readonly unknown[] = [
++      { value: Number.NaN },
++      { value: undefined },
++      new Date(0),
++      cyclic,
++    ];
++    for (const payload of invalidPayloads) {
++      expect(
++        prepareEvidenceEvent(state, payload as EvidencePayload),
++      ).toMatchObject({ status: "rejected", reason: "invalid-payload" });
++    }
++  });
++
++  it("rejects sparse and accessor arrays without invoking getters", () => {
++    const state = emptyOutbox();
++    const sparse = Array(1) as EvidencePayload;
++    let getterInvoked = false;
++    const accessor: unknown[] = [];
++    Object.defineProperty(accessor, "0", {
++      enumerable: true,
++      get() {
++        getterInvoked = true;
++        throw new Error("canonicalization must not invoke array accessors");
++      },
++    });
++
++    expect(prepareEvidenceEvent(state, [])).toMatchObject({
++      status: "prepared",
++    });
++    expect(prepareEvidenceEvent(state, sparse)).toMatchObject({
++      status: "rejected",
++      reason: "invalid-payload",
++    });
++    expect(
++      prepareEvidenceEvent(state, accessor as EvidencePayload),
++    ).toMatchObject({
++      status: "rejected",
++      reason: "invalid-payload",
++    });
++    expect(getterInvoked).toBe(false);
++  });
++
++  it("rejects unknown command discriminants instead of treating them as acknowledgements", () => {
++    const state = enqueue(emptyOutbox(), "event-1");
++    const unknown = planEvidenceOutboxCommand(state, {
++      type: "delete",
++      operationId: "malicious-delete",
++      expectedRevision: state.revision,
++      acknowledgements: [ackFor(state, 1)],
++    } as unknown as EvidenceOutboxCommand);
++    const malformedEnqueue = planEvidenceOutboxCommand(state, {
++      type: "enqueue",
++      operationId: "missing-event",
++      expectedRevision: state.revision,
++    } as unknown as EvidenceOutboxCommand);
++    const malformedAcknowledgement = planEvidenceOutboxCommand(state, {
++      type: "acknowledge",
++      operationId: "missing-acknowledgements",
++      expectedRevision: state.revision,
++    } as unknown as EvidenceOutboxCommand);
++    for (const result of [
++      unknown,
++      malformedEnqueue,
++      malformedAcknowledgement,
++    ]) {
++      expect(result).toMatchObject({
++        status: "rejected",
++        rejection: { code: "invalid-command" },
++      });
++      expect(result.state).toBe(state);
++    }
++    expect(state.pending).toHaveLength(1);
++  });
++
++  it("rejects stale mutations and fail-closes corrupt persisted state", () => {
++    const state = emptyOutbox();
++    const event = preparedEvent(state, "event-1");
++    const stale = planEvidenceOutboxCommand(state, {
++      ...enqueueCommand(state, event),
++      expectedRevision: 2,
++    });
++    const corrupt = { ...state, nextSequence: 2 } as EvidenceOutbox;
++    const corruptResult = planEvidenceOutboxCommand(
++      corrupt,
++      enqueueCommand(corrupt, event),
++    );
++    expect(stale).toMatchObject({
++      status: "rejected",
++      rejection: { code: "revision-mismatch" },
++    });
++    expect(corruptResult).toMatchObject({
++      status: "rejected",
++      rejection: { code: "invalid-outbox" },
++    });
++  });
++
++  it("rejects invalid identity and capacities instead of creating a lossy queue", () => {
++    expect(
++      createEvidenceOutbox({
++        identity: { ...identity, releaseId: "" },
++        capacity: 2,
++        tombstoneCapacity: 2,
++      }),
++    ).toMatchObject({ status: "rejected", reason: "invalid-identity" });
++    expect(
++      createEvidenceOutbox({ identity, capacity: 0, tombstoneCapacity: 2 }),
++    ).toMatchObject({ status: "rejected", reason: "invalid-capacity" });
++    expect(
++      createEvidenceOutbox({ identity, capacity: 2, tombstoneCapacity: 0 }),
++    ).toMatchObject({
++      status: "rejected",
++      reason: "invalid-tombstone-capacity",
++    });
++    expect(
++      createEvidenceOutbox({
++        identity,
++        capacity: evidenceOutboxMaximumPendingEvents + 1,
++        tombstoneCapacity: 2,
++      }),
++    ).toMatchObject({ status: "rejected", reason: "invalid-capacity" });
++    expect(
++      createEvidenceOutbox({
++        identity,
++        capacity: 2,
++        tombstoneCapacity: evidenceOutboxMaximumAcknowledgedTombstones + 1,
++      }),
++    ).toMatchObject({
++      status: "rejected",
++      reason: "invalid-tombstone-capacity",
++    });
++  });
++
++  it("exposes the pending-write plan type only for explicit settlement", () => {
++    const state = emptyOutbox();
++    const event = preparedEvent(state, "event-1");
++    const plan = planEvidenceOutboxCommand(state, enqueueCommand(state, event));
++    expect(plan.status).toBe("write-required");
++    const typedPlan: EvidenceOutboxWritePlan | null =
++      plan.status === "write-required" ? plan : null;
++    expect(typedPlan?.operationId).toBe(`enqueue-${event.eventId}`);
++  });
++});
+diff --git a/packages/domain/tests/lock-lifecycle.test.ts b/packages/domain/tests/lock-lifecycle.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..02ba8de653aee6de5b1ce40d9c1f4e3375dd8646
+--- /dev/null
++++ b/packages/domain/tests/lock-lifecycle.test.ts
+@@ -0,0 +1,589 @@
++import { describe, expect, it } from "vitest";
++
++import {
++  createLockLifecycle,
++  initializeLockLifecycle,
++  lockEngagementProtections,
++  reduceLockLifecycle,
++  settleLockLifecycleWrite,
++  type EngagementProtection,
++  type LockIdentity,
++  type LockLifecycleCommand,
++  type LockLifecycleState,
++} from "../src/index.js";
++
++const identity: LockIdentity = {
++  schoolId: "school-1",
++  testId: "test-1",
++  studentSessionId: "student-session-1",
++  deviceSessionId: "device-session-1",
++};
++
++type LockLifecycleCommandInput = LockLifecycleCommand extends infer Command
++  ? Command extends LockLifecycleCommand
++    ? Omit<Command, "expectedRevision" | "identity" | "transitionId">
++    : never
++  : never;
++
++function command(
++  state: LockLifecycleState,
++  value: LockLifecycleCommandInput,
++  transitionId = `transition-${state.revision + 1}`,
++): LockLifecycleCommand {
++  return {
++    ...value,
++    expectedRevision: state.revision,
++    identity,
++    transitionId,
++  } as LockLifecycleCommand;
++}
++
++function accept(
++  state: LockLifecycleState,
++  value: LockLifecycleCommandInput,
++  transitionId?: string,
++): LockLifecycleState {
++  const result = reduceLockLifecycle(
++    state,
++    command(state, value, transitionId),
++  );
++  if (result.status === "write-required") {
++    return settleLockLifecycleWrite(result, { status: "stored" }).state;
++  }
++  if (result.status === "rejected") {
++    throw new Error(`transition rejected: ${result.rejection.code}`);
++  }
++  return result.state;
++}
++
++function engagingState(): LockLifecycleState {
++  return accept(createLockLifecycle(identity), { type: "begin-engagement" });
++}
++
++function confirmProtections(
++  state: LockLifecycleState,
++  protections: readonly EngagementProtection[] = lockEngagementProtections,
++): LockLifecycleState {
++  return protections.reduce(
++    (current, protection, index) =>
++      accept(
++        current,
++        {
++          type: "confirm-protection",
++          proof: {
++            protection,
++            proofId: `proof-${protection}`,
++          },
++        },
++        `proof-transition-${current.revision}-${index}`,
++      ),
++    state,
++  );
++}
++
++describe("lock lifecycle", () => {
++  it("binds a new lifecycle to one identity in preflight", () => {
++    expect(createLockLifecycle(identity)).toMatchObject({
++      schemaVersion: 1,
++      identity,
++      phase: "preflight",
++      revision: 0,
++      appliedTransitionIds: [],
++    });
++  });
++
++  it("reports engagement only after every required protection has proof", () => {
++    let state = engagingState();
++
++    for (const protection of lockEngagementProtections.slice(0, -1)) {
++      const result = reduceLockLifecycle(
++        state,
++        command(state, {
++          type: "confirm-protection",
++          proof: { protection, proofId: `proof-${protection}` },
++        }),
++      );
++      expect(result.status).toBe("accepted");
++      if (result.status !== "accepted") throw new Error("expected acceptance");
++      expect(result.engagement).toBe("not-confirmed");
++      expect(result.state.phase).toBe("engaging");
++      state = result.state;
++    }
++
++    const finalProtection = lockEngagementProtections.at(-1);
++    if (finalProtection === undefined) throw new Error("missing protection");
++    const result = reduceLockLifecycle(
++      state,
++      command(state, {
++        type: "confirm-protection",
++        proof: {
++          protection: finalProtection,
++          proofId: `proof-${finalProtection}`,
++        },
++      }),
++    );
++    expect(result).toMatchObject({
++      status: "write-required",
++      engagement: "pending-durability",
++      previousState: { phase: "engaging" },
++      state: { phase: "locked" },
++    });
++    if (result.status !== "write-required") {
++      throw new Error("expected persistence plan");
++    }
++    expect(
++      settleLockLifecycleWrite(result, { status: "stored" }),
++    ).toMatchObject({
++      status: "accepted",
++      engagement: "confirmed",
++      state: { phase: "locked" },
++    });
++  });
++
++  it("makes scan and shortcut failures explicit recovery states", () => {
++    for (const protection of [
++      "application-scan",
++      "shortcut-registration",
++    ] as const) {
++      const engaging = engagingState();
++      const result = reduceLockLifecycle(
++        engaging,
++        command(engaging, {
++          type: "report-engagement-failure",
++          protection,
++          failureCode: `${protection}-failed`,
++        }),
++      );
++      expect(result.status).toBe("accepted");
++      if (result.status !== "accepted") throw new Error("expected acceptance");
++      expect(result.engagement).toBe("recovery-required");
++      expect(result.state).toMatchObject({
++        phase: "recovery",
++        reason: "engagement-failure",
++        failure: { protection, code: `${protection}-failed` },
++      });
++    }
++  });
++
++  it("rejects cross-identity, stale-revision, duplicate-proof, and replayed commands without mutation", () => {
++    const engaging = engagingState();
++    const first = reduceLockLifecycle(
++      engaging,
++      command(
++        engaging,
++        {
++          type: "confirm-protection",
++          proof: { protection: "persistence", proofId: "proof-persistence" },
++        },
++        "persist-proof",
++      ),
++    );
++    expect(first.status).toBe("accepted");
++    if (first.status !== "accepted") throw new Error("expected acceptance");
++
++    const rejected = [
++      reduceLockLifecycle(first.state, {
++        type: "request-recovery",
++        reason: "process-crash",
++        identity: { ...identity, studentSessionId: "other-session" },
++        expectedRevision: first.state.revision,
++        transitionId: "wrong-identity",
++      }),
++      reduceLockLifecycle(first.state, {
++        type: "request-recovery",
++        reason: "process-crash",
++        identity,
++        expectedRevision: first.state.revision - 1,
++        transitionId: "stale-revision",
++      }),
++      reduceLockLifecycle(
++        first.state,
++        command(first.state, {
++          type: "confirm-protection",
++          proof: { protection: "persistence", proofId: "different-proof" },
++        }),
++      ),
++      reduceLockLifecycle(first.state, {
++        type: "request-recovery",
++        reason: "process-crash",
++        identity,
++        expectedRevision: first.state.revision,
++        transitionId: "persist-proof",
++      }),
++    ];
++
++    expect(rejected.map((result) => result.status)).toEqual([
++      "rejected",
++      "rejected",
++      "rejected",
++      "rejected",
++    ]);
++    expect(
++      rejected.map((result) =>
++        result.status === "rejected" ? result.rejection.code : "accepted",
++      ),
++    ).toEqual([
++      "identity-mismatch",
++      "revision-mismatch",
++      "duplicate-protection",
++      "transition-replay",
++    ]);
++    for (const result of rejected) expect(result.state).toBe(first.state);
++  });
++
++  it("rejects proof-id collisions and transitions that are invalid for the phase", () => {
++    let engaging = engagingState();
++    engaging = accept(engaging, {
++      type: "confirm-protection",
++      proof: { protection: "persistence", proofId: "shared-proof" },
++    });
++    const collision = reduceLockLifecycle(
++      engaging,
++      command(engaging, {
++        type: "confirm-protection",
++        proof: { protection: "window", proofId: "shared-proof" },
++      }),
++    );
++    const invalid = reduceLockLifecycle(
++      createLockLifecycle(identity),
++      command(createLockLifecycle(identity), {
++        type: "confirm-protection",
++        proof: { protection: "window", proofId: "window-proof" },
++      }),
++    );
++    expect(collision).toMatchObject({
++      status: "rejected",
++      rejection: { code: "proof-id-collision" },
++    });
++    expect(invalid).toMatchObject({
++      status: "rejected",
++      rejection: { code: "invalid-transition" },
++    });
++  });
++
++  it("requires identity-bound trusted authority and local release proof", () => {
++    const locked = confirmProtections(engagingState());
++    const wrongAuthority = reduceLockLifecycle(
++      locked,
++      command(locked, {
++        type: "authorize-release",
++        authorization: {
++          kind: "teacher-capability",
++          authorizationId: "release-1",
++          identity: { ...identity, testId: "other-test" },
++          provenance: {
++            kind: "validated-server-capability",
++            issuer: "desmoslock-backend",
++            capabilityId: "release-1",
++          },
++        },
++      }),
++    );
++    expect(wrongAuthority).toMatchObject({
++      status: "rejected",
++      rejection: { code: "release-authority-mismatch" },
++    });
++
++    const releasing = accept(locked, {
++      type: "authorize-release",
++      authorization: {
++        kind: "teacher-capability",
++        authorizationId: "release-1",
++        identity,
++        provenance: {
++          kind: "validated-server-capability",
++          issuer: "desmoslock-backend",
++          capabilityId: "release-1",
++        },
++      },
++    });
++    expect(releasing.phase).toBe("releasing");
++    const released = reduceLockLifecycle(
++      releasing,
++      command(releasing, {
++        type: "confirm-release",
++        proof: {
++          networkRestoredProofId: "network-restored",
++          persistenceClearedProofId: "persistence-cleared",
++          shortcutsRestoredProofId: "shortcuts-restored",
++          windowReleasedProofId: "window-released",
++        },
++      }),
++    );
++    expect(released).toMatchObject({
++      status: "accepted",
++      engagement: "released",
++      state: { phase: "released" },
++    });
++  });
++
++  it("accepts only the modeled documented local emergency authority", () => {
++    const locked = confirmProtections(engagingState());
++    const result = reduceLockLifecycle(
++      locked,
++      command(locked, {
++        type: "authorize-release",
++        authorization: {
++          kind: "documented-emergency-action",
++          actionId: "local-action-1",
++          identity,
++          provenance: {
++            kind: "trusted-local-procedure",
++            procedureId: "emergency-release-v1",
++            invocationId: "local-action-1",
++          },
++        },
++      }),
++    );
++    expect(result).toMatchObject({
++      status: "accepted",
++      state: {
++        phase: "releasing",
++        authorization: { kind: "documented-emergency-action" },
++      },
++    });
++  });
++
++  it("rejects unknown release kinds and provenance that is not bound to the authorization", () => {
++    const locked = confirmProtections(engagingState());
++    const unknownKind = reduceLockLifecycle(
++      locked,
++      command(locked, {
++        type: "authorize-release",
++        authorization: {
++          kind: "remote-document",
++          actionId: "forged-action",
++          identity,
++          provenance: {
++            kind: "trusted-local-procedure",
++            procedureId: "forged",
++            invocationId: "forged-action",
++          },
++        },
++      } as unknown as LockLifecycleCommandInput),
++    );
++    const mismatchedProvenance = reduceLockLifecycle(
++      locked,
++      command(locked, {
++        type: "authorize-release",
++        authorization: {
++          kind: "teacher-capability",
++          authorizationId: "release-1",
++          identity,
++          provenance: {
++            kind: "validated-server-capability",
++            issuer: "desmoslock-backend",
++            capabilityId: "different-release",
++          },
++        },
++      }),
++    );
++    const missingProvenance = reduceLockLifecycle(
++      locked,
++      command(locked, {
++        type: "authorize-release",
++        authorization: { kind: "documented-emergency-action" },
++      } as unknown as LockLifecycleCommandInput),
++    );
++    expect([unknownKind, mismatchedProvenance, missingProvenance]).toEqual([
++      expect.objectContaining({
++        status: "rejected",
++        rejection: { code: "invalid-command" },
++      }),
++      expect.objectContaining({
++        status: "rejected",
++        rejection: { code: "release-authority-mismatch" },
++      }),
++      expect.objectContaining({
++        status: "rejected",
++        rejection: { code: "invalid-command" },
++      }),
++    ]);
++  });
++
++  it("rejects every malformed nested command variant without throwing", () => {
++    const state = engagingState();
++    const base = {
++      identity,
++      expectedRevision: state.revision,
++      transitionId: "malformed-nested-command",
++    };
++    const malformedCommands: readonly unknown[] = [
++      null,
++      { ...base, type: "confirm-protection", proof: null },
++      { ...base, type: "confirm-protection", proof: {} },
++      {
++        ...base,
++        type: "report-engagement-failure",
++        protection: null,
++        failureCode: "scan-failed",
++      },
++      {
++        ...base,
++        type: "report-engagement-failure",
++        protection: "application-scan",
++        failureCode: null,
++      },
++      { ...base, type: "request-recovery", reason: null },
++      { ...base, type: "request-recovery", reason: "corrupt-state" },
++      { ...base, type: "authorize-release", authorization: null },
++      { ...base, type: "confirm-release", proof: null },
++      { ...base, type: "confirm-release", proof: {} },
++      { ...base, type: "declare-terminal-failure", failureCode: null },
++    ];
++
++    const results = malformedCommands.map((malformed) =>
++      reduceLockLifecycle(state, malformed as LockLifecycleCommand),
++    );
++    for (const result of results) {
++      expect(result).toMatchObject({
++        status: "rejected",
++        rejection: { code: "invalid-command" },
++      });
++      expect(result.state).toBe(state);
++    }
++  });
++
++  it("does not report final engagement when the atomic state write fails", () => {
++    let state = engagingState();
++    state = confirmProtections(state, lockEngagementProtections.slice(0, -1));
++    const finalProtection = lockEngagementProtections.at(-1);
++    if (finalProtection === undefined) throw new Error("missing protection");
++    const plan = reduceLockLifecycle(
++      state,
++      command(state, {
++        type: "confirm-protection",
++        proof: {
++          protection: finalProtection,
++          proofId: `proof-${finalProtection}`,
++        },
++      }),
++    );
++    expect(plan.status).toBe("write-required");
++    if (plan.status !== "write-required") {
++      throw new Error("expected persistence plan");
++    }
++    expect(
++      settleLockLifecycleWrite(plan, {
++        status: "failed",
++        failureCode: "disk-full",
++      }),
++    ).toMatchObject({
++      status: "write-failed",
++      engagement: "recovery-required",
++      state: {
++        phase: "recovery",
++        reason: "persistence-write-failure",
++        failure: { kind: "persistence-write", code: "disk-full" },
++      },
++      failure: { code: "storage-write-failed", cause: "disk-full" },
++    });
++  });
++
++  it("starts in recovery after an interrupted, corrupt, partial, incompatible, or identity-mismatched record", () => {
++    const locked = confirmProtections(engagingState());
++    const startupStates = [
++      initializeLockLifecycle(identity, { kind: "verified", state: locked }),
++      initializeLockLifecycle(identity, { kind: "corrupt" }),
++      initializeLockLifecycle(identity, { kind: "partial" }),
++      initializeLockLifecycle(identity, { kind: "incompatible" }),
++      initializeLockLifecycle(identity, {
++        kind: "verified",
++        state: { ...locked, identity: { ...identity, testId: "other-test" } },
++      }),
++    ];
++    expect(startupStates.map((state) => state.phase)).toEqual([
++      "recovery",
++      "recovery",
++      "recovery",
++      "recovery",
++      "recovery",
++    ]);
++    expect(
++      startupStates.map((state) =>
++        state.phase === "recovery" ? state.reason : "not-recovery",
++      ),
++    ).toEqual([
++      "startup-interrupted",
++      "corrupt-state",
++      "partial-state",
++      "incompatible-state",
++      "identity-mismatch",
++    ]);
++  });
++
++  it("trusts an explicitly absent record and preserves safe terminal records", () => {
++    const fresh = initializeLockLifecycle(identity, { kind: "absent" });
++    const terminal = accept(fresh, {
++      type: "declare-terminal-failure",
++      failureCode: "preflight-unavailable",
++    });
++    expect(fresh.phase).toBe("preflight");
++    expect(
++      initializeLockLifecycle(identity, { kind: "verified", state: terminal }),
++    ).toBe(terminal);
++  });
++
++  it("requires every protection to be reconfirmed before recovery can return to locked", () => {
++    const locked = confirmProtections(engagingState());
++    let recovery = accept(locked, {
++      type: "request-recovery",
++      reason: "renderer-reload",
++    });
++    expect(recovery).toMatchObject({
++      phase: "recovery",
++      confirmedProtections: [],
++    });
++    recovery = confirmProtections(
++      recovery,
++      lockEngagementProtections.slice(0, -1),
++    );
++    expect(recovery.phase).toBe("recovery");
++    recovery = confirmProtections(
++      recovery,
++      lockEngagementProtections.slice(-1),
++    );
++    expect(recovery.phase).toBe("locked");
++  });
++
++  it.each([
++    "application-crash",
++    "backend-outage",
++    "lease-untrusted",
++    "operating-system-reboot",
++    "process-crash",
++    "renderer-reload",
++  ] as const)("keeps a locked session recoverable after %s", (reason) => {
++    const locked = confirmProtections(engagingState());
++    const result = reduceLockLifecycle(
++      locked,
++      command(locked, { type: "request-recovery", reason }),
++    );
++    expect(result).toMatchObject({
++      status: "accepted",
++      engagement: "recovery-required",
++      state: {
++        phase: "recovery",
++        reason,
++        lastKnownPhase: "locked",
++        confirmedProtections: [],
++      },
++    });
++  });
++
++  it("makes unrecoverable recovery terminal without claiming the device unlocked", () => {
++    const locked = confirmProtections(engagingState());
++    const recovery = accept(locked, {
++      type: "request-recovery",
++      reason: "operating-system-reboot",
++    });
++    const terminal = accept(recovery, {
++      type: "declare-terminal-failure",
++      failureCode: "manual-recovery-required",
++    });
++    expect(terminal).toMatchObject({
++      phase: "terminal-failure",
++      lockDisposition: "unknown-must-recover",
++    });
++  });
++});
+diff --git a/packages/domain/tests/offline-lease.test.ts b/packages/domain/tests/offline-lease.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d8f7a1cbaf95f1e0153c08fa0df8c6f6ebea8b8e
+--- /dev/null
++++ b/packages/domain/tests/offline-lease.test.ts
+@@ -0,0 +1,517 @@
++import { describe, expect, it } from "vitest";
++
++import {
++  createOfflineLease,
++  createOfflineLeaseAuthorizationChallenge,
++  createOfflineLeaseAuthorizationLedger,
++  evaluateOfflineLease,
++  offlineLeaseAuthorizationFreshnessMaximumMilliseconds,
++  planOfflineLeaseAuthorization,
++  settleOfflineLeaseAuthorization,
++  type LockIdentity,
++  type OfflineLease,
++  type OfflineLeaseAuthorizationChallenge,
++  type OfflineLeaseAuthorizationLedger,
++  type OfflineLeaseAuthorizationRequest,
++  type OfflineLeaseAuthorizationWritePlan,
++  type OfflineLeaseObservation,
++  type TrustedOfflineLeaseAuthorization,
++} from "../src/index.js";
++
++const identity: LockIdentity = {
++  schoolId: "school-1",
++  testId: "test-1",
++  studentSessionId: "student-session-1",
++  deviceSessionId: "device-session-1",
++};
++
++function observation(
++  monotonicMilliseconds: number,
++  overrides: Partial<OfflineLeaseObservation> = {},
++): OfflineLeaseObservation {
++  return {
++    identity,
++    bootId: "boot-a",
++    monotonicMilliseconds,
++    trust: "trusted",
++    ...overrides,
++  };
++}
++
++function emptyLedger(): OfflineLeaseAuthorizationLedger {
++  const result = createOfflineLeaseAuthorizationLedger(identity);
++  expect(result.status).toBe("created");
++  if (result.status !== "created") throw new Error(result.reason);
++  return result.ledger;
++}
++
++function challenge(
++  overrides: Partial<OfflineLeaseAuthorizationChallenge> = {},
++): OfflineLeaseAuthorizationChallenge {
++  return {
++    schemaVersion: 1,
++    challengeId: "challenge-1",
++    identity,
++    bootId: "boot-a",
++    monotonicRequestedMilliseconds: 20_000,
++    ...overrides,
++  };
++}
++
++type AuthorizationOverrides = {
++  readonly authorizationId?: string;
++  readonly challenge?: OfflineLeaseAuthorizationChallenge;
++  readonly serverAuthorizedAtMilliseconds?: number;
++  readonly serverObservedAtMilliseconds?: number;
++  readonly serverExpiresAtMilliseconds?: number;
++  readonly verification?: TrustedOfflineLeaseAuthorization["verification"];
++};
++
++function authorization(
++  overrides: AuthorizationOverrides = {},
++): TrustedOfflineLeaseAuthorization {
++  return {
++    verification:
++      overrides.verification ??
++      ({
++        status: "trusted",
++        kind: "verified-server-signature",
++        issuer: "desmoslock-backend",
++        keyId: "lease-signing-key-1",
++        signatureId: "signature-1",
++      } as const),
++    claims: {
++      schemaVersion: 1,
++      authorizationId: overrides.authorizationId ?? "authorization-1",
++      challenge: overrides.challenge ?? challenge(),
++      serverAuthorizedAtMilliseconds:
++        overrides.serverAuthorizedAtMilliseconds ?? 1_000_000,
++      serverObservedAtMilliseconds:
++        overrides.serverObservedAtMilliseconds ?? 1_010_000,
++      serverExpiresAtMilliseconds:
++        overrides.serverExpiresAtMilliseconds ?? 1_600_000,
++    },
++  };
++}
++
++function request(
++  overrides: Partial<OfflineLeaseAuthorizationRequest> = {},
++): OfflineLeaseAuthorizationRequest {
++  return {
++    ledger: emptyLedger(),
++    authorization: authorization(),
++    observation: observation(25_000),
++    ...overrides,
++  };
++}
++
++function plan(
++  input: OfflineLeaseAuthorizationRequest = request(),
++): OfflineLeaseAuthorizationWritePlan {
++  const result = planOfflineLeaseAuthorization(input);
++  expect(result.status).toBe("write-required");
++  if (result.status !== "write-required") throw new Error(result.reason);
++  return result;
++}
++
++function commit(writePlan: OfflineLeaseAuthorizationWritePlan): {
++  readonly lease: OfflineLease;
++  readonly ledger: OfflineLeaseAuthorizationLedger;
++} {
++  const result = settleOfflineLeaseAuthorization(writePlan, {
++    status: "committed",
++    expectedRevision: writePlan.expectedLedgerRevision,
++    ledger: writePlan.ledger,
++  });
++  expect(result.status).toBe("accepted");
++  if (result.status !== "accepted") throw new Error(result.failure.code);
++  return result;
++}
++
++function lease(): OfflineLease {
++  return commit(plan()).lease;
++}
++
++describe("offline lease", () => {
++  it("creates a request challenge bound to identity, boot, and monotonic request evidence", () => {
++    const result = createOfflineLeaseAuthorizationChallenge({
++      challengeId: "challenge-1",
++      identity,
++      observation: observation(20_000),
++    });
++    expect(result).toEqual({
++      status: "created",
++      challenge: {
++        schemaVersion: 1,
++        challengeId: "challenge-1",
++        identity,
++        bootId: "boot-a",
++        monotonicRequestedMilliseconds: 20_000,
++      },
++    });
++  });
++
++  it("returns a pending ledger-CAS plan and never an accepted lease directly", () => {
++    const result = createOfflineLease(request());
++    expect(result).toMatchObject({
++      status: "write-required",
++      expectedLedgerRevision: 0,
++      previousLedger: { revision: 0, consumedAuthorizationIds: [] },
++      ledger: { revision: 1, consumedAuthorizationIds: ["authorization-1"] },
++      leaseCandidate: {
++        authorizationId: "authorization-1",
++        challengeId: "challenge-1",
++        authorizationRoundTripElapsedMilliseconds: 5_000,
++        authorizedRemainingDurationMilliseconds: 585_000,
++      },
++    });
++    expect(result).not.toHaveProperty("lease");
++  });
++
++  it("accepts only after the exact consumed-ID CAS commit settles", () => {
++    const writePlan = plan();
++    expect(commit(writePlan)).toMatchObject({
++      lease: {
++        schemaVersion: 1,
++        identity,
++        authorizationId: "authorization-1",
++        authorizedRemainingDurationMilliseconds: 585_000,
++        bootId: "boot-a",
++        monotonicRequestedMilliseconds: 20_000,
++        monotonicStartedMilliseconds: 25_000,
++        monotonicLastObservedMilliseconds: 25_000,
++      },
++      ledger: { revision: 1, consumedAuthorizationIds: ["authorization-1"] },
++    });
++  });
++
++  it("subtracts request-to-verification elapsed time from server remaining duration", () => {
++    const writePlan = plan(
++      request({
++        authorization: authorization({
++          serverObservedAtMilliseconds: 1_010_000,
++          serverExpiresAtMilliseconds: 1_600_000,
++        }),
++        observation: observation(30_000),
++      }),
++    );
++    expect(writePlan.leaseCandidate).toMatchObject({
++      authorizationRoundTripElapsedMilliseconds: 10_000,
++      authorizedRemainingDurationMilliseconds: 580_000,
++    });
++  });
++
++  it("uses monotonic elapsed evidence and ignores wall-clock jumps", () => {
++    const first = evaluateOfflineLease(
++      lease(),
++      observation(80_000, { wallClockMilliseconds: 9_999_999_999_999 }),
++    );
++    const second = evaluateOfflineLease(
++      lease(),
++      observation(80_000, { wallClockMilliseconds: 1 }),
++    );
++    expect(first).toMatchObject({
++      status: "active",
++      remainingMilliseconds: 530_000,
++    });
++    expect(second).toMatchObject({
++      status: "active",
++      remainingMilliseconds: 530_000,
++    });
++  });
++
++  it("expires at the exact conservatively authorized duration", () => {
++    expect(evaluateOfflineLease(lease(), observation(609_999))).toMatchObject({
++      status: "active",
++      remainingMilliseconds: 1,
++    });
++    expect(evaluateOfflineLease(lease(), observation(610_000))).toMatchObject({
++      status: "expired",
++      elapsedMilliseconds: 585_000,
++    });
++    expect(evaluateOfflineLease(lease(), observation(700_000))).toMatchObject({
++      status: "expired",
++      elapsedMilliseconds: 675_000,
++    });
++  });
++
++  it("enters recovery after a reboot instead of extending the lease", () => {
++    expect(
++      evaluateOfflineLease(
++        lease(),
++        observation(1_000, { bootId: "boot-after-reboot" }),
++      ),
++    ).toMatchObject({ status: "recovery", reason: "boot-identity-changed" });
++  });
++
++  it("rejects the same signed response on a different boot", () => {
++    expect(
++      planOfflineLeaseAuthorization(
++        request({
++          observation: observation(25_000, { bootId: "boot-after-reboot" }),
++        }),
++      ),
++    ).toMatchObject({
++      status: "rejected",
++      reason: "invalid-authorization-challenge",
++    });
++  });
++
++  it("uses an independent durable ledger so a null previous lease cannot reset replay history", () => {
++    const first = commit(plan());
++    const replayInput = {
++      ...request({ ledger: first.ledger }),
++      previousLease: null,
++    } as unknown as OfflineLeaseAuthorizationRequest;
++    expect(planOfflineLeaseAuthorization(replayInput)).toMatchObject({
++      status: "rejected",
++      reason: "authorization-replay",
++    });
++  });
++
++  it("accepts a unique response for a new boot without re-anchoring a full Test duration", () => {
++    const first = commit(plan());
++    const nextChallenge = challenge({
++      challengeId: "challenge-2",
++      bootId: "boot-after-reboot",
++      monotonicRequestedMilliseconds: 1_000,
++    });
++    const nextPlan = plan(
++      request({
++        ledger: first.ledger,
++        authorization: authorization({
++          authorizationId: "authorization-2",
++          challenge: nextChallenge,
++          serverAuthorizedAtMilliseconds: 1_350_000,
++          serverObservedAtMilliseconds: 1_400_000,
++          serverExpiresAtMilliseconds: 1_600_000,
++        }),
++        observation: observation(6_000, { bootId: "boot-after-reboot" }),
++      }),
++    );
++    expect(commit(nextPlan)).toMatchObject({
++      lease: {
++        authorizationId: "authorization-2",
++        authorizedRemainingDurationMilliseconds: 195_000,
++        bootId: "boot-after-reboot",
++      },
++      ledger: {
++        revision: 2,
++        consumedAuthorizationIds: ["authorization-1", "authorization-2"],
++      },
++    });
++  });
++
++  it("rejects a server observation outside the fixed freshness window", () => {
++    const result = planOfflineLeaseAuthorization(
++      request({
++        authorization: authorization({
++          serverObservedAtMilliseconds:
++            1_000_000 +
++            offlineLeaseAuthorizationFreshnessMaximumMilliseconds +
++            1,
++        }),
++      }),
++    );
++    expect(result).toMatchObject({
++      status: "rejected",
++      reason: "stale-server-authorization",
++    });
++  });
++
++  it("rejects a delayed unused response using monotonic request evidence", () => {
++    const result = planOfflineLeaseAuthorization(
++      request({
++        observation: observation(
++          20_000 + offlineLeaseAuthorizationFreshnessMaximumMilliseconds + 1,
++        ),
++      }),
++    );
++    expect(result).toMatchObject({
++      status: "rejected",
++      reason: "stale-authorization-response",
++    });
++  });
++
++  it("requires the exact trusted server-signature verification result", () => {
++    const invalidVerification = {
++      status: "trusted",
++      kind: "local-assertion",
++      issuer: "desmoslock-backend",
++      keyId: "lease-signing-key-1",
++      signatureId: "signature-1",
++    } as unknown as TrustedOfflineLeaseAuthorization["verification"];
++    expect(
++      planOfflineLeaseAuthorization(
++        request({
++          authorization: authorization({
++            verification: invalidVerification,
++          }),
++        }),
++      ),
++    ).toMatchObject({
++      status: "rejected",
++      reason: "untrusted-authorization-verification",
++    });
++  });
++
++  it("binds the verified challenge identity and monotonic request observation", () => {
++    const wrongIdentity = planOfflineLeaseAuthorization(
++      request({
++        authorization: authorization({
++          challenge: challenge({
++            identity: { ...identity, studentSessionId: "other-session" },
++          }),
++        }),
++      }),
++    );
++    const futureRequest = planOfflineLeaseAuthorization(
++      request({
++        authorization: authorization({
++          challenge: challenge({ monotonicRequestedMilliseconds: 25_001 }),
++        }),
++      }),
++    );
++    expect(wrongIdentity).toMatchObject({
++      status: "rejected",
++      reason: "identity-mismatch",
++    });
++    expect(futureRequest).toMatchObject({
++      status: "rejected",
++      reason: "invalid-monotonic-evidence",
++    });
++  });
++
++  it("returns no lease when the ledger CAS conflicts or storage fails", () => {
++    const writePlan = plan();
++    const conflict = settleOfflineLeaseAuthorization(writePlan, {
++      status: "committed",
++      expectedRevision: writePlan.expectedLedgerRevision,
++      ledger: {
++        ...writePlan.ledger,
++        consumedAuthorizationIds: ["different-authorization"],
++      },
++    });
++    const failed = settleOfflineLeaseAuthorization(writePlan, {
++      status: "failed",
++      failureCode: "disk-full",
++    });
++    expect(conflict).toMatchObject({
++      status: "write-failed",
++      lease: null,
++      ledger: writePlan.previousLedger,
++      failure: { code: "authorization-ledger-cas-conflict" },
++    });
++    expect(failed).toMatchObject({
++      status: "write-failed",
++      lease: null,
++      ledger: writePlan.previousLedger,
++      failure: {
++        code: "authorization-ledger-write-failed",
++        cause: "disk-full",
++      },
++    });
++  });
++
++  it("enters recovery for untrusted or regressing monotonic evidence", () => {
++    const current = evaluateOfflineLease(lease(), observation(80_000));
++    expect(current.status).toBe("active");
++    if (current.status !== "active") throw new Error("expected active lease");
++
++    expect(
++      evaluateOfflineLease(
++        current.lease,
++        observation(90_000, { trust: "untrusted" }),
++      ),
++    ).toMatchObject({ status: "recovery", reason: "untrusted-time-evidence" });
++    expect(
++      evaluateOfflineLease(current.lease, observation(79_999)),
++    ).toMatchObject({ status: "recovery", reason: "monotonic-regression" });
++  });
++
++  it("binds every observation to the authorized Student Session identity", () => {
++    expect(
++      evaluateOfflineLease(
++        lease(),
++        observation(80_000, {
++          identity: { ...identity, studentSessionId: "other-session" },
++        }),
++      ),
++    ).toMatchObject({ status: "recovery", reason: "identity-mismatch" });
++  });
++
++  it("survives a process or renderer reload on the same boot", () => {
++    const persisted = lease();
++    const afterReload = evaluateOfflineLease(persisted, observation(320_000));
++    expect(afterReload).toMatchObject({
++      status: "active",
++      remainingMilliseconds: 290_000,
++      lease: { monotonicLastObservedMilliseconds: 320_000 },
++    });
++  });
++
++  it("rejects malformed server authorization and untrusted anchors", () => {
++    const invalid = [
++      planOfflineLeaseAuthorization(
++        request({
++          authorization: authorization({
++            serverExpiresAtMilliseconds: 1_010_000,
++          }),
++        }),
++      ),
++      planOfflineLeaseAuthorization(
++        request({
++          authorization: authorization({
++            serverObservedAtMilliseconds: 999_999,
++          }),
++        }),
++      ),
++      planOfflineLeaseAuthorization(
++        request({ observation: observation(25_000, { trust: "untrusted" }) }),
++      ),
++    ];
++    expect(invalid.map((result) => result.status)).toEqual([
++      "rejected",
++      "rejected",
++      "rejected",
++    ]);
++  });
++
++  it("fails into recovery when a persisted lease is malformed", () => {
++    const malformed = {
++      ...lease(),
++      authorizedRemainingDurationMilliseconds: 700_000,
++    } as OfflineLease;
++    expect(evaluateOfflineLease(malformed, observation(80_000))).toMatchObject({
++      status: "recovery",
++      reason: "invalid-lease",
++    });
++  });
++
++  it("rejects malformed independent authorization history", () => {
++    const malformedLedger = {
++      ...emptyLedger(),
++      revision: 2,
++      consumedAuthorizationIds: ["authorization-1", "authorization-1"],
++    } as OfflineLeaseAuthorizationLedger;
++    expect(
++      planOfflineLeaseAuthorization(request({ ledger: malformedLedger })),
++    ).toMatchObject({
++      status: "rejected",
++      reason: "invalid-authorization-ledger",
++    });
++  });
++
++  it("treats an identical monotonic sample as an idempotent observation", () => {
++    const current = evaluateOfflineLease(lease(), observation(80_000));
++    expect(current.status).toBe("active");
++    if (current.status !== "active") throw new Error("expected active lease");
++    expect(
++      evaluateOfflineLease(current.lease, observation(80_000)),
++    ).toMatchObject({
++      status: "active",
++      remainingMilliseconds: 530_000,
++      lease: { monotonicLastObservedMilliseconds: 80_000 },
++    });
++  });
++});

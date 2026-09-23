@@ -1,0 +1,19 @@
+{
+  "action": "verify",
+  "automatic_replay": false,
+  "captured_bytes": { "stderr": 227, "stdout": 4478 },
+  "cli_sha256": "06179215a136f183ed24841e177e605fe15bf3e1ac1b6edac8312da71e835014",
+  "client_failure_means_rollback": false,
+  "failure_code": null,
+  "finished_at": "2026-09-22T04:19:38.986793+00:00",
+  "format_version": 1,
+  "helper_sha256": "711a38844d20507f76b4641797dd67a01837ac3a0082798698933636698450e0",
+  "network_wire_cap_claimed": false,
+  "operation_sha256": "1ee7a0e306ebb77702ed0976cbb6ca99e4f136387882c8cd6e455ef28bf46cd0",
+  "process_exit_code": 0,
+  "query_sha256": "be3167d4a7b6a5fe2f675a0e5af90efee5047ce3264bfec7a65c034b61a0e8ae",
+  "started_at": "2026-09-22T04:19:36.922717+00:00",
+  "status": "verified_committed",
+  "target": "adlhhdbglpamaftcbmce",
+  "version": "atomic-upgrade-apply-v1"
+}
