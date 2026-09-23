@@ -1795,10 +1795,12 @@ export async function desktopPackagePaths(
     1,
     "Packaged executable must not be hardlinked",
   );
-  await fs.access(
-    executable,
-    platform === "win32" ? constants.F_OK : constants.X_OK,
-  );
+  if (platform !== "win32")
+    assert.notEqual(
+      executableStatus.mode & 0o111,
+      0,
+      "Packaged executable must have an executable mode bit",
+    );
   return { packageDirectory, appBundle, executable, resourcesDirectory };
 }
 
