@@ -11,3 +11,6 @@ blob-report/
 .env
 .env.*
 !.env.example
+
+# verify-desmoslock skill evidence (local only, never committed)
+.verify-evidence/
