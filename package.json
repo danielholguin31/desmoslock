@@ -68,7 +68,7 @@
     "esbuild": "^0.28.2",
     "eslint": "^10.11.0",
     "globals": "^17.11.0",
-    "prettier": "^3.9.6",
+    "prettier": "^3.9.9",
     "secretlint": "^13.0.5",
     "supabase": "^2.115.0",
     "typescript": "^6.0.3",
