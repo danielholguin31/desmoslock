@@ -64,7 +64,7 @@
     "@secretlint/secretlint-rule-preset-recommend": "^13.0.4",
     "@types/node": "24.13.3",
     "actionlint": "^2.0.6",
-    "deno": "^2.9.5",
+    "deno": "^2.9.6",
     "esbuild": "^0.28.2",
     "eslint": "^10.11.0",
     "globals": "^17.11.0",
