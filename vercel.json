@@ -1,46 +1,5 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "node scripts/refuse-legacy-vercel-build.mjs",
-  "ignoreCommand": "node scripts/ignore-legacy-vercel-build.mjs",
-  "installCommand": null,
-  "outputDirectory": "web",
-  "framework": null,
-  "cleanUrls": true,
-  "trailingSlash": false,
-  "redirects": [
-    {
-      "source": "/download/mac",
-      "destination": "https://github.com/danielholguin31/desmoslock-releases/releases/latest/download/DesmosLock-mac.dmg",
-      "permanent": false
-    },
-    {
-      "source": "/download/mac-intel",
-      "destination": "https://github.com/danielholguin31/desmoslock-releases/releases/latest/download/DesmosLock-mac-intel.dmg",
-      "permanent": false
-    },
-    {
-      "source": "/download/windows",
-      "destination": "https://github.com/danielholguin31/desmoslock-releases/releases/latest/download/DesmosLock-setup.exe",
-      "permanent": false
-    },
-    {
-      "source": "/download/linux",
-      "destination": "https://github.com/danielholguin31/desmoslock-releases/releases/latest/download/DesmosLock.AppImage",
-      "permanent": false
-    },
-    {
-      "source": "/releases",
-      "destination": "https://github.com/danielholguin31/desmoslock-releases/releases/latest",
-      "permanent": false
-    }
-  ],
-  "headers": [
-    {
-      "source": "/(.*)",
-      "headers": [
-        { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" }
-      ]
-    }
-  ]
+  "ignoreCommand": "exit 0",
+  "buildCommand": "exit 1"
 }
