@@ -25,6 +25,33 @@ const sandboxWeakeningOrInliningSwitch = new RegExp(
   `^-{1,2}(?:${sandboxWeakeningOrInliningSwitchNames.join("|")})(?:=|$)`,
 );
 
+// Chromium enforces Connection-Allowlist (including webrtc=block) only while
+// its ConnectionAllowlists feature is enabled. Any disable-features value that
+// names a Connection-Allowlist feature is refused, whatever its case, list
+// position, study suffix, or parameter suffix.
+export const connectionAllowlistDisablingSwitchName = "disable-features";
+const disableFeaturesSwitch = /^-{1,2}disable-features(?:=(.*))?$/i;
+
+function namesConnectionAllowlistFeature(featureList: string): boolean {
+  return featureList.toLowerCase().includes("connectionallowlist");
+}
+
+function argumentsDisableConnectionAllowlists(
+  arguments_: readonly string[],
+): boolean {
+  return arguments_.some((argument, index) => {
+    const match = disableFeaturesSwitch.exec(argument.trim());
+    if (match === null) return false;
+    const inlineValue = match[1] ?? "";
+    // Also inspect a detached value so no spelling of the switch slips through.
+    return (
+      namesConnectionAllowlistFeature(inlineValue) ||
+      (inlineValue.trim() === "" &&
+        namesConnectionAllowlistFeature(arguments_[index + 1] ?? ""))
+    );
+  });
+}
+
 function hasSwitch(arguments_: readonly string[], pattern: RegExp): boolean {
   return arguments_.some((argument) => pattern.test(argument.trim()));
 }
@@ -32,6 +59,7 @@ function hasSwitch(arguments_: readonly string[], pattern: RegExp): boolean {
 export interface PackagedLaunchPolicyControls {
   readonly arguments: readonly string[];
   readonly commandLine: {
+    getSwitchValue(name: string): string;
     hasSwitch(name: string): boolean;
   };
   readonly environment: {
@@ -60,6 +88,9 @@ function observedArgumentSwitches(
     }
     observed.add(trimmed.replace(/^-{1,2}/, "").split("=", 1)[0] ?? trimmed);
   }
+  if (argumentsDisableConnectionAllowlists(arguments_)) {
+    observed.add(connectionAllowlistDisablingSwitchName);
+  }
   return Object.freeze([...observed].sort());
 }
 
@@ -67,10 +98,19 @@ export function inspectPackagedLaunchPolicyBoundary(
   isPackaged: boolean,
   controls: PackagedLaunchPolicyControls,
 ): PackagedLaunchPolicyBoundaryReceipt {
-  const commandLineSwitches = [
+  const commandLineSwitches: string[] = [
     ...diagnosticSwitchNames,
     ...sandboxWeakeningOrInliningSwitchNames,
   ].filter((name) => controls.commandLine.hasSwitch(name));
+  if (
+    namesConnectionAllowlistFeature(
+      controls.commandLine.getSwitchValue(
+        connectionAllowlistDisablingSwitchName,
+      ),
+    )
+  ) {
+    commandLineSwitches.push(connectionAllowlistDisablingSwitchName);
+  }
   return Object.freeze({
     argumentSwitches: observedArgumentSwitches(controls.arguments),
     commandLineSwitches: Object.freeze(commandLineSwitches.sort()),
@@ -124,6 +164,19 @@ export function assertPackagedLaunchPolicy(
       "Packaged runtime forbids diagnostic command-line switches",
     );
   }
+
+  if (
+    boundary.argumentSwitches.includes(
+      connectionAllowlistDisablingSwitchName,
+    ) ||
+    boundary.commandLineSwitches.includes(
+      connectionAllowlistDisablingSwitchName,
+    )
+  ) {
+    throw new Error(
+      "Packaged runtime forbids disabling Connection-Allowlist enforcement",
+    );
+  }
 }
 
 export function assertPackagedLaunchArguments(
@@ -145,6 +198,12 @@ export function assertPackagedLaunchArguments(
   if (hasSwitch(arguments_, diagnosticSwitch)) {
     throw new Error(
       "Packaged runtime forbids diagnostic command-line switches",
+    );
+  }
+
+  if (argumentsDisableConnectionAllowlists(arguments_)) {
+    throw new Error(
+      "Packaged runtime forbids disabling Connection-Allowlist enforcement",
     );
   }
 }

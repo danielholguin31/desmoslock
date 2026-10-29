@@ -57,6 +57,8 @@ const forbiddenPackagedSwitches = Object.freeze([
   "--inspect=0",
   "--remote-debugging-pipe",
   "--remote-debugging-port=0",
+  "--disable-features=ConnectionAllowlists",
+  "--disable-features=SitePerProcess,ConnectionAllowlists",
   ...(process.platform === "darwin"
     ? [
         ...sandboxWeakeningOrInliningSwitchNames.map((name) => `--${name}`),
@@ -569,6 +571,10 @@ async function inspectCalculatorRuntime(application) {
           app.commandLine.hasSwitch("no-sandbox") ||
           app.commandLine.hasSwitch("disable-setuid-sandbox") ||
           process.env.ELECTRON_DISABLE_SANDBOX === "1",
+        connectionAllowlistsDisabled: app.commandLine
+          .getSwitchValue("disable-features")
+          .toLowerCase()
+          .includes("connectionallowlist"),
         contextIsolation: preferences.contextIsolation,
         devTools: preferences.devTools ?? false,
         electronVersion: process.versions.electron,
@@ -1048,6 +1054,7 @@ await runWithIndependentCleanup(async () => {
   const calculatorRuntime = await inspectCalculatorRuntime(application);
   assert.deepEqual(calculatorRuntime, {
     chromiumSandboxDisabledByLaunch: process.platform === "linux",
+    connectionAllowlistsDisabled: false,
     contextIsolation: true,
     devTools: false,
     electronVersion: "44.10.0",
