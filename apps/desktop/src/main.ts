@@ -92,8 +92,6 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 const shellScheme = "desmoslock-app";
-const connectionAllowlistOverride =
-  "OverrideConnectionAllowlistOriginTrial" as const;
 const publicBackendConfiguration = parsePublicBackendConfiguration(
   publicDesktopBackendConfiguration,
 );
@@ -120,18 +118,6 @@ const shellContentSecurityPolicy = [
   "form-action 'none'",
   "frame-ancestors 'none'",
 ].join("; ");
-
-const existingChromiumFeatures = app.commandLine
-  .getSwitchValue("enable-features")
-  .split(",")
-  .map((feature) => feature.trim())
-  .filter((feature) => feature.length > 0);
-if (!existingChromiumFeatures.includes(connectionAllowlistOverride)) {
-  app.commandLine.appendSwitch(
-    "enable-features",
-    [...existingChromiumFeatures, connectionAllowlistOverride].join(","),
-  );
-}
 
 protocol.registerSchemesAsPrivileged(
   [shellScheme, calculatorScheme].map((scheme) => ({

@@ -711,10 +711,7 @@ test.describe
       webviewTag: false,
     });
     expect(isolation.enabledFeatures).toEqual(
-      expect.arrayContaining([
-        "CDPScreenshotNewSurface",
-        "OverrideConnectionAllowlistOriginTrial",
-      ]),
+      expect.arrayContaining(["CDPScreenshotNewSurface"]),
     );
     expect(isolation.remoteProxy).toContain("PROXY 127.0.0.1:9");
     expect(isolation.preload).toBeUndefined();
@@ -891,7 +888,7 @@ test.describe
         nodeRequire: "undefined",
         permission: "denied",
         popup: "blocked",
-        rtcPeerConnection: "NotAllowedError",
+        rtcPeerConnection: "administratively-prohibited",
         webTransport: "rejected",
       });
 

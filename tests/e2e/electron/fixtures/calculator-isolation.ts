@@ -19,13 +19,6 @@ if (outputDirectory === undefined || !path.isAbsolute(outputDirectory))
     "Calculator isolation fixture requires an absolute built output directory",
   );
 
-const features = app.commandLine
-  .getSwitchValue("enable-features")
-  .split(",")
-  .filter(Boolean);
-if (!features.includes("OverrideConnectionAllowlistOriginTrial"))
-  features.push("OverrideConnectionAllowlistOriginTrial");
-app.commandLine.appendSwitch("enable-features", features.join(","));
 protocol.registerSchemesAsPrivileged(
   ["desmoslock-app", "desmoslock-calculator"].map((scheme) => ({
     scheme,
