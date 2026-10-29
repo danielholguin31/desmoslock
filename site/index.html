@@ -8,34 +8,115 @@
       name="description"
       content="The real Desmos graphing calculator, locked to your students' screens during a test. One click locks every device in the room."
     />
+    <meta name="theme-color" content="#ffffff" />
+    <meta property="og:type" content="website" />
     <meta property="og:title" content="DesmosLock" />
     <meta
       property="og:description"
       content="The real Desmos graphing calculator, locked to your students' screens during a test."
     />
     <meta property="og:url" content="https://desmoslock.nickymolina.com" />
-    <link
-      rel="icon"
-      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔒</text></svg>"
+    <meta
+      property="og:image"
+      content="https://desmoslock.nickymolina.com/og.png"
     />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="site.css" />
+    <script>
+      document.documentElement.classList.add("js");
+    </script>
   </head>
   <body>
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <defs>
+        <symbol id="i-lock" viewBox="0 0 20 20">
+          <rect x="4" y="9" width="12" height="8.5" rx="2" />
+          <path d="M7 9V6.5a3 3 0 0 1 6 0V9" />
+        </symbol>
+        <symbol id="i-displays" viewBox="0 0 20 20">
+          <rect x="1.75" y="3.5" width="10.5" height="7.5" rx="1.5" />
+          <rect x="9" y="7.5" width="9.25" height="6.75" rx="1.5" />
+          <path d="M5 15.5h4M7 11v4.5" />
+        </symbol>
+        <symbol id="i-spaces" viewBox="0 0 20 20">
+          <rect x="5.5" y="5.5" width="12" height="9" rx="1.5" />
+          <path d="M3 12V4.5A1.5 1.5 0 0 1 4.5 3H14" />
+        </symbol>
+        <symbol id="i-front" viewBox="0 0 20 20">
+          <circle cx="10" cy="10" r="6.75" />
+          <circle cx="10" cy="10" r="2.25" />
+          <path d="M10 1.5v2.25M10 16.25v2.25M1.5 10h2.25M16.25 10h2.25" />
+        </symbol>
+        <symbol id="i-command" viewBox="0 0 20 20">
+          <path
+            d="M7.5 7.5h5v5h-5zM7.5 7.5V5.25a2 2 0 1 0-2 2.25h2zM12.5 7.5V5.25a2 2 0 1 1 2 2.25h-2zM7.5 12.5v2.25a2 2 0 1 1-2-2.25h2zM12.5 12.5v2.25a2 2 0 1 0 2-2.25h-2z"
+          />
+        </symbol>
+        <symbol id="i-power" viewBox="0 0 20 20">
+          <path d="M10 2.5v6.5" />
+          <path d="M6 5a6.5 6.5 0 1 0 8 0" />
+        </symbol>
+        <symbol id="i-restart" viewBox="0 0 20 20">
+          <path d="M16.25 10A6.25 6.25 0 1 1 13.5 4.8" />
+          <path d="M14 1.75v3.5h-3.5" />
+        </symbol>
+        <symbol id="i-clean" viewBox="0 0 20 20">
+          <rect x="2.5" y="2.5" width="15" height="15" rx="2.5" />
+          <path d="M6.75 10.25 9 12.5l4.5-5" />
+        </symbol>
+        <symbol id="i-capture" viewBox="0 0 20 20">
+          <path
+            d="M2.5 7a1.5 1.5 0 0 1 1.5-1.5h2l1.5-2h5l1.5 2h2A1.5 1.5 0 0 1 17.5 7v8A1.5 1.5 0 0 1 16 16.5H4A1.5 1.5 0 0 1 2.5 15z"
+          />
+          <path d="M3 3l14 14" />
+        </symbol>
+        <symbol id="i-network" viewBox="0 0 20 20">
+          <circle cx="10" cy="10" r="7.25" />
+          <path
+            d="M2.75 10h14.5M10 2.75c2 2.1 3 4.5 3 7.25s-1 5.15-3 7.25c-2-2.1-3-4.5-3-7.25s1-5.15 3-7.25"
+          />
+        </symbol>
+        <symbol id="i-warn" viewBox="0 0 20 20">
+          <path
+            d="M8.7 3.3a1.5 1.5 0 0 1 2.6 0l6.4 11.2a1.5 1.5 0 0 1-1.3 2.25H3.6a1.5 1.5 0 0 1-1.3-2.25z"
+          />
+          <path d="M10 8v3.5" />
+          <circle cx="10" cy="14" r=".4" />
+        </symbol>
+        <symbol id="i-x" viewBox="0 0 20 20">
+          <path d="M5.5 5.5l9 9M14.5 5.5l-9 9" />
+        </symbol>
+        <symbol id="i-plus" viewBox="0 0 20 20">
+          <path d="M10 4.5v11M4.5 10h11" />
+        </symbol>
+        <symbol id="i-github" viewBox="0 0 16 16">
+          <path
+            fill="currentColor"
+            stroke="none"
+            d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8"
+          />
+        </symbol>
+      </defs>
+    </svg>
+
     <header class="nav">
-      <a class="brand" href="/"><span class="brand-mark">∫</span> DesmosLock</a>
-      <nav>
+      <a class="brand" href="/" aria-label="DesmosLock home"
+        ><span class="brand-mark" aria-hidden="true">∫</span> DesmosLock</a
+      >
+      <nav aria-label="Primary">
         <a href="#how">How it works</a>
         <a href="#lock">The lock</a>
         <a href="#faq">FAQ</a>
         <a class="nav-cta" href="https://github.com/danielholguin31/desmoslock"
-          >GitHub</a
+          ><svg class="ico" aria-hidden="true"><use href="#i-github" /></svg>
+          GitHub</a
         >
       </nav>
     </header>
 
     <main>
       <section class="hero">
-        <p class="eyebrow">For math teachers</p>
         <h1>The Desmos calculator.<br />Locked to their screens.</h1>
         <p class="lede">
           Students get the real graphing calculator — nothing removed, nothing
@@ -46,135 +127,190 @@
           <a
             class="btn primary"
             href="https://github.com/danielholguin31/desmoslock"
-            >View on GitHub</a
+            ><svg class="ico" aria-hidden="true"><use href="#i-github" /></svg>
+            View on GitHub</a
           >
           <a class="btn ghost" href="#how">How it works</a>
         </div>
         <p class="micro">Open source · AGPL-3.0 · No student accounts</p>
+      </section>
 
-        <div
-          class="shot"
-          role="img"
-          aria-label="The DesmosLock teacher console next to a locked student screen"
-        >
-          <div class="shot-win">
-            <div class="shot-bar">
-              <i></i><i></i><i></i><span>Teacher console</span>
-            </div>
-            <div class="shot-body console-mock">
-              <div class="mock-side">
-                <div class="mock-row head">
-                  <span class="mock-avatar">R</span> Ms. Rivera
+      <div
+        class="stage"
+        id="stage"
+        role="img"
+        aria-label="The DesmosLock teacher console locking a test, next to a student's locked Desmos calculator"
+      >
+        <div class="win console">
+          <div class="win-bar">
+            <span class="lights"><i></i><i></i><i></i></span>
+            <span class="win-title">DesmosLock — Teacher console</span>
+          </div>
+          <div class="console-body">
+            <aside class="c-side">
+              <div class="c-who">
+                <span class="c-avatar">R</span> Ms. Rivera
+              </div>
+              <div class="c-new">
+                <svg class="ico" aria-hidden="true"><use href="#i-plus" /></svg>
+                New test
+              </div>
+              <div class="c-label">Tests</div>
+              <div class="c-test on">
+                <span class="dot state-dot"></span> Unit 4 Test
+              </div>
+              <div class="c-test"><span class="dot green"></span> Warm-up</div>
+              <div class="c-test"><span class="dot muted"></span> Quiz 3.2</div>
+            </aside>
+            <div class="c-main">
+              <div class="c-head">
+                <div class="c-title">
+                  Unit 4 Test
+                  <span class="pill state-pill"
+                    ><span class="pill-open">Open</span
+                    ><span class="pill-locked">Locked</span></span
+                  >
                 </div>
-                <div class="mock-row muted">＋ New test</div>
-                <div class="mock-label">Tests</div>
-                <div class="mock-row on">
-                  <span class="dot red"></span> Unit 4 Test
+                <span class="c-lockbtn"
+                  ><span class="lb-lock"
+                    ><svg class="ico" aria-hidden="true">
+                      <use href="#i-lock" />
+                    </svg>
+                    Lock room</span
+                  ><span class="lb-unlock">Unlock room</span></span
+                >
+              </div>
+              <div class="c-stats">
+                <div class="stat code">
+                  <small>Class code</small><b>XKD4TQ</b>
                 </div>
-                <div class="mock-row">
-                  <span class="dot green"></span> Warm-up
+                <div class="stat"><small>Joined</small><b>27</b></div>
+                <div class="stat">
+                  <small>Flags</small
+                  ><b class="flags"
+                    ><span class="f-before">2</span
+                    ><span class="f-after">3</span></b
+                  >
                 </div>
               </div>
-              <div class="mock-main">
-                <div class="mock-title">
-                  Unit 4 Test <span class="pill red">Locked</span>
-                </div>
-                <div class="mock-cards">
-                  <div class="mock-card blue">
-                    <small>Class code</small><b>XKD4TQ</b>
-                  </div>
-                  <div class="mock-card"><small>Joined</small><b>27</b></div>
-                  <div class="mock-card">
-                    <small>Flags</small><b class="amber">3</b>
-                  </div>
-                </div>
-                <div class="mock-feed">
-                  <div class="feed-row bad">
+              <div class="c-feedlabel">Activity</div>
+              <ol class="feed">
+                <li class="feed-row bad new">
+                  <div>
                     <b>Jordan K.</b> switched away from the calculator
                     <em>10:42</em>
                   </div>
-                  <div class="feed-row">
-                    <b>Alex C.</b> joined the session <em>10:31</em>
-                  </div>
-                  <div class="feed-row bad">
-                    <b>Sam P.</b> tried to quit the app <em>10:29</em>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="shot-win locked">
-            <div class="shot-bar red">
-              <span>🔒 Locked by teacher — Jordan Kim</span>
-            </div>
-            <div class="shot-body calc-mock">
-              <div class="calc-exprs">
-                <div class="expr"><span class="n">1</span> y = 3x + 1</div>
-                <div class="expr"><span class="n">2</span> y = x² − 4</div>
-                <div class="expr"><span class="n">3</span></div>
-              </div>
-              <div class="calc-grid">
-                <svg
-                  viewBox="0 0 240 180"
-                  preserveAspectRatio="none"
-                  aria-hidden="true"
-                >
-                  <defs>
-                    <pattern
-                      id="g"
-                      width="20"
-                      height="20"
-                      patternUnits="userSpaceOnUse"
-                    >
-                      <path
-                        d="M20 0H0v20"
-                        fill="none"
-                        stroke="rgba(55,53,47,.10)"
-                        stroke-width="1"
-                      />
-                    </pattern>
-                  </defs>
-                  <rect width="240" height="180" fill="url(#g)" />
-                  <line
-                    x1="0"
-                    y1="90"
-                    x2="240"
-                    y2="90"
-                    stroke="rgba(55,53,47,.35)"
-                    stroke-width="1.2"
-                  />
-                  <line
-                    x1="120"
-                    y1="0"
-                    x2="120"
-                    y2="180"
-                    stroke="rgba(55,53,47,.35)"
-                    stroke-width="1.2"
-                  />
-                  <path
-                    d="M0 174 L240 6"
-                    fill="none"
-                    stroke="#2383e2"
-                    stroke-width="2.4"
-                  />
-                  <path
-                    d="M20 4 Q120 210 220 4"
-                    fill="none"
-                    stroke="#0f7b6c"
-                    stroke-width="2.4"
-                  />
-                </svg>
-              </div>
+                </li>
+                <li class="feed-row">
+                  <div><b>Alex C.</b> joined the session <em>10:31</em></div>
+                </li>
+                <li class="feed-row bad">
+                  <div><b>Sam P.</b> tried to quit the app <em>10:29</em></div>
+                </li>
+                <li class="feed-row">
+                  <div><b>Priya N.</b> joined the session <em>10:28</em></div>
+                </li>
+              </ol>
             </div>
           </div>
         </div>
-      </section>
+
+        <div class="win student">
+          <div class="s-bar">
+            <span class="s-wait">Waiting for your teacher…</span>
+            <span class="s-locked"
+              ><svg class="ico" aria-hidden="true"><use href="#i-lock" /></svg>
+              Locked by teacher · Jordan Kim</span
+            >
+          </div>
+          <div class="calc">
+            <div class="calc-exprs">
+              <div class="expr">
+                <span class="n">1</span><span class="swatch red"></span>
+                <span>y = 3x + 1</span>
+              </div>
+              <div class="expr">
+                <span class="n">2</span><span class="swatch blue"></span>
+                <span>y = x² − 4</span>
+              </div>
+              <div class="expr"><span class="n">3</span></div>
+            </div>
+            <svg class="graph" viewBox="0 0 240 240" aria-hidden="true">
+              <defs>
+                <pattern
+                  id="minor"
+                  width="10"
+                  height="10"
+                  patternUnits="userSpaceOnUse"
+                >
+                  <path
+                    d="M10 0H0v10"
+                    fill="none"
+                    stroke="rgba(55,53,47,.06)"
+                  />
+                </pattern>
+                <pattern
+                  id="major"
+                  width="40"
+                  height="40"
+                  patternUnits="userSpaceOnUse"
+                  x="0"
+                  y="0"
+                >
+                  <rect width="40" height="40" fill="url(#minor)" />
+                  <path
+                    d="M40 0H0v40"
+                    fill="none"
+                    stroke="rgba(55,53,47,.13)"
+                  />
+                </pattern>
+              </defs>
+              <rect width="240" height="240" fill="url(#major)" />
+              <path
+                d="M0 120H240M120 0V240"
+                stroke="rgba(55,53,47,.55)"
+                stroke-width="1.1"
+              />
+              <path
+                class="curve"
+                d="M56.8 0Q120 400 183.2 0"
+                fill="none"
+                stroke="#2d70b3"
+                stroke-width="2.5"
+              />
+              <path
+                class="curve"
+                d="M73.3 240L153.3 0"
+                fill="none"
+                stroke="#c74440"
+                stroke-width="2.5"
+              />
+              <circle
+                cx="96.1"
+                cy="171.6"
+                r="3.5"
+                fill="#fff"
+                stroke="#6b6b6b"
+                stroke-width="1.5"
+              />
+              <g class="ticks" fill="rgba(55,53,47,.55)" font-size="8">
+                <text x="76" y="131">−2</text>
+                <text x="157" y="131">2</text>
+                <text x="111" y="83">2</text>
+                <text x="107" y="163">−2</text>
+              </g>
+            </svg>
+          </div>
+        </div>
+      </div>
 
       <section id="how" class="band">
         <h2>Three steps, no setup</h2>
         <ol class="steps">
           <li>
+            <div class="step-art">
+              <span class="art-code">XKD4TQ</span>
+            </div>
             <span class="step-n">1</span>
             <h3>Start a test</h3>
             <p>
@@ -183,6 +319,10 @@
             </p>
           </li>
           <li>
+            <div class="step-art">
+              <span class="art-field"><small>Code</small>XKD4TQ</span>
+              <span class="art-field"><small>Name</small>Jordan Kim</span>
+            </div>
             <span class="step-n">2</span>
             <h3>Students join</h3>
             <p>
@@ -191,6 +331,14 @@
             </p>
           </li>
           <li>
+            <div class="step-art">
+              <span class="art-btn"
+                ><svg class="ico" aria-hidden="true">
+                  <use href="#i-lock" />
+                </svg>
+                Lock room</span
+              >
+            </div>
             <span class="step-n">3</span>
             <h3>Lock the room</h3>
             <p>
@@ -202,13 +350,18 @@
       </section>
 
       <section id="lock" class="band alt">
-        <h2>What “locked” actually means</h2>
-        <p class="band-lede">
-          Not a full-screen web page you can tab out of. The lock lives in the
-          app's system layer, so the page can't talk itself out of it.
-        </p>
+        <div class="band-head">
+          <h2>What “locked” actually means</h2>
+          <p class="band-lede">
+            Not a full-screen web page you can tab out of. The lock lives in the
+            app's system layer, so the page can't talk itself out of it.
+          </p>
+        </div>
         <div class="grid">
           <div class="cell">
+            <svg class="cell-ico" aria-hidden="true">
+              <use href="#i-displays" />
+            </svg>
             <h3>Covers every display</h3>
             <p>
               The calculator fills the main screen over the menu bar and dock.
@@ -216,6 +369,9 @@
             </p>
           </div>
           <div class="cell">
+            <svg class="cell-ico" aria-hidden="true">
+              <use href="#i-spaces" />
+            </svg>
             <h3>Follows across desktops</h3>
             <p>
               Swipe to another Space or virtual desktop and the lock is already
@@ -223,6 +379,9 @@
             </p>
           </div>
           <div class="cell">
+            <svg class="cell-ico" aria-hidden="true">
+              <use href="#i-front" />
+            </svg>
             <h3>Holds the front</h3>
             <p>
               A watchdog checks three times a second. Anything that steals focus
@@ -230,6 +389,9 @@
             </p>
           </div>
           <div class="cell">
+            <svg class="cell-ico" aria-hidden="true">
+              <use href="#i-command" />
+            </svg>
             <h3>Swallows shortcuts</h3>
             <p>
               Quit, close, hide, Spotlight, Mission Control, screenshots, dev
@@ -237,6 +399,9 @@
             </p>
           </div>
           <div class="cell">
+            <svg class="cell-ico" aria-hidden="true">
+              <use href="#i-power" />
+            </svg>
             <h3>Won't quit or close</h3>
             <p>
               The close button and the quit command are both refused while a
@@ -244,6 +409,9 @@
             </p>
           </div>
           <div class="cell">
+            <svg class="cell-ico" aria-hidden="true">
+              <use href="#i-restart" />
+            </svg>
             <h3>Survives a force-quit</h3>
             <p>
               Kill the app or reboot the laptop and it reopens straight back
@@ -252,6 +420,9 @@
             </p>
           </div>
           <div class="cell">
+            <svg class="cell-ico" aria-hidden="true">
+              <use href="#i-clean" />
+            </svg>
             <h3>Starts from a clean machine</h3>
             <p>
               Students cannot begin with anything else running. The app lists
@@ -260,12 +431,18 @@
             </p>
           </div>
           <div class="cell">
+            <svg class="cell-ico" aria-hidden="true">
+              <use href="#i-capture" />
+            </svg>
             <h3>Blocks screen capture</h3>
             <p>
               Screenshots and screen-sharing of the test window come out blank.
             </p>
           </div>
           <div class="cell">
+            <svg class="cell-ico" aria-hidden="true">
+              <use href="#i-network" />
+            </svg>
             <h3>Nothing else loads</h3>
             <p>
               All network traffic is dropped except Desmos and your own server.
@@ -276,115 +453,187 @@
       </section>
 
       <section class="band">
-        <h2>Leaving early costs them the test</h2>
         <div class="two">
-          <div>
+          <div class="two-copy">
+            <h2>Leaving early costs them the test</h2>
             <p>
               There is exactly one student-facing way out of a live lock: the
-              <b>✕ Exit test</b>
+              <b class="kbd-ish"
+                ><svg class="ico" aria-hidden="true"><use href="#i-x" /></svg>
+                Exit test</b
+              >
               button. It doesn't just close — it warns them, in plain words,
               that their test ends there and that you will be told.
             </p>
             <p>
               If they go through with it, their name is struck through on your
-              roster, marked
-              <b>forfeited</b>, with the time they left. Everything short of
-              that — switching away, a blocked shortcut, a dropped connection,
-              the screen going to sleep — lands in your activity feed as it
-              happens.
+              roster, marked <b>forfeited</b>, with the time they left.
+              Everything short of that — switching away, a blocked shortcut, a
+              dropped connection, the screen going to sleep — lands in your
+              activity feed as it happens.
             </p>
           </div>
-          <div class="quote-card">
-            <div class="quote-icon">⚠</div>
-            <p class="quote-title">Exit and forfeit the test?</p>
-            <p class="quote-body">
-              Your test ends here. The calculator closes, your teacher is told
-              immediately that you left early, and you cannot rejoin this test
-              without them letting you back in.
-            </p>
-            <div class="quote-actions">
-              <span class="qbtn">Cancel</span
-              ><span class="qbtn danger">Forfeit and exit</span>
+          <div class="two-art" aria-hidden="true">
+            <div class="dialog">
+              <svg class="dialog-ico" aria-hidden="true">
+                <use href="#i-warn" />
+              </svg>
+              <p class="dialog-title">Exit and forfeit the test?</p>
+              <p class="dialog-body">
+                Your test ends here. The calculator closes, your teacher is told
+                immediately that you left early, and you cannot rejoin this test
+                without them letting you back in.
+              </p>
+              <div class="dialog-actions">
+                <span class="dbtn">Cancel</span
+                ><span class="dbtn danger">Forfeit and exit</span>
+              </div>
+            </div>
+            <div class="roster">
+              <div class="roster-row">
+                <span class="r-name">Alex Chen</span
+                ><span class="r-state ok">In test</span>
+              </div>
+              <div class="roster-row gone">
+                <span class="r-name">Sam Patel</span
+                ><span class="r-state bad">Forfeited · 10:47</span>
+              </div>
+              <div class="roster-row">
+                <span class="r-name">Priya Nair</span
+                ><span class="r-state ok">In test</span>
+              </div>
             </div>
           </div>
         </div>
       </section>
 
-      <section id="faq" class="band">
-        <h2>Questions teachers actually ask</h2>
-        <div class="faq">
-          <details open>
-            <summary>Is this the real Desmos calculator?</summary>
+      <section id="faq" class="band alt">
+        <div class="faq-wrap">
+          <div class="faq-head">
+            <h2>Questions teachers actually ask</h2>
             <p>
-              Yes — the official Desmos graphing calculator, embedded through
-              their API with no options changed. Same keypad, same sliders, same
-              tables, same everything your students already know.
+              Something missing?
+              <a
+                class="link"
+                href="https://github.com/danielholguin31/desmoslock/issues"
+                >Ask on GitHub</a
+              >
             </p>
-          </details>
-          <details>
-            <summary>Do my students need accounts?</summary>
-            <p>
-              No. You're the only person who signs in. Students type a
-              six-character code and their name, which is all that shows up on
-              your roster.
-            </p>
-          </details>
-          <details>
-            <summary>What if the Wi-Fi drops mid-test?</summary>
-            <p>
-              The lock holds — losing the network does not unlock anyone. Their
-              work keeps autosaving locally. If the server stays unreachable for
-              90 seconds, the app offers a force-exit so nobody is trapped on a
-              frozen screen; it's recorded and delivered to you the moment
-              you're back online.
-            </p>
-          </details>
-          <details>
-            <summary>What if a student gets stuck?</summary>
-            <p>
-              Every test has an override code that only you can see. Read it out
-              and that one device unlocks — and you're told which student used
-              it. You can also release or remove anyone from the roster with one
-              click.
-            </p>
-          </details>
-          <details>
-            <summary>What student data do you store?</summary>
-            <p>
-              The name a student types when they join, the times they joined and
-              left, and any integrity events during the test. No email
-              addresses, no student IDs, no grades. Their graph work stays on
-              their own machine.
-            </p>
-          </details>
-          <details>
-            <summary>Can it stop absolutely everything?</summary>
-            <p>
-              No software lock can, and we'd rather say so. A student can still
-              force-quit the app from the operating system, or pick up a phone.
-              What DesmosLock does is make every one of those moves loud: the
-              app reopens back into the lock, and the attempt is already sitting
-              in your feed with a timestamp.
-            </p>
-          </details>
-          <details>
-            <summary>Do students have to close their other apps?</summary>
-            <p>
-              Yes, and it is enforced rather than requested. Before a student
-              can join, DesmosLock lists every application they have open and
-              will not continue until every one is quit. If something is
-              launched during the test, it lands in your activity feed with the
-              app's name.
-            </p>
-          </details>
-          <details>
-            <summary>Does it work without internet?</summary>
-            <p>
-              The calculator itself loads from Desmos, so each machine needs to
-              reach desmos.com once at the start. Locking, joining and alerts
-              run entirely on your classroom network.
-            </p>
-          </details>
+          </div>
+          <div class="faq">
+            <details open>
+              <summary>
+                Is this the real Desmos calculator?
+                <svg class="faq-ico" aria-hidden="true">
+                  <use href="#i-plus" />
+                </svg>
+              </summary>
+              <p>
+                Yes — the official Desmos graphing calculator, embedded through
+                their API with no options changed. Same keypad, same sliders,
+                same tables, same everything your students already know.
+              </p>
+            </details>
+            <details>
+              <summary>
+                Do my students need accounts?
+                <svg class="faq-ico" aria-hidden="true">
+                  <use href="#i-plus" />
+                </svg>
+              </summary>
+              <p>
+                No. You're the only person who signs in. Students type a
+                six-character code and their name, which is all that shows up on
+                your roster.
+              </p>
+            </details>
+            <details>
+              <summary>
+                What if the Wi-Fi drops mid-test?
+                <svg class="faq-ico" aria-hidden="true">
+                  <use href="#i-plus" />
+                </svg>
+              </summary>
+              <p>
+                The lock holds — losing the network does not unlock anyone.
+                Their work keeps autosaving locally. If the server stays
+                unreachable for 90 seconds, the app offers a force-exit so
+                nobody is trapped on a frozen screen; it's recorded and
+                delivered to you the moment you're back online.
+              </p>
+            </details>
+            <details>
+              <summary>
+                What if a student gets stuck?
+                <svg class="faq-ico" aria-hidden="true">
+                  <use href="#i-plus" />
+                </svg>
+              </summary>
+              <p>
+                Every test has an override code that only you can see. Read it
+                out and that one device unlocks — and you're told which student
+                used it. You can also release or remove anyone from the roster
+                with one click.
+              </p>
+            </details>
+            <details>
+              <summary>
+                What student data do you store?
+                <svg class="faq-ico" aria-hidden="true">
+                  <use href="#i-plus" />
+                </svg>
+              </summary>
+              <p>
+                The name a student types when they join, the times they joined
+                and left, and any integrity events during the test. No email
+                addresses, no student IDs, no grades. Their graph work stays on
+                their own machine.
+              </p>
+            </details>
+            <details>
+              <summary>
+                Can it stop absolutely everything?
+                <svg class="faq-ico" aria-hidden="true">
+                  <use href="#i-plus" />
+                </svg>
+              </summary>
+              <p>
+                No software lock can, and we'd rather say so. A student can
+                still force-quit the app from the operating system, or pick up a
+                phone. What DesmosLock does is make every one of those moves
+                loud: the app reopens back into the lock, and the attempt is
+                already sitting in your feed with a timestamp.
+              </p>
+            </details>
+            <details>
+              <summary>
+                Do students have to close their other apps?
+                <svg class="faq-ico" aria-hidden="true">
+                  <use href="#i-plus" />
+                </svg>
+              </summary>
+              <p>
+                Yes, and it is enforced rather than requested. Before a student
+                can join, DesmosLock lists every application they have open and
+                will not continue until every one is quit. If something is
+                launched during the test, it lands in your activity feed with
+                the app's name.
+              </p>
+            </details>
+            <details>
+              <summary>
+                Does it work without internet?
+                <svg class="faq-ico" aria-hidden="true">
+                  <use href="#i-plus" />
+                </svg>
+              </summary>
+              <p>
+                The calculator itself loads from Desmos, so each machine needs
+                to reach desmos.com once at the start. Locking, joining and
+                alerts run entirely on your classroom network.
+              </p>
+            </details>
+          </div>
         </div>
       </section>
 
@@ -393,14 +642,15 @@
         <a
           class="btn primary big"
           href="https://github.com/danielholguin31/desmoslock"
-          >View on GitHub</a
+          ><svg class="ico" aria-hidden="true"><use href="#i-github" /></svg>
+          View on GitHub</a
         >
       </section>
     </main>
 
     <footer>
-      <span
-        >DesmosLock ·
+      <span class="foot-brand"
+        ><span class="brand-mark sm" aria-hidden="true">∫</span> DesmosLock ·
         <a href="https://github.com/danielholguin31/desmoslock">Source</a> ·
         <a
           href="https://github.com/danielholguin31/desmoslock/blob/main/LICENSE"
@@ -412,5 +662,38 @@
         API.</span
       >
     </footer>
+
+    <script>
+      (function () {
+        var stage = document.getElementById("stage");
+        if (!stage) return;
+        var reduce = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+        if (reduce || !("IntersectionObserver" in window)) {
+          stage.dataset.phase = "alert";
+          return;
+        }
+        stage.dataset.phase = "open";
+        var steps = [
+          ["press", 650],
+          ["locked", 760],
+          ["alert", 2100],
+        ];
+        var io = new IntersectionObserver(
+          function (entries) {
+            if (!entries[0].isIntersecting) return;
+            io.disconnect();
+            steps.forEach(function (s) {
+              setTimeout(function () {
+                stage.dataset.phase = s[0];
+              }, s[1]);
+            });
+          },
+          { threshold: 0.3 },
+        );
+        io.observe(stage);
+      })();
+    </script>
   </body>
 </html>
