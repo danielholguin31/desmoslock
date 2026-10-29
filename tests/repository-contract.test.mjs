@@ -362,6 +362,11 @@ test("operator docs enumerate the exact toolchain and all public web build input
     },
     {
       exactToolchain:
+        "Use exactly Node.js 24.20.0 and npm 11.12.1 from the repository root.",
+      text: readText("docs/maintainers.md"),
+    },
+    {
+      exactToolchain:
         "Use exactly Node.js 24.20.0, npm 11.12.1, Docker, and the repository-pinned\nSupabase CLI.",
       text: readText("docs/product-completion/reproducible-supabase.md"),
     },
@@ -395,11 +400,11 @@ test("operator docs enumerate the exact toolchain and all public web build input
     );
   }
   assert.match(
-    documents[1].text,
+    documents[2].text,
     /publishable key is intentionally browser-public/u,
   );
-  assert.match(documents[1].text, /no database URL,[\s\S]*service-role key/u);
-  assert.match(documents[1].text, /desktop renderer never receives/u);
+  assert.match(documents[2].text, /no database URL,[\s\S]*service-role key/u);
+  assert.match(documents[2].text, /desktop renderer never receives/u);
 
   const rootPackage = readJson("package.json");
   assert.equal(
@@ -1534,24 +1539,40 @@ test("source-reconciliation ledger exactly covers both evidence inputs", () => {
   });
 });
 
-test("README presents only the internal v2 source as current truth", () => {
+test("README and maintainer guide present only the internal v2 source as current truth", () => {
   const readme = readText("README.md");
-  assert.match(readme, /internal, pre-release/);
+  assert.match(readme, /pre-release/);
+  assert.match(readme, /no supported download/);
+  assert.match(readme, /\(docs\/maintainers\.md\)/);
+  assert.doesNotMatch(readme, /daniel-handoff\.md/);
+  assert.doesNotMatch(readme, /`(?:desktop|server|web)\/`/);
+
+  const maintainers = readText("docs/maintainers.md");
+  assert.match(maintainers, /internal, pre-release/);
   assert.match(
-    readme,
+    maintainers,
     /only development,\s*integration, and future release source/,
   );
-  assert.match(readme, /no supported public download, deployment, price/);
-  assert.match(readme, /v1\.0\.1 draft release.*must never be\s*published/s);
+  assert.match(maintainers, /no supported public download, deployment, price/);
   assert.match(
-    readme,
+    maintainers,
+    /v1\.0\.1 draft release.*must never be\s*published/s,
+  );
+  assert.match(
+    maintainers,
     /does not require the historical Git\s*object or branch/,
   );
-  assert.match(readme, /This local reconciliation does not complete issue 29/);
-  assert.doesNotMatch(readme, /suites are run in\s*a temporary directory/);
-  assert.doesNotMatch(readme, /^## Pricing and licensing$/m);
-  assert.doesNotMatch(readme, /^## desmoslock\.vercel\.app$/m);
-  assert.doesNotMatch(readme, /\*\*Status: live\.\*\*/);
+  assert.match(
+    maintainers,
+    /This local reconciliation does not complete issue 29/,
+  );
+
+  for (const document of [readme, maintainers]) {
+    assert.doesNotMatch(document, /suites are run in\s*a temporary directory/);
+    assert.doesNotMatch(document, /^## Pricing and licensing$/m);
+    assert.doesNotMatch(document, /^## desmoslock\.vercel\.app$/m);
+    assert.doesNotMatch(document, /\*\*Status: live\.\*\*/);
+  }
 
   for (const legacyDocument of [
     "docs/MACOS_RELEASE.md",
