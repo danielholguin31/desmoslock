@@ -17,6 +17,6 @@
     "@desmoslock/domain": "2.0.0"
   },
   "devDependencies": {
-    "electron": "^43.8.4"
+    "electron": "^44.10.0"
   }
 }

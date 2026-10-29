@@ -85,9 +85,16 @@ export async function runHostileCalculatorProbe(input) {
       peer.createDataChannel("hostile");
       await peer.setLocalDescription(await peer.createOffer());
       await new Promise((resolve) => globalThis.setTimeout(resolve, 700));
+      // Chromium 152 (Electron 44) enforces Connection-Allowlist webrtc=block
+      // by stripping every ICE server and marking all candidates
+      // administratively prohibited, which forces ICE to "failed", instead of
+      // throwing NotAllowedError from the constructor.
       result.rtcPeerConnection = emittedCandidate
         ? "candidate"
-        : "no-candidate";
+        : peer.getConfiguration().iceServers.length === 0 &&
+            peer.iceConnectionState === "failed"
+          ? "administratively-prohibited"
+          : "no-candidate";
       peer.close();
     } catch (caught) {
       result.rtcPeerConnection =

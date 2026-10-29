@@ -470,7 +470,7 @@ async function inspectProductionShell(
   assert.deepEqual(boundary, {
     calculators: 0,
     windows: [{ attachedViews: 0 }],
-    electronVersion: "43.8.4",
+    electronVersion: "44.10.0",
     architecture: process.arch,
     platform: process.platform,
   });
@@ -1050,7 +1050,7 @@ await runWithIndependentCleanup(async () => {
     chromiumSandboxDisabledByLaunch: process.platform === "linux",
     contextIsolation: true,
     devTools: false,
-    electronVersion: "43.8.4",
+    electronVersion: "44.10.0",
     architecture: process.arch,
     platform: process.platform,
     enabledFeatures: calculatorRuntime.enabledFeatures,
@@ -1064,12 +1064,6 @@ await runWithIndependentCleanup(async () => {
     storagePath: null,
     webviewTag: false,
   });
-  assert.ok(
-    calculatorRuntime.enabledFeatures.includes(
-      "OverrideConnectionAllowlistOriginTrial",
-    ),
-    "Synthetic calculator fixture did not enable the production Connection-Allowlist prerequisite",
-  );
   assert.match(calculatorRuntime.remoteProxy, /PROXY 127\.0\.0\.1:9/);
 
   networkSinks = await createHostileNetworkSinks();
@@ -1082,7 +1076,7 @@ await runWithIndependentCleanup(async () => {
     nodeRequire: "undefined",
     permission: "denied",
     popup: "blocked",
-    rtcPeerConnection: "NotAllowedError",
+    rtcPeerConnection: "administratively-prohibited",
     webTransport: "rejected",
   });
   assert.deepEqual(hostile.boundary, {

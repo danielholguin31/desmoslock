@@ -110,7 +110,7 @@ function descriptor(hostArchitecture = "arm64") {
       tools: {
         node: { version: "24.20.0", sha256: "1".repeat(64) },
         npm: { version: "11.12.1", sha256: "2".repeat(64) },
-        electron: { version: "43.8.4" },
+        electron: { version: "44.10.0" },
         packager: { version: "20.3.0" },
         fuses: { version: "2.1.3" },
         compiler: {
@@ -473,7 +473,7 @@ async function workflowFixture(t) {
       assert.deepEqual(options.nativeSlices, nativeSlices);
       assert.deepEqual(options.electronArchives, archives);
       assert.deepEqual(options.expectedBuildIdentity, buildIdentity);
-      assert.equal(options.electronVersion, "43.8.4");
+      assert.equal(options.electronVersion, "44.10.0");
       assert.equal(commandOptions.node, input.paths.node);
       assert.equal(
         commandOptions.env.TMPDIR.startsWith(path.join(runRoot, "temporary")),
