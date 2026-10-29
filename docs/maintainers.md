@@ -14,10 +14,11 @@ the `main` branch of `danielholguin31/desmoslock` is the only development,
 integration, and future release source.
 
 There is currently no supported public download, deployment, price, purchase
-flow, or generally available release. The legacy `desktop/`, `server/`, `web/`,
-standalone SQL, Vercel configuration, and v1 release material are retained only
-as historical audit evidence. They must not be run, deployed, packaged,
-published, or presented as current product behavior.
+flow, or generally available release. The legacy v1 `desktop/`, `server/`,
+`web/`, standalone SQL, and release material were removed from `main`; they
+remain reachable only at tag `v1.0.0` as historical audit evidence. They must
+not be run, deployed, packaged, published, or presented as current product
+behavior.
 
 ## Maintainer handoff
 
@@ -37,8 +38,8 @@ System-level Apple assessment protection remains required.
 - Dependency source: the root `package.json` and root `package-lock.json`
 - Required verification: `.github/workflows/ci.yml` and
   `.github/workflows/security.yml`
-- Release status: no v2 release workflow exists yet; the legacy workflow is a
-  manual, always-failing tombstone
+- Release status: no v2 release workflow exists yet; the repository contract
+  rejects any release, tag, schedule, or deploy-triggered workflow
 
 Every future artifact must be built from a reviewed commit contained in `main`,
 with root, workspace, internal-dependency, and lockfile versions in agreement.
@@ -150,9 +151,10 @@ contract IDs. `npm run test:evidence` verifies that fixture and executes only
 the tracked v2 expected-red contracts. It does not require the historical Git
 object or branch at runtime.
 
-The legacy enterprise-administration files under `web/admin`,
-`supabase/enterprise.sql`, and `docs/OPERATIONS.md` likewise remain historical
-evidence only; they are not a supported v2 administration surface.
+The legacy enterprise-administration files (`web/admin`,
+`supabase/enterprise.sql`, `docs/OPERATIONS.md`) were removed from `main` and
+must stay absent; they exist only at tag `v1.0.0` and are not a supported v2
+administration surface.
 
 | Evidence contract         | Exact count |
 | ------------------------- | ----------: |
@@ -182,10 +184,10 @@ sanitized recovery identity.
 
 ## Legacy tree policy
 
-Legacy directories remain in place only so audit and fail-closed tests can prove
-what was considered and what was rejected. Their packaging scripts, Vercel
-build, and release workflow refuse to produce artifacts. Do not copy legacy
-files into `apps/` or `packages/` wholesale; future work must start from an
+Legacy v1 directories were removed from `main` and live only at tag `v1.0.0`.
+The repository contract fails if any of them return, and the root `vercel.json`
+is reduced to a build that always refuses. Do not copy legacy files into
+`apps/` or `packages/` wholesale; future work must start from an
 accepted v2 contract and port only the required behavior with focused tests.
 
 Draft PRs and non-`main` branches are proposals or evidence. They are not
