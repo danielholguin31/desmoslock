@@ -698,7 +698,7 @@ await test("unsigned desktop artifact inspection uses synthetic files and mocked
         const root = await directory();
         const zipRoot = path.join(root, "archive");
         const bytes = Buffer.from("synthetic archive checksum fixture");
-        const filename = "electron-v43.7.0-linux-x64.zip";
+        const filename = "electron-v43.8.4-linux-x64.zip";
         await write(
           root,
           "node_modules/electron/checksums.json",
@@ -707,7 +707,7 @@ await test("unsigned desktop artifact inspection uses synthetic files and mocked
         const archive = await write(zipRoot, filename, bytes);
         const options = {
           repositoryRoot: root,
-          electronVersion: "43.7.0",
+          electronVersion: "43.8.4",
           platform: "linux",
           architecture: "x64",
           directory: zipRoot,

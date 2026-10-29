@@ -49,7 +49,7 @@ describe("candidate build identity (pure)", () => {
     tools: {
       node: { version: "24.20.0", sha256: hash },
       npm: { version: "11.12.1", sha256: hash },
-      electron: { version: "43.7.0", archiveSha256: hash },
+      electron: { version: "43.8.4", archiveSha256: hash },
       packager: { version: "20.3.0" },
       fuses: { version: "2.1.3" },
       compiler: { version: "Apple clang 17.0.0", sha256: hash },

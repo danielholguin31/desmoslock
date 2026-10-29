@@ -470,7 +470,7 @@ async function inspectProductionShell(
   assert.deepEqual(boundary, {
     calculators: 0,
     windows: [{ attachedViews: 0 }],
-    electronVersion: "43.7.0",
+    electronVersion: "43.8.4",
     architecture: process.arch,
     platform: process.platform,
   });
@@ -1050,7 +1050,7 @@ await runWithIndependentCleanup(async () => {
     chromiumSandboxDisabledByLaunch: process.platform === "linux",
     contextIsolation: true,
     devTools: false,
-    electronVersion: "43.7.0",
+    electronVersion: "43.8.4",
     architecture: process.arch,
     platform: process.platform,
     enabledFeatures: calculatorRuntime.enabledFeatures,
