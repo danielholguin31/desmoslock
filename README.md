@@ -1,5 +1,8 @@
 # DesmosLock
 
+DesmosLock is open source under the [GNU Affero General Public License v3.0](LICENSE).
+Project site: <https://desmoslock.nickymolina.com> (static source in [`site/`](site/)).
+
 DesmosLock v2 is an **internal, pre-release** product. The root npm workspace on
 the `main` branch of `danielholguin31/desmoslock` is the only development,
 integration, and future release source.
