@@ -19,6 +19,12 @@ function inspectBoundary(
   return inspectPackagedLaunchPolicyBoundary(true, {
     arguments: arguments_,
     commandLine: {
+      getSwitchValue: (name) =>
+        arguments_
+          .map((argument) => argument.trim().replace(/^-{1,2}/, ""))
+          .filter((argument) => argument.split("=", 1)[0] === name)
+          .map((argument) => argument.slice(name.length + 1))
+          .at(-1) ?? "",
       hasSwitch: (name) => commandLineSwitches.includes(name),
     },
     environment: launchProfile.env,
@@ -92,6 +98,43 @@ describe("packaged switch rejection boundary", () => {
           isPackaged: true,
         },
         forbiddenSwitch: "--remote-debugging-pipe",
+        launchProfile: createElectronLaunchProfile({}, "darwin"),
+      }),
+    ).toThrow();
+  });
+
+  it.each(["darwin", "linux"] as const)(
+    "accepts the exact %s receipt for a Connection-Allowlist-disabling switch",
+    (platform) => {
+      const launchProfile = createElectronLaunchProfile({}, platform);
+      for (const forbiddenSwitch of [
+        "--disable-features=ConnectionAllowlists",
+        "--disable-features=SitePerProcess,ConnectionAllowlists",
+      ]) {
+        const boundary = inspectBoundary(launchProfile, forbiddenSwitch);
+        expect(boundary.argumentSwitches).toContain("disable-features");
+        expect(boundary.commandLineSwitches).toContain("disable-features");
+        expect(() =>
+          assertPackagedSwitchRejectionBoundary({
+            boundary,
+            forbiddenSwitch,
+            launchProfile,
+          }),
+        ).not.toThrow();
+      }
+    },
+  );
+
+  it("rejects a Connection-Allowlist receipt that the curated launch did not request", () => {
+    expect(() =>
+      assertPackagedSwitchRejectionBoundary({
+        boundary: {
+          argumentSwitches: ["disable-features", "inspect"],
+          commandLineSwitches: ["disable-features", "inspect"],
+          environmentSandboxControlPresent: false,
+          isPackaged: true,
+        },
+        forbiddenSwitch: "--inspect=0",
         launchProfile: createElectronLaunchProfile({}, "darwin"),
       }),
     ).toThrow();

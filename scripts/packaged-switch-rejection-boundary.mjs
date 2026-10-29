@@ -22,6 +22,26 @@ const sandboxWeakeningOrInliningSwitchNames = new Set([
   "single-process",
 ]);
 
+const connectionAllowlistDisablingSwitchName = "disable-features";
+const disableFeaturesSwitch = /^-{1,2}disable-features(?:=(.*))?$/i;
+
+function namesConnectionAllowlistFeature(featureList) {
+  return featureList.toLowerCase().includes("connectionallowlist");
+}
+
+function argumentsDisableConnectionAllowlists(arguments_) {
+  return arguments_.some((argument, index) => {
+    const match = disableFeaturesSwitch.exec(argument.trim());
+    if (match === null) return false;
+    const inlineValue = match[1] ?? "";
+    return (
+      namesConnectionAllowlistFeature(inlineValue) ||
+      (inlineValue.trim() === "" &&
+        namesConnectionAllowlistFeature(arguments_[index + 1] ?? ""))
+    );
+  });
+}
+
 function normalizedSwitchName(argument) {
   return argument
     .trim()
@@ -35,16 +55,20 @@ export function assertPackagedSwitchRejectionBoundary({
   launchProfile,
 }) {
   const normalizedName = normalizedSwitchName(forbiddenSwitch);
+  const launchArguments = [...launchProfile.args, forbiddenSwitch];
   const expectedArgumentSwitches = [
-    ...new Set(
-      [...launchProfile.args, forbiddenSwitch]
+    ...new Set([
+      ...launchArguments
         .map(normalizedSwitchName)
         .filter(
           (name) =>
             diagnosticSwitchNames.has(name) ||
             sandboxWeakeningOrInliningSwitchNames.has(name),
         ),
-    ),
+      ...(argumentsDisableConnectionAllowlists(launchArguments)
+        ? [connectionAllowlistDisablingSwitchName]
+        : []),
+    ]),
   ].sort();
   assert.equal(boundary.isPackaged, true);
   assert.equal(
