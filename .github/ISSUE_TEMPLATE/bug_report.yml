@@ -1,0 +1,55 @@
+name: Bug report
+description: Something in the v2 apps, backend, or tooling does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems, including any way to get out of a locked test, go through private reporting instead. See SECURITY.md.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Student desktop app (apps/desktop)
+        - Staff web app (apps/web)
+        - Backend (supabase/)
+        - Shared packages (packages/)
+        - Build, CI, or scripts
+        - Documentation
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: Output of `git rev-parse HEAD`.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. npm ci
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: Include error output or logs. Remove any credentials or personal data first.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: macOS 26.1, Apple silicon, Node 24.20.0, npm 11.12.1

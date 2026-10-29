@@ -1,58 +1,53 @@
 # DesmosLock
 
-DesmosLock is open source under the [GNU Affero General Public License v3.0](LICENSE).
-Project site: <https://desmoslock.nickymolina.com> (static source in [`site/`](site/)).
+DesmosLock locks student Macs to a graphing calculator for the length of a
+math test, and gives teachers a web app to run the test and manage each
+student's session.
 
-DesmosLock v2 is an **internal, pre-release** product. The root npm workspace on
-the `main` branch of `danielholguin31/desmoslock` is the only development,
-integration, and future release source.
+Project site: <https://desmoslock.nickymolina.com>
 
-There is currently no supported public download, deployment, price, purchase
-flow, or generally available release. The legacy `desktop/`, `server/`, `web/`,
-standalone SQL, Vercel configuration, and v1 release material are retained only
-as historical audit evidence. They must not be run, deployed, packaged,
-published, or presented as current product behavior.
+![Staff web app sign-in screen, rendered from this repository against a local synthetic backend](docs/images/staff-web-sign-in.png)
 
-## Maintainer handoff
+## Status
 
-See [Daniel’s takeover checklist](docs/product-completion/daniel-handoff.md) for the
-latest completed work, retained evidence, and remaining GitHub release tickets.
-System-level Apple assessment protection remains required.
+DesmosLock v2 is pre-release. There is no supported download, hosted service,
+or release yet, and nothing in this repository should be used to run a real
+test today.
 
-## Canonical source contract
+- The v1 code is preserved at the [`v1.0.0`](https://github.com/danielholguin31/desmoslock/tree/v1.0.0)
+  tag. It is no longer maintained and is being removed from `main`.
+- The v2 desktop app does not embed the Desmos API yet. It currently uses a
+  small graphing surface written in this repository that handles a fixed set
+  of expressions, so the pipeline can be tested end to end without
+  third-party assets.
+- macOS lockdown depends on Apple's Automatic Assessment Configuration
+  entitlement, which requires Apple approval and a signed build. Neither
+  exists yet.
 
-- Repository: `danielholguin31/desmoslock`
-- Integration branch: `main`
-- Product source: `apps/`, `packages/`, `supabase/config.toml`,
-  `supabase/functions/`, `supabase/migrations/`, `supabase/seed.sql`,
-  `supabase/templates/`, and `supabase/tests/database/`
-- Operations source: `scripts/synthetic-backup/` for the synthetic-only backup
-  and local-restore boundary
-- Dependency source: the root `package.json` and root `package-lock.json`
-- Required verification: `.github/workflows/ci.yml` and
-  `.github/workflows/security.yml`
-- Release status: no v2 release workflow exists yet; the legacy workflow is a
-  manual, always-failing tombstone
+## How it works
 
-Every future artifact must be built from a reviewed commit contained in `main`,
-with root, workspace, internal-dependency, and lockfile versions in agreement.
-Creating that signed, immutable v2 pipeline is later work; no legacy workflow or
-branch may substitute for it.
+A teacher signs in to the staff web app, opens a Test, and issues a join
+code. Students open the desktop app and join with that code. They do not have
+accounts. When a student starts the Test, the desktop app enters macOS
+assessment mode, which blocks other apps until the session ends. Leaving early
+means forfeiting the Test. The app keeps a durable local record so a crash or
+restart resumes the same session, and it reports protection events to the
+backend. The teacher sees each session in the staff app and can remove or
+re-admit a student.
 
-These exact Supabase and operator paths are canonical only for the reviewed v2
-internal baseline. They do not confer authority on legacy standalone SQL,
-including `supabase/enterprise.sql`, or on any legacy deployment/operator path.
+| Component        | Path           | What it is                                                                                                                                                     |
+| ---------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Student desktop  | `apps/desktop` | Electron app for macOS. Hosts the calculator in an isolated view, joins Test sessions, and drives a native addon that uses Automatic Assessment Configuration. |
+| Staff web        | `apps/web`     | Static TypeScript app for teachers and school admins: sign-in, invitations and recovery, School settings, staff memberships, Tests, and student sessions.      |
+| Backend          | `supabase/`    | Postgres schema, row-level security and RPCs as versioned migrations, plus Deno Edge Functions for health, staff invitations, recovery, and student sessions.  |
+| Shared libraries | `packages/`    | `domain` (business rules), `contracts` (typed wire formats shared by apps and functions), `test-support` (fixtures).                                           |
 
-This local reconciliation does not complete issue 29. Downstream v2 behavior,
-CI evidence for the exact merged head, remote pull-request and branch cleanup,
-branch protection, and artifact provenance remain open gates.
+The desktop app holds no backend credentials. It calls the student-session
+Edge Functions and signs its requests with an Ed25519 device key it generates
+locally. The staff app signs in through Supabase Auth, and database rules
+decide what each owner, administrator, or teacher can read or change.
 
-GitHub branch/ruleset enforcement is still an owner/admin gate. The current
-private/free repository plan cannot enforce the intended required checks. Until
-that gate is resolved, this documented contract and the repository verifier are
-the available controls; they are not represented as server-side protection.
-
-## Develop and verify v2
+## Develop
 
 Use exactly Node.js 24.20.0 and npm 11.12.1 from the repository root.
 
@@ -69,17 +64,11 @@ DESMOSLOCK_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_rrrrrrrrrrrrrrrrrrrrrr
   npm run build
 ```
 
-All four public web values are mandatory. An absent or partial configuration
-fails before bundling; there is no implicit loopback, staging target, or
-publishable key. The synthetic key above is test-only and is never a hosted
-credential.
+The build fails unless all four `DESMOSLOCK_PUBLIC_*` values are set. The key
+above is a synthetic test value, not a real credential.
 
-The disposable v2 database starts from `supabase/migrations/` and
-`supabase/seed.sql`. It does not import legacy users or product rows. The
-generation-4 seed creates only the fixed two-School synthetic internal
-baseline. Its six profiles remain unbound to Auth identities, and its six
-Memberships remain active, revision-one fixtures with no acceptance or
-revocation state.
+A local database needs Docker. It starts from `supabase/migrations/` and the
+synthetic `supabase/seed.sql`:
 
 ```bash
 npm run db:start
@@ -88,99 +77,36 @@ npm run test:db
 npm run db:stop
 ```
 
-For the disposable staff-auth schema and local-prerequisite verification lane:
+The full verification lanes, including the staff-auth stack, Electron tests,
+and backup round trip, are described in the
+[maintainer guide](docs/maintainers.md).
 
-```bash
-npm run db:start:full
-npm run db:reset
-npm run test:staff-auth
-npm run db:stop
-```
+## Repository layout
 
-CI now runs that complete lane inside the disposable
-[`test:backup:roundtrip` harness](docs/product-completion/synthetic-restore-acceptance.md),
-which first exports and restores the pristine fixture across distinct fresh
-clusters, then runs the staff-auth suite without reseeding. The eight-migration
-baseline passed this real roundtrip on both
-[source `5b5722b`](https://github.com/danielholguin31/desmoslock/actions/runs/34189874469)
-and [merged main `73d8b8a`](https://github.com/danielholguin31/desmoslock/actions/runs/34190379428).
-The nine-migration School settings extension passed all 12 required source jobs,
-599 fresh SQL assertions and the full restored-target staff suite on
-[source `6939c59`](https://github.com/danielholguin31/desmoslock/actions/runs/34194857958),
-then merged as [`d8fadca`](https://github.com/danielholguin31/desmoslock/commit/d8fadcafe8aa5fbc7ef6ca6717d61899677b49fc).
-The ten-migration [Test workspace candidate](docs/product-completion/test-workspace.md)
-requires its own exact-commit runtime run. CI owns startup and unconditional shutdown. The command verifies
-database schema/RPC lifecycle contracts, local Auth/PostgREST/health prerequisites,
-observed two-connection authorization races, Edge handler behavior, unit tests,
-then real-provider invitation, PKCE recovery and revocation journeys. The final
-composed suite requires a freshly reset stack;
-its append-only audit fixtures remain until the disposable stack is stopped or
-reset. CLI startup output is sanitized so generated local keys are not printed.
-The School settings gate included its actual-entrypoint browser against the
-disposable backend. Nested restored-suite counters are withheld; no separate
-unobserved browser/provider counts are claimed. The Test workspace extension
-has not executed its new database/provider/browser journeys locally.
-Hosted email and configuration remain separate acceptance gates. See
-[`auth-integration-evidence.md`](docs/product-completion/auth-integration-evidence.md)
-for the selected contract, evidence limits and in-place rollout prerequisite.
+| Path        | Contents                                                            |
+| ----------- | ------------------------------------------------------------------- |
+| `apps/`     | Student desktop app and staff web app                               |
+| `packages/` | Shared domain logic, wire contracts, and test fixtures              |
+| `supabase/` | Migrations, seed data, Edge Functions, email templates, SQL tests   |
+| `scripts/`  | Build, packaging, verification, and synthetic backup tooling        |
+| `tests/`    | Repository contracts, acceptance tests, end-to-end and native tests |
+| `docs/`     | Maintainer guide and design and evidence records                    |
+| `site/`     | Static source for the project site                                  |
 
-See
-[`docs/product-completion/reproducible-supabase.md`](docs/product-completion/reproducible-supabase.md)
-for the public health/configuration contract, synthetic-only export and
-seven-table local restore operator, and the remote staging human gate.
+## More
 
-The repository contract can also be checked directly:
+- [Maintainer guide](docs/maintainers.md): source contract, verification
+  lanes, and historical evidence rules
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [Code of conduct](CODE_OF_CONDUCT.md)
+- [Changelog](CHANGELOG.md)
 
-```bash
-npm run verify:repository
-```
+## Authors and license
 
-## Historical evidence boundaries
+DesmosLock is built by Nicky Molina ([@nicolasdmolina](https://github.com/nicolasdmolina))
+and Daniel Holguin ([@danielholguin31](https://github.com/danielholguin31)).
 
-The divergent `release/1.0` line is frozen evidence, not an alternate release
-source. A tracked immutable fixture records the exact historical commit, tree,
-test-file identities, and 9 recovery, 13 release-provenance, and 15 Gatekeeper
-contract IDs. `npm run test:evidence` verifies that fixture and executes only
-the tracked v2 expected-red contracts. It does not require the historical Git
-object or branch at runtime.
-
-The legacy enterprise-administration files under `web/admin`,
-`supabase/enterprise.sql`, and `docs/OPERATIONS.md` likewise remain historical
-evidence only; they are not a supported v2 administration surface.
-
-| Evidence contract | Exact count |
-| --- | ---: |
-| Fail-closed lock recovery | 9 |
-| Release provenance | 13 |
-| Gatekeeper acceptance | 15 |
-
-The corresponding 37 v2 public-seam contracts remain executable expected
-failures until later tickets deliberately port each behavior. A green legacy
-evidence run does not mean the v2 behavior is implemented.
-
-The unpublished v1.0.1 draft release is quarantined evidence and must never be
-published. Existing legacy deployment and download surfaces are unsupported and
-must not be used as release instructions.
-
-The sanitized MacBook archive is also reconstruction evidence only. It contains
-no original unpublished commit objects and intentionally omits all `.env*`
-content. No archived product implementation is accepted merely because it was
-preserved.
-
-See
-[`docs/product-completion/source-reconciliation.md`](docs/product-completion/source-reconciliation.md)
-for the human-readable boundary and
-[`docs/product-completion/source-reconciliation.json`](docs/product-completion/source-reconciliation.json)
-for the machine-enforced ledger covering every divergent release commit and the
-sanitized recovery identity.
-
-## Legacy tree policy
-
-Legacy directories remain in place only so audit and fail-closed tests can prove
-what was considered and what was rejected. Their packaging scripts, Vercel
-build, and release workflow refuse to produce artifacts. Do not copy legacy
-files into `apps/` or `packages/` wholesale; future work must start from an
-accepted v2 contract and port only the required behavior with focused tests.
-
-Draft PRs and non-`main` branches are proposals or evidence. They are not
-integration or release sources, even while remote cleanup is pending.
+It is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+DesmosLock is an independent project and is not affiliated with or endorsed by
+Desmos Studio.

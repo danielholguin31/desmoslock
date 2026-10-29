@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/danielholguin31/desmoslock/blob/main/SECURITY.md
+    about: Lockdown bypasses and other vulnerabilities are reported privately. Do not open a public issue.
