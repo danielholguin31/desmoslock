@@ -293,10 +293,13 @@ export function verifySourceReconciliationContract(
     },
     "Canonical enterprise-administration evidence",
   );
+  // Preserved at the v1.0.0 tag; these paths must never return to main.
   for (const evidencePath of reconciliation.canonicalSource
     .preservedLegacyEvidence.enterpriseAdministration.paths) {
-    if (!fs.existsSync(path.join(repositoryRoot, evidencePath))) {
-      fail(`Canonical legacy evidence path is missing: ${evidencePath}`);
+    if (fs.existsSync(path.join(repositoryRoot, evidencePath))) {
+      fail(
+        `Legacy enterprise-administration evidence was restored to main: ${evidencePath}`,
+      );
     }
   }
   requireEqual(

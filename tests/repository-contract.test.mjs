@@ -7,14 +7,15 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  assertLegacyReleaseTombstone,
-  expectedLegacyReleaseTombstone,
-} from "../scripts/release-tombstone-contract.mjs";
-import {
   assertPublicWebCiWorkflow,
   assertStaffAuthCiWorkflow,
   assertUnsignedArtifactCiInvocation,
 } from "../scripts/repository-contract/ci-contract.mjs";
+import {
+  assertNoReleaseWorkflow,
+  expectedRootVercelConfiguration,
+  removedLegacyPaths,
+} from "../scripts/repository-contract/legacy-quarantine-contract.mjs";
 import {
   assertMigrationSetAttestation,
   assertSupabaseAuthConfiguration,
@@ -996,41 +997,25 @@ test("legacy v1 and test-only support cannot enter a v2 release path", () => {
   const testSupportPackage = readJson("packages/test-support/package.json");
   const webPackage = readJson("apps/web/package.json");
   const vercel = readJson("vercel.json");
-  const releaseWorkflow = fs.readFileSync(
-    path.join(repositoryRoot, ".github/workflows/release.yml"),
-    "utf8",
-  );
 
   assert.equal(
     rootPackage.scripts?.["verify:repository"],
     "node scripts/verify-repository-contract.mjs",
   );
-  assert.equal(
-    vercel.ignoreCommand,
-    "node scripts/ignore-legacy-vercel-build.mjs",
-  );
-  assert.equal(
-    vercel.buildCommand,
-    "node scripts/refuse-legacy-vercel-build.mjs",
-  );
+  assert.deepEqual(vercel, { ...expectedRootVercelConfiguration });
   assert.equal(
     fs.existsSync(
       path.join(repositoryRoot, "scripts/verify-repository-contract.mjs"),
     ),
     true,
   );
-  assert.equal(
-    fs.existsSync(
-      path.join(repositoryRoot, "scripts/ignore-legacy-vercel-build.mjs"),
-    ),
-    true,
-  );
-  assert.equal(
-    fs.existsSync(
-      path.join(repositoryRoot, "scripts/refuse-legacy-vercel-build.mjs"),
-    ),
-    true,
-  );
+  for (const legacyPath of removedLegacyPaths) {
+    assert.equal(
+      fs.existsSync(path.join(repositoryRoot, legacyPath)),
+      false,
+      `${legacyPath} must stay removed from main`,
+    );
+  }
   assert.equal(
     desktopPackage.dependencies?.["@desmoslock/test-support"],
     undefined,
@@ -1044,8 +1029,16 @@ test("legacy v1 and test-only support cannot enter a v2 release path", () => {
     "./dist/index.js",
   );
   assert.equal(testSupportPackage.exports?.["."]?.default, "./dist/blocked.js");
-  assert.equal(releaseWorkflow, expectedLegacyReleaseTombstone);
-  assert.doesNotThrow(() => assertLegacyReleaseTombstone(releaseWorkflow));
+  for (const workflow of fs
+    .readdirSync(path.join(repositoryRoot, ".github/workflows"))
+    .filter((filename) => /\.ya?ml$/u.test(filename))) {
+    assert.doesNotThrow(() =>
+      assertNoReleaseWorkflow(
+        workflow,
+        readText(path.join(".github/workflows", workflow)),
+      ),
+    );
+  }
 });
 
 test("Electron CI acceptance includes internal isolation and external package policy verification", () => {
@@ -1111,71 +1104,87 @@ test("the production desktop command cannot bypass observed application retireme
   );
 });
 
-test("legacy release tombstone rejects every alternate execution path", () => {
+test("no workflow can restore a legacy release or publication path", () => {
+  const baseline = `name: Synthetic verification
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+`;
+  assert.doesNotThrow(() => assertNoReleaseWorkflow("ci.yml", baseline));
+
   const mutations = [
+    ["release filename", "release.yml", baseline],
     [
       "tag trigger",
-      expectedLegacyReleaseTombstone.replace(
+      "ci.yml",
+      baseline.replace("    branches:\n      - main", "    tags:\n      - v*"),
+    ],
+    [
+      "release trigger",
+      "ci.yml",
+      baseline.replace(
         "  workflow_dispatch:",
-        "  push:\n    tags:\n      - v*",
+        "  workflow_dispatch:\n  release:\n    types: [published]",
       ),
     ],
     [
-      "write permission",
-      expectedLegacyReleaseTombstone.replace(
-        "permissions: {}",
-        "permissions:\n  contents: write",
+      "schedule trigger",
+      "ci.yml",
+      baseline.replace(
+        "  workflow_dispatch:",
+        "  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'",
       ),
     ],
     [
       "environment",
-      expectedLegacyReleaseTombstone.replace(
+      "ci.yml",
+      baseline.replace(
         "    runs-on: ubuntu-latest",
         "    runs-on: ubuntu-latest\n    environment: production",
       ),
     ],
     [
-      "third-party action",
-      expectedLegacyReleaseTombstone.replace(
-        "    steps:",
-        "    steps:\n      - uses: actions/checkout@deadbeef",
+      "GitHub release",
+      "ci.yml",
+      baseline.replace("npm test", "gh release create v2.0.0"),
+    ],
+    ["npm publish", "ci.yml", baseline.replace("npm test", "npm publish")],
+    [
+      "release action",
+      "ci.yml",
+      baseline.replace(
+        "      - run: npm test",
+        "      - uses: softprops/action-gh-release@deadbeef",
       ),
     ],
     [
-      "secret expression",
-      expectedLegacyReleaseTombstone.replace(
-        "        shell: bash",
-        "        env:\n          TOKEN: ${{ secrets.TOKEN }}\n        shell: bash",
-      ),
+      "legacy packaging",
+      "ci.yml",
+      baseline.replace("npm test", "npx electron-builder --mac"),
     ],
     [
-      "artifact transfer",
-      expectedLegacyReleaseTombstone.replace(
-        "        shell: bash",
-        "        uses: actions/upload-artifact@deadbeef\n        shell: bash",
-      ),
-    ],
-    [
-      "successful exit",
-      expectedLegacyReleaseTombstone.replace(
-        "          exit 1",
-        "          exit 0",
-      ),
-    ],
-    [
-      "second job",
-      `${expectedLegacyReleaseTombstone}  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: exit 1\n`,
+      "deployment",
+      "ci.yml",
+      baseline.replace("npm test", "npx vercel deploy --prod"),
     ],
   ];
 
-  for (const [label, mutation] of mutations) {
-    assert.notEqual(
-      mutation,
-      expectedLegacyReleaseTombstone,
-      `${label} mutates`,
-    );
+  for (const [label, filename, mutation] of mutations) {
     assert.throws(
-      () => assertLegacyReleaseTombstone(mutation),
+      () => assertNoReleaseWorkflow(filename, mutation),
       Error,
       `${label} must fail closed`,
     );
@@ -1549,10 +1558,10 @@ test("README presents only the internal v2 source as current truth", () => {
     "docs/OPERATIONS.md",
     "docs/SUPABASE.md",
   ]) {
-    assert.match(
-      readText(legacyDocument),
-      /\*\*Historical v1 evidence only\.\*\*/,
-      `${legacyDocument} must not present historical instructions as current`,
+    assert.equal(
+      fs.existsSync(path.join(repositoryRoot, legacyDocument)),
+      false,
+      `${legacyDocument} must stay removed; v1 history lives at tag v1.0.0`,
     );
   }
 });

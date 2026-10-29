@@ -1,5 +1,4 @@
 node_modules/
-server/data/
 dist/
 artifacts/
 supabase/.branches/
@@ -14,3 +13,6 @@ blob-report/
 
 # verify-desmoslock skill evidence (local only, never committed)
 .verify-evidence/
+
+# Personal MCP client configuration (never committed)
+.mcp.json

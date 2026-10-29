@@ -69,14 +69,7 @@ const webAppPattern = {
 
 export default tseslint.config(
   {
-    ignores: [
-      "**/dist/**",
-      "**/node_modules/**",
-      "desktop/**",
-      "server/**",
-      "web/**",
-      "supabase/functions/**",
-    ],
+    ignores: ["**/dist/**", "**/node_modules/**", "supabase/functions/**"],
   },
   {
     linterOptions: {

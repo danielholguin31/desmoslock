@@ -4,7 +4,7 @@
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",
-  "description": "DesmosLock v2 workspace; legacy v1 remains evidence-only during the expand phase.",
+  "description": "DesmosLock v2 workspace; legacy v1 is preserved only at the v1.0.0 tag.",
   "packageManager": "npm@11.12.1+sha512.cdca14b85d647b3192028d02aadbe82d75f79a446aceea9874be98e6d768f20ebd3555770a48d0e9906106007877bbc690f715e9372f2e2dc644a3c3157fb14c",
   "engines": {
     "node": "24.20.0"
@@ -27,7 +27,7 @@
     "test": "npm run test:repository && npm run test:unit && npm run test:evidence",
     "test:clean-build": "node --test tests/acceptance/clean-build.test.mjs",
     "test:unit": "npm run build:packages && vitest run",
-    "test:repository": "npm run test:clean-build && node --test tests/repository-contract.test.mjs tests/acceptance/required-check-probe.test.mjs tests/acceptance/unsupported-surfaces.test.mjs tests/acceptance/license-policy.test.mjs tests/acceptance/lint-guards.test.mjs tests/acceptance/legacy-packaging.test.mjs tests/acceptance/synthetic-backup.test.mjs tests/acceptance/postgres-backup-adapter.test.mjs tests/acceptance/local-supabase-output.test.mjs tests/acceptance/synthetic-backup-runtime.test.mjs tests/acceptance/unsigned-artifact-collector.test.mjs tests/acceptance/unsigned-artifact-evidence.test.mjs tests/acceptance/unsigned-artifact-cli.test.mjs tests/acceptance/desktop-native-build-targets.test.mjs tests/acceptance/universal-artifact-composition.test.mjs tests/acceptance/universal-artifact-cli.test.mjs tests/acceptance/signed-artifact-custody.test.mjs tests/acceptance/signed-artifact-evidence.test.mjs tests/acceptance/signed-artifact-cli.test.mjs",
+    "test:repository": "npm run test:clean-build && node --test tests/repository-contract.test.mjs tests/acceptance/required-check-probe.test.mjs tests/acceptance/unsupported-surfaces.test.mjs tests/acceptance/license-policy.test.mjs tests/acceptance/lint-guards.test.mjs tests/acceptance/synthetic-backup.test.mjs tests/acceptance/postgres-backup-adapter.test.mjs tests/acceptance/local-supabase-output.test.mjs tests/acceptance/synthetic-backup-runtime.test.mjs tests/acceptance/unsigned-artifact-collector.test.mjs tests/acceptance/unsigned-artifact-evidence.test.mjs tests/acceptance/unsigned-artifact-cli.test.mjs tests/acceptance/desktop-native-build-targets.test.mjs tests/acceptance/universal-artifact-composition.test.mjs tests/acceptance/universal-artifact-cli.test.mjs tests/acceptance/signed-artifact-custody.test.mjs tests/acceptance/signed-artifact-evidence.test.mjs tests/acceptance/signed-artifact-cli.test.mjs",
     "test:backup:roundtrip": "node --test tests/acceptance/synthetic-backup-roundtrip.test.mjs",
     "test:staff-auth": "npm run test:db && npm run test:staff-auth:stack && npm run test:staff-auth:locks && npm run test:edge && npm run test:unit && npm run test:staff-auth:composed",
     "test:staff-auth:stack": "node --test tests/acceptance/staff-auth-stack.test.mjs",

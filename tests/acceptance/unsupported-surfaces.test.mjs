@@ -25,20 +25,3 @@ test("repository contract excludes unsupported surfaces from every GA path", () 
     `repository contract failed:\n${result.stdout ?? ""}${result.stderr ?? ""}`,
   );
 });
-
-test("a direct legacy Vercel build fails closed", () => {
-  const result = spawnSync(
-    process.execPath,
-    ["scripts/refuse-legacy-vercel-build.mjs"],
-    {
-      cwd: repositoryRoot,
-      encoding: "utf8",
-    },
-  );
-
-  assert.equal(result.status, 1);
-  assert.match(
-    `${result.stdout ?? ""}${result.stderr ?? ""}`,
-    /legacy v1.+disabled/i,
-  );
-});
