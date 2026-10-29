@@ -184,7 +184,9 @@
                 <div class="stat code">
                   <small>Class code</small><b>XKD4TQ</b>
                 </div>
-                <div class="stat"><small>Joined</small><b>27</b></div>
+                <div class="stat">
+                  <small>Joined</small><b class="joined">27</b>
+                </div>
                 <div class="stat">
                   <small>Flags</small
                   ><b class="flags"
@@ -272,20 +274,23 @@
                 stroke-width="1.1"
               />
               <path
-                class="curve"
+                class="curve c-para"
+                pathLength="1"
                 d="M56.8 0Q120 400 183.2 0"
                 fill="none"
                 stroke="#2d70b3"
                 stroke-width="2.5"
               />
               <path
-                class="curve"
+                class="curve c-line"
+                pathLength="1"
                 d="M73.3 240L153.3 0"
                 fill="none"
                 stroke="#c74440"
                 stroke-width="2.5"
               />
               <circle
+                class="pt"
                 cx="96.1"
                 cy="171.6"
                 r="3.5"
@@ -496,7 +501,12 @@
               </div>
               <div class="roster-row gone">
                 <span class="r-name">Sam Patel</span
-                ><span class="r-state bad">Forfeited · 10:47</span>
+                ><span class="r-swap"
+                  ><span class="r-state ok r-was">In test</span
+                  ><span class="r-state bad r-now"
+                    >Forfeited · 10:47</span
+                  ></span
+                >
               </div>
               <div class="roster-row">
                 <span class="r-name">Priya Nair</span
@@ -665,34 +675,145 @@
 
     <script>
       (function () {
+        var reduce = window.matchMedia("(prefers-reduced-motion: reduce)");
+        if (reduce.matches || !("IntersectionObserver" in window)) return;
+
+        /* Hero: the console locks the room on a loop.
+           0 open, Joined ticks 22→27 · 2.7s press · 2.86s locked
+           (bar wipes, window snaps forward, graph draws) · 5s alert
+           (feed pushes, Flags 2→3) · 10.5s reset (unlock, clear) · loop. */
         var stage = document.getElementById("stage");
-        if (!stage) return;
-        var reduce = window.matchMedia(
-          "(prefers-reduced-motion: reduce)",
-        ).matches;
-        if (reduce || !("IntersectionObserver" in window)) {
-          stage.dataset.phase = "alert";
-          return;
+        if (stage) {
+          var joined = stage.querySelector(".joined");
+          var firstRow = stage.querySelector(".feed-row");
+          var count = 22;
+          var setShift = function () {
+            stage.style.setProperty(
+              "--feed-shift",
+              firstRow.offsetHeight + "px",
+            );
+          };
+          var phase = function (p) {
+            return function () {
+              stage.dataset.phase = p;
+            };
+          };
+          var tick = function () {
+            count += 1;
+            joined.textContent = count;
+            joined.animate(
+              [
+                { transform: "translateY(5px)", opacity: 0.35 },
+                { transform: "none", opacity: 1 },
+              ],
+              { duration: 260, easing: "cubic-bezier(0.16, 1, 0.3, 1)" },
+            );
+          };
+          var restart = function () {
+            stage.dataset.snap = "";
+            stage.dataset.phase = "open";
+            count = 22;
+            joined.textContent = count;
+            void stage.offsetWidth;
+            delete stage.dataset.snap;
+          };
+          var steps = [
+            [500, tick],
+            [300, tick],
+            [450, tick],
+            [250, tick],
+            [500, tick],
+            [700, phase("press")],
+            [160, phase("locked")],
+            [2140, phase("alert")],
+            [5500, phase("reset")],
+            [450, restart],
+          ];
+          var i = 0;
+          var timer = null;
+          var left = steps[0][0];
+          var startedAt = 0;
+          var playing = false;
+          var onScreen = false;
+          var run = function () {
+            startedAt = performance.now();
+            timer = setTimeout(function () {
+              steps[i][1]();
+              i = (i + 1) % steps.length;
+              left = steps[i][0];
+              run();
+            }, left);
+          };
+          var sync = function () {
+            var should = onScreen && !document.hidden;
+            if (should === playing) return;
+            playing = should;
+            if (playing) {
+              run();
+            } else {
+              clearTimeout(timer);
+              left = Math.max(0, left - (performance.now() - startedAt));
+            }
+          };
+
+          setShift();
+          window.addEventListener("resize", setShift);
+          restart();
+          new IntersectionObserver(
+            function (entries) {
+              onScreen = entries[0].intersectionRatio >= 0.3;
+              sync();
+            },
+            { threshold: [0, 0.3] },
+          ).observe(stage);
+          document.addEventListener("visibilitychange", sync);
         }
-        stage.dataset.phase = "open";
-        var steps = [
-          ["press", 650],
-          ["locked", 760],
-          ["alert", 2100],
-        ];
-        var io = new IntersectionObserver(
+
+        /* Forfeit: dialog appears, Forfeit is pressed, the roster row is struck. */
+        var art = document.querySelector(".two-art");
+        if (art) {
+          art.dataset.step = "0";
+          var artIo = new IntersectionObserver(
+            function (entries) {
+              if (!entries[0].isIntersecting) return;
+              artIo.disconnect();
+              [
+                ["1", 150],
+                ["2", 1450],
+                ["3", 1580],
+              ].forEach(function (s) {
+                setTimeout(function () {
+                  art.dataset.step = s[0];
+                }, s[1]);
+              });
+            },
+            { threshold: 0.5 },
+          );
+          artIo.observe(art);
+        }
+
+        /* Lists: the three steps and the lock grid arrive in reading order. */
+        var items = document.querySelectorAll(".steps > li, .grid > .cell");
+        var rvIo = new IntersectionObserver(
           function (entries) {
-            if (!entries[0].isIntersecting) return;
-            io.disconnect();
-            steps.forEach(function (s) {
-              setTimeout(function () {
-                stage.dataset.phase = s[0];
-              }, s[1]);
+            var n = 0;
+            entries.forEach(function (e) {
+              var el = e.target;
+              if (e.isIntersecting) {
+                el.style.setProperty("--rv-i", Math.min(n++, 5));
+              } else if (e.boundingClientRect.top > 0) {
+                return;
+              }
+              el.classList.add("rv-in");
+              rvIo.unobserve(el);
             });
           },
-          { threshold: 0.3 },
+          { rootMargin: "0px 0px -8% 0px" },
         );
-        io.observe(stage);
+        items.forEach(function (el) {
+          el.classList.add("rv-armed");
+          rvIo.observe(el);
+        });
       })();
     </script>
   </body>
